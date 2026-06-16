@@ -1,8 +1,7 @@
 version: '3'
 
-# nib Taskfile
-# Run `task --list` to see available tasks.
-# Follow patterns from sibling projects (revized, autonomus, agents, skm).
+# nib - Task runner for the AI coding + workload agent.
+# All development, checking, and automation must go through these tasks.
 
 tasks:
   default:
@@ -10,26 +9,70 @@ tasks:
     cmds:
       - task --list
 
-  check:
-    desc: Run formatting, linting, and type/static checks (placeholder)
+  # --- Python / uv environment ---
+  install:
+    desc: Install dependencies with uv (including dev)
     cmds:
-      - echo "TODO: implement check pipeline (ruff, pyright, etc. or cargo, tsc, etc.)"
+      - uv sync --all-extras
 
-  test:
-    desc: Run tests (placeholder)
-    cmds:
-      - echo "TODO: implement test command"
-
+  # --- Formatting & Linting ---
   fmt:
-    desc: Format code (placeholder)
+    desc: Format code with ruff
     cmds:
-      - echo "TODO: implement format command"
+      - uv run ruff format src tests
 
-  # Future includes example (uncomment when subprojects exist):
-  # docs:
-  #   taskfile: docs/Taskfile.yml
-  #   dir: docs
+  lint:
+    desc: Lint with ruff
+    cmds:
+      - uv run ruff check src tests
 
-  # infra:
-  #   taskfile: deployment/Taskfile.yml
-  #   dir: deployment
+  typecheck:
+    desc: Static type checking with pyright
+    cmds:
+      - uv run pyright
+
+  check:
+    desc: Run all quality gates (format check + lint + types)
+    cmds:
+      - uv run ruff format --check src tests
+      - task: lint
+      - task: typecheck
+
+  # --- Testing ---
+  test:
+    desc: Run the test suite
+    cmds:
+      - uv run pytest -q
+
+  test:watch:
+    desc: Run tests continuously (requires pytest-watch or similar)
+    cmds:
+      - uv run pytest --looponfail
+
+  # --- Development convenience ---
+  dev:
+    desc: Install + run a quick smoke check
+    cmds:
+      - task: install
+      - task: check
+      - task: test
+      - uv run nib --help
+
+  clean:
+    desc: Remove Python cache and build artifacts
+    cmds:
+      - find . -type d -name '__pycache__' -exec rm -rf {} +
+      - find . -type d -name '.ruff_cache' -exec rm -rf {} +
+      - find . -type d -name '.pytest_cache' -exec rm -rf {} +
+      - rm -rf .venv uv.lock  # careful - only if you want a full reset
+
+  # --- Future / placeholders ---
+  tui:
+    desc: Run the nib TUI directly
+    cmds:
+      - uv run nib tui
+
+  build:
+    desc: Build the package (wheel + sdist)
+    cmds:
+      - uv build

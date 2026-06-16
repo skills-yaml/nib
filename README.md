@@ -28,7 +28,8 @@ The most trustworthy, persistent agent for solo and small-team software developm
 
 - `docs/specs/` – Product and feature specifications (foundation, feature, and task docs following revized-style conventions).
 - `docs/tech/` – Architecture and process references (to be populated).
-- (Implementation directories will follow conventions established in sibling projects: Python/uv backend patterns, Taskfile-driven workflows, etc.)
+- Implementation is in **Python** (uv + pyproject.toml, src/ layout).
+- See `docs/tech/backend_python.md` and `docs/tech/project_structure.md` for the exact conventions and layout.
 
 ## Documentation Map
 
