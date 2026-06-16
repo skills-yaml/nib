@@ -1,0 +1,35 @@
+version: '3'
+
+# nib Taskfile
+# Run `task --list` to see available tasks.
+# Follow patterns from sibling projects (revized, autonomus, agents, skm).
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  check:
+    desc: Run formatting, linting, and type/static checks (placeholder)
+    cmds:
+      - echo "TODO: implement check pipeline (ruff, pyright, etc. or cargo, tsc, etc.)"
+
+  test:
+    desc: Run tests (placeholder)
+    cmds:
+      - echo "TODO: implement test command"
+
+  fmt:
+    desc: Format code (placeholder)
+    cmds:
+      - echo "TODO: implement format command"
+
+  # Future includes example (uncomment when subprojects exist):
+  # docs:
+  #   taskfile: docs/Taskfile.yml
+  #   dir: docs
+
+  # infra:
+  #   taskfile: deployment/Taskfile.yml
+  #   dir: deployment
