@@ -34,6 +34,7 @@ from nib.tools.models import (
     ToolResult,
 )
 from nib.tools.registry import get_permission_level, get_tool_metadata
+from nib.tools.worktree import WorktreeManager
 
 console = Console()
 
@@ -48,7 +49,7 @@ class ToolExecutor:
         self.workload_store = workload_store
         self.approval_mode = approval_mode
         self.project_root = project_root
-        self._worktree_manager = None  # lazy
+        self._worktree_manager: WorktreeManager | None = None
 
     async def execute(
         self,
@@ -119,14 +120,28 @@ class ToolExecutor:
     def _ensure_worktree_if_needed(
         self, call: ToolCall, metadata: Any, effective_root: Path
     ) -> Path | None:
-        if metadata.requires_worktree or get_permission_level(call.tool_name) in {
-            PermissionLevel.DESTRUCTIVE,
-            PermissionLevel.SAFE,
-        }:
-            # TODO: integrate real WorktreeManager
-            # For now return the effective root (will be replaced with worktree path)
+        if not (
+            metadata.requires_worktree
+            or get_permission_level(call.tool_name)
+            in {
+                PermissionLevel.DESTRUCTIVE,
+                PermissionLevel.SAFE,
+            }
+        ):
+            return None
+
+        if not call.task_id:
+            return effective_root  # fallback if no task
+
+        if self._worktree_manager is None:
+            self._worktree_manager = WorktreeManager(effective_root)
+
+        try:
+            wt = self._worktree_manager.create_for_task(call.task_id)
+            return wt
+        except Exception:
+            # fallback to main tree if worktree fails (e.g. no git)
             return effective_root
-        return None
 
     async def _handle_approval(
         self, call: ToolCall, level: PermissionLevel, task_id: str | None
@@ -181,7 +196,7 @@ class ToolExecutor:
         return "Potentially modifying state."
 
     def _redact_arguments(self, args: dict) -> dict:
-        # TODO: real secret redaction (see Hermes patterns)
+        # TODO: real secret redaction (see patterns from advanced agent runtimes)
         return args
 
     async def _dispatch(self, tool_name: str, args: dict, cwd: Path | None) -> Any:

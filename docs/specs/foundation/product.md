@@ -14,7 +14,7 @@ Become the most reliable personal "chief of staff + senior engineer" for softwar
 
 ## Project mission
 
-Deliver a focused agent (initially strong as a CLI/TUI companion, later with optional interfaces) that (1) maintains an accurate, queryable, and prioritizable workload model, (2) excels at turning goals into well-scoped, verifiable plans, (3) executes or orchestrates coding work using rigorous subagent-driven and lane-based patterns with mandatory verification, and (4) provides excellent visibility and control so a human can stay in the loop at the right moments — all while leveraging and enhancing the powerful agent ecosystems already present in the environment (Hermes skills/kanban/delegation, Grok subagents, MCP integrations, etc.).
+Deliver a focused agent (initially strong as a CLI/TUI companion, later with optional interfaces) that (1) maintains an accurate, queryable, and prioritizable workload model, (2) excels at turning goals into well-scoped, verifiable plans, (3) executes or orchestrates coding work using rigorous subagent-driven and lane-based patterns with mandatory verification, and (4) provides excellent visibility and control so a human can stay in the loop at the right moments — all while leveraging and enhancing the powerful agent ecosystems already present in the environment (skill systems, kanban/delegation patterns, Grok subagents, MCP integrations, etc.).
 
 ## Main features of the MVP
 
@@ -22,8 +22,8 @@ Deliver a focused agent (initially strong as a CLI/TUI companion, later with opt
 * **Goal intake & structuring** — Convert vague requests, tickets, or conversation into crisp work items with acceptance criteria, using symphony-style decomposition.
 * **Planning & decomposition** — Produce (and maintain) clear implementation plans. Support for task breakdown that feeds directly into execution workflows.
 * **Smart prioritization & selection** — Surface the highest-leverage next actions considering dependencies, risk, user context, and workload state.
-* **Disciplined execution** — Direct edits or delegation (fresh subagents per task, two-stage spec + quality review, worktree isolation, Codex/Hermes/Grok lanes). Strong TDD and verification bias.
+* **Disciplined execution** — Direct edits or delegation (fresh subagents per task, two-stage spec + quality review, worktree isolation, Codex/Grok lanes and similar). Strong TDD and verification bias.
 * **Reconciliation & truth maintenance** — Review diffs, run tests, update workload state, link artifacts (commits, PRs), record rationale and risks.
 * **Visibility & control** — Excellent TUI/CLI views of the backlog, progress, blocked items, and agent activity. Human-in-the-loop escalation for decisions, clarifications, and approvals.
-* **Integration bridges** — Deep use of GitHub (via MCP or skills), Notion, existing local agents (Hermes profiles, sub-delegation), and the surrounding skill/registry system.
+* **Integration bridges** — Deep use of GitHub (via MCP or skills), Notion, existing local agents (subagent profiles, sub-delegation), and the surrounding skill/registry system.
 * **Persistent self** — Long-term memory of the user's projects, preferences, architecture decisions, and learned workflows that survives across sessions.

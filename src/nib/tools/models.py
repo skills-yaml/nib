@@ -22,7 +22,7 @@ class PermissionLevel(StrEnum):
 
 
 class ApprovalMode(StrEnum):
-    """Approval modes for the agent (inspired by Hermes + custom for nib)."""
+    """Approval modes for the agent (inspired by advanced agent runtimes + custom for nib)."""
 
     MANUAL = "manual"  # Always prompt for non-read-only
     SMART = "smart"  # LLM/rules assisted auto-approve for safe actions

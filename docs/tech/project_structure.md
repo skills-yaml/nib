@@ -20,8 +20,11 @@ nib/
 │   │   ├── feature/             # ft_XXX_*.md
 │   │   └── task/                # TXXX_*.md (+ .plan.md)
 │   └── tech/
+│       ├── architecture.md      # Base architecture of the agent (components, flows, principles)
 │       ├── backend_python.md    # nib-specific Python conventions (CLI/TUI agent)
 │       ├── project_structure.md
+│       ├── permissions.md       # Defense-in-depth permission model
+│       ├── ecosystem_integration.md  # MCP, Skills, AGENTS.md
 │       ├── sdlc.md
 │       ├── task.md
 │       └── cli_tui.md           # (future) detailed TUI/CLI guidelines
@@ -32,7 +35,7 @@ nib/
 │       ├── cli/                 # Typer command surface
 │       ├── tui/                 # Textual interactive application
 │       ├── core/                # Domain logic (workload, planning, execution, reconciliation)
-│       ├── integrations/        # Git, Hermes, lanes, GitHub, Notion, etc.
+│       ├── integrations/        # Git, subagent, lanes, GitHub, Notion, etc.
 │       ├── models/              # Pydantic data models (or keep in core)
 │       └── utils/
 └── tests/
@@ -70,7 +73,9 @@ For the MVP and early versions, keep it a clean, single `src/nib/` Python packag
 
 ## References
 
+- `docs/tech/architecture.md` — Base architecture, core components, data flows, and principles.
 - `docs/tech/backend_python.md` — Detailed Python, CLI, TUI, and persistence conventions for nib.
+- `docs/specs/feature/ft_002_base_architecture.md` — Feature spec for this architecture.
 - Central workspace references (when more detail is needed):
   - `~/work/projects/agents/docs/tech/backend_python.md`
   - `~/work/projects/agents/docs/tech/project_structure.md`

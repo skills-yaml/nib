@@ -10,14 +10,14 @@ nib requires a small, well-defined set of core tools to function as an effective
 
 This feature defines the minimal viable tool surface, their interfaces, permission classifications, and integration points with the rest of the nib system (workload model, planner, executor, reconciler, MCP, Skills, and AGENTS.md).
 
-The design prioritizes safety and leverage over breadth: reuse existing patterns from Hermes, subagent-driven-development, and the workspace conventions rather than reinventing a large tool library.
+The design prioritizes safety and leverage over breadth: reuse existing patterns from subagent-driven-development and the workspace conventions rather than reinventing a large tool library.
 
 ## Goals
 
 - Provide exactly the minimal set of tools needed for high-quality coding work (read, search, edit, execute) without over-permissioning.
 - Enforce a consistent, auditable permission model across all tools.
 - Make every tool invocation go through the workload model (record what was done, why, and the outcome).
-- Ensure tools are usable both directly by nib's core and exposable via MCP so other agents (Hermes, Grok, Claude, etc.) can delegate to nib.
+- Ensure tools are usable both directly by nib's core and exposable via MCP so other agents (Grok, Claude, and similar) can delegate to nib.
 - Support dynamic behavior via Skills (e.g., a skill can contribute additional tool constraints or post-processing).
 - Automatically respect any `AGENTS.md` / project guidelines loaded for the current context (e.g., "never run `npm install` without approval").
 - Enable safe parallel execution via worktree isolation for edit/execute tools.

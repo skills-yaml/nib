@@ -4,7 +4,7 @@ nib acts as both:
 - MCP client: consumes tools from GitHub, Notion, Linear, etc.
 - MCP server: exposes nib's workload, planning, and execution capabilities.
 
-This allows seamless interoperability with Hermes, the Grok TUI, Claude, etc.
+This allows seamless interoperability with the Grok TUI, Claude, and similar agent environments.
 """
 
 from __future__ import annotations
@@ -39,29 +39,55 @@ class MCPClientManager:
 
 
 class MCPServer:
-    """Serves nib's own tools and context via MCP.
+    """Serves nib's tools (from ToolRegistry/Executor) and other capabilities via MCP.
 
-    Other agents can then call nib for workload management and planning.
+    Other agents (Claude, Grok, and similar) can call nib for safe execution.
+    Permissions are still enforced inside the executor.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, executor=None) -> None:
+        self.executor = executor  # ToolExecutor instance
 
     def get_tools(self) -> list[dict]:
-        """Return the tools nib exposes (workload queries, planning, etc.)."""
-        return [
-            {
-                "name": "nib_get_workload",
-                "description": "Get current projects and tasks owned by nib",
-            },
-            {
-                "name": "nib_create_plan",
-                "description": "Decompose a goal into a structured plan",
-            },
-            # ... more
-        ]
+        """Expose core tools (via registry) + workload/planning."""
+        from nib.tools.registry import list_tools
 
-    # In a real server these would be exposed via mcp.server
-    async def handle_tool_call(self, name: str, arguments: dict) -> dict:
-        # Delegate to core planner / workload
+        tools = []
+        for meta in list_tools():
+            tools.append(
+                {
+                    "name": f"nib_{meta.name}",
+                    "description": meta.description,
+                    "permission_level": meta.permission_level.value,
+                }
+            )
+        tools.extend(
+            [
+                {
+                    "name": "nib_get_workload",
+                    "description": "Get current projects and tasks owned by nib",
+                },
+                {
+                    "name": "nib_get_context",
+                    "description": "Get loaded AGENTS.md + skills for active project",
+                },
+            ]
+        )
+        return tools
+
+    async def handle_tool_call(
+        self, name: str, arguments: dict, task_id: str | None = None
+    ) -> dict:
+        """Dispatch to executor (permissions applied) or stubs."""
+        if name.startswith("nib_"):
+            tool_name = name[4:]
+            from nib.tools.registry import list_tools
+
+            if tool_name in [m.name for m in list_tools()]:
+                if self.executor:
+                    from nib.tools.models import ToolCall
+
+                    call = ToolCall(tool_name=tool_name, arguments=arguments, task_id=task_id)
+                    result = await self.executor.execute(call, current_task_id=task_id)
+                    return result.model_dump()
         return {"status": "not_implemented", "tool": name}

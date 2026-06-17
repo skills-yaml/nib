@@ -4,7 +4,7 @@ nib is not a standalone island. It must deeply integrate with the existing agent
 
 Core requirements:
 - **MCP** (Model Context Protocol)
-- **Skills** (SKILL.md system used by Hermes, Grok, skm/registry)
+- **Skills** (SKILL.md system used by Grok, skm/registry, and similar tools)
 - **AGENTS.md** (and CLAUDE.md, etc.) — project-specific agent instructions
 
 These are not optional features. They are fundamental to how coding and workload work happens here.
@@ -30,12 +30,12 @@ Failure to follow loaded AGENTS.md should be treated as a serious violation duri
 
 ## Skills Support
 
-nib should participate in the SKILL.md ecosystem (used by Hermes and the Grok skill system).
+nib should participate in the SKILL.md ecosystem (used by the Grok skill system and similar tools).
 
 **Capabilities**:
 - Discover skills from standard locations:
   - `~/.grok/skills/`
-  - `~/.hermes/skills/`
+  - Standard skill directories in the ecosystem (e.g. those used by Grok and similar tools)
   - Local project skills (e.g. `<project>/.skills/` or `skills/`)
   - The central registry (`~/work/projects/registry/skills/`)
 - Parse SKILL.md frontmatter (YAML) + body.
@@ -44,7 +44,7 @@ nib should participate in the SKILL.md ecosystem (used by Hermes and the Grok sk
 - Contribute its own capabilities as skills (so other agents can use nib via the skill system).
 
 **nib as a skill**:
-- nib should be publishable as a skill itself (with frontmatter) so Hermes or other agents can delegate workload/planning tasks to it.
+- nib should be publishable as a skill itself (with frontmatter) so other agents can delegate workload/planning tasks to it.
 
 **Implementation**:
 - `nib/skills/` package with:
@@ -60,7 +60,7 @@ See `~/work/projects/registry/SKILL_STRUCTURE.md` for the canonical format.
 
 ## MCP Support
 
-MCP (Model Context Protocol) is the standard way tools and context are provided to agents in this environment (used by the current Grok TUI, Hermes, Claude Desktop, etc.).
+MCP (Model Context Protocol) is the standard way tools and context are provided to agents in this environment (used by the current Grok TUI, Claude Desktop, and similar tools).
 
 **nib must**:
 
@@ -75,7 +75,7 @@ MCP (Model Context Protocol) is the standard way tools and context are provided 
      - Planning (`create_plan`, `decompose_goal`)
      - Delegation helpers
      - Reconciliation status
-   - This allows Hermes, Claude Code, Grok subagents, etc., to call into nib for workload ownership instead of duplicating todo/kanban logic.
+   - This allows Claude Code, Grok subagents, and similar tools to call into nib for workload ownership instead of duplicating todo/kanban logic.
 
 **Implementation**:
 - Add `mcp` package to dependencies.

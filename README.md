@@ -11,7 +11,7 @@ Unlike general chat agents that forget context between sessions, nib treats the 
 Primary users:
 - Individual developers and technical founders who want a reliable daily partner for both "what should I do?" and "do the work".
 - Small teams that want consistent, reviewable agent-driven progress on code projects.
-- Power users already living in rich agent environments (Hermes, Grok subagents, MCPs) who want a workload-native orchestrator on top.
+- Power users already living in rich agent environments (Grok subagents, MCPs, and similar tools) who want a workload-native orchestrator on top.
 
 Key capabilities (MVP focus):
 - Local-first workload tracking with Projects, Tasks, dependencies, priorities, and external links.

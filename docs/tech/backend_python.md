@@ -38,7 +38,7 @@ src/nib/
 │   └── reconciler.py    # Diff review, test verification, state updates
 ├── integrations/
 │   ├── git.py
-│   ├── hermes.py        # Spawning / communicating with Hermes profiles
+│   ├── subagent.py      # Spawning / communicating with subagent profiles and similar tools
 │   ├── lanes.py         # Codex lanes, subagent delegation helpers
 │   ├── mcp.py           # MCP client + server (core ecosystem integration)
 │   └── github.py        # (via gh CLI or MCP)
@@ -85,6 +85,7 @@ task test     # pytest
 ## Architecture Principles for nib
 
 See also:
+- [Architecture](architecture.md) — the base architecture of the agent.
 - [Ecosystem Integration](ecosystem_integration.md) for MCP, Skills, and AGENTS.md requirements.
 - [Permissions](permissions.md) — the authoritative deep dive on preventing destructive actions without explicit approval or policy.
 
@@ -101,7 +102,7 @@ See also:
    - Escalation points (clarify, approve, review diff) are first-class.
 
 4. **Leverage, don't duplicate**
-   - Reuse Hermes kanban/todo/delegation/cron where they are the right primitive.
+   - Reuse kanban/todo/delegation/cron patterns from the surrounding ecosystem where they are the right primitive.
    - Deeply integrate with the local ecosystem: MCP servers, the Skills (SKILL.md) system, and AGENTS.md files.
    - See the dedicated [Ecosystem Integration](ecosystem_integration.md) document for requirements and design.
    - nib's job is **orchestration + workload truth**, not being another general agent.
@@ -137,4 +138,4 @@ Keep this document practical and specific to building a reliable local coding + 
 See also:
 - `docs/tech/project_structure.md` (overall layout)
 - `docs/tech/task.md` (Taskfile expectations)
-- Sibling projects for inspiration: `autonomus` (orchestration patterns), `agents/skills/autonomous-ai-agents/hermes-agent` (real-world agent integration patterns)
+- Sibling projects for inspiration: `autonomus` (orchestration patterns), `agents/skills/autonomous-ai-agents` (real-world agent integration patterns)

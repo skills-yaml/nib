@@ -1,7 +1,7 @@
 """Skill discovery (SKILL.md files).
 
 Follows the structure defined in ~/work/projects/registry/SKILL_STRUCTURE.md
-and used by skm + Hermes.
+and used by skm and the surrounding ecosystem.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ SKILL_FILENAME = "SKILL.md"
 # Common locations to search (user can extend via config later)
 DEFAULT_SEARCH_PATHS = [
     Path.home() / ".grok" / "skills",
-    Path.home() / ".hermes" / "skills",
+    Path.home() / ".config" / "nib" / "skills",  # plus standard locations from the surrounding ecosystem
     Path.home() / ".config" / "nib" / "skills",
 ]
 

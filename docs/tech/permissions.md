@@ -3,7 +3,7 @@
 This document provides a comprehensive model for managing permissions in AI coding agents, with a strong focus on preventing destructive actions without explicit user approval or clear policy consent.
 
 It is informed by:
-- Real production patterns from Hermes (the dominant agent runtime in this workspace)
+- Real production patterns from dominant agent runtimes in this workspace (such as those providing rich approval and isolation features)
 - Workspace conventions (AGENTS.md files, subagent-driven-development, worktree usage)
 - General security best practices for agentic systems (least privilege, defense in depth, auditability)
 - nib's unique role as a **workload-owning orchestrator** (not just another chat agent)
@@ -66,7 +66,7 @@ No single layer is sufficient. Dangerous actions must pass **all** applicable la
 ### Layer 4: Approval Workflow
 This is the most important layer for destructive actions.
 
-**Modes** (inspired directly by Hermes, adapted for nib):
+**Modes** (inspired by common patterns in advanced agent runtimes, adapted for nib):
 - `manual` (default): Every destructive action prompts the user via TUI or CLI. User must explicitly say "approve", "approve for this task", or "deny".
 - `smart`: Use a small auxiliary model or rules engine to auto-approve low-risk variants of safe commands. Still prompt for anything classified destructive.
 - `policy`: Only actions that have an explicit prior grant (from policy files, AGENTS.md allowlists, or `nib allow ...` commands) are auto-approved. Everything else blocks or prompts.
@@ -218,6 +218,6 @@ This multi-layer approach, combined with nib's workload ownership and explicit c
 - `docs/tech/ecosystem_integration.md`
 - `docs/specs/feature/ft_001_basic_agent_tools.md`
 - `docs/specs/task/T001_implement_core_agent_tools.md`
-- Workspace reference: Hermes permission system (see `hermes-agent/SKILL.md` sections on approvals, yolo, worktree, redaction, shell-hooks-allowlist)
+- Workspace references for permission patterns in advanced agent tools (approvals, yolo modes, worktree isolation, redaction, shell-hook allowlists)
 
 This model should be the foundation for nib's `ToolExecutor` and all future tool/MCP/skill integrations.
