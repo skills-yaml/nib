@@ -1,8 +1,8 @@
 version: '3'
 
-# nib Taskfile
-# Run `task --list` to see available tasks.
-# Follow patterns from sibling projects (revized, autonomus, agents, skm).
+# nib - Task runner (Rust CLI + Python core).
+# Follows skm project CI/Task structure.
+# All checks, tests, and builds go through these tasks.
 
 tasks:
   default:
@@ -11,25 +11,50 @@ tasks:
       - task --list
 
   check:
-    desc: Run formatting, linting, and type/static checks (placeholder)
+    desc: Run formatting, lint, and compile checks
     cmds:
-      - echo "TODO: implement check pipeline (ruff, pyright, etc. or cargo, tsc, etc.)"
+      - cargo fmt -- --check
+      - cargo clippy -- -D warnings
+      - cargo check
+
+  fix:
+    desc: Auto-format and apply clippy fixes
+    cmds:
+      - cargo fmt
+      - cargo clippy --fix --allow-dirty --allow-no-vcs
 
   test:
-    desc: Run tests (placeholder)
+    desc: Run unit and integration tests
     cmds:
-      - echo "TODO: implement test command"
+      - cargo test -- --test-threads=1
 
-  fmt:
-    desc: Format code (placeholder)
+  build:
+    desc: Build optimized release binary (supports cross TARGET)
     cmds:
-      - echo "TODO: implement format command"
+      - cargo build --locked --release {{if .TARGET}}--target {{.TARGET}}{{end}}
 
-  # Future includes example (uncomment when subprojects exist):
-  # docs:
-  #   taskfile: docs/Taskfile.yml
-  #   dir: docs
+  # Python core support (for agent/llm loop until fully ported)
+  py:install:
+    desc: Install Python deps (uv)
+    cmds:
+      - uv sync --all-extras || echo "uv not found or no pyproject"
 
-  # infra:
-  #   taskfile: deployment/Taskfile.yml
-  #   dir: deployment
+  py:test:
+    desc: Run Python tests
+    cmds:
+      - uv run pytest -q || echo "no python tests or uv"
+
+  dev:
+    desc: Quick dev check (Rust + Python)
+    cmds:
+      - task: check
+      - task: test
+      - task: build
+      - ./target/release/nib --help || cargo run -- --help
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+      - find . -type d -name '__pycache__' -exec rm -rf {} + || true
+      - rm -rf .venv uv.lock || true

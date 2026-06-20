@@ -1,0 +1,195 @@
+name: Release Artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - development
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel to publish
+        required: true
+        type: choice
+        options:
+          - prod
+          - development
+
+permissions:
+  contents: write
+
+env:
+  CRATE_NAME: nib
+
+jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      tag: ${{ steps.release.outputs.tag }}
+      title: ${{ steps.release.outputs.title }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Resolve release channel
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            channel="${{ inputs.channel }}"
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            channel="prod"
+          elif [ "${GITHUB_REF_NAME}" = "development" ]; then
+            channel="development"
+          else
+            echo "Unsupported release branch: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+          if [ "$channel" = "prod" ]; then
+            tag="prod-latest"
+            title="nib production"
+            prerelease="false"
+          else:
+            tag="development-latest"
+            title="nib development"
+            prerelease="true"
+          fi
+
+          {
+            echo "channel=$channel"
+            echo "tag=$tag"
+            echo "title=$title"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: nib
+            asset: nib-linux-x86_64.tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: nib
+            asset: nib-macos-x86_64.tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            binary: nib
+            asset: nib-macos-aarch64.tar.gz
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: nib.exe
+            asset: nib-windows-x86_64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        env:
+          NIB_BUILD_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          NIB_BUILD_COMMIT: ${{ github.sha }}
+        run: task build TARGET=${{ matrix.target }}
+
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/pkg
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib"
+          chmod +x "dist/pkg/nib"
+          tar -C dist/pkg -czf "dist/${{ matrix.asset }}" nib
+          shasum -a 256 "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/pkg | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib.exe"
+          Compress-Archive -Path "dist/pkg/nib.exe" -DestinationPath "dist/${{ matrix.asset }}" -Force
+          $hash = Get-FileHash -Algorithm SHA256 "dist/${{ matrix.asset }}"
+          "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "dist/${{ matrix.asset }}.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_TITLE: ${{ needs.prepare.outputs.title }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Move release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$RELEASE_TAG"
+
+      - name: Publish release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes="Automated $RELEASE_CHANNEL build from branch $GITHUB_REF_NAME at commit $GITHUB_SHA."
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "$notes"
+          else
+            args=(release create "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes "$notes")
+            if [ "$RELEASE_PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            gh "${args[@]}"
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.sha256 --clobber

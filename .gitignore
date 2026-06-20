@@ -161,3 +161,14 @@ dist/
 # Misc
 *.bak
 *.tmp
+
+# nib local runtime data (per-project sessions, LLM provider keys/config)
+# Users should not commit keys. See also comments in src/nib/config.py
+.nib/
+
+# Rust build output
+target/
+
+# Temporary test data / env
+.env.local
+*.log

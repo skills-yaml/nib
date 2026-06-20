@@ -1,0 +1,68 @@
+[project]
+name = "nib"
+version = "0.1.0"
+description = "AI agent for coding and workload management. Persistent backlog owner with disciplined execution."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+  { name = "nib Contributors" }
+]
+license = { text = "MIT" }
+dependencies = [
+  "pydantic>=2.7",
+  "typer[all]>=0.12",
+  "rich>=13.7",
+  "textual>=0.70",
+  "aiosqlite>=0.20",
+  "litellm>=1.60",
+]
+
+[project.scripts]
+nib = "nib.cli:app"
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.4",
+  "pyright>=1.1",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.4",
+  "pyright>=1.1",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "I", "UP", "B", "SIM", "TCH", "RUF"
+]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+reportMissingTypeStubs = false
+include = ["src"]
+exclude = ["**/__pycache__"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nib"]
