@@ -19,8 +19,10 @@ Legacy or reference spec paths preserved during adoption (and subsequent alignme
 - `docs/specs/foundation/`
 - `docs/specs/task/`
 
-Foundational specs (FT-001, FT-002, product.md, T001) were updated in place during the workspace-docs adoption + FT-001 implementation to align with finalized tech documentation (`architecture.md`, `permissions.md`, `ecosystem_integration.md`, etc.), current implementation reality, and the canonical spec states.
+Foundational specs (FT-001, FT-002, product.md, T001) were updated in place during the workspace-docs adoption + FT-001 implementation.
 
-Per explicit request, content, statuses, cross-references, and "Implementation Status" notes were refreshed (no file moves to preserve history). Future work should use `backlog/`, `development/`, `done/` for new specs.
+FT-003 and FT-004 were moved to `done/` upon merge of the implementing branch (PR #1).
+
+Future work should use the canonical `backlog/`, `development/`, `done/` directories.
 
 See `docs/projects/nib/inventory.md` for adoption details.

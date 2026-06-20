@@ -1,6 +1,6 @@
 # FT-004: LLM Integration and Agent Loop
 
-**Status:** Draft  
+**Status:** Done (merged 2026-06-20 via PR #1)  
 **Related:** [FT-001: Basic Agent Tools](../feature/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](../feature/ft_002_base_architecture.md), [FT-003: Hybrid Sandboxing](../feature/ft_003_adopt_codex_sandboxing.md), [docs/tech/architecture.md](../../tech/architecture.md), [docs/tech/ecosystem_integration.md](../../tech/ecosystem_integration.md)
 
 ## Summary

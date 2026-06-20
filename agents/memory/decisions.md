@@ -33,3 +33,24 @@ Adopt FT-004 for LLM-driven agent loop. Key decisions:
 - Leverage existing ecosystem (MCP, subagents, skills) instead of duplicating.
 
 This completes the shift from workload-centric to session + execution-centric architecture while preserving safety and human steerability.
+
+## 2026-06-20 - Rust CLI Rewrite + LLM/Agent Loop Merged (PR #1)
+
+- Type: milestone / decision
+- Source: user + implementation
+- Confidence: high
+- Supersedes: Python-only CLI (Typer)
+
+Content:
+
+Merged feat/implement-basic-agent-tools (PR #1) into main.
+
+- Primary CLI is now the Rust binary (`nib` via clap).
+- `nib chat` supports only `/model` for switching (list + number select or direct name for active provider).
+- `nib auth` wizard for multi-provider configuration.
+- Hybrid: Rust CLI + Python core (LLM via LiteLLM, agent loop, tools, sessions in `.nib/`).
+- FT-003 (hybrid bwrap sandbox) and FT-004 (LLM + agent loop) completed and moved to done/.
+- CI, release, and install scripts follow skm patterns.
+- All execution still updates the authoritative session state in `.nib/sessions/`.
+
+Branch deleted locally. Main is now at merge commit e47cb7f.

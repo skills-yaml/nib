@@ -1,6 +1,6 @@
 # FT-003: Hybrid Sandboxing for nib — Direct bwrap + Worktrees + Configurable Boundaries + Plan Gates
 
-**Status:** Draft  
+**Status:** Done (merged 2026-06-20 via PR #1)  
 **Related:** [FT-001: Basic Agent Tools](../feature/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](../feature/ft_002_base_architecture.md), [T001](../task/T001_implement_core_agent_tools.md), `docs/tech/permissions.md`, `docs/tech/architecture.md`, `docs/specs/foundation/product.md`
 
 **Summary of hybrid philosophy**: Direct bwrap (OS-level isolation like Claude Code / Codex) + git worktree composition (like Grok) + configurable boundaries (like Claude / Antigravity) + strong Plan/approval gates (like Grok). Sessions (conversations + tool calls) are stored as files in the project's `.nib/sessions/`. No central projects/tasks model.
