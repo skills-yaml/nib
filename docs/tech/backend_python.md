@@ -11,7 +11,7 @@ nib is a **local-first CLI + TUI AI agent** for coding and workload management, 
 - **CLI**: Typer (with Rich for output)
 - **TUI**: Textual (for interactive workload views, kanban, live updates)
 - **Models**: Pydantic (v2)
-- **Persistence**: SQLite via `aiosqlite` (local-first workload store)
+- **Persistence**: File-based sessions in project `.nib/sessions/` (JSON files for conversations and tool calls)
 - **Quality**:
   - `ruff` (lint + format)
   - `pyright` (strict type checking)
@@ -31,8 +31,8 @@ src/nib/
 │   ├── __init__.py
 │   └── app.py           # Textual application entry
 ├── core/
-│   ├── models.py        # Pydantic domain models (Project, Task, etc.)
-│   ├── workload.py      # Persistence, queries, transactions
+│   ├── models.py        # Pydantic models for sessions
+│   ├── workload.py      # SessionStore (files in .nib/sessions/)
 │   ├── planner.py       # Goal decomposition & plan generation
 │   ├── executor.py      # Direct execution + delegation logic
 │   └── reconciler.py    # Diff review, test verification, state updates

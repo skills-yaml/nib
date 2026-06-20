@@ -56,6 +56,11 @@ All success criteria above are met, the code follows the rules in `AGENTS.md` an
 
 ---
 
-**Owner:** To be assigned  
-**Estimate:** 3–6 focused sessions (depending on how much of the executor vs. individual tools is done in one go)  
-**Next:** Create detailed `.plan.md` using the subagent-driven-development process when ready to start coding.
+**Owner:** nib team (feat/implement-basic-agent-tools)  
+**Estimate:** 3–6 focused sessions  
+**Status:** Core delivered (registry, executor, worktree, read tools, audit, context integration, demos). Write-tool impls, full quality gates, and real E2E edits remain.
+
+**Post-execution notes (2026-06):**  
+Implementation followed the suggested order closely. See updated FT-001 "Implementation Status" for detailed delivered vs gaps. `task check` and expanded tests are open items. The task spec remains the reference definition of done for this increment. No separate .plan.md was required for the initial pass.
+
+Update this file (or move to done/) when the remaining gaps in FT-001 are closed and all success criteria are green.

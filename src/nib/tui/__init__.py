@@ -1,1 +1,1 @@
-"""Textual TUI for interactive workload management and agent control."""
+"""Textual TUI for sessions, history and agent control (data in .nib/)."""

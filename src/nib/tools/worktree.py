@@ -16,17 +16,17 @@ class WorktreeManager:
 
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root.resolve()
-        self.worktrees: dict[str, Path] = {}  # task_id -> worktree_path
+        self.worktrees: dict[str, Path] = {}  # session_id -> worktree_path
 
-    def create_for_task(self, task_id: str, branch: str | None = None) -> Path:
-        """Create an isolated worktree for the given task.
+    def create_for_task(self, session_id: str, branch: str | None = None) -> Path:
+        """Create an isolated worktree for the given session.
 
         Returns the path to the worktree.
         """
-        if task_id in self.worktrees:
-            return self.worktrees[task_id]
+        if session_id in self.worktrees:
+            return self.worktrees[session_id]
 
-        wt_name = f"nib-task-{task_id}-{uuid.uuid4().hex[:8]}"
+        wt_name = f"nib-session-{session_id}-{uuid.uuid4().hex[:8]}"
         wt_path = self.repo_root / ".worktrees" / wt_name
         wt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -35,25 +35,25 @@ class WorktreeManager:
         try:
             # Create worktree
             subprocess.check_call(
-                ["git", "worktree", "add", "-b", f"nib/{task_id}/{wt_name}", str(wt_path), base],
+                ["git", "worktree", "add", "-b", f"nib/{session_id}/{wt_name}", str(wt_path), base],
                 cwd=self.repo_root,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            self.worktrees[task_id] = wt_path
+            self.worktrees[session_id] = wt_path
             return wt_path
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to create worktree for task {task_id}: {e}") from e
+            raise RuntimeError(f"Failed to create worktree for session {session_id}: {e}") from e
 
-    def get_path(self, task_id: str) -> Path | None:
-        return self.worktrees.get(task_id)
+    def get_path(self, session_id: str) -> Path | None:
+        return self.worktrees.get(session_id)
 
-    def cleanup(self, task_id: str, remove_branch: bool = False) -> None:
-        """Remove the worktree for the task.
+    def cleanup(self, session_id: str, remove_branch: bool = False) -> None:
+        """Remove the worktree for the session.
 
         Optionally delete the branch.
         """
-        wt_path = self.worktrees.pop(task_id, None)
+        wt_path = self.worktrees.pop(session_id, None)
         if not wt_path or not wt_path.exists():
             return
 
@@ -71,9 +71,9 @@ class WorktreeManager:
             # Best effort cleanup
             pass
 
-    def status(self, task_id: str) -> str:
+    def status(self, session_id: str) -> str:
         """Return short git status inside the worktree."""
-        wt_path = self.get_path(task_id)
+        wt_path = self.get_path(session_id)
         if not wt_path:
             return "no worktree"
         try:

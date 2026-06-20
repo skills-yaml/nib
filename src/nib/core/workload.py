@@ -1,127 +1,77 @@
-"""Workload persistence and query layer (SQLite-backed).
+"""Session persistence layer.
 
-Extended with tool execution + approval audit records as required by the
-permissions deep-dive and FT-001 spec.
+All conversation and tool-calling history is stored as plain files under
+<project>/.nib/sessions/.
+
+This replaces the previous global SQLite-based workload model that used
+projects and tasks.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import aiosqlite
-
-from nib.core.models import WorkloadSnapshot
-
-if TYPE_CHECKING:
-    from nib.tools.models import ToolExecutionRecord
+from nib.core.models import Session, SessionMessage, ToolCallRecord
 
 
-class WorkloadStore:
-    """Local-first workload database."""
+class SessionStore:
+    """File-based persistence for sessions inside the project's .nib folder."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = db_path or (Path.home() / ".nib" / "workload.db")
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, project_root: Path | None = None) -> None:
+        if project_root is None:
+            project_root = Path.cwd()
 
-    async def init_db(self) -> None:
-        """Create tables if they don't exist (including tool audit tables)."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS projects (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    root_path TEXT,
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-                """
-            )
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    status TEXT,
-                    priority TEXT,
-                    project_id TEXT,
-                    parent_id TEXT,
-                    estimate_minutes INTEGER,
-                    due TEXT,
-                    tags TEXT,
-                    links TEXT,
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-                """
-            )
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tool_executions (
-                    id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    arguments TEXT,
-                    success BOOLEAN,
-                    output TEXT,
-                    error TEXT,
-                    duration_seconds REAL,
-                    approval_granted BOOLEAN,
-                    approval_source TEXT,
-                    project_root TEXT,
-                    worktree_path TEXT,
-                    executed_at TEXT,
-                    FOREIGN KEY(task_id) REFERENCES tasks(id)
-                )
-                """
-            )
-            await db.commit()
+        self.project_root = project_root.resolve()
+        self.nib_dir = self.project_root / ".nib"
+        self.sessions_dir = self.nib_dir / "sessions"
 
-    async def get_snapshot(self) -> WorkloadSnapshot:
-        """Return a full in-memory snapshot."""
-        # TODO: real queries
-        return WorkloadSnapshot(projects=[], tasks=[])
+        self.nib_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    async def record_tool_execution(self, record: ToolExecutionRecord) -> None:
-        """Persist a tool call + approval decision (core of permissions audit)."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO tool_executions
-                (id, task_id, tool_name, arguments, success, output, error,
-                 duration_seconds, approval_granted, approval_source,
-                 project_root, worktree_path, executed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.id,
-                    record.task_id,
-                    record.tool_name,
-                    json.dumps(record.arguments),
-                    record.result.success,
-                    json.dumps(record.result.output) if record.result.output else None,
-                    record.result.error,
-                    record.result.duration_seconds,
-                    record.result.approval_granted,
-                    record.result.approval_source,
-                    record.project_root,
-                    record.worktree_path,
-                    record.executed_at.isoformat(),
-                ),
-            )
-            await db.commit()
+    def _path(self, session_id: str) -> Path:
+        return self.sessions_dir / f"{session_id}.json"
 
-    async def get_tool_history_for_task(self, task_id: str) -> list[dict]:
-        """Retrieve audit trail for a task (used by reconciler and UI)."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM tool_executions WHERE task_id = ? ORDER BY executed_at",
-                (task_id,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+    def create_session(self) -> Session:
+        session = Session(id=str(uuid.uuid4()))
+        self.save_session(session)
+        return session
+
+    def load_session(self, session_id: str) -> Session | None:
+        path = self._path(session_id)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return Session.model_validate(data)
+
+    def save_session(self, session: Session) -> None:
+        path = self._path(session.id)
+        path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+
+    def list_sessions(self) -> list[str]:
+        return sorted(p.stem for p in self.sessions_dir.glob("*.json"))
+
+    def append_message(self, session_id: str, role: str, content: str) -> Session:
+        session = self.load_session(session_id) or Session(id=session_id)
+        session.messages.append(SessionMessage(role=role, content=content))
+        self.save_session(session)
+        return session
+
+    def record_tool_call(self, record: ToolCallRecord | dict) -> None:
+        """Accept either ToolCallRecord (from core or tools) or dict."""
+        if isinstance(record, dict):
+            record = ToolCallRecord(**record)
+        elif hasattr(record, "model_dump"):
+            # Pydantic v2 compat (could be from tools.models)
+            data = record.model_dump()
+            record = ToolCallRecord(**data)
+        session = self.load_session(record.session_id) or Session(id=record.session_id)
+        session.tool_calls.append(record)
+        self.save_session(session)
+
+    def get_latest_session(self) -> Session | None:
+        ids = self.list_sessions()
+        if not ids:
+            return None
+        return self.load_session(ids[-1])

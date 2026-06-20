@@ -11,7 +11,7 @@ from .models import (
     ApprovalMode,
     PermissionLevel,
     ToolCall,
-    ToolExecutionRecord,
+    ToolCallRecord,
     ToolMetadata,
     ToolResult,
 )
@@ -21,7 +21,7 @@ __all__ = [
     "ApprovalMode",
     "PermissionLevel",
     "ToolCall",
-    "ToolExecutionRecord",
+    "ToolCallRecord",
     "ToolExecutor",
     "ToolMetadata",
     "ToolResult",

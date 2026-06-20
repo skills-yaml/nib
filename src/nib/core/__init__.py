@@ -1,1 +1,1 @@
-"""Core agent logic: workload model, planning, execution, and reconciliation."""
+"""Core agent logic: session management, planning, execution, and reconciliation."""

@@ -1,6 +1,6 @@
 # Base Architecture of nib
 
-nib is a **local-first, persistent AI agent** specialized in **coding and workload management**. It owns a living model of projects and tasks, breaks down goals into verifiable plans, executes (or delegates) work through a safe, auditable tool surface, reconciles results, and keeps the user in the loop at the right moments.
+nib is a **local-first AI coding agent**. All session data (conversations + tool calls) is stored as JSON files inside the project's `.nib/sessions/` directory. It breaks down goals, executes work safely (using hybrid bwrap + worktrees), and keeps full history per project.
 
 This document describes the **base architecture** — the core components, data flows, principles, and integration points that every part of nib must respect.
 
@@ -10,13 +10,15 @@ See also:
 - [Permissions](permissions.md) (defense-in-depth model)
 - [Ecosystem Integration](ecosystem_integration.md) (MCP, Skills, AGENTS.md)
 - [FT-001: Basic Agent Tools](../specs/feature/ft_001_basic_agent_tools.md)
+- [FT-003: Direct Bubblewrap Sandboxing](../specs/feature/ft_003_adopt_codex_sandboxing.md) (hybrid sandbox)
+- [FT-004: LLM Integration and Agent Loop](../specs/feature/ft_004_llm_integration_and_agent_loop.md) (reasoning + tool loop)
 
 ## High-Level Principles
 
-1. **Workload Model is Sacred**
-   - The persistent store of Projects, Tasks (with status, priorities, dependencies, estimates, links), history, and execution records is the single source of truth.
-   - Every planning, execution, and reconciliation step must ultimately update or query this model.
-   - Tool calls and approvals are recorded against specific Tasks for auditability.
+1. **Session History is Sacred**
+   - All conversation messages and tool executions are stored as files inside the project's `.nib/sessions/` directory.
+   - This gives full per-session auditability without a global database.
+   - Every tool call records the exact arguments, result, approval decision, worktree, and boundaries.
 
 2. **Defense-in-Depth for Safety**
    - No tool action (especially destructive ones like `run_terminal` or broad patches) can occur without passing multiple independent layers: scoping, isolation (worktrees), classification, policy/AGENTS.md rules, explicit approval (manual or prior grant), redaction, and audit.
@@ -24,7 +26,7 @@ See also:
 
 3. **Leverage, Don't Duplicate**
    - Reuse existing ecosystem primitives: kanban/todo/delegation/cron patterns, subagent patterns, MCP servers (GitHub, Notion, etc.), Skills (SKILL.md), AGENTS.md guidelines.
-   - nib's job is **orchestration + workload truth + safe execution**, not reimplementing a general-purpose agent.
+   - nib's job is **orchestration + safe execution + session history**, not reimplementing a general-purpose agent.
 
 4. **Fresh Context + Verification Loops**
    - Prefer fresh sub-agents, isolated worktrees, and clean context for implementation work.
@@ -36,7 +38,7 @@ See also:
    - Escalation points (clarify, approve, review diff) are first-class.
 
 6. **Context-Rich but Token-Efficient**
-   - Early in any task: assemble rich context (AGENTS.md, relevant Skills, project standards/libs docs, current workload snapshot, connected MCP tools).
+   - Early in a session: assemble rich context (AGENTS.md, relevant Skills, project standards/libs docs, recent session history, connected MCP tools).
    - Future work will address token budgets via summarization and selective loading.
 
 ## Core Components
@@ -46,7 +48,7 @@ User / Workload Owner
         │
         ▼
 ┌──────────────────────────────┐
-│         CLI / TUI            │  (Typer + Textual; status, approvals, backlog views)
+│         CLI (Rust) / TUI     │  (clap; hybrid: Rust REPL/auth delegates to Python agent/LLM for loop)  (Textual planned)
 └──────────────┬───────────────┘
                │
                ▼
@@ -57,8 +59,9 @@ User / Workload Owner
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│              Planner                          │  (Goal intake → decomposition → structured plan
-│  (core/planner.py - future)                   │   using symphony-style + skills)
+│              Context + Planner              │
+│  (AGENTS.md/skills + LLM reasoning)           │
+│  src/nib/context/ + src/nib/agent/loop.py     │
 └──────────────┬────────────────────────────────┘
                │
                ▼
@@ -71,8 +74,9 @@ User / Workload Owner
 │  • Policy + AGENTS.md + Skills constraints    │
 │  • Approval workflow (manual/smart/policy/off)│
 │  • Redaction                                  │
-│  • Dispatch to impls + Audit to Workload      │
+│  • Dispatch to impls + Audit to SessionStore  │
 └──────────────┬────────────────────────────────┘
+
                │
        ┌───────┴───────┬───────────────┬──────────────┐
        ▼               ▼               ▼              ▼
@@ -93,66 +97,65 @@ User / Workload Owner
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│           Workload Store (SQLite)             │  (aiosqlite + Pydantic models)
-│  • Projects, Tasks, history, tool_executions, │
-│    approvals, context snapshots               │
-│  • Queries for "what next?", status, audit    │
+│           Session Store (file-based)         │  (plain JSON files in <project>/.nib/sessions/)
+│  • Conversation history (messages)            │
+│  • Tool calls with results and approvals      │
+│  • Stored per project under .nib/             │
 └───────────────────────────────────────────────┘
 ```
 
 ### Key Modules (current + planned)
 
-- `core/models.py` — Pydantic domain models (Project, Task, TaskStatus, Priority, ToolExecutionRecord, etc.)
-- `core/workload.py` — Persistence, init tables, record_tool_execution, get snapshots/history
-- `tools/` (new in this phase)
-  - `models.py` — PermissionLevel, ApprovalMode, ToolCall/Result, ApprovalRequest/Decision, ToolExecutionRecord
+- `core/models.py` — Pydantic models for sessions (Session, SessionMessage, ToolCallRecord)
+- `core/workload.py` — Project-local SessionStore (files in .nib/sessions/) for conversations and tool calls
+- `llm/` — LLMClient abstraction + providers (Grok-first + Mock)
+- `agent/loop.py` — Core AgentLoop (reasoning → tool selection via executor → observation)
+- `tools/`
+  - `models.py` — PermissionLevel, ApprovalMode, ToolCall/Result, ApprovalRequest/Decision, ToolCallRecord
   - `registry.py` — Static metadata registration
   - `executor.py` — The central gate (all layers)
   - `core_tools.py` — Implementations of the 5 minimal tools + dispatcher
-  - `worktree.py` — Git worktree isolation manager (create_for_task, cleanup, status)
+  - `worktree.py` — Git worktree isolation manager
 - `context/`
   - `agents.py` — Walk-up discovery + loading of AGENTS.md / CLAUDE.md
-  - `loader.py` — assemble_context() + format for prompts (AGENTS + active Skills)
+  - `loader.py` — assemble_context() + assemble_agent_prompt()
 - `skills/`
   - Discovery of SKILL.md (standard locations + project-local)
-  - Naive frontmatter parsing + activation heuristics
 - `integrations/mcp.py` — ClientManager + MCPServer (dynamic exposure of registered tools via registry)
-- `cli/` & `tui/` — Thin adapters over core (demo-tool currently exercises executor)
+- `cli/` & `tui/` — Thin adapters over core (now includes `nib run` for the full agent loop)
 - `utils/` — Logging, redaction helpers (future)
 
-## Data Flow for a Typical Task
+## Data Flow for a Typical Session
 
 1. **Intake / Activation**
-   - User creates task or nib loads from backlog.
-   - Context Loader walks for AGENTS.md, discovers/activates relevant Skills, pulls project standards + libs docs, lists MCP tools.
+   - User creates or resumes a session (`.nib/sessions/<id>.json`).
+   - Context + prompt builder assembles AGENTS.md, skills, recent history, and tool schemas.
 
-2. **Planning**
-   - Planner receives rich context + goal.
-   - Produces structured plan (tasks, dependencies, acceptance criteria, tool usage hints).
-   - Plan is stored in workload.
+2. **LLM Reasoning (new in FT-004)**
+   - AgentLoop sends prompt to LLMClient.
+   - LLM returns content or tool_calls.
 
 3. **Execution (gated)**
-   - For each step: build ToolCall.
-   - ToolExecutor:
-     - Resolves scope + worktree (if needed).
-     - Classifies action.
-     - Applies policy + AGENTS/Skills rules.
-     - Triggers approval (if required) → records decision.
-     - Dispatches to implementation (redacted args).
-     - Records full ToolExecutionRecord (call + result + approval + context) to workload.
-   - Sub-delegation (fresh context + worktree) when appropriate.
+   - Tool calls go to ToolExecutor:
+     - Scope + worktree resolution.
+     - Classification + policy/AGENTS enforcement.
+     - Approval gate.
+     - Hybrid sandbox dispatch (bwrap + boundaries).
+     - Full ToolCallRecord written to the session file.
+   - Observation appended to session and fed back to LLM.
 
-4. **Reconciliation**
-   - Reconciler reviews diffs/artifacts, runs verification (tests/lint), updates Task status.
-   - Surfaces risks or needed human input.
+4. **Loop + Reconciliation**
+   - Continue until final answer, approved plan, or limit.
+   - Future Reconciler can append verification summaries to the session.
 
 5. **Visibility**
-   - CLI/TUI shows workload state, recent tool history (with approval sources), blocked items.
+   - CLI/TUI shows live session history, tool calls (with boundaries/approvals), and loop state.
 
 ## Persistence
 
-- Local SQLite (`~/.nib/workload.db`) for rich querying, relationships, and audit.
-- Tables: projects, tasks, tool_executions (with JSON for args/output + approval metadata).
+- File-based sessions stored locally in the project folder under `.nib/sessions/`.
+- Each session is a JSON file containing conversation messages and tool call records (with approvals, worktree, etc.).
+- No central global database; everything is project-local.
 - Future: export/import, git-friendly snapshots, or optional bridges to Notion/GitHub Projects.
 
 ## Integration Points (Ecosystem)
@@ -170,19 +173,19 @@ User / Workload Owner
 - Python 3.12+, uv, src/ layout, ruff + pyright (strict), pytest-asyncio.
 - Pydantic for all domain + tool models.
 - aiosqlite for persistence.
-- Typer + Rich for CLI; Textual for TUI.
+- Rust (clap) is the primary CLI binary (auth/chat/run); delegates to Python core (agent/loop, LLM via litellm) for execution until full port. Typer reference kept for TUI. Textual for TUI.
 - All repeatable work via Taskfile.
 
 ## Future Evolution
 
+- Production LLM clients (Grok, Anthropic, OpenAI) + streaming (FT-004).
 - Richer Planner (full symphony-style + multi-step reasoning).
-- Advanced Context Management (token budgets, summarization).
-- Smart Approval Classifier (rules + small model).
-- MCP production client/server (with OAuth handling).
-- Optional web dashboard or HTTP surface.
-- Skill authoring tools and curator (following ecosystem patterns).
-- Tighter integration with existing productivity skills (Linear, Notion, calendar).
+- Advanced session memory (summaries, facts across turns).
+- Smarter approval classifier inside the loop.
+- Deep sub-agent / lane delegation with linked sessions.
+- MCP server exposing the full agent loop.
+- TUI live streaming of LLM tokens + tool results.
 
-This base architecture ensures nib remains a trustworthy "chief of staff + senior engineer" that owns your workload while never performing destructive actions without proper consent.
+This architecture keeps nib as a trustworthy, local-first orchestrator that drives LLMs safely through gated tools while maintaining complete per-project session history in `.nib/sessions/`.
 
 Update this document whenever core components, flows, or principles change.

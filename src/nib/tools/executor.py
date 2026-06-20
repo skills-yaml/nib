@@ -8,7 +8,7 @@ It enforces:
 - Permission layers (from permissions deep-dive)
 - Approval workflow
 - Redaction (basic)
-- Audit recording to workload store
+- Audit recording to project-local session store (.nib/sessions/)
 - Context from AGENTS.md / skills (wired in later)
 
 This is the single source of truth for "can the agent do this?"
@@ -30,7 +30,7 @@ from nib.tools.models import (
     ApprovalRequest,
     PermissionLevel,
     ToolCall,
-    ToolExecutionRecord,
+    ToolCallRecord,
     ToolResult,
 )
 from nib.tools.registry import get_permission_level, get_tool_metadata
@@ -42,19 +42,25 @@ console = Console()
 class ToolExecutor:
     def __init__(
         self,
-        workload_store=None,  # Will be nib.core.workload.WorkloadStore
+        session_store=None,  # nib.core.workload.SessionStore (file-based in .nib/)
         approval_mode: ApprovalMode = ApprovalMode.MANUAL,
         project_root: Path | None = None,
     ) -> None:
-        self.workload_store = workload_store
+        self.session_store = session_store
         self.approval_mode = approval_mode
         self.project_root = project_root
         self._worktree_manager: WorktreeManager | None = None
+        if project_root and not session_store:
+            try:
+                from nib.core.workload import SessionStore
+                self.session_store = SessionStore(project_root=project_root)
+            except Exception:
+                pass
 
     async def execute(
         self,
         call: ToolCall,
-        current_task_id: str | None = None,
+        session_id: str | None = None,
     ) -> ToolResult:
         """Main entry point. Enforces all permission layers."""
         start = time.time()
@@ -68,7 +74,7 @@ class ToolExecutor:
 
         # Layer 3: Classification (already in metadata, but can be refined)
         # Layer 4: Approval
-        approval = await self._handle_approval(call, level, current_task_id)
+        approval = await self._handle_approval(call, level, session_id)
 
         if not approval.granted:
             result = ToolResult(
@@ -79,7 +85,7 @@ class ToolExecutor:
                 approval_granted=False,
                 approval_source=approval.source,
             )
-            await self._record_execution(call, result, approval, current_task_id, worktree)
+            await self._record_execution(call, result, approval, session_id, worktree)
             return result
 
         # Layer 5: Redaction (basic placeholder - expand later)
@@ -108,7 +114,7 @@ class ToolExecutor:
             redacted=True,  # placeholder
         )
 
-        await self._record_execution(call, result, approval, current_task_id, worktree)
+        await self._record_execution(call, result, approval, session_id, worktree)
         return result
 
     def _resolve_scope(self, call: ToolCall) -> Path:
@@ -130,21 +136,21 @@ class ToolExecutor:
         ):
             return None
 
-        if not call.task_id:
-            return effective_root  # fallback if no task
+        if not call.session_id:
+            return effective_root  # fallback if no session
 
         if self._worktree_manager is None:
             self._worktree_manager = WorktreeManager(effective_root)
 
         try:
-            wt = self._worktree_manager.create_for_task(call.task_id)
+            wt = self._worktree_manager.create_for_task(call.session_id)
             return wt
         except Exception:
             # fallback to main tree if worktree fails (e.g. no git)
             return effective_root
 
     async def _handle_approval(
-        self, call: ToolCall, level: PermissionLevel, task_id: str | None
+        self, call: ToolCall, level: PermissionLevel, session_id: str | None
     ) -> ApprovalDecision:
         """Core approval logic from permissions deep-dive."""
         if level == PermissionLevel.READ_ONLY:
@@ -163,10 +169,10 @@ class ToolExecutor:
             tool_name=call.tool_name,
             arguments=call.arguments,
             permission_level=level,
-            reason="Agent requested this action as part of current task.",
+            reason="Agent requested this action as part of current session.",
             risk_explanation=self._risk_explanation(call.tool_name, level),
             suggested_command_or_patch=str(call.arguments),
-            task_id=task_id,
+            session_id=session_id,
         )
 
         # Simple rich prompt for CLI (TUI version later)
@@ -211,15 +217,15 @@ class ToolExecutor:
         call: ToolCall,
         result: ToolResult,
         approval: ApprovalDecision,
-        task_id: str | None,
+        session_id: str | None,
         worktree: Path | None,
     ) -> None:
-        """Record to workload for audit (ties to permissions deep-dive requirement)."""
-        if not task_id:
+        """Record tool call to the project-local session store."""
+        if not session_id:
             return
-        record = ToolExecutionRecord(
+        record = ToolCallRecord(
             id=f"tool-{int(time.time() * 1000)}",
-            task_id=task_id,
+            session_id=session_id,
             tool_name=call.tool_name,
             arguments=call.arguments,
             result=result,
@@ -227,13 +233,14 @@ class ToolExecutor:
             project_root=str(self.project_root) if self.project_root else None,
             worktree_path=str(worktree) if worktree else None,
         )
-        if self.workload_store:
-            await self.workload_store.record_tool_execution(record)  # type: ignore[attr-defined]
+        if self.session_store:
+            self.session_store.record_tool_call(record)
         else:
             console.print(
-                f"[dim]Recorded tool call for task {task_id}: {call.tool_name} (approved={approval.granted})[/dim]"
+                f"[dim]Recorded tool call for session {session_id}: {call.tool_name} (approved={approval.granted})[/dim]"
             )
 
 
 # Global default executor (can be overridden)
+# Note: session_store should be provided with a project-local SessionStore
 default_executor = ToolExecutor(approval_mode=ApprovalMode.MANUAL)

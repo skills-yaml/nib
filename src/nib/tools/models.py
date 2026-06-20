@@ -47,7 +47,7 @@ class ToolCall(BaseModel):
 
     tool_name: str
     arguments: dict[str, Any]
-    task_id: str | None = None
+    session_id: str | None = None
     project_root: str | None = None
     worktree_path: str | None = None
     requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -75,7 +75,7 @@ class ApprovalRequest(BaseModel):
     reason: str  # From planner or agent context
     risk_explanation: str
     suggested_command_or_patch: str | None = None
-    task_id: str | None = None
+    session_id: str | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -88,11 +88,11 @@ class ApprovalDecision(BaseModel):
     expires_for_task: bool = True  # Per-task grant by default
 
 
-class ToolExecutionRecord(BaseModel):
-    """Audit record stored in workload DB."""
+class ToolCallRecord(BaseModel):
+    """Audit record for a tool call (stored in session)."""
 
     id: str
-    task_id: str
+    session_id: str
     tool_name: str
     arguments: dict[str, Any]
     result: ToolResult

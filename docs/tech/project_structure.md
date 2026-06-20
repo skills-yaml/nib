@@ -1,6 +1,10 @@
 # Project Structure
 
-nib is a focused, local-first AI agent for coding and workload management. It follows the general documentation and process patterns from the broader workspace (revized, autonomus, agents/) but uses a much lighter structure appropriate for a personal CLI/TUI tool rather than a full cloud SaaS monorepo.
+nib CLI is implemented in Rust (following skm structure) with Python core/agent logic (transitional).
+
+See skm's project_structure.md for reference on CI/install layout.
+Rust sources in src/ (main.rs, auth.rs, chat.rs, config.rs, agent/, llm/, etc).
+Python sources remain in src/nib/ for agent/llm until ported.
 
 ## High-Level Layout
 
@@ -34,7 +38,7 @@ nib/
 │       ├── __main__.py
 │       ├── cli/                 # Typer command surface
 │       ├── tui/                 # Textual interactive application
-│       ├── core/                # Domain logic (workload, planning, execution, reconciliation)
+│       ├── core/                # Domain logic (sessions, planning, execution, reconciliation)
 │       ├── integrations/        # Git, subagent, lanes, GitHub, Notion, etc.
 │       ├── models/              # Pydantic data models (or keep in core)
 │       └── utils/

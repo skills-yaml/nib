@@ -56,7 +56,7 @@ def assemble_context(
             for s in skills[:3]  # limit to avoid token bloat
         )
 
-    # TODO: MCP tools summary, libs docs, current workload snapshot, etc.
+    # TODO: MCP tools summary, libs docs, recent session history, etc.
 
     return context
 

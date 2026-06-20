@@ -12,7 +12,7 @@ def run_tui() -> None:
     """Entry point for the full Textual TUI."""
     console.print("[bold yellow]TUI is not yet implemented.[/]\n")
     console.print("Planned features:")
-    console.print("  • Live workload / kanban board")
+    console.print("  • Session history and tool call viewer (stored in .nib/)")
     console.print("  • Agent activity & delegation views")
     console.print("  • Interactive planning & review flows")
     console.print("\nFor now use the CLI: [cyan]nib --help[/]")

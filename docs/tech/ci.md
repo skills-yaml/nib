@@ -1,41 +1,21 @@
-# CI
+# CI for nib (Rust CLI)
 
-Metadata:
+Follows skm project structure.
 
-- Standard: workspace-docs@1.0.0
-- Status: static
-- Owner: project
-- Last reviewed: 2026-06-17
+## Pipeline
+- Use `task check`, `task test`, `task build`.
+- Rust toolchain via dtolnay/rust-toolchain.
+- Task via arduino/setup-task.
+- Cross-platform release builds for linux/macos/windows.
+- Channels: prod (main), development.
+- Installers in scripts/ consume the release artifacts.
 
-## Scope
+See .github/workflows/ci.yml and release.yml (modeled directly on skm).
 
-This document records continuous integration expectations for `nib`.
+## Taskfile
+See root Taskfile.yml for check/fix/test/build (cargo based, with Python support).
 
-## Source Of Truth
-
-- `.github/workflows/` when present.
-- `Taskfile.yml` or `Taskfile.yaml` when present.
-- `README.md` and `AGENTS.md` for documented quality gates.
-
-## Required Rules
-
-- Keep CI aligned with local task entrypoints when tasks exist.
-- Do not commit secrets, tokens, private keys, or environment-specific credentials.
-- Document missing or not-yet-enabled CI in `docs/projects/nib/inventory.md`.
-
-## Workflow
-
-1. Check available workflows under `.github/workflows/`.
-2. Check task targets with `task --list` or `task --list-all` when a Taskfile exists.
-3. Mirror local validation commands in CI where practical.
-
-## Validation
-
-- `task --list` or `task --list-all` when a Taskfile exists.
-- `task check` and `task test` when defined and dependencies are available.
-
-## References
-
-- `AGENTS.md`
-- `README.md`
-- `docs/projects/nib/inventory.md`
+## Install & Update
+- scripts/install.sh and install.ps1 (modeled on skm).
+- Self-update logic in src/updater.rs (checks tags prod-latest etc.).
+- Build embeds NIB_BUILD_COMMIT / CHANNEL via build.rs.

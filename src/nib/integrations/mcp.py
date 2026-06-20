@@ -2,7 +2,7 @@
 
 nib acts as both:
 - MCP client: consumes tools from GitHub, Notion, Linear, etc.
-- MCP server: exposes nib's workload, planning, and execution capabilities.
+- MCP server: exposes nib's sessions, planning, and execution capabilities.
 
 This allows seamless interoperability with the Grok TUI, Claude, and similar agent environments.
 """
@@ -64,19 +64,19 @@ class MCPServer:
         tools.extend(
             [
                 {
-                    "name": "nib_get_workload",
-                    "description": "Get current projects and tasks owned by nib",
+                    "name": "nib_list_sessions",
+                    "description": "List sessions (conversations + tool calls) stored in .nib/sessions/",
                 },
                 {
                     "name": "nib_get_context",
-                    "description": "Get loaded AGENTS.md + skills for active project",
+                    "description": "Get loaded AGENTS.md + skills for current session",
                 },
             ]
         )
         return tools
 
     async def handle_tool_call(
-        self, name: str, arguments: dict, task_id: str | None = None
+        self, name: str, arguments: dict, session_id: str | None = None
     ) -> dict:
         """Dispatch to executor (permissions applied) or stubs."""
         if name.startswith("nib_"):
@@ -87,7 +87,7 @@ class MCPServer:
                 if self.executor:
                     from nib.tools.models import ToolCall
 
-                    call = ToolCall(tool_name=tool_name, arguments=arguments, task_id=task_id)
-                    result = await self.executor.execute(call, current_task_id=task_id)
+                    call = ToolCall(tool_name=tool_name, arguments=arguments, session_id=session_id)
+                    result = await self.executor.execute(call, session_id=session_id)
                     return result.model_dump()
         return {"status": "not_implemented", "tool": name}

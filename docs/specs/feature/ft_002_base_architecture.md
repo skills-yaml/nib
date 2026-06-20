@@ -1,6 +1,6 @@
 # FT-002: Base Architecture of the Agent
 
-**Status:** Draft  
+**Status:** Implemented (architecture.md created + core modules aligned)  
 **Related:** [Product Foundation](../foundation/product.md), [FT-001: Basic Agent Tools](../feature/ft_001_basic_agent_tools.md), [T001](../task/T001_implement_core_agent_tools.md)
 
 ## Overview
@@ -65,7 +65,7 @@ See [docs/tech/backend_python.md](../../tech/backend_python.md) for the full sta
 
 - `docs/tech/architecture.md` exists and is referenced from project_structure.md, backend_python.md, ecosystem_integration.md, permissions.md, and the product foundation.
 - A feature spec (this document) exists that clearly states the principles and high-level flow.
-- The current code (ToolExecutor, context loader, workload recording, worktree manager, MCP server stubs, skills) matches the described architecture.
+- The current code (ToolExecutor + permission layers, context loader, workload recording + tool audit table, worktree manager, MCP server stubs, skills discovery) matches the described architecture (see architecture.md "as-built" sections and FT-001 implementation status).
 - Diagrams and module ownership are kept up-to-date.
 - Future features (Planner, full TUI approvals, production MCP, etc.) will have their own specs that reference this base architecture.
 

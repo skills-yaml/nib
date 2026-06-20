@@ -1,0 +1,23 @@
+[package]
+name = "nib"
+version = "0.1.0"
+edition = "2021"
+description = "AI agent for coding and workload management. Persistent backlog owner with disciplined execution."
+license = "MIT"
+authors = ["nib Contributors"]
+repository = "https://github.com/example/nib"  # update as needed
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+colored = "2.1"  # for nice output
+rpassword = "7.3"
+
+[dev-dependencies]
+tempfile = "3.8"
+serial_test = "3.0"
+
+[build-dependencies]
+# none for now

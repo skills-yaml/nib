@@ -1,8 +1,8 @@
 # FT-001: Basic Agent Tools Implementation
 
-**Status:** Draft  
+**Status:** In Progress (core implemented; write tools stubbed)  
 **Owner:** nib team  
-**Related:** [Product Foundation](../foundation/product.md), [Ecosystem Integration](../../tech/ecosystem_integration.md), [Permissions & Safety](../../tech/permissions.md) *(to be created)*
+**Related:** [Product Foundation](../foundation/product.md), [Ecosystem Integration](../../tech/ecosystem_integration.md), [Permissions & Safety](../../tech/permissions.md), [Base Architecture](../../tech/architecture.md)
 
 ## Overview
 
@@ -27,7 +27,7 @@ The design prioritizes safety and leverage over breadth: reuse existing patterns
 
 - Full browser automation or web interaction tools.
 - Arbitrary database or cloud resource access (use MCP servers for that when needed).
-- General-purpose code execution sandbox (rely on the host's normal shell + worktrees + approval).
+- General-purpose code execution sandbox (rely on the host's normal shell + worktrees + approval). See FT-003 for direct bwrap sandboxing (with Codex patterns as reference).
 - Semantic code search / embeddings (start with simple grep + read).
 - Tool discovery or self-modification by the agent at runtime (static tool registry).
 - Cross-project write access by default (read access to shared libs/docs is allowed via scoped context loading).
@@ -56,7 +56,8 @@ All tools follow a common pattern:
   - `recursive`: bool (default false, with sensible depth limit)
   - `include_hidden`: bool
 - **Permission Level**: Read-only
-- **Output**: List of entries with type (file/dir), size, mtime.
+- **Output (target)**: List of entries with type (file/dir), size, mtime.  
+  Current basic impl returns only `path` + `type` (with recursive safety cap).
 
 ### 3. `grep` / `search_files`
 - **Purpose**: Search file contents or filenames.
@@ -66,7 +67,8 @@ All tools follow a common pattern:
   - `glob`: e.g. `**/*.py`
   - `max_results`: int
 - **Permission Level**: Read-only
-- **Output**: List of matches with file, line, snippet (redacted).
+- **Output (target)**: List of matches with file, line, snippet (redacted).  
+  Current basic impl performs case-insensitive substring match (no true regex, no glob filter). Full ripgrep-style via terminal is planned.
 
 ### 4. `apply_patch` (preferred edit tool)
 - **Purpose**: Apply a unified diff / patch safely.
@@ -177,7 +179,36 @@ MCP-exposed versions of these tools must carry the same permission metadata.
 
 Start with pure function-based tools (easy to test). Move to class-based registry only when dynamic skill contribution is needed.
 
+## Implementation Status (as of 2026-06, feat/implement-basic-agent-tools)
+
+The core permission model, registry, executor, worktree support, workload audit recording, context/AGENTS/skills loading, and MCP stubs were delivered as part of this feature. See [docs/tech/architecture.md](../../tech/architecture.md) for the as-built module summary.
+
+**Delivered:**
+- Tool models (PermissionLevel, Approval*, ToolCall/Result, ToolExecutionRecord)
+- Registry + 5 tools registered with metadata
+- ToolExecutor with scoping, worktree auto-selection for SAFE/DESTRUCTIVE, approval modes (MANUAL default with rich CLI prompt), basic redaction placeholder, audit recording to WorkloadStore
+- WorktreeManager (git worktree create/cleanup/status)
+- Functional read-only tools: `read_file`, `list_directory`, `grep` (basic Python impl; grep is substring case-insensitive)
+- `apply_patch` and `run_terminal`: stub implementations (return preview messages; real `git apply` in worktree + asyncio subprocess + classification/redaction/TODOs remain)
+- WorkloadStore: tables + `record_tool_execution` + history query (snapshot stubbed)
+- Context assembly + `nib context` command exercising AGENTS.md + skills
+- `nib demo-tool` exercising the executor + permission flow + DB
+- CLI surface updated for tools demo
+
+**Gaps vs this spec (tracked for follow-up):**
+- Real implementation of edit/execute tools (apply_patch using git apply; run_terminal using subprocess or Codex sandbox per FT-003)
+- Full dynamic classification for run_terminal; POLICY/SMART approval modes beyond fallback
+- Secret redaction, improved output formats (size/mtime on list, regex on grep)
+- TUI approval flows
+- Rich E2E demo performing an actual code change + reconciliation inside worktree
+- `task check` (format + 90 pyright errors in executor types) and expanded tests
+- Deeper Skills/MCP/AGENTS influence inside the executor decision path
+
+The skeleton and permission layers closely match the design in this spec and the finalized architecture.md.
+
 ## Acceptance Criteria
+
+These remain the definition of full completion for FT-001. See the Implementation Status section above for delivered vs remaining work.
 
 - [ ] All five core tools implemented with the interfaces above.
 - [ ] Every tool call is recorded in the workload model with full audit trail.
@@ -190,6 +221,8 @@ Start with pure function-based tools (easy to test). Move to class-based registr
 - [ ] Unit + integration tests exist for each tool (including permission denial paths and worktree scenarios).
 - [ ] `task check` and `task test` pass.
 - [ ] End-to-end demo: nib is given a small coding task, loads context (AGENTS + skills), uses the tools safely inside a worktree, records everything, and produces a verifiable result.
+
+**Partial progress note**: The executor + recording + read tools + basic context + demo tooling satisfy several of the integration and audit requirements at the skeleton level. Full write-tool implementations, richer tests, and quality gates are the remaining work to close this feature.
 
 ## Open Questions / Risks
 
