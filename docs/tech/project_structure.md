@@ -1,47 +1,41 @@
 # Project Structure
 
-nib CLI is implemented in Rust (following skm structure) with Python core/agent logic (transitional).
+nib CLI is implemented in **Rust** (primary binary, following skm structure) with a **Python core** for the agent loop, LLM clients, and tool execution (hybrid).
 
 See skm's project_structure.md for reference on CI/install layout.
-Rust sources in src/ (main.rs, auth.rs, chat.rs, config.rs, agent/, llm/, etc).
-Python sources remain in src/nib/ for agent/llm until ported.
+
+- Rust: `src/main.rs`, `src/auth.rs`, `src/chat.rs`, `src/run.rs`, `src/config.rs`, `src/session.rs`, `src/updater.rs`, etc.
+- Python core: `src/nib/` (agent/loop.py, llm/base.py, core/workload.py (sessions), tools/, etc.)
+
+The `nib` command is the compiled Rust binary. Python is invoked via subprocess for agent steps during the transition.
 
 ## High-Level Layout
 
 ```
 nib/
+├── Cargo.toml
+├── Cargo.lock
+├── build.rs
 ├── pyproject.toml
 ├── uv.lock
-├── Taskfile.yml                 # All dev, check, test, and build commands
-├── .python-version
+├── Taskfile.yml                 # All dev, check, test, and build commands (cargo + py)
 ├── AGENTS.md
 ├── README.md
 ├── .gitignore
+├── .github/workflows/           # ci.yml + release.yml (skm style)
+├── scripts/                     # install.sh, install.ps1, first-time-setup.sh
 ├── docs/
-│   ├── specs/
-│   │   ├── foundation/
-│   │   │   └── product.md
-│   │   ├── feature/             # ft_XXX_*.md
-│   │   └── task/                # TXXX_*.md (+ .plan.md)
-│   └── tech/
-│       ├── architecture.md      # Base architecture of the agent (components, flows, principles)
-│       ├── backend_python.md    # nib-specific Python conventions (CLI/TUI agent)
-│       ├── project_structure.md
-│       ├── permissions.md       # Defense-in-depth permission model
-│       ├── ecosystem_integration.md  # MCP, Skills, AGENTS.md
-│       ├── sdlc.md
-│       ├── task.md
-│       └── cli_tui.md           # (future) detailed TUI/CLI guidelines
+│   └── ... (specs, tech)
 ├── src/
-│   └── nib/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── cli/                 # Typer command surface
-│       ├── tui/                 # Textual interactive application
-│       ├── core/                # Domain logic (sessions, planning, execution, reconciliation)
-│       ├── integrations/        # Git, subagent, lanes, GitHub, Notion, etc.
-│       ├── models/              # Pydantic data models (or keep in core)
-│       └── utils/
+│   ├── main.rs                  # Rust CLI entry (clap)
+│   ├── auth.rs, chat.rs, run.rs, ...
+│   ├── config.rs, session.rs, updater.rs, version.rs
+│   └── nib/                     # Python core (hybrid)
+│       ├── agent/loop.py
+│       ├── llm/base.py (LiteLLM + Mock)
+│       ├── core/workload.py (sessions in .nib/)
+│       ├── tools/
+│       └── cli/app.py (legacy Typer reference)
 └── tests/
 ```
 
@@ -53,12 +47,13 @@ nib/
 - `docs/specs/` — Product truth. Never implement major behavior without a corresponding spec or task plan.
 - `docs/tech/` — Engineering conventions. Keep them up to date as the project evolves.
 
-## Python Package Rules
+## Package Rules
 
-- Use the `src/` layout.
-- All imports are absolute from the `nib` package: `from nib.core.workload import ...`
-- The command `nib` is provided via the `[project.scripts]` entry point in `pyproject.toml`.
-- Support `python -m nib` via `__main__.py`.
+- Rust binary (`nib`) is the user-facing CLI (built from `src/` with `cargo`).
+- Python lives under `src/nib/` and is invoked by the Rust CLI (via `uv run python` or `python -m`) for the agent loop and LLM/tool logic during the hybrid phase.
+- Use the `src/` layout for Python.
+- All Python imports are absolute from the `nib` package: `from nib.core.workload import ...`
+- Python parts can still be run directly with `uv run python -m nib ...` for debugging.
 
 ## What nib Is NOT (for structure decisions)
 
@@ -68,21 +63,19 @@ nib/
 
 ## Future Growth
 
-If nib evolves to have:
-- A web dashboard → add a `fe/` directory following the workspace frontend patterns.
-- Background services or a small API → consider a `srv/` directory at that time.
-- Distribution as a compiled binary → evaluate a thin Rust wrapper around the Python core (or full Rust rewrite).
+If nib evolves further:
+- Full pure-Rust port of the agent loop → drop the Python subprocess bridge.
+- A web dashboard → add a `fe/` directory.
+- Background services → consider a `srv/` directory.
 
-For the MVP and early versions, keep it a clean, single `src/nib/` Python package with strong separation between `core/`, `integrations/`, and UI layers.
+The current design (Rust CLI as the stable distribution vehicle + Python for complex agent logic) gives us fast iteration on the agent while providing users a single `nib` binary.
 
 ## References
 
-- `docs/tech/architecture.md` — Base architecture, core components, data flows, and principles.
-- `docs/tech/backend_python.md` — Detailed Python, CLI, TUI, and persistence conventions for nib.
-- `docs/specs/feature/ft_002_base_architecture.md` — Feature spec for this architecture.
-- Central workspace references (when more detail is needed):
-  - `~/work/projects/agents/docs/tech/backend_python.md`
-  - `~/work/projects/agents/docs/tech/project_structure.md`
-  - `~/work/projects/agents/docs/tech/sdlc.md`
+- `docs/tech/architecture.md` — Base architecture.
+- `docs/tech/ci.md` — Build, CI, release, and installation details.
+- `docs/tech/backend_python.md` — Python core conventions.
+- `docs/specs/done/ft_004_llm_integration_and_agent_loop.md` — LLM + agent loop spec.
+- Central workspace references for patterns.
 
 Update this document whenever the top-level layout changes significantly.

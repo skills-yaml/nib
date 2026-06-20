@@ -14,11 +14,11 @@ Primary users:
 - Power users already living in rich agent environments (Grok subagents, MCPs, and similar tools) who want a workload-native orchestrator on top.
 
 Key capabilities (MVP focus):
-- Local-first workload tracking with Projects, Tasks, dependencies, priorities, and external links.
-- High-quality planning using structured (Symphony-style) decomposition.
-- Rigorous execution: fresh-context subagents, spec compliance reviews, quality reviews, isolated worktrees, and lane-based specialists (e.g. Codex lanes).
-- Excellent TUI/CLI visibility and human steering.
-- Strong integration with Git, GitHub (MCP), Notion, and existing agent platforms in the environment.
+- Local-first sessions (`./.nib/sessions/`) for conversation + tool call history.
+- LLM-driven agent loop with pluggable providers (Grok, OpenAI, Anthropic, etc.).
+- Rigorous execution: gated ToolExecutor, hybrid bwrap sandboxing, git worktrees, plan/approval gates.
+- Excellent CLI (`nib chat`, `nib run`, `nib auth`) + TUI visibility and human steering.
+- Strong integration with Git, GitHub (MCP), skills, and existing agent platforms.
 
 ## Vision
 
@@ -27,24 +27,91 @@ The most trustworthy, persistent agent for solo and small-team software developm
 ## Project Structure
 
 - `docs/specs/` – Product and feature specifications (foundation, feature, and task docs following revized-style conventions).
-- `docs/tech/` – Architecture and process references (to be populated).
-- Implementation is in **Python** (uv + pyproject.toml, src/ layout).
-- See `docs/tech/backend_python.md` and `docs/tech/project_structure.md` for the exact conventions and layout.
+- `docs/tech/` – Architecture and process references.
+- Hybrid implementation: **Rust CLI** (primary entrypoint, `src/`) + **Python core** (agent loop, LLM, tools in `src/nib/`).
+- See `docs/tech/backend_python.md`, `docs/tech/project_structure.md`, and `docs/tech/ci.md` for conventions and layout.
 
-## Documentation Map
+## Installation
 
-- [docs/specs/foundation/product.md](docs/specs/foundation/product.md) — **Product foundation document**. High-level description, vision, mission, and MVP feature outline.
-- `docs/specs/feature/` — Future feature specifications (ft_XXX).
-- `docs/specs/task/` — Task-level specs and associated .plan.md files.
-- `docs/tech/` — Technical standards (project structure, SDLC, task runner, backend, etc.) — modeled on patterns from revized, autonomus, agents, and other projects.
+### Stable Release (Recommended)
 
-## Getting Started (Early)
+**Linux / macOS**
 
-This project is in the early definition phase. The first artifact is the foundation product document.
+```bash
+# Install latest stable (prod channel)
+curl -fsSL https://raw.githubusercontent.com/skills-yaml/nib/main/scripts/install.sh | \
+  NIB_REPO=skills-yaml/nib sh
 
-Use the standard task and agent workflows once implementation begins:
-- Follow patterns from `~/work/projects/agents/docs/tech/`
-- Prefer Taskfile.yml for all repeatable commands.
-- Use available skills (symphony-spec-writing, design, implement, review, subagent-driven-development, etc.) for agent-assisted work.
+# Development channel (bleeding edge)
+curl -fsSL https://raw.githubusercontent.com/skills-yaml/nib/main/scripts/install.sh | \
+  NIB_REPO=skills-yaml/nib NIB_CHANNEL=development sh
+```
 
-Run `task --list` (once a Taskfile exists) for available commands.
+The script downloads the appropriate binary for your platform and installs it to `~/.local/bin`.
+
+**Windows (PowerShell)**
+
+```powershell
+# Stable
+irm https://raw.githubusercontent.com/skills-yaml/nib/main/scripts/install.ps1 | iex
+
+# With parameters (recommended)
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/skills-yaml/nib/main/scripts/install.ps1"))) `
+  -Channel prod -Repo skills-yaml/nib -AddToPath
+```
+
+After installation, ensure `~/.local/bin` (or the equivalent) is in your `PATH`.
+
+To update later, simply re-run the same install command (it will overwrite with the latest for the chosen channel).
+
+### From Source (Developers)
+
+```bash
+git clone https://github.com/skills-yaml/nib.git
+cd nib
+
+# Quick dev build + checks
+task dev
+
+# Or just build the release binary
+task build
+./target/release/nib --help
+```
+
+Requires:
+- Rust toolchain (stable)
+- Task (https://taskfile.dev)
+- uv (for Python core parts)
+
+### First-Time Setup
+
+After installing `nib`:
+
+```bash
+nib auth          # Configure LLM providers (OpenAI, Anthropic, Grok, etc.)
+nib chat          # Start an interactive session
+nib run "your goal"
+```
+
+See `scripts/first-time-setup.sh` for an automated first-run helper.
+
+## Quick Start
+
+```bash
+nib chat
+# Inside chat:
+#   /model                # List & switch models for the current provider
+#   /help
+#   /quit
+```
+
+## Documentation
+
+- [docs/specs/foundation/product.md](docs/specs/foundation/product.md) — Product foundation.
+- `docs/specs/done/` — Completed feature specs (FT-003 Hybrid Sandboxing, FT-004 LLM + Agent Loop).
+- `docs/tech/` — Technical references:
+  - `architecture.md`
+  - `ci.md` (builds, releases, installation)
+  - `project_structure.md`
+  - `permissions.md`, etc.
+- `agents/memory/` — Durable project decisions and facts.
