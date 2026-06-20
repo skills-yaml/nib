@@ -37,14 +37,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "DEBUG event_name=${{ github.event_name }} ref_name=${GITHUB_REF_NAME:-unset} ref=${GITHUB_REF:-unset}"
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             channel="${{ inputs.channel }}"
-          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+          elif [ "${GITHUB_REF_NAME:-}" = "main" ]; then
             channel="prod"
-          elif [ "${GITHUB_REF_NAME}" = "development" ]; then
+          elif [ "${GITHUB_REF_NAME:-}" = "development" ]; then
             channel="development"
           else
-            echo "Unsupported release branch: ${GITHUB_REF_NAME}" >&2
+            echo "Unsupported release branch: ${GITHUB_REF_NAME:-unset}" >&2
             exit 1
           fi
 
@@ -58,6 +60,7 @@ jobs:
             prerelease="true"
           fi
 
+          GITHUB_OUTPUT=${GITHUB_OUTPUT:-/dev/stdout}
           {
             echo "channel=$channel"
             echo "tag=$tag"
@@ -122,29 +125,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p artifacts
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifacts/nib"
-          chmod +x "artifacts/nib"
-          tar -C artifacts -czf "artifacts/${{ matrix.asset }}" nib
-          shasum -a 256 "artifacts/${{ matrix.asset }}" > "artifacts/${{ matrix.asset }}.sha256"
+          mkdir -p pkg
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" pkg/nib
+          chmod +x pkg/nib
+          tar -C pkg -czf "${{ matrix.asset }}" nib
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          rm -rf pkg
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifacts/nib.exe"
-          Compress-Archive -Path "artifacts/nib.exe" -DestinationPath "artifacts/${{ matrix.asset }}" -Force
-          $hash = Get-FileHash -Algorithm SHA256 "artifacts/${{ matrix.asset }}"
-          "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "artifacts/${{ matrix.asset }}.sha256"
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "pkg/nib.exe"
+          Compress-Archive -Path "pkg/nib.exe" -DestinationPath "${{ matrix.asset }}" -Force
+          $hash = Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}"
+          "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
+          Remove-Item -Recurse -Force pkg
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: |
-            artifacts/${{ matrix.asset }}
-            artifacts/${{ matrix.asset }}.sha256
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
           if-no-files-found: error
 
   release:
@@ -168,7 +173,6 @@ jobs:
       - name: Download workflow artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
           merge-multiple: true
 
       - name: Move release tag
@@ -176,6 +180,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
           git push -f origin "refs/tags/$RELEASE_TAG"
 
@@ -198,4 +204,4 @@ jobs:
             gh "${args[@]}"
           fi
 
-          gh release upload "$RELEASE_TAG" artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 --clobber
+          gh release upload "$RELEASE_TAG" *.tar.gz *.zip *.sha256 --clobber
