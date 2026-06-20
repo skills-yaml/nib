@@ -77,7 +77,7 @@ jobs:
             target: x86_64-unknown-linux-musl
             binary: nib
             asset: nib-linux-x86_64.tar.gz
-          - os: macos-15-intel
+          - os: macos-13
             target: x86_64-apple-darwin
             binary: nib
             asset: nib-macos-x86_64.tar.gz
@@ -85,7 +85,7 @@ jobs:
             target: aarch64-apple-darwin
             binary: nib
             asset: nib-macos-aarch64.tar.gz
-          - os: windows-2025
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             binary: nib.exe
             asset: nib-windows-x86_64.zip
@@ -104,6 +104,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install musl tools (for musl target)
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Build
         env:
           NIB_BUILD_CHANNEL: ${{ needs.prepare.outputs.channel }}
@@ -116,29 +122,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p dist/pkg
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib"
-          chmod +x "dist/pkg/nib"
-          tar -C dist/pkg -czf "dist/${{ matrix.asset }}" nib
-          shasum -a 256 "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifacts/nib"
+          chmod +x "artifacts/nib"
+          tar -C artifacts -czf "artifacts/${{ matrix.asset }}" nib
+          shasum -a 256 "artifacts/${{ matrix.asset }}" > "artifacts/${{ matrix.asset }}.sha256"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/pkg | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib.exe"
-          Compress-Archive -Path "dist/pkg/nib.exe" -DestinationPath "dist/${{ matrix.asset }}" -Force
-          $hash = Get-FileHash -Algorithm SHA256 "dist/${{ matrix.asset }}"
-          "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "dist/${{ matrix.asset }}.sha256"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifacts/nib.exe"
+          Compress-Archive -Path "artifacts/nib.exe" -DestinationPath "artifacts/${{ matrix.asset }}" -Force
+          $hash = Get-FileHash -Algorithm SHA256 "artifacts/${{ matrix.asset }}"
+          "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "artifacts/${{ matrix.asset }}.sha256"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: |
-            dist/${{ matrix.asset }}
-            dist/${{ matrix.asset }}.sha256
+            artifacts/${{ matrix.asset }}
+            artifacts/${{ matrix.asset }}.sha256
           if-no-files-found: error
 
   release:
@@ -162,7 +168,7 @@ jobs:
       - name: Download workflow artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: artifacts
           merge-multiple: true
 
       - name: Move release tag
@@ -192,4 +198,4 @@ jobs:
             gh "${args[@]}"
           fi
 
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.sha256 --clobber
+          gh release upload "$RELEASE_TAG" artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 --clobber
