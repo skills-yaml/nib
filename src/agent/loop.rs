@@ -266,17 +266,6 @@ Think step-by-step. Use tools when needed. When done, give a clear final answer.
     )
 }
 
-fn is_final(response: &LlmResponse, mode: &str) -> bool {
-    if mode == "plan" {
-        return true;
-    }
-    if let Some(c) = &response.content {
-        let lower = c.to_lowercase();
-        return lower.contains("final answer") || lower.contains("task complete") || c.len() > 200;
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
