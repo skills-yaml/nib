@@ -69,7 +69,11 @@ fn main() {
         Some(Commands::Run(args)) => run::run_agent(args),
         Some(Commands::Auth) => auth::run_auth_wizard(),
         Some(Commands::Context(args)) => context_cmd::run_context(args),
-        Some(Commands::Doctor) => doctor::run_doctor(&project),
+        Some(Commands::Doctor) => {
+            if !doctor::run_doctor(&project) {
+                process::exit(1);
+            }
+        }
         Some(Commands::DemoTool { tool, arg, yes }) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
