@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod memory;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMessage {
     pub role: String,

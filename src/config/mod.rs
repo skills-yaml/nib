@@ -48,7 +48,7 @@ pub const AVAILABLE_MODELS: &[(&str, &[&str])] = &[
 /// Legacy alias used by CLI modules during the Rust migration.
 pub type LLMConfigFile = LlmConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NibConfig {
     #[serde(default)]
     pub llm: LlmConfig,
@@ -56,6 +56,10 @@ pub struct NibConfig {
     pub execution: ExecutionConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub compression: CompressionConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -94,6 +98,48 @@ fn default_network() -> String {
     "restricted".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompressionConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_target_ratio")]
+    pub target_ratio: f64,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: 0.50,
+            target_ratio: 0.20,
+        }
+    }
+}
+
+fn default_threshold() -> f64 { 0.50 }
+fn default_target_ratio() -> f64 { 0.20 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_memory_provider")]
+    pub provider: String,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "built-in".to_string(),
+        }
+    }
+}
+
+fn default_memory_provider() -> String { "built-in".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpConfig {
     #[serde(default)]
@@ -109,11 +155,27 @@ pub struct McpServerEntry {
     pub env: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmConfig {
     pub active_provider: Option<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderEntry>,
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            active_provider: None,
+            providers: HashMap::new(),
+            context_length: 128_000,
+        }
+    }
+}
+
+fn default_context_length() -> usize {
+    128_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -250,6 +312,8 @@ pub fn load_nib_config_full(project_root: &Path) -> Result<NibConfig, ConfigErro
             llm,
             execution: ExecutionConfig::default(),
             mcp: McpConfig::default(),
+            compression: CompressionConfig::default(),
+            memory: MemoryConfig::default(),
         });
     }
 
@@ -311,6 +375,8 @@ fn migrate_json_to_toml(paths: &ConfigPaths) -> Result<LlmConfig, ConfigError> {
             llm: llm.clone(),
             execution: ExecutionConfig::default(),
             mcp: McpConfig::default(),
+            compression: CompressionConfig::default(),
+            memory: MemoryConfig::default(),
         },
     )?;
 
@@ -339,11 +405,14 @@ mod tests {
                     base_url: None,
                 },
             )]),
+            context_length: 128_000,
         };
         let nib = NibConfig {
             llm: llm.clone(),
             execution: ExecutionConfig::default(),
             mcp: McpConfig::default(),
+            compression: CompressionConfig::default(),
+            memory: MemoryConfig::default(),
         };
         let serialized = toml::to_string_pretty(&nib).expect("serialize");
         let parsed: NibConfig = toml::from_str(&serialized).expect("parse");
@@ -397,6 +466,7 @@ mod tests {
                     base_url: None,
                 },
             )]),
+            context_length: 128_000,
         };
         save_config(dir.path(), &llm).expect("save");
         let loaded = load_config(dir.path());

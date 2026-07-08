@@ -55,6 +55,7 @@ fn config_toml_save_load_integration() {
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
             },
         )]),
+        context_length: 128_000,
     };
 
     save_config(dir.path(), &llm).expect("save");

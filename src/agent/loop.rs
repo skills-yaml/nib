@@ -103,16 +103,40 @@ pub async fn run_agent_loop(
     let mut steps = 0u32;
     for step in 0..cfg.max_steps {
         steps = step + 1;
-        let prompt = build_prompt(
+
+        let _ = crate::context::compression::maybe_compress_session(
             &store,
             session_id,
-            goal,
+            &llm,
+            &nib_cfg,
+        )
+        .await;
+
+        let system_prompt = build_system_prompt(
             &context_block,
             use_tools_ref.unwrap_or(&[]),
             &cfg.mode,
             &project_root,
         );
-        let messages = vec![json!({"role": "user", "content": prompt})];
+        let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+
+        if let Some(session) = store.load(session_id) {
+            let mut last_role: Option<String> = None;
+            for msg in session.messages {
+                if let Some(ref lr) = last_role {
+                    if lr == &msg.role {
+                        if let Some(last_msg) = messages.last_mut() {
+                            let old_content = last_msg["content"].as_str().unwrap_or("");
+                            let new_content = format!("{}\n\n{}", old_content, msg.content);
+                            *last_msg = json!({"role": msg.role, "content": new_content});
+                        }
+                        continue;
+                    }
+                }
+                last_role = Some(msg.role.clone());
+                messages.push(json!({"role": msg.role, "content": msg.content}));
+            }
+        }
 
         let response = llm.complete(&messages, use_tools_ref, 0.7).await?;
 
@@ -154,28 +178,12 @@ pub async fn run_agent_loop(
     })
 }
 
-fn build_prompt(
-    store: &SessionStore,
-    session_id: &str,
-    goal: &str,
+fn build_system_prompt(
     context_block: &str,
     tools_schema: &[Value],
     mode: &str,
     project_root: &Path,
 ) -> String {
-    let history: Vec<String> = store
-        .load(session_id)
-        .map(|s| {
-            s.messages
-                .iter()
-                .rev()
-                .take(8)
-                .rev()
-                .map(|m| format!("{}: {}", m.role.to_uppercase(), m.content))
-                .collect()
-        })
-        .unwrap_or_default();
-
     let tool_list: String = tools_schema
         .iter()
         .filter_map(|t| {
@@ -200,11 +208,6 @@ Current mode: {}
 Available tools:
 {}
 
-Current goal: {}
-
-Recent conversation:
-{}
-
 Think step-by-step. Use tools when needed. When done, give a clear final answer."#,
         project_root.display(),
         mode,
@@ -212,12 +215,6 @@ Think step-by-step. Use tools when needed. When done, give a clear final answer.
             "No tools (plan mode)".to_string()
         } else {
             tool_list
-        },
-        goal,
-        if history.is_empty() {
-            "(none)".to_string()
-        } else {
-            history.join("\n")
         }
     )
 }
