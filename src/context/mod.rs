@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub mod agents;
 pub mod compression;
+pub mod skills;
 
 pub use agents::{find_agents_md, format_context_for_prompt, load_agents_md};
 
@@ -27,6 +28,13 @@ pub fn assemble_context(project_path: &Path, task: Option<&str>) -> String {
                 ctx.push_str(&format!("- {}: {}\n", k, v));
             }
         }
+    }
+
+    // Inject Skills
+    let skills_block = crate::context::skills::load_relevant_skills(project_path, task);
+    if !skills_block.is_empty() {
+        ctx.push_str("\n\n");
+        ctx.push_str(&skills_block);
     }
 
     ctx

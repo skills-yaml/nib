@@ -102,72 +102,115 @@ pub async fn run_agent_loop(
 
     if nib_cfg.daemons.cron_enabled && nib_cfg.daemons.curator_enabled {
         crate::daemons::cron::Cron::run_maintenance(&project_root, nib_cfg.daemons.retention_days);
-    }
-
+    }    let mut state = crate::agent::state::AgentState::Idle;
     let mut steps = 0u32;
-    for step in 0..cfg.max_steps {
-        steps = step + 1;
+    let mut messages = Vec::new();
+    let mut response_content: Option<String> = None;
+    let mut tool_calls = Vec::new();
+    let mut tool_call_count = 0;
 
-        let _ = crate::context::compression::maybe_compress_session(
-            &store,
-            session_id,
-            &llm,
-            &nib_cfg,
-        )
-        .await;
+    while state != crate::agent::state::AgentState::Done && steps < cfg.max_steps {
+        state = match state {
+            crate::agent::state::AgentState::Idle => {
+                steps += 1;
+                crate::agent::state::AgentState::BuildContext
+            }
+            crate::agent::state::AgentState::BuildContext => {
+                // compression
+                let _ = crate::context::compression::maybe_compress_session(
+                    &store,
+                    session_id,
+                    &llm,
+                    &nib_cfg,
+                )
+                .await;
 
-        let system_prompt = build_system_prompt(
-            &context_block,
-            use_tools_ref.unwrap_or(&[]),
-            &cfg.mode,
-            &project_root,
-        );
-        let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+                let system_prompt = build_system_prompt(
+                    &context_block,
+                    use_tools_ref.unwrap_or(&[]),
+                    &cfg.mode,
+                    &project_root,
+                );
+                messages.clear();
+                messages.push(json!({"role": "system", "content": system_prompt}));
 
-        if let Some(session) = store.load(session_id) {
-            let mut last_role: Option<String> = None;
-            for msg in session.messages {
-                if let Some(ref lr) = last_role {
-                    if lr == &msg.role {
-                        if let Some(last_msg) = messages.last_mut() {
-                            let old_content = last_msg["content"].as_str().unwrap_or("");
-                            let new_content = format!("{}\n\n{}", old_content, msg.content);
-                            *last_msg = json!({"role": msg.role, "content": new_content});
+                if let Some(session) = store.load(session_id) {
+                    let mut last_role: Option<String> = None;
+                    for msg in session.messages {
+                        if let Some(ref lr) = last_role {
+                            if lr == &msg.role {
+                                if let Some(last_msg) = messages.last_mut() {
+                                    let old_content = last_msg["content"].as_str().unwrap_or("");
+                                    let new_content = format!("{}\n\n{}", old_content, msg.content);
+                                    *last_msg = json!({"role": msg.role, "content": new_content});
+                                }
+                                continue;
+                            }
                         }
-                        continue;
+                        last_role = Some(msg.role.clone());
+                        messages.push(json!({"role": msg.role, "content": msg.content}));
                     }
                 }
-                last_role = Some(msg.role.clone());
-                messages.push(json!({"role": msg.role, "content": msg.content}));
+                crate::agent::state::AgentState::InspectLlm
             }
-        }
+            crate::agent::state::AgentState::InspectLlm => {
+                let response = llm.complete(&messages, use_tools_ref, 0.7).await?;
+                response_content = response.content.clone();
+                if let Some(calls) = &response.tool_calls {
+                    tool_calls = calls.clone();
+                } else {
+                    tool_calls.clear();
+                }
 
-        let response = llm.complete(&messages, use_tools_ref, 0.7).await?;
-
-        if let Some(content) = &response.content {
-            store.append_message(session_id, "assistant", content);
-        }
-
-        if let Some(calls) = &response.tool_calls {
-            for tc in calls {
-                let call = ToolCall {
-                    tool_name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                    session_id: Some(session_id.to_string()),
-                    project_root: Some(project_root.clone()),
-                };
-                let result = executor.execute(call, Some(session_id)).await;
-                let obs = json!({
-                    "tool": tc.name,
-                    "success": result.success,
-                    "output": result.output,
-                    "error": result.error,
-                });
-                store.append_message(session_id, "tool", &obs.to_string());
+                crate::agent::state::AgentState::UpdateMemory
             }
-        } else if is_final(&response, &cfg.mode) {
-            break;
-        }
+            crate::agent::state::AgentState::UpdateMemory => {
+                if let Some(content) = &response_content {
+                    store.append_message(session_id, "assistant", content);
+                }
+                
+                if !tool_calls.is_empty() {
+                    crate::agent::state::AgentState::ToolExecute
+                } else {
+                    // Check if final
+                    let mut is_fin = false;
+                    if cfg.mode == "plan" {
+                        is_fin = true;
+                    } else if let Some(c) = &response_content {
+                        let lower = c.to_lowercase();
+                        if lower.contains("final answer") || lower.contains("task complete") || c.len() > 200 {
+                            is_fin = true;
+                        }
+                    }
+                    if is_fin {
+                        crate::agent::state::AgentState::Done
+                    } else {
+                        crate::agent::state::AgentState::Idle
+                    }
+                }
+            }
+            crate::agent::state::AgentState::ToolExecute => {
+                for tc in &tool_calls {
+                    let call = ToolCall {
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        session_id: Some(session_id.to_string()),
+                        project_root: Some(project_root.clone()),
+                    };
+                    let result = executor.execute(call, Some(session_id)).await;
+                    let obs = json!({
+                        "tool": tc.name,
+                        "success": result.success,
+                        "output": result.output,
+                        "error": result.error,
+                    });
+                    store.append_message(session_id, "tool", &obs.to_string());
+                    tool_call_count += 1;
+                }
+                crate::agent::state::AgentState::Idle
+            }
+            crate::agent::state::AgentState::Done => crate::agent::state::AgentState::Done,
+        };
     }
 
     let final_session = store.load(session_id);
@@ -178,7 +221,7 @@ pub async fn run_agent_loop(
             .as_ref()
             .and_then(|s| s.messages.last())
             .map(|m| m.content.clone()),
-        tool_call_count: final_session.map(|s| s.tool_calls.len()).unwrap_or(0),
+        tool_call_count,
     })
 }
 
