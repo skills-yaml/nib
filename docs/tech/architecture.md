@@ -6,11 +6,11 @@ This document describes the **base architecture** — the core components, data 
 
 See also:
 - [Project Structure](project_structure.md)
-- [Backend Python](backend_python.md)
+- [Backend Rust](backend_rust.md)
 - [Permissions](permissions.md) (defense-in-depth model)
 - [Ecosystem Integration](ecosystem_integration.md) (MCP, Skills, AGENTS.md)
 - [FT-001: Basic Agent Tools](../specs/feature/ft_001_basic_agent_tools.md)
-- [FT-003: Direct Bubblewrap Sandboxing](../specs/feature/ft_003_adopt_codex_sandboxing.md) (hybrid sandbox)
+- [FT-003: Hybrid Sandboxing](../specs/development/ft_003_adopt_codex_sandboxing.md) (reopened — implement in Rust)
 - [FT-004: LLM Integration and Agent Loop](../specs/feature/ft_004_llm_integration_and_agent_loop.md) (reasoning + tool loop)
 
 ## High-Level Principles
@@ -48,25 +48,25 @@ User / Workload Owner
         │
         ▼
 ┌──────────────────────────────┐
-│         CLI (Rust) / TUI     │  (clap; hybrid: Rust REPL/auth delegates to Python agent/LLM for loop)  (Textual planned)
+│         CLI (Rust) / TUI     │  (clap / ratatui)
 └──────────────┬───────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
 │              Context Loader                   │  (AGENTS.md walk-up, Skills discovery/activation,
-│  (src/nib/context/)                           │   project standards, libs docs, MCP tool list)
+│  (src/context/)                               │   project standards, libs docs, MCP tool list)
 └──────────────┬────────────────────────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
 │              Context + Planner              │
 │  (AGENTS.md/skills + LLM reasoning)           │
-│  src/nib/context/ + src/nib/agent/loop.py     │
+│  src/context/ + src/agent/loop.rs             │
 └──────────────┬────────────────────────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│         Tool Executor (the Gatekeeper)        │  (src/nib/tools/executor.py)
+│         Tool Executor (the Gatekeeper)        │  (src/tools/executor.rs)
 │  • Tool Registry (metadata + PermissionLevel) │
 │  • Scoping + Worktree isolation               │
 │  • Classification (read-only / safe /         │
@@ -92,7 +92,7 @@ User / Workload Owner
                ▼
 ┌───────────────────────────────────────────────┐
 │              Reconciler                       │  (Verify diffs, run tests, update workload state,
-│  (core/reconciler.py - future)                │   link artifacts, record rationale)
+│  (src/agent/reconciler.rs - future)           │   link artifacts, record rationale)
 └──────────────┬────────────────────────────────┘
                │
                ▼
@@ -106,24 +106,22 @@ User / Workload Owner
 
 ### Key Modules (current + planned)
 
-- `core/models.py` — Pydantic models for sessions (Session, SessionMessage, ToolCallRecord)
-- `core/workload.py` — Project-local SessionStore (files in .nib/sessions/) for conversations and tool calls
-- `llm/` — LLMClient abstraction + providers (Grok-first + Mock)
-- `agent/loop.py` — Core AgentLoop (reasoning → tool selection via executor → observation)
-- `tools/`
-  - `models.py` — PermissionLevel, ApprovalMode, ToolCall/Result, ApprovalRequest/Decision, ToolCallRecord
-  - `registry.py` — Static metadata registration
-  - `executor.py` — The central gate (all layers)
-  - `core_tools.py` — Implementations of the 5 minimal tools + dispatcher
-  - `worktree.py` — Git worktree isolation manager
-- `context/`
-  - `agents.py` — Walk-up discovery + loading of AGENTS.md / CLAUDE.md
-  - `loader.py` — assemble_context() + assemble_agent_prompt()
-- `skills/`
-  - Discovery of SKILL.md (standard locations + project-local)
-- `integrations/mcp.py` — ClientManager + MCPServer (dynamic exposure of registered tools via registry)
-- `cli/` & `tui/` — Thin adapters over core (now includes `nib run` for the full agent loop)
-- `utils/` — Logging, redaction helpers (future)
+- `src/session/` — Session models and Project-local SessionStore (files in .nib/sessions/)
+- `src/llm/` — LlmClient trait + providers (OpenAI, Anthropic, Gemini, Grok, Mock)
+- `src/agent/` — Core loop (reasoning → tool selection via executor → observation)
+- `src/tools/`
+  - `models.rs` — PermissionLevel, ApprovalMode, ToolCall, Result
+  - `registry.rs` — Static metadata registration
+  - `executor.rs` — The central gate (all layers)
+  - `core_tools.rs` — Implementations of minimal tools
+  - `worktree.rs` — Git worktree isolation manager
+- `src/context/`
+  - `agents.rs` — Walk-up discovery + loading of AGENTS.md
+  - `loader.rs` — assemble_context() + assemble_agent_prompt()
+- `src/sandbox/`
+  - `mod.rs` — Hybrid execution via bwrap
+- `src/integrations/` — MCP ClientManager + server exposing tools
+- `src/cli/` & `src/tui/` — Interfaces for interacting with the agent loop
 
 ## Data Flow for a Typical Session
 
@@ -169,11 +167,12 @@ User / Workload Owner
 
 ## Technology & Quality
 
-(See [Backend Python](backend_python.md) for full details.)
-- Python 3.12+, uv, src/ layout, ruff + pyright (strict), pytest-asyncio.
-- Pydantic for all domain + tool models.
-- aiosqlite for persistence.
-- Rust (clap) is the primary CLI binary (auth/chat/run); delegates to Python core (agent/loop, LLM via litellm) for execution until full port. Typer reference kept for TUI. Textual for TUI.
+(See [Backend Rust](backend_rust.md) for full details.)
+- Rust (edition 2021) is the exclusive runtime.
+- `tokio` for async execution.
+- `clap` for the CLI and `ratatui` for the TUI.
+- `reqwest` and `rustls` for LLM and network interactions.
+- `serde` for all JSON and TOML parsing.
 - All repeatable work via Taskfile.
 
 ## Future Evolution

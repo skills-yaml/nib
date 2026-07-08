@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::config::{load_config, save_config, LLMConfigFile, SUPPORTED_PROVIDERS};
+use nib::config::{
+    load_config_with_source, save_config, ConfigSource, LLMConfigFile, SUPPORTED_PROVIDERS,
+};
 
 pub fn run_auth_wizard() {
     println!("nib Auth Wizard");
@@ -11,7 +13,19 @@ pub fn run_auth_wizard() {
     println!();
 
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cfg: LLMConfigFile = load_config(&project_root);
+    let mut cfg: LLMConfigFile = match load_config_with_source(&project_root) {
+        Ok((cfg, ConfigSource::MigratedFromJson)) => {
+            println!(
+                "[nib] Migrated .nib/config.json → .nib/config.toml (backup: config.json.bak)"
+            );
+            cfg
+        }
+        Ok((cfg, _)) => cfg,
+        Err(e) => {
+            eprintln!("[nib] Warning: could not load config ({e}); starting fresh.");
+            LLMConfigFile::default()
+        }
+    };
 
     loop {
         println!("Available providers:");
@@ -102,10 +116,11 @@ pub fn run_auth_wizard() {
         }
     }
 
-    if let Err(e) = save_config(&project_root, &cfg) {
-        eprintln!("Failed to save config: {}", e);
-    } else {
-        println!("\nProviders configured in .nib/config.json");
-        println!("You can now run: nib chat");
+    match save_config(&project_root, &cfg) {
+        Err(e) => eprintln!("Failed to save config: {}", e),
+        Ok(()) => {
+            println!("\nProviders configured in .nib/config.toml");
+            println!("You can now run: nib chat");
+        }
     }
 }

@@ -1,4 +1,5 @@
 use clap::Args;
+use nib::context::assemble_context;
 
 #[derive(Args, Debug)]
 pub struct ContextArgs {
@@ -10,6 +11,7 @@ pub struct ContextArgs {
 }
 
 pub fn run_context(args: &ContextArgs) {
-    println!("nib context for {}", args.path);
-    println!("(Rust implementation - assembles AGENTS.md + skills from .nib context loader logic)");
+    let path = std::path::PathBuf::from(&args.path);
+    let ctx = assemble_context(&path, args.task.as_deref());
+    println!("{ctx}");
 }

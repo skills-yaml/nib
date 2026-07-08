@@ -54,3 +54,24 @@ Merged feat/implement-basic-agent-tools (PR #1) into main.
 - All execution still updates the authoritative session state in `.nib/sessions/`.
 
 Branch deleted locally. Main is now at merge commit e47cb7f.
+
+Note: FT-003 was later **reopened** (2026-07-02) — sandbox was never implemented despite this milestone text.
+
+## 2026-07-02 - FT-005 Pure Rust Migration — scope locked
+
+- Type: decision
+- Source: user
+- Confidence: high
+- Review: none
+- Supersedes: hybrid Python core as long-term architecture (transitional until FT-005 Phase 6)
+
+Content:
+
+Approved FT-005 move to `development/` with these scope decisions:
+
+- **Config:** Migrate to `.nib/config.toml`; auto-migrate from legacy `config.json`.
+- **LLM:** Full provider set day one in Rust — OpenAI, Anthropic, Google Gemini, Grok (xAI), OpenRouter, Mock (no LiteLLM, no phased provider rollout).
+- **TUI:** Port to ratatui in FT-005 Phase 4 (`nib tui`); in scope, not deferred.
+- **FT-003:** Reopen to `development/`; implement hybrid sandbox only in Rust (FT-005 Phase 5 / T019).
+
+Next implementation unit: T009 (module layout + TOML config migration).

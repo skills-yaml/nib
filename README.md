@@ -28,8 +28,8 @@ The most trustworthy, persistent agent for solo and small-team software developm
 
 - `docs/specs/` – Product and feature specifications (foundation, feature, and task docs following revized-style conventions).
 - `docs/tech/` – Architecture and process references.
-- Hybrid implementation: **Rust CLI** (primary entrypoint, `src/`) + **Python core** (agent loop, LLM, tools in `src/nib/`).
-- See `docs/tech/backend_python.md`, `docs/tech/project_structure.md`, and `docs/tech/ci.md` for conventions and layout.
+- Hybrid implementation: **Rust** (CLI, agent loop, LLM, tools, sessions in `src/`).
+- See `docs/tech/project_structure.md` and `docs/tech/ci.md` for conventions and layout.
 
 ## Installation
 
@@ -81,7 +81,6 @@ task build
 Requires:
 - Rust toolchain (stable)
 - Task (https://taskfile.dev)
-- uv (for Python core parts)
 
 ### First-Time Setup
 

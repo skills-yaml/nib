@@ -30,3 +30,15 @@ Major deliverables:
 - skm-style CI, installers, and Task integration.
 
 See decisions.md for details. Merge commit: e47cb7f.
+
+## 2026-07-02 - FT-005: Pure Rust core implemented
+
+- Type: implementation / milestone
+- Source: FT-005 Phases 0–6
+- Confidence: high
+
+Content:
+
+- Migrated agent loop, ToolExecutor, all 5 core tools, LLM providers (OpenAI, Anthropic, Gemini, Grok, OpenRouter, Mock), context (AGENTS.md), sandbox detection, ratatui TUI stub, and `nib doctor` to Rust.
+- Removed Python core (`src/nib/`, `pyproject.toml`); `nib chat` / `nib run` run in-process.
+- 15 Rust tests passing; `task check` green.

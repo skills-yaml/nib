@@ -1,9 +1,9 @@
 # AGENTS.md
 
-<!-- AGENT-CONTEXT:START workspace-docs@1.0.0 -->
+<!-- AGENT-CONTEXT:START workspace-docs@1.2.0 -->
 ## Workspace Documentation Standard
 
-This project follows `workspace-docs@1.0.0`.
+This project follows `workspace-docs@1.2.0`.
 
 ### Required Reading
 

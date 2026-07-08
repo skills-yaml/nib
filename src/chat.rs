@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::auth::run_auth_wizard;
-use crate::config::{load_config, save_config, LLMConfigFile};
-use crate::session::SessionStore;
+use nib::config::{load_config, save_config};
+use nib::session::SessionStore;
 
 #[derive(Args, Debug)]
 pub struct ChatArgs {
@@ -18,7 +18,7 @@ pub struct ChatArgs {
 
 pub fn run_chat(args: &ChatArgs) {
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cfg: LLMConfigFile = load_config(&project);
+    let mut cfg = load_config(&project);
 
     if args.auth || cfg.providers.is_empty() {
         // Run wizard (it may prompt for multiple)
@@ -259,105 +259,29 @@ Commands (chat):
     }
 }
 
-/// Delegate a single agent loop step (LLM + tool execution + recording) to the Python core.
-/// This keeps Rust as the CLI while the agent/llm/executor stay in Python (litellm etc).
-/// Uses uv if present, falls back to python3. PYTHONPATH is set for src/ layout in workspace.
 fn execute_agent_step(project: &Path, session_id: &str, goal: &str) -> Result<(), String> {
-    // Prepare a small python snippet that reads from env and drives one loop pass
-    // We avoid double-appending the user message by letting the loop handle it.
-    // (run_agent_loop appends the goal as user internally)
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
-    let py_code = r#"
-import os, sys, asyncio, json
-from pathlib import Path
-
-# Ensure we can import nib from the workspace layout
-src = os.environ.get("NIB_PYTHONPATH") or "src"
-if src and src not in sys.path:
-    sys.path.insert(0, src)
-
-project = Path(os.environ.get("NIB_PROJECT", ".")).resolve()
-sid = os.environ.get("NIB_SESSION_ID", "")
-goal = os.environ.get("NIB_GOAL", "")
-
-if not sid or not goal:
-    print("MISSING_ENV")
-    sys.exit(2)
-
-from nib.config import LLMConfig
-from nib.core.workload import SessionStore
-from nib.agent.loop import run_agent_loop
-from nib.tools.executor import default_executor
-
-ss = SessionStore(project_root=project)
-llm_cfg = LLMConfig(project_root=project)
-llm = llm_cfg.get_current_client()
-
-executor = default_executor
-executor.session_store = ss
-executor.project_root = project
-
-summary = asyncio.run(run_agent_loop(
-    session_store=ss,
-    session_id=sid,
-    goal=goal,
-    llm=llm,
-    executor=executor,
-    max_steps=int(os.environ.get("NIB_MAX_STEPS", "6")),
-    mode=os.environ.get("NIB_MODE", "execute"),
-    project_root=project,
-))
-print("STEP_DONE")
-print(json.dumps(summary)[:500])
-"#;
-
-    let mut cmd = if which_uv() {
-        let mut c = std::process::Command::new("uv");
-        c.arg("run").arg("python").arg("-c").arg(py_code);
-        c
-    } else {
-        let mut c = std::process::Command::new("python3");
-        c.arg("-c").arg(py_code);
-        c
+    let loop_cfg = nib::agent::AgentLoopConfig {
+        max_steps: 15,
+        mode: "execute".to_string(),
+        provider: None,
+        auto_approve: true,
+        approval_handler: None,
     };
 
-    // Set envs for the snippet
-    let pp = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("src")
-        .to_string_lossy()
-        .to_string();
+    let result = rt.block_on(nib::agent::run_agent_loop(
+        project.to_path_buf(),
+        session_id,
+        goal,
+        loop_cfg,
+    ));
 
-    cmd.env("NIB_PROJECT", project)
-        .env("NIB_SESSION_ID", session_id)
-        .env("NIB_GOAL", goal)
-        .env("NIB_MAX_STEPS", "6")
-        .env("NIB_MODE", "execute")
-        .env("NIB_PYTHONPATH", pp)
-        .current_dir(project);
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn python: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If the python side printed useful info, surface last lines
-        return Err(format!(
-            "agent step failed (code {:?}): {}",
-            output.status.code(),
-            stderr.lines().last().unwrap_or("")
-        ));
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
     }
-
-    // success
-    Ok(())
-}
-
-fn which_uv() -> bool {
-    std::process::Command::new("uv")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }

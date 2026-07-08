@@ -1,0 +1,267 @@
+//! Core tool implementations (called only after ToolExecutor gates pass).
+
+use crate::config::ExecutionConfig;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::process::Command;
+use tokio::time::timeout;
+
+pub async fn dispatch(
+    tool_name: &str,
+    args: &Value,
+    cwd: &Path,
+    config: &ExecutionConfig,
+) -> Result<Value, String> {
+    match tool_name {
+        "read_file" => read_file(args, cwd).await,
+        "list_directory" => list_directory(args, cwd).await,
+        "grep" => grep(args, cwd).await,
+        "apply_patch" => apply_patch(args, cwd).await,
+        "run_terminal" => run_terminal(args, cwd, config).await,
+        other => Err(format!("No implementation for tool: {other}")),
+    }
+}
+
+async fn read_file(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let path_str = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("missing path")?;
+    let mut path = PathBuf::from(path_str);
+    if path.is_relative() {
+        path = cwd.join(path);
+    }
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("File not found: {path_str} ({e})"))?;
+    if !path.starts_with(cwd) {
+        return Err("Path outside project scope".to_string());
+    }
+    if !path.is_file() {
+        return Err(format!("Not a file: {}", path.display()));
+    }
+
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let end = args
+        .get("end_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(lines.len());
+    let slice = &lines[start.min(lines.len())..end.min(lines.len())];
+
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "content": slice.join("\n"),
+        "start_line": start,
+        "end_line": end,
+        "total_lines": lines.len(),
+    }))
+}
+
+async fn list_directory(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let rel = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let mut path = cwd.join(rel);
+    path = path
+        .canonicalize()
+        .map_err(|e| format!("Directory not found: {rel} ({e})"))?;
+    if !path.starts_with(cwd) {
+        return Err("Path outside project scope".to_string());
+    }
+
+    let recursive = args
+        .get("recursive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut entries = Vec::new();
+
+    if recursive {
+        for entry in walkdir_light(&path)?.into_iter().take(100) {
+            entries.push(entry);
+        }
+    } else {
+        let mut rd = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|e| e.to_string())?;
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let ft = entry.file_type().await.map_err(|e| e.to_string())?;
+            entries.push(json!({
+                "path": entry.file_name().to_string_lossy(),
+                "type": if ft.is_dir() { "dir" } else { "file" },
+            }));
+        }
+    }
+
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "entries": entries,
+    }))
+}
+
+fn walkdir_light(root: &Path) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let ft = entry.file_type().map_err(|e| e.to_string())?;
+            let p = entry.path();
+            let rel = p.strip_prefix(root).unwrap_or(&p);
+            out.push(json!({
+                "path": rel.to_string_lossy(),
+                "type": if ft.is_dir() { "dir" } else { "file" },
+            }));
+            if ft.is_dir() {
+                stack.push(p);
+            }
+            if out.len() >= 100 {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn grep(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or("missing pattern")?;
+    let rel = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+    let mut path = cwd.join(rel);
+    if path.exists() {
+        path = path.canonicalize().map_err(|e| e.to_string())?;
+    }
+    if !path.starts_with(cwd) {
+        return Err("Path outside project scope".to_string());
+    }
+
+    let pattern_lower = pattern.to_lowercase();
+    let mut matches = Vec::new();
+    let files: Vec<PathBuf> = if path.is_dir() {
+        walkdir_light(&path)?
+            .into_iter()
+            .filter_map(|e| {
+                let p = e.get("path")?.as_str()?;
+                let full = path.join(p);
+                if full.is_file() {
+                    Some(full)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        vec![path]
+    };
+
+    for file in files {
+        if matches.len() >= max_results {
+            break;
+        }
+        let Ok(text) = tokio::fs::read_to_string(&file).await else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&pattern_lower) {
+                matches.push(json!({
+                    "file": file.to_string_lossy(),
+                    "line": i + 1,
+                    "snippet": &line[..line.len().min(200)],
+                }));
+                if matches.len() >= max_results {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(json!({
+        "pattern": pattern,
+        "matches": matches,
+        "truncated": matches.len() >= max_results,
+    }))
+}
+
+async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if patch.is_empty() {
+        return Err("empty patch".to_string());
+    }
+
+    let patch_file = cwd.join(".nib").join("_apply_patch.tmp");
+    tokio::fs::create_dir_all(cwd.join(".nib"))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::write(&patch_file, patch)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    cmd.arg("apply");
+    if dry_run {
+        cmd.arg("--check");
+    }
+    cmd.arg(&patch_file);
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("git apply failed to start: {e}"))?;
+    let _ = tokio::fs::remove_file(&patch_file).await;
+
+    Ok(json!({
+        "applied": output.status.success() && !dry_run,
+        "dry_run": dry_run,
+        "exit_code": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+    }))
+}
+
+async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Result<Value, String> {
+    let command = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or("missing command")?;
+    let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+
+    let dangerous = ["rm -rf", "git reset --hard", "sudo", "DROP DATABASE"];
+    for pat in dangerous {
+        if command.contains(pat) {
+            return Err(format!("Blocked dangerous pattern: {pat}"));
+        }
+    }
+
+    let start = Instant::now();
+    let run =
+        crate::sandbox::run_sandboxed(command, cwd, &config.default_profile, &config.boundaries);
+
+    let output = timeout(Duration::from_secs(timeout_secs), run)
+        .await
+        .map_err(|_| format!("Command timed out after {timeout_secs}s"))?
+        .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "command": command,
+        "cwd": cwd.to_string_lossy(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "exit_code": output.status.code(),
+        "duration": start.elapsed().as_secs_f64(),
+    }))
+}
