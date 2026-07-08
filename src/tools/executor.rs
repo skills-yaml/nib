@@ -1,6 +1,7 @@
 //! Central ToolExecutor — all tool usage must pass through here.
 
 use crate::config::ExecutionConfig;
+use crate::integrations::mcp::McpManager;
 use crate::integrations::worktree::WorktreeManager;
 use crate::session::{SessionStore, ToolCallRecord};
 use crate::tools::core;
@@ -50,6 +51,7 @@ pub struct ToolExecutor {
     pub execution_config: ExecutionConfig,
     pub approval_handler: Arc<dyn ApprovalHandler>,
     worktree_manager: Option<WorktreeManager>,
+    pub mcp_manager: Option<Arc<McpManager>>,
 }
 
 impl ToolExecutor {
@@ -63,6 +65,7 @@ impl ToolExecutor {
             execution_config,
             approval_handler: Arc::new(StdinApprovalHandler),
             worktree_manager: None,
+            mcp_manager: None,
         }
     }
 
@@ -76,27 +79,55 @@ impl ToolExecutor {
         self
     }
 
+    pub fn with_mcp_manager(mut self, manager: Arc<McpManager>) -> Self {
+        self.mcp_manager = Some(manager);
+        self
+    }
+
+    pub async fn get_tools_schema(&self) -> Vec<Value> {
+        let mut schemas = tools_json_schema();
+        if let Some(mcp) = &self.mcp_manager {
+            if let Ok(mcp_tools) = mcp.list_tools().await {
+                for t in mcp_tools {
+                    schemas.push(json!({
+                        "type": "function",
+                        "function": t
+                    }));
+                }
+            }
+        }
+        schemas
+    }
+
     pub async fn execute(&mut self, call: ToolCall, session_id: Option<&str>) -> ToolResult {
         let start = Instant::now();
         let tool_name = call.tool_name.clone();
-        let metadata = match get_tool_metadata(&tool_name) {
-            Some(m) => m,
-            None => {
-                return ToolResult {
-                    tool_name,
-                    success: false,
-                    output: None,
-                    error: Some(format!("Unknown tool: {}", call.tool_name)),
-                    duration_seconds: start.elapsed().as_secs_f64(),
-                    approval_granted: false,
-                    approval_source: None,
-                };
-            }
-        };
+        let mut is_mcp_tool = false;
+        let metadata_opt = get_tool_metadata(&tool_name);
+
+        if metadata_opt.is_none() && tool_name.contains("::") {
+            // It might be an MCP tool
+            is_mcp_tool = true;
+        } else if metadata_opt.is_none() {
+            return ToolResult {
+                tool_name,
+                success: false,
+                output: None,
+                error: Some(format!("Unknown tool: {}", call.tool_name)),
+                duration_seconds: start.elapsed().as_secs_f64(),
+                approval_granted: false,
+                approval_source: None,
+            };
+        }
 
         let effective_root = self.resolve_scope(&call);
-        let worktree = self.ensure_worktree(&call, metadata, &effective_root, session_id);
+        let worktree = if let Some(meta) = metadata_opt {
+            self.ensure_worktree(&call, meta, &effective_root, session_id)
+        } else {
+            None
+        };
 
+        // Assume Destructive level for unknown/MCP tools to be safe
         let level = get_permission_level(&tool_name).unwrap_or(PermissionLevel::Destructive);
         let approval = self.handle_approval(&call, level, session_id).await;
 
@@ -115,8 +146,19 @@ impl ToolExecutor {
         }
 
         let cwd = worktree.as_ref().unwrap_or(&effective_root);
-        let exec_result =
-            core::dispatch(&tool_name, &call.arguments, cwd, &self.execution_config).await;
+
+        let exec_result = if is_mcp_tool {
+            if let Some(mcp) = &self.mcp_manager {
+                match mcp.call_tool(&tool_name, call.arguments.clone()).await {
+                    Ok(res) => Ok(res),
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                Err("MCP tool called but manager not initialized".to_string())
+            }
+        } else {
+            core::dispatch(&tool_name, &call.arguments, cwd, &self.execution_config).await
+        };
 
         let (success, output, error) = match exec_result {
             Ok(v) => (true, Some(v), None),

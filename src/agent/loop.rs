@@ -3,7 +3,7 @@
 use crate::context::assemble_context;
 use crate::llm::{create_client, LlmClient, LlmResponse};
 use crate::session::SessionStore;
-use crate::tools::{tools_json_schema, ToolCall, ToolExecutor};
+use crate::tools::{ToolCall, ToolExecutor};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,8 +44,21 @@ pub async fn run_agent_loop(
     let nib_cfg = crate::config::load_nib_config(&project_root);
     let llm: Arc<dyn LlmClient> = create_client(&nib_cfg.llm, cfg.provider.as_deref());
     let store = SessionStore::new(&project_root);
+    let mcp_manager = if !nib_cfg.mcp.servers.is_empty() {
+        crate::integrations::mcp::McpManager::new(&nib_cfg.mcp.servers)
+            .await
+            .ok()
+            .map(Arc::new)
+    } else {
+        None
+    };
+
     let mut executor = ToolExecutor::new(project_root.clone(), nib_cfg.execution.clone())
         .with_auto_approve(cfg.auto_approve);
+
+    if let Some(mcp) = mcp_manager {
+        executor = executor.with_mcp_manager(mcp);
+    }
 
     if let Some(handler) = cfg.approval_handler.clone() {
         executor = executor.with_approval_handler(handler);
@@ -61,7 +74,7 @@ pub async fn run_agent_loop(
 
     store.append_message(session_id, "user", goal);
 
-    let tools_schema = tools_json_schema();
+    let tools_schema = executor.get_tools_schema().await;
     let use_tools = cfg.mode == "execute";
     let context_block = assemble_context(&project_root, Some(goal));
 
