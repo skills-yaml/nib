@@ -60,6 +60,8 @@ pub struct NibConfig {
     pub compression: CompressionConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub daemons: DaemonsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -139,6 +141,28 @@ impl Default for MemoryConfig {
 }
 
 fn default_memory_provider() -> String { "built-in".to_string() }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonsConfig {
+    #[serde(default = "default_true")]
+    pub cron_enabled: bool,
+    #[serde(default = "default_true")]
+    pub curator_enabled: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: i64,
+}
+
+impl Default for DaemonsConfig {
+    fn default() -> Self {
+        Self {
+            cron_enabled: true,
+            curator_enabled: true,
+            retention_days: 30,
+        }
+    }
+}
+
+fn default_retention_days() -> i64 { 30 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpConfig {
@@ -314,6 +338,7 @@ pub fn load_nib_config_full(project_root: &Path) -> Result<NibConfig, ConfigErro
             mcp: McpConfig::default(),
             compression: CompressionConfig::default(),
             memory: MemoryConfig::default(),
+            daemons: DaemonsConfig::default(),
         });
     }
 
@@ -377,6 +402,7 @@ fn migrate_json_to_toml(paths: &ConfigPaths) -> Result<LlmConfig, ConfigError> {
             mcp: McpConfig::default(),
             compression: CompressionConfig::default(),
             memory: MemoryConfig::default(),
+            daemons: DaemonsConfig::default(),
         },
     )?;
 
@@ -413,6 +439,7 @@ mod tests {
             mcp: McpConfig::default(),
             compression: CompressionConfig::default(),
             memory: MemoryConfig::default(),
+            daemons: DaemonsConfig::default(),
         };
         let serialized = toml::to_string_pretty(&nib).expect("serialize");
         let parsed: NibConfig = toml::from_str(&serialized).expect("parse");

@@ -100,6 +100,10 @@ pub async fn run_agent_loop(
         }
     }
 
+    if nib_cfg.daemons.cron_enabled && nib_cfg.daemons.curator_enabled {
+        crate::daemons::cron::Cron::run_maintenance(&project_root, nib_cfg.daemons.retention_days);
+    }
+
     let mut steps = 0u32;
     for step in 0..cfg.max_steps {
         steps = step + 1;

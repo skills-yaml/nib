@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod config;
 pub mod context;
+pub mod daemons;
 pub mod integrations;
 pub mod llm;
 pub mod sandbox;
