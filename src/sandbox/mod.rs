@@ -31,12 +31,12 @@ pub async fn run_sandboxed(
     cwd: &Path,
     profile: &str,
     boundaries: &BoundaryConfig,
-) -> Result<std::process::Output, String> {
+) -> Result<(std::process::Output, Option<Vec<String>>), String> {
     let caps = detect_capabilities();
     if caps.bwrap_available && profile != "internal" {
-        run_bwrap(command, cwd, boundaries, profile).await
+        run_bwrap(command, cwd, boundaries, profile).await.map(|(out, args)| (out, Some(args)))
     } else {
-        run_direct(command, cwd).await
+        run_direct(command, cwd).await.map(|out| (out, None))
     }
 }
 
@@ -55,7 +55,7 @@ async fn run_bwrap(
     cwd: &Path,
     boundaries: &BoundaryConfig,
     profile: &str,
-) -> Result<std::process::Output, String> {
+) -> Result<(std::process::Output, Vec<String>), String> {
     let cwd_str = cwd.to_str().ok_or("invalid cwd")?;
     let mut args = vec![
         "--ro-bind".to_string(),
@@ -91,11 +91,13 @@ async fn run_bwrap(
     args.push("-c".to_string());
     args.push(command.to_string());
 
-    tokio::process::Command::new("bwrap")
+    let output = tokio::process::Command::new("bwrap")
         .args(&args)
         .output()
         .await
-        .map_err(|e| format!("bwrap execution failed: {e}"))
+        .map_err(|e| format!("bwrap execution failed: {e}"))?;
+
+    Ok((output, args))
 }
 
 pub fn doctor_report() -> String {

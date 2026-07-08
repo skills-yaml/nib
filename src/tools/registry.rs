@@ -41,6 +41,13 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
             requires_approval: true,
             requires_worktree: true,
         },
+        ToolMetadata {
+            name: "write_plan".to_string(),
+            description: "Write a structured plan to disk (used in plan mode).".to_string(),
+            permission_level: PermissionLevel::Plan,
+            requires_approval: false,
+            requires_worktree: false,
+        },
     ];
     tools
         .into_iter()

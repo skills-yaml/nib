@@ -75,8 +75,30 @@ pub async fn run_agent_loop(
     store.append_message(session_id, "user", goal);
 
     let tools_schema = executor.get_tools_schema().await;
-    let use_tools = cfg.mode == "execute";
     let context_block = assemble_context(&project_root, Some(goal));
+
+    let mut filtered_tools = Vec::new();
+    let mut use_tools_ref: Option<&[Value]> = None;
+
+    if cfg.mode == "execute" {
+        use_tools_ref = Some(tools_schema.as_slice());
+    } else {
+        for t in &tools_schema {
+            if let Some(f) = t.get("function") {
+                if let Some(name) = f.get("name").and_then(|n| n.as_str()) {
+                    let level = crate::tools::registry::get_tool_metadata(name)
+                        .map(|m| m.permission_level)
+                        .unwrap_or(crate::tools::models::PermissionLevel::Destructive);
+                    if level == crate::tools::models::PermissionLevel::ReadOnly || level == crate::tools::models::PermissionLevel::Plan {
+                        filtered_tools.push(t.clone());
+                    }
+                }
+            }
+        }
+        if !filtered_tools.is_empty() {
+            use_tools_ref = Some(filtered_tools.as_slice());
+        }
+    }
 
     let mut steps = 0u32;
     for step in 0..cfg.max_steps {
@@ -86,18 +108,13 @@ pub async fn run_agent_loop(
             session_id,
             goal,
             &context_block,
-            &tools_schema,
+            use_tools_ref.unwrap_or(&[]),
             &cfg.mode,
             &project_root,
         );
         let messages = vec![json!({"role": "user", "content": prompt})];
-        let tools_ref = if use_tools {
-            Some(tools_schema.as_slice())
-        } else {
-            None
-        };
 
-        let response = llm.complete(&messages, tools_ref, 0.7).await?;
+        let response = llm.complete(&messages, use_tools_ref, 0.7).await?;
 
         if let Some(content) = &response.content {
             store.append_message(session_id, "assistant", content);

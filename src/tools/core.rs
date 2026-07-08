@@ -19,6 +19,7 @@ pub async fn dispatch(
         "grep" => grep(args, cwd).await,
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => run_terminal(args, cwd, config).await,
+        "write_plan" => write_plan(args, cwd).await,
         other => Err(format!("No implementation for tool: {other}")),
     }
 }
@@ -233,6 +234,35 @@ async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
     }))
 }
 
+async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if content.is_empty() {
+        return Err("Plan content is empty".to_string());
+    }
+
+    let nib_dir = cwd.join(".nib");
+    let plans_dir = nib_dir.join("plans");
+    tokio::fs::create_dir_all(&plans_dir)
+        .await
+        .map_err(|e| format!("Failed to create plans dir: {e}"))?;
+
+    let plan_id = format!("plan-{}", uuid::Uuid::new_v4());
+    let plan_path = plans_dir.join(format!("{}.md", plan_id));
+
+    tokio::fs::write(&plan_path, content)
+        .await
+        .map_err(|e| format!("Failed to write plan file: {e}"))?;
+
+    Ok(json!({
+        "plan_id": plan_id,
+        "path": plan_path.to_string_lossy(),
+        "status": "saved",
+    }))
+}
+
 async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Result<Value, String> {
     let command = args
         .get("command")
@@ -251,17 +281,28 @@ async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Res
     let run =
         crate::sandbox::run_sandboxed(command, cwd, &config.default_profile, &config.boundaries);
 
-    let output = timeout(Duration::from_secs(timeout_secs), run)
+    let (output, bwrap_args) = timeout(Duration::from_secs(timeout_secs), run)
         .await
         .map_err(|_| format!("Command timed out after {timeout_secs}s"))?
         .map_err(|e| e.to_string())?;
 
-    Ok(json!({
+    let mut res = json!({
         "command": command,
         "cwd": cwd.to_string_lossy(),
         "stdout": String::from_utf8_lossy(&output.stdout),
         "stderr": String::from_utf8_lossy(&output.stderr),
         "exit_code": output.status.code(),
         "duration": start.elapsed().as_secs_f64(),
-    }))
+        "provider": config.provider,
+        "sandbox_profile": config.default_profile,
+        "boundaries": config.boundaries,
+    });
+
+    if let Some(args) = bwrap_args {
+        res.as_object_mut()
+            .unwrap()
+            .insert("bwrap_args".to_string(), json!(args));
+    }
+
+    Ok(res)
 }

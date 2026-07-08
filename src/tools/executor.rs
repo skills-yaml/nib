@@ -219,7 +219,7 @@ impl ToolExecutor {
         level: PermissionLevel,
         _session_id: Option<&str>,
     ) -> ApprovalDecision {
-        if level == PermissionLevel::ReadOnly {
+        if level == PermissionLevel::ReadOnly || level == PermissionLevel::Plan {
             return ApprovalDecision::granted_policy();
         }
         if self.approval_mode == ApprovalMode::Off {
@@ -247,6 +247,34 @@ impl ToolExecutor {
             return;
         };
 
+        let mut provider = None;
+        let mut sandbox_profile = None;
+        let mut bwrap_args = None;
+        let mut boundaries = None;
+
+        let mut final_result = result.output.clone();
+        if let Some(mut obj) = final_result.take().and_then(|v| {
+            if let Value::Object(m) = v {
+                Some(m)
+            } else {
+                None
+            }
+        }) {
+            if let Some(p) = obj.remove("provider") {
+                provider = p.as_str().map(|s| s.to_string());
+            }
+            if let Some(sp) = obj.remove("sandbox_profile") {
+                sandbox_profile = sp.as_str().map(|s| s.to_string());
+            }
+            if let Some(ba) = obj.remove("bwrap_args") {
+                bwrap_args = serde_json::from_value(ba).ok();
+            }
+            if let Some(b) = obj.remove("boundaries") {
+                boundaries = serde_json::from_value(b).ok();
+            }
+            final_result = Some(Value::Object(obj));
+        }
+
         let record = ToolCallRecord {
             id: Some(format!("tool-{}", Uuid::new_v4())),
             session_id: Some(sid.to_string()),
@@ -254,7 +282,7 @@ impl ToolExecutor {
             arguments: call.arguments.clone(),
             result: Some(json!({
                 "success": result.success,
-                "output": result.output,
+                "output": final_result,
                 "error": result.error,
                 "approval": approval.source,
             })),
@@ -262,6 +290,11 @@ impl ToolExecutor {
             duration_seconds: Some(result.duration_seconds),
             worktree_path: worktree.map(|p| p.to_string_lossy().to_string()),
             timestamp: Some(Utc::now()),
+            provider,
+            sandbox_profile,
+            bwrap_args,
+            boundaries,
+            plan_id: None, // Will implement later
         };
         let _ = store.record_tool_call(record);
     }
@@ -283,6 +316,7 @@ pub fn tools_json_schema() -> Vec<Value> {
                             "command": { "type": "string" },
                             "pattern": { "type": "string" },
                             "patch": { "type": "string" },
+                            "content": { "type": "string" },
                         },
                         "required": []
                     }

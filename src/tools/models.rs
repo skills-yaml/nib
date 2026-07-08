@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[serde(rename_all = "snake_case")]
 pub enum PermissionLevel {
     ReadOnly,
+    Plan,
     Safe,
     Destructive,
     Network,
