@@ -1,6 +1,6 @@
 # T018: ratatui TUI and Live Approval Flow
 
-**Status:** Development
+**Status:** Done
 **Related:** [FT-005](../development/ft_005_pure_rust_core_migration.md)
 
 ## Scope

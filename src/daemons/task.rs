@@ -50,7 +50,33 @@ impl TaskManager {
         });
     }
 
+    pub fn register_subagent(&self, id: String) {
+        self.tasks.lock().unwrap().insert(id.clone(), BackgroundTask {
+            id,
+            status: "running".to_string(),
+        });
+    }
+
+    pub fn mark_completed(&self, id: &str) {
+        if let Ok(mut map) = self.tasks.lock() {
+            if let Some(task) = map.get_mut(id) {
+                task.status = "completed".to_string();
+            }
+        }
+    }
+
     pub fn get_status(&self, id: &str) -> Option<String> {
         self.tasks.lock().unwrap().get(id).map(|t| t.status.clone())
     }
+
+    pub fn list_tasks(&self) -> Vec<Value> {
+        self.tasks.lock().unwrap().values().map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "status": t.status,
+            })
+        }).collect()
+    }
 }
+
+pub static TASK_MANAGER: std::sync::LazyLock<TaskManager> = std::sync::LazyLock::new(TaskManager::new);

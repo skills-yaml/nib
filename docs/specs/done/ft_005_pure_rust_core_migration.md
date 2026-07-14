@@ -1,6 +1,6 @@
 # FT-005: Pure Rust Core Migration
 
-**Status:** Development — Phases 0–6 core complete (2026-07-02); FT-003 hybrid acceptance partially met  
+**Status:** Done — Phases 0–6 core complete (2026-07-02); FT-003 hybrid acceptance partially met  
 **Decision:** Replace the hybrid Rust CLI + Python core with a **single Rust binary**. No Python/uv runtime at cutover.  
 **Related:** [FT-001](../feature/ft_001_basic_agent_tools.md), [FT-002](../feature/ft_002_base_architecture.md), [FT-003](ft_003_adopt_codex_sandboxing.md), [FT-004](../done/ft_004_llm_integration_and_agent_loop.md), [T009](../task/T009_rust_module_layout_and_toml_config.md), [architecture.md](../../tech/architecture.md), [project_structure.md](../../tech/project_structure.md)
 

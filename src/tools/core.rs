@@ -20,7 +20,7 @@ pub async fn dispatch(
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => run_terminal(args, cwd, config).await,
         "write_plan" => write_plan(args, cwd).await,
-        "invoke_subagent" => invoke_subagent(args, cwd).await,
+        "invoke_subagent" => std::future::ready(invoke_subagent(args, cwd)).await,
         "manage_subagents" => manage_subagents(args, cwd).await,
         "send_message" => send_message(args, cwd).await,
         "search_web" => search_web(args, cwd).await,
@@ -312,16 +312,49 @@ async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Res
     Ok(res)
 }
 
-async fn invoke_subagent(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    Ok(json!({ "status": "stub", "subagent_id": "sub-123" }))
+fn invoke_subagent(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let subagent_id = format!("sub-{}", uuid::Uuid::new_v4());
+    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("help").to_string();
+    
+    // Create worktree
+    let worktree = crate::sandbox::worktree::Worktree::create(cwd, &subagent_id)?;
+    let wt_path = worktree.path.clone();
+    
+    crate::daemons::task::TASK_MANAGER.register_subagent(subagent_id.clone());
+
+    let sid = subagent_id.clone();
+    let cwd_buf = cwd.to_path_buf();
+    tokio::spawn(async move {
+        let cfg = crate::agent::AgentLoopConfig {
+            max_steps: 10,
+            ..Default::default()
+        };
+        let _ = crate::agent::run_agent_loop(wt_path.clone(), &sid, &prompt, cfg).await;
+        crate::daemons::task::TASK_MANAGER.mark_completed(&sid);
+        let _ = crate::sandbox::worktree::Worktree::remove(&cwd_buf, &sid);
+    });
+
+    Ok(json!({ "status": "started", "subagent_id": subagent_id }))
 }
 
 async fn manage_subagents(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    Ok(json!({ "status": "stub", "action": args.get("action") }))
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    if action == "list" {
+        Ok(json!({ "subagents": crate::daemons::task::TASK_MANAGER.list_tasks() }))
+    } else {
+        Ok(json!({ "status": "unknown action" }))
+    }
 }
 
-async fn send_message(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    Ok(json!({ "status": "stub", "sent": true }))
+async fn send_message(args: &Value, cwd: &Path) -> Result<Value, String> {
+    let subagent_id = args.get("subagent_id").and_then(|v| v.as_str()).ok_or("missing subagent_id")?;
+    let message = args.get("message").and_then(|v| v.as_str()).ok_or("missing message")?;
+    
+    // Append to subagent's session file so it picks it up in its loop
+    let store = crate::session::SessionStore::new(cwd);
+    store.append_message(subagent_id, "user", message);
+
+    Ok(json!({ "status": "sent", "subagent_id": subagent_id }))
 }
 
 async fn search_web(args: &Value, _cwd: &Path) -> Result<Value, String> {
@@ -341,11 +374,21 @@ async fn read_url_content(args: &Value, _cwd: &Path) -> Result<Value, String> {
 }
 
 async fn manage_task(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    Ok(json!({ "status": "stub", "task_id": "task-123" }))
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    if action == "list" {
+        Ok(json!({ "tasks": crate::daemons::task::TASK_MANAGER.list_tasks() }))
+    } else {
+        Ok(json!({ "status": "unknown action" }))
+    }
 }
 
 async fn schedule(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    Ok(json!({ "status": "stub", "scheduled": true }))
+    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("timer fired").to_string();
+    let duration = args.get("duration_secs").and_then(|v| v.as_u64()).unwrap_or(60);
+    let (tx, _rx) = tokio::sync::mpsc::channel(1); // Dummy channel for now
+    let id = format!("timer-{}", uuid::Uuid::new_v4());
+    crate::daemons::task::TASK_MANAGER.spawn_timer(id.clone(), duration, prompt, tx);
+    Ok(json!({ "status": "scheduled", "id": id }))
 }
 
 async fn ask_question(args: &Value, _cwd: &Path) -> Result<Value, String> {

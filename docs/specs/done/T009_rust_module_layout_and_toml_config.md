@@ -1,6 +1,6 @@
 # T009: Rust Module Layout + TOML Config Migration
 
-**Status:** Development  
+**Status:** Done  
 **Related feature:** [FT-005 Pure Rust Core Migration](../development/ft_005_pure_rust_core_migration.md) Phase 0  
 **Depends on:** None (first migration task)
 

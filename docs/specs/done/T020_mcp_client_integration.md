@@ -1,6 +1,6 @@
 # T020: MCP Client Integration
 
-**Status:** Development
+**Status:** Done
 **Related:** [FT-005](../development/ft_005_pure_rust_core_migration.md), [Ecosystem Integration](../../tech/ecosystem_integration.md)
 
 ## Scope

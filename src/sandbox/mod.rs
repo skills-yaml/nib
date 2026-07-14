@@ -1,5 +1,7 @@
 //! Hybrid sandbox: internal execution + optional bwrap (FT-003).
 
+pub mod worktree;
+
 use crate::config::BoundaryConfig;
 use std::path::Path;
 use std::process::Command;

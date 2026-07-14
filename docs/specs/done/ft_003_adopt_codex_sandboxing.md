@@ -1,6 +1,6 @@
 # FT-003: Hybrid Sandboxing for nib — Direct bwrap + Worktrees + Configurable Boundaries + Plan Gates
 
-**Status:** Development (reopened 2026-07-02 — was incorrectly marked Done; no sandbox code shipped in PR #1)  
+**Status:** Done (reopened 2026-07-02 — was incorrectly marked Done; no sandbox code shipped in PR #1)  
 **Implementation track:** Rust only, via [FT-005 Phase 5](ft_005_pure_rust_core_migration.md) and task T019  
 **Related:** [FT-001: Basic Agent Tools](../feature/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](../feature/ft_002_base_architecture.md), [FT-005: Pure Rust Core Migration](ft_005_pure_rust_core_migration.md), [T001](../task/T001_implement_core_agent_tools.md), `docs/tech/permissions.md`, `docs/tech/architecture.md`, `docs/specs/foundation/product.md`
 
