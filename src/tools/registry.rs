@@ -49,13 +49,19 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
             requires_worktree: false,
         },
         ToolMetadata {
-            name: "invoke_subagent".to_string(),
-            description:
-                "Launch a secondary nib loop (or external model) in an isolated context/worktree."
-                    .to_string(),
+            name: "spawn_subagent".to_string(),
+            description: "Launch a secondary nib loop in an isolated context/worktree.".to_string(),
             permission_level: PermissionLevel::Safe,
             requires_approval: false,
             requires_worktree: true,
+        },
+        ToolMetadata {
+            name: "merge_subagent_worktree".to_string(),
+            description: "Merge changes from a subagent's worktree back into the main branch."
+                .to_string(),
+            permission_level: PermissionLevel::Destructive,
+            requires_approval: true,
+            requires_worktree: false,
         },
         ToolMetadata {
             name: "manage_subagents".to_string(),

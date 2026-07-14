@@ -20,6 +20,12 @@ pub async fn dispatch(
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => run_terminal(args, cwd, config).await,
         "write_plan" => write_plan(args, cwd).await,
+        "spawn_subagent" => {
+            std::future::ready(crate::tools::delegation::spawn_subagent(args, cwd)).await
+        }
+        "merge_subagent_worktree" => {
+            crate::tools::delegation::merge_subagent_worktree(args, cwd).await
+        }
         "invoke_subagent" => std::future::ready(invoke_subagent(args, cwd)).await,
         "manage_subagents" => manage_subagents(args, cwd).await,
         "send_message" => send_message(args, cwd).await,
