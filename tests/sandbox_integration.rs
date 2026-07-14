@@ -1,8 +1,6 @@
 use nib::config::BoundaryConfig;
 use nib::sandbox::{detect_capabilities, run_sandboxed};
-use std::path::PathBuf;
 use tempfile::tempdir;
-use tokio::fs;
 
 #[tokio::test]
 async fn test_sandbox_write_restrictions() {

@@ -1,7 +1,7 @@
 use nib::agent::r#loop::{run_agent_loop, AgentLoopConfig};
 use nib::config::{save_config, LlmConfig};
 use nib::session::SessionStore;
-use std::path::PathBuf;
+
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -11,8 +11,10 @@ async fn test_full_agent_runtime_cycle() {
     let session = store.create_session();
 
     // Set up mock provider
-    let mut cfg = LlmConfig::default();
-    cfg.active_provider = Some("mock".to_string());
+    let cfg = LlmConfig {
+        active_provider: Some("mock".to_string()),
+        ..Default::default()
+    };
     save_config(dir.path(), &cfg).unwrap();
 
     let cfg = AgentLoopConfig {

@@ -292,8 +292,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path());
         let session = store.create_session();
-        let mut cfg = LlmConfig::default();
-        cfg.active_provider = Some("mock".to_string());
+        let cfg = LlmConfig {
+            active_provider: Some("mock".to_string()),
+            ..Default::default()
+        };
         save_config(dir.path(), &cfg).unwrap();
 
         let summary = run_agent_loop(
