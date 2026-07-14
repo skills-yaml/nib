@@ -119,7 +119,7 @@ jobs:
           mkdir -p dist/pkg
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib"
           chmod +x "dist/pkg/nib"
-          tar -C dist/pkg -czf "dist/${{ matrix.asset }}" -C dist/pkg nib
+          tar -C dist/pkg -czf "dist/${{ matrix.asset }}" nib
           shasum -a 256 "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
 
       - name: Package Windows artifact
