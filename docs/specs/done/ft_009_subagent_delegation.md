@@ -1,6 +1,6 @@
 # FT-009: Deep Sub-Agent Delegation
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
