@@ -107,7 +107,7 @@ Commands (chat):
   /session         Show current session ID
   /clear           Start fresh session (new history)
   /skills [cmd]    Manage skills (list, install <url>, remove <name>)
-  /mcp             List configured MCP servers
+  /mcp [cmd]       Manage MCP servers (list, add <name> <cmd> [args], remove <name>)
   /help            This help
   /quit /exit /q   Exit
 [/dim]"#
@@ -236,15 +236,20 @@ Commands (chat):
                     }
                 }
                 "mcp" => {
-                    let nib_cfg = nib::config::load_nib_config(&project);
-                    let mcp_cfg = &nib_cfg.mcp;
-                    if mcp_cfg.servers.is_empty() {
-                        println!("No MCP servers configured.");
+                    let sub_args: Vec<&str> =
+                        arg.as_deref().unwrap_or("").split_whitespace().collect();
+                    if sub_args.is_empty() || sub_args[0] == "list" {
+                        crate::mcp_cmd::list_mcp_servers(&project);
+                    } else if sub_args[0] == "add" && sub_args.len() >= 3 {
+                        let name = sub_args[1];
+                        let command = sub_args[2];
+                        let args: Vec<String> =
+                            sub_args[3..].iter().map(|s| s.to_string()).collect();
+                        crate::mcp_cmd::add_mcp_server(&project, name, command, &args);
+                    } else if sub_args[0] == "remove" && sub_args.len() > 1 {
+                        crate::mcp_cmd::remove_mcp_server(&project, sub_args[1]);
                     } else {
-                        println!("[bold]Configured MCP Servers:[/bold]");
-                        for (name, entry) in &mcp_cfg.servers {
-                            println!("  - {}: {} {}", name, entry.command, entry.args.join(" "));
-                        }
+                        println!("[red]Usage: /mcp list | /mcp add <name> <command> [args...] | /mcp remove <name>[/red]");
                     }
                 }
                 _ => {

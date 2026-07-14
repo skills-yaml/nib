@@ -6,6 +6,7 @@ mod auth;
 mod chat;
 mod context_cmd;
 mod doctor;
+mod mcp_cmd;
 mod mcp_server;
 mod run;
 mod skill_cmd;
@@ -59,6 +60,9 @@ enum Commands {
 
     /// Manage skills (list, install, remove)
     Skill(skill_cmd::SkillArgs),
+
+    /// Manage MCP servers (list, add, remove)
+    Mcp(mcp_cmd::McpArgs),
 }
 
 #[derive(clap::Args)]
@@ -127,6 +131,7 @@ fn main() {
             rt.block_on(mcp_server::run_mcp_server(&project));
         }
         Some(Commands::Skill(args)) => skill_cmd::run_skill_cmd(args, &project),
+        Some(Commands::Mcp(args)) => mcp_cmd::run_mcp_cmd(args, &project),
         None => {
             println!("nib — AI agent for coding and workload management");
             println!(
