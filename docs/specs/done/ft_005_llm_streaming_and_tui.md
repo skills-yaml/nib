@@ -1,6 +1,6 @@
 # FT-005: LLM Streaming & TUI Live View
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
