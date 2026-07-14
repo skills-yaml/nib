@@ -44,6 +44,7 @@ pub fn create_client(llm: &LlmConfig, provider_override: Option<&str>) -> Arc<dy
         }
         "grok" => Arc::new(OpenAiCompatClient::xai(model, api_key)),
         "openrouter" => Arc::new(OpenAiCompatClient::openrouter(model, api_key)),
+        "meta" => Arc::new(OpenAiCompatClient::meta(model, api_key)),
         _ => Arc::new(MockLlmClient::new()),
     }
 }
@@ -55,6 +56,7 @@ fn default_model(provider: &str) -> String {
         "google" => "gemini-1.5-pro".to_string(),
         "grok" => "grok-2-1212".to_string(),
         "openrouter" => "openrouter/anthropic/claude-3.5-sonnet".to_string(),
+        "meta" => "muse-spark-1.1".to_string(),
         _ => "mock-model".to_string(),
     }
 }
@@ -66,6 +68,7 @@ fn env_key(provider: &str) -> Option<String> {
         "google" => "GOOGLE_API_KEY",
         "grok" => "XAI_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
+        "meta" => "META_API_KEY",
         _ => return None,
     };
     std::env::var(var).ok()

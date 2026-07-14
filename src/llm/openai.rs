@@ -39,6 +39,10 @@ impl OpenAiCompatClient {
             "https://openrouter.ai/api/v1/chat/completions",
         )
     }
+
+    pub fn meta(model: String, api_key: Option<String>) -> Self {
+        Self::new(model, api_key, "https://api.meta.com/v1/chat/completions")
+    }
 }
 
 #[async_trait]

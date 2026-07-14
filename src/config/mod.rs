@@ -12,6 +12,7 @@ pub const SUPPORTED_PROVIDERS: &[(&str, &str)] = &[
     ("google", "Google Gemini"),
     ("grok", "xAI Grok"),
     ("openrouter", "OpenRouter"),
+    ("meta", "Meta (Muse Spark)"),
     ("mock", "Mock"),
 ];
 
@@ -42,6 +43,7 @@ pub const AVAILABLE_MODELS: &[(&str, &[&str])] = &[
             "openrouter/mistralai/mistral-large",
         ],
     ),
+    ("meta", &["muse-spark-1.1", "muse-spark-1.1-mini"]),
     ("mock", &["mock-model"]),
 ];
 
