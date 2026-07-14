@@ -106,6 +106,8 @@ Commands (chat):
   /providers       List configured providers
   /session         Show current session ID
   /clear           Start fresh session (new history)
+  /skills [cmd]    Manage skills (list, install <url>, remove <name>)
+  /mcp             List configured MCP servers
   /help            This help
   /quit /exit /q   Exit
 [/dim]"#
@@ -219,6 +221,31 @@ Commands (chat):
                     }
                     // cfg reloaded implicitly on next use
                     cfg = load_config(&project);
+                }
+                "skills" => {
+                    let sub_args: Vec<&str> =
+                        arg.as_deref().unwrap_or("").split_whitespace().collect();
+                    if sub_args.is_empty() || sub_args[0] == "list" {
+                        crate::skill_cmd::list_skills(&project);
+                    } else if sub_args[0] == "install" && sub_args.len() > 1 {
+                        crate::skill_cmd::install_skill(sub_args[1]);
+                    } else if sub_args[0] == "remove" && sub_args.len() > 1 {
+                        crate::skill_cmd::remove_skill(sub_args[1]);
+                    } else {
+                        println!("[red]Usage: /skills list | /skills install <url_or_path> | /skills remove <name>[/red]");
+                    }
+                }
+                "mcp" => {
+                    let nib_cfg = nib::config::load_nib_config(&project);
+                    let mcp_cfg = &nib_cfg.mcp;
+                    if mcp_cfg.servers.is_empty() {
+                        println!("No MCP servers configured.");
+                    } else {
+                        println!("[bold]Configured MCP Servers:[/bold]");
+                        for (name, entry) in &mcp_cfg.servers {
+                            println!("  - {}: {} {}", name, entry.command, entry.args.join(" "));
+                        }
+                    }
                 }
                 _ => {
                     println!(

@@ -39,7 +39,7 @@ fn get_global_skills_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".config").join("nib").join("skills"))
 }
 
-fn list_skills(project_root: &Path) {
+pub fn list_skills(project_root: &Path) {
     println!("Installed Skills:");
     let paths = nib::context::skills::find_skills(project_root);
     if paths.is_empty() {
@@ -59,7 +59,7 @@ fn list_skills(project_root: &Path) {
     }
 }
 
-fn install_skill(source: &str) {
+pub fn install_skill(source: &str) {
     let global_dir = match get_global_skills_dir() {
         Some(d) => d,
         None => {
@@ -131,7 +131,7 @@ fn install_skill(source: &str) {
     println!("Successfully installed skill '{}'.", skill.frontmatter.name);
 }
 
-fn remove_skill(name: &str) {
+pub fn remove_skill(name: &str) {
     let global_dir = match get_global_skills_dir() {
         Some(d) => d,
         None => {
