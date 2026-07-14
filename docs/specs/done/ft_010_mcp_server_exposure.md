@@ -1,6 +1,6 @@
 # FT-010: MCP Server Exposing the Agent Loop
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
