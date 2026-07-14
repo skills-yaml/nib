@@ -1,18 +1,13 @@
-use nib::config::load_nib_config;
-use nib::tools::{ToolCall, ToolExecutor};
+use crate::config::load_nib_config;
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
 use std::path::Path;
 
 pub async fn run_mcp_server(project_root: &Path) {
-    let cfg = load_nib_config(project_root);
-    let mut executor =
-        ToolExecutor::new(project_root.to_path_buf(), cfg.execution).with_auto_approve(false); // require human approval for dangerous tasks when called from MCP
+    let _cfg = load_nib_config(project_root);
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-
-    let tools_schema = executor.get_tools_schema().await;
 
     // A simple MCP JSON-RPC stdio loop
     while let Some(Ok(line)) = lines.next() {
@@ -45,18 +40,36 @@ pub async fn run_mcp_server(project_root: &Path) {
                     println!("{}", resp);
                 }
                 "tools/list" => {
-                    // map openAI schema to MCP tools schema
-                    let mcp_tools: Vec<Value> = tools_schema
-                        .iter()
-                        .map(|t| {
-                            let f = t.get("function").unwrap();
-                            json!({
-                                "name": f.get("name"),
-                                "description": f.get("description"),
-                                "inputSchema": f.get("parameters")
-                            })
-                        })
-                        .collect();
+                    let mcp_tools = vec![
+                        json!({
+                            "name": "nib_run",
+                            "description": "Start a background nib agent to achieve a goal",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "goal": {
+                                        "type": "string",
+                                        "description": "The goal for the agent to achieve"
+                                    }
+                                },
+                                "required": ["goal"]
+                            }
+                        }),
+                        json!({
+                            "name": "nib_get_status",
+                            "description": "Query the status of an agent run using its session_id",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "session_id": {
+                                        "type": "string",
+                                        "description": "The session ID returned by nib_run"
+                                    }
+                                },
+                                "required": ["session_id"]
+                            }
+                        }),
+                    ];
 
                     let resp = json!({
                         "jsonrpc": "2.0",
@@ -72,24 +85,32 @@ pub async fn run_mcp_server(project_root: &Path) {
                         params.get("name").and_then(|n| n.as_str()),
                         params.get("arguments"),
                     ) {
-                        let call = ToolCall {
-                            tool_name: name.to_string(),
-                            arguments: args.clone(),
-                            session_id: None,
-                            project_root: Some(project_root.to_path_buf()),
+                        let text_content = match name {
+                            "nib_run" => {
+                                let goal =
+                                    args.get("goal").and_then(|g| g.as_str()).unwrap_or("help");
+                                let call_args = json!({"prompt": goal});
+                                match crate::tools::delegation::spawn_subagent(
+                                    &call_args,
+                                    project_root,
+                                ) {
+                                    Ok(res) => res.to_string(),
+                                    Err(e) => format!("Error: {}", e),
+                                }
+                            }
+                            "nib_get_status" => {
+                                let _session_id = args
+                                    .get("session_id")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
+                                // For now, just return a generic status since TASK_MANAGER manages it
+                                let tasks = crate::daemons::task::TASK_MANAGER.list_tasks();
+                                json!({"tasks": tasks}).to_string()
+                            }
+                            _ => "Unknown tool".to_string(),
                         };
-                        let result = executor.execute(call, None).await;
 
-                        let is_error = !result.success;
-                        let text_content = if is_error {
-                            result
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "Unknown error".to_string())
-                        } else {
-                            result.output.clone().unwrap_or_default().to_string()
-                        };
-
+                        let is_error = text_content.starts_with("Error:");
                         let resp = json!({
                             "jsonrpc": "2.0",
                             "id": id,

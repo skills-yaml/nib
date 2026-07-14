@@ -7,7 +7,6 @@ mod chat;
 mod context_cmd;
 mod doctor;
 mod mcp_cmd;
-mod mcp_server;
 mod run;
 mod skill_cmd;
 mod updater;
@@ -128,7 +127,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .expect("tokio");
-            rt.block_on(mcp_server::run_mcp_server(&project));
+            rt.block_on(nib::integrations::mcp_server::run_mcp_server(&project));
         }
         Some(Commands::Skill(args)) => skill_cmd::run_skill_cmd(args, &project),
         Some(Commands::Mcp(args)) => mcp_cmd::run_mcp_cmd(args, &project),
