@@ -6,6 +6,7 @@ mod auth;
 mod chat;
 mod context_cmd;
 mod doctor;
+mod mcp_server;
 mod run;
 mod updater;
 mod version;
@@ -50,6 +51,10 @@ enum Commands {
 
     /// Launch session browser TUI (ratatui)
     Tui(TuiArgs),
+
+    /// Start nib as an MCP Server (JSON-RPC over stdio)
+    #[command(name = "mcp-server")]
+    McpServer,
 }
 
 #[derive(clap::Args)]
@@ -109,6 +114,13 @@ fn main() {
                 eprintln!("TUI error: {e}");
                 process::exit(1);
             }
+        }
+        Some(Commands::McpServer) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
+            rt.block_on(mcp_server::run_mcp_server(&project));
         }
         None => {
             println!("nib — AI agent for coding and workload management");

@@ -1,7 +1,7 @@
 //! Core agent loop — LLM reasoning + gated tool execution.
 
 use crate::context::assemble_context;
-use crate::llm::{create_client, LlmClient, LlmResponse};
+use crate::llm::{create_client, LlmClient};
 use crate::session::SessionStore;
 use crate::tools::{ToolCall, ToolExecutor};
 use serde_json::{json, Value};
