@@ -8,6 +8,7 @@ mod context_cmd;
 mod doctor;
 mod mcp_server;
 mod run;
+mod skill_cmd;
 mod updater;
 mod version;
 
@@ -55,6 +56,9 @@ enum Commands {
     /// Start nib as an MCP Server (JSON-RPC over stdio)
     #[command(name = "mcp-server")]
     McpServer,
+
+    /// Manage skills (list, install, remove)
+    Skill(skill_cmd::SkillArgs),
 }
 
 #[derive(clap::Args)]
@@ -122,6 +126,7 @@ fn main() {
                 .expect("tokio");
             rt.block_on(mcp_server::run_mcp_server(&project));
         }
+        Some(Commands::Skill(args)) => skill_cmd::run_skill_cmd(args, &project),
         None => {
             println!("nib — AI agent for coding and workload management");
             println!(
