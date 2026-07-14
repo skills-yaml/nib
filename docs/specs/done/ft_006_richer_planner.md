@@ -1,6 +1,6 @@
 # FT-006: Richer Planner (Symphony-Style)
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
