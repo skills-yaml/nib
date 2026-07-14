@@ -5,5 +5,6 @@ pub enum AgentState {
     InspectLlm,
     ToolExecute,
     UpdateMemory,
+    WaitingForUserInput,
     Done,
 }

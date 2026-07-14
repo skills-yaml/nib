@@ -193,7 +193,11 @@ pub async fn run_agent_loop(
                 }
             }
             crate::agent::state::AgentState::ToolExecute => {
+                let mut requires_user_input = false;
                 for tc in &tool_calls {
+                    if tc.name == "ask_question" {
+                        requires_user_input = true;
+                    }
                     let call = ToolCall {
                         tool_name: tc.name.clone(),
                         arguments: tc.arguments.clone(),
@@ -210,7 +214,15 @@ pub async fn run_agent_loop(
                     store.append_message(session_id, "tool", &obs.to_string());
                     tool_call_count += 1;
                 }
-                crate::agent::state::AgentState::Idle
+                if requires_user_input {
+                    crate::agent::state::AgentState::WaitingForUserInput
+                } else {
+                    crate::agent::state::AgentState::Idle
+                }
+            }
+            crate::agent::state::AgentState::WaitingForUserInput => {
+                // Return Done for now to break the loop (the outer UI will handle resuming)
+                crate::agent::state::AgentState::Done
             }
             crate::agent::state::AgentState::Done => crate::agent::state::AgentState::Done,
         };

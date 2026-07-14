@@ -20,6 +20,14 @@ pub async fn dispatch(
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => run_terminal(args, cwd, config).await,
         "write_plan" => write_plan(args, cwd).await,
+        "invoke_subagent" => invoke_subagent(args, cwd).await,
+        "manage_subagents" => manage_subagents(args, cwd).await,
+        "send_message" => send_message(args, cwd).await,
+        "search_web" => search_web(args, cwd).await,
+        "read_url_content" => read_url_content(args, cwd).await,
+        "manage_task" => manage_task(args, cwd).await,
+        "schedule" => schedule(args, cwd).await,
+        "ask_question" => ask_question(args, cwd).await,
         other => Err(format!("No implementation for tool: {other}")),
     }
 }
@@ -303,3 +311,45 @@ async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Res
 
     Ok(res)
 }
+
+async fn invoke_subagent(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    Ok(json!({ "status": "stub", "subagent_id": "sub-123" }))
+}
+
+async fn manage_subagents(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    Ok(json!({ "status": "stub", "action": args.get("action") }))
+}
+
+async fn send_message(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    Ok(json!({ "status": "stub", "sent": true }))
+}
+
+async fn search_web(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    Ok(json!({ "status": "stub", "results": [format!("Results for {}", query)] }))
+}
+
+async fn read_url_content(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    match reqwest::get(url).await {
+        Ok(res) => match res.text().await {
+            Ok(text) => Ok(json!({ "status": "success", "content": &text[..text.len().min(1000)] })),
+            Err(e) => Err(format!("Failed to read text: {}", e)),
+        },
+        Err(e) => Err(format!("Request failed: {}", e)),
+    }
+}
+
+async fn manage_task(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    Ok(json!({ "status": "stub", "task_id": "task-123" }))
+}
+
+async fn schedule(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    Ok(json!({ "status": "stub", "scheduled": true }))
+}
+
+async fn ask_question(args: &Value, _cwd: &Path) -> Result<Value, String> {
+    // In reality, this sets the loop state. For now, just return a prompt response
+    Ok(json!({ "status": "pending_ui", "question": args.get("question") }))
+}
+
