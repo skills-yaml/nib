@@ -39,6 +39,27 @@ impl LlmClient for MockLlmClient {
             .unwrap_or("")
             .to_lowercase();
 
+        let mut is_planner = false;
+        if let Some(t) = tools {
+            if let Some(tools_array) = serde_json::to_value(t)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+            {
+                for tool in tools_array {
+                    if tool["function"]["name"] == "submit_plan" {
+                        is_planner = true;
+                    }
+                }
+            }
+        }
+
+        if is_planner {
+            return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
+                name: "submit_plan".to_string(),
+                arguments: json!({"steps": ["explore", "finish"]}),
+            }]));
+        }
+
         let step = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         if tools.is_some() && step == 0 {

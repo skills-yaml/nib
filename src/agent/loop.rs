@@ -118,6 +118,20 @@ pub async fn run_agent_loop(
         state = match state {
             crate::agent::state::AgentState::Idle => {
                 steps += 1;
+                let session = store.load(session_id).unwrap();
+                if session.plan.is_none() {
+                    crate::agent::state::AgentState::Planning
+                } else {
+                    crate::agent::state::AgentState::BuildContext
+                }
+            }
+            crate::agent::state::AgentState::Planning => {
+                if let Ok(plan) = crate::agent::planner::generate_plan(&llm, goal).await {
+                    if let Some(mut session) = store.load(session_id) {
+                        session.plan = Some(plan);
+                        let _ = store.save(&session);
+                    }
+                }
                 crate::agent::state::AgentState::BuildContext
             }
             crate::agent::state::AgentState::BuildContext => {
@@ -127,11 +141,33 @@ pub async fn run_agent_loop(
                 )
                 .await;
 
-                let system_prompt = build_system_prompt(
-                    &context_block,
-                    use_tools_ref.unwrap_or(&[]),
-                    &cfg.mode,
-                    &project_root,
+                let mut current_step_info = String::new();
+                if let Some(session) = store.load(session_id) {
+                    if let Some(plan) = &session.plan {
+                        if plan.current_step_index < plan.steps.len() {
+                            let step = &plan.steps[plan.current_step_index];
+                            current_step_info = format!(
+                                "\n\nCurrent Plan Step ({}/{}): {}\nStatus: {}",
+                                plan.current_step_index + 1,
+                                plan.steps.len(),
+                                step.description,
+                                step.status
+                            );
+                        } else {
+                            current_step_info = "\n\nAll planned steps are completed.".to_string();
+                        }
+                    }
+                }
+
+                let system_prompt = format!(
+                    "{}{}",
+                    build_system_prompt(
+                        &context_block,
+                        use_tools_ref.unwrap_or(&[]),
+                        &cfg.mode,
+                        &project_root,
+                    ),
+                    current_step_info
                 );
                 messages.clear();
                 messages.push(json!({"role": "system", "content": system_prompt}));
@@ -248,7 +284,27 @@ pub async fn run_agent_loop(
                         }
                     }
                     if is_fin {
-                        crate::agent::state::AgentState::Done
+                        if let Some(mut session) = store.load(session_id) {
+                            if let Some(mut plan) = session.plan.take() {
+                                if plan.current_step_index < plan.steps.len() {
+                                    plan.steps[plan.current_step_index].status =
+                                        "Completed".to_string();
+                                    plan.current_step_index += 1;
+                                }
+                                session.plan = Some(plan.clone());
+                                let _ = store.save(&session);
+
+                                if plan.current_step_index >= plan.steps.len() {
+                                    crate::agent::state::AgentState::Done
+                                } else {
+                                    crate::agent::state::AgentState::Idle
+                                }
+                            } else {
+                                crate::agent::state::AgentState::Done
+                            }
+                        } else {
+                            crate::agent::state::AgentState::Done
+                        }
                     } else {
                         crate::agent::state::AgentState::Idle
                     }

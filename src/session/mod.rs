@@ -50,6 +50,18 @@ pub struct ToolCallRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanStep {
+    pub description: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Plan {
+    pub steps: Vec<PlanStep>,
+    pub current_step_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Session {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,6 +70,8 @@ pub struct Session {
     pub messages: Vec<SessionMessage>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 #[derive(Debug, Error)]
@@ -94,6 +108,7 @@ impl SessionStore {
             started_at: Some(Utc::now()),
             messages: vec![],
             tool_calls: vec![],
+            plan: None,
         };
         let _ = self.save(&session);
         session
@@ -124,6 +139,7 @@ impl SessionStore {
             started_at: Some(Utc::now()),
             messages: vec![],
             tool_calls: vec![],
+            plan: None,
         });
         session.messages.push(SessionMessage {
             role: role.to_string(),
@@ -161,6 +177,7 @@ impl SessionStore {
             started_at: Some(Utc::now()),
             messages: vec![],
             tool_calls: vec![],
+            plan: None,
         });
         session.tool_calls.push(record);
         self.save(&session)
