@@ -149,6 +149,55 @@ User / Workload Owner
 5. **Visibility**
    - CLI/TUI shows live session history, tool calls (with boundaries/approvals), and loop state.
 
+### Sequence Diagram of Interactions
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as CLI / Chat
+    participant L as Agent Loop
+    participant Cx as Context Engine
+    participant M as MCP Manager
+    participant LLM as LLM Provider
+    participant T as Tool Executor
+    participant S as Session Store
+
+    U->>C: Provides goal or chat input
+    C->>L: Start Agent Run (goal, session_id)
+    
+    rect rgb(30, 40, 50)
+        Note over L,S: Turn Initialization
+        L->>S: Load or create Session
+        L->>M: Initialize MCP Client (Load external tools)
+        L->>T: Register Core + MCP Tools
+    end
+    
+    loop Until Goal Met or Max Steps
+        L->>Cx: Assemble Context (AGENTS.md, Skills, History)
+        Cx-->>L: System Prompt + Injected Skills
+        
+        L->>LLM: Send Messages + Tools Schema
+        LLM-->>L: Response (Text + Tool Calls)
+        
+        L->>S: Append Assistant Response
+        
+        alt Has Tool Calls
+            loop For each Tool Call
+                L->>T: Execute Tool
+                T->>T: Verify Permissions & Classify
+                T->>T: Check Approval / Sandbox Policy
+                T-->>L: Tool Result / Observation
+                L->>S: Append Tool Observation
+            end
+        else No Tool Calls
+            L->>L: Mark as Done
+        end
+    end
+    
+    L-->>C: Return Agent Run Summary
+    C-->>U: Display Results / Prompt for Input
+```
+
 ## Persistence
 
 - File-based sessions stored locally in the project folder under `.nib/sessions/`.
