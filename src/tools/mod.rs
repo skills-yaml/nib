@@ -1,5 +1,6 @@
 //! Tool registry, executor, and implementations.
 
+pub mod classifier;
 pub mod core;
 pub mod executor;
 pub mod models;

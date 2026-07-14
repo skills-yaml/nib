@@ -222,6 +222,12 @@ impl ToolExecutor {
         if level == PermissionLevel::ReadOnly || level == PermissionLevel::Plan {
             return ApprovalDecision::granted_policy();
         }
+
+        if crate::tools::classifier::classify_tool_call(call)
+            == crate::tools::classifier::ToolRisk::Safe
+        {
+            return ApprovalDecision::granted_classifier();
+        }
         if self.approval_mode == ApprovalMode::Off {
             return ApprovalDecision::granted_yolo();
         }

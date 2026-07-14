@@ -86,6 +86,14 @@ impl ApprovalDecision {
         }
     }
 
+    pub fn granted_classifier() -> Self {
+        Self {
+            granted: true,
+            source: "classifier".to_string(),
+            note: Some("Smart classifier approved".to_string()),
+        }
+    }
+
     pub fn granted_user() -> Self {
         Self {
             granted: true,
