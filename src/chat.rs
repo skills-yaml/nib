@@ -301,8 +301,8 @@ fn execute_agent_step(project: &Path, session_id: &str, goal: &str) -> Result<()
         max_steps: 15,
         mode: "execute".to_string(),
         provider: None,
-        auto_approve: true,
-        approval_handler: None,
+        auto_approve: false,
+        ..Default::default()
     };
 
     let result = rt.block_on(nib::agent::run_agent_loop(

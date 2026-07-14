@@ -65,6 +65,9 @@ fn draw_loop(
     let store = SessionStore::new(project_root);
     let mut selected = 0usize;
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
+    let (stream_tx, mut stream_rx) =
+        tokio::sync::mpsc::channel::<crate::llm::types::StreamEvent>(100);
+    let mut streaming_content = String::new();
 
     if let Some(goal) = run_goal {
         let pr = project_root.to_path_buf();
@@ -81,6 +84,7 @@ fn draw_loop(
                 let loop_cfg = crate::agent::AgentLoopConfig {
                     max_steps: 15,
                     approval_handler: Some(std::sync::Arc::new(TuiApprovalHandler { tx })),
+                    stream_tx: Some(stream_tx),
                     ..Default::default()
                 };
 
@@ -96,7 +100,11 @@ fn draw_loop(
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(10),
+                    Constraint::Length(3),
+                ])
                 .split(f.area());
 
             let items: Vec<ListItem> = if ids.is_empty() {
@@ -118,6 +126,15 @@ fn draw_loop(
             );
             f.render_widget(list, chunks[0]);
 
+            let stream_para = Paragraph::new(streaming_content.as_str())
+                .block(
+                    Block::default()
+                        .title(" Live Stream ")
+                        .borders(Borders::ALL),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            f.render_widget(stream_para, chunks[1]);
+
             let help = Paragraph::new(Line::from(vec![
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" select  "),
@@ -127,7 +144,7 @@ fn draw_loop(
                 Span::raw(" quit"),
             ]))
             .block(Block::default().borders(Borders::ALL));
-            f.render_widget(help, chunks[1]);
+            f.render_widget(help, chunks[2]);
             if let Some(req) = &pending_approval {
                 let modal_area = centered_rect(60, 20, f.area());
                 let text = vec![
@@ -159,6 +176,18 @@ fn draw_loop(
                 f.render_widget(modal, modal_area);
             }
         })?;
+
+        while let Ok(event) = stream_rx.try_recv() {
+            match event {
+                crate::llm::types::StreamEvent::Content(c) => streaming_content.push_str(&c),
+                crate::llm::types::StreamEvent::ToolCallChunk { name, .. } => {
+                    if let Some(n) = name {
+                        streaming_content.push_str(&format!("\n[Tool: {}]\n", n));
+                    }
+                }
+                crate::llm::types::StreamEvent::End(_) => {}
+            }
+        }
 
         if let Ok(req) = approval_rx.try_recv() {
             pending_approval = Some(req);

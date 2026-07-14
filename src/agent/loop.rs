@@ -14,6 +14,7 @@ pub struct AgentLoopConfig {
     pub provider: Option<String>,
     pub auto_approve: bool,
     pub approval_handler: Option<Arc<dyn crate::tools::executor::ApprovalHandler>>,
+    pub stream_tx: Option<tokio::sync::mpsc::Sender<crate::llm::types::StreamEvent>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -24,6 +25,7 @@ impl Default for AgentLoopConfig {
             provider: None,
             auto_approve: false,
             approval_handler: None,
+            stream_tx: None,
         }
     }
 }
@@ -154,12 +156,72 @@ pub async fn run_agent_loop(
                 crate::agent::state::AgentState::InspectLlm
             }
             crate::agent::state::AgentState::InspectLlm => {
-                let response = llm.complete(&messages, use_tools_ref, 0.7).await?;
-                response_content = response.content.clone();
-                if let Some(calls) = &response.tool_calls {
-                    tool_calls = calls.clone();
+                let mut rx = llm.stream(&messages, use_tools_ref, 0.7).await?;
+                let mut accumulated_content = String::new();
+                let mut current_tool_calls: std::collections::HashMap<
+                    usize,
+                    crate::llm::ToolCallRequest,
+                > = std::collections::HashMap::new();
+
+                while let Some(res) = rx.recv().await {
+                    match res {
+                        Ok(event) => {
+                            if let Some(tx) = &cfg.stream_tx {
+                                let _ = tx.send(event.clone()).await;
+                            }
+                            match event {
+                                crate::llm::types::StreamEvent::Content(c) => {
+                                    accumulated_content.push_str(&c);
+                                }
+                                crate::llm::types::StreamEvent::ToolCallChunk {
+                                    index,
+                                    name,
+                                    arguments,
+                                } => {
+                                    let tc = current_tool_calls.entry(index).or_insert_with(|| {
+                                        crate::llm::ToolCallRequest {
+                                            name: String::new(),
+                                            arguments: serde_json::json!(""),
+                                        }
+                                    });
+                                    if let Some(n) = name {
+                                        tc.name.push_str(&n);
+                                    }
+                                    if let Some(a) = arguments {
+                                        let current = tc.arguments.as_str().unwrap_or("");
+                                        tc.arguments =
+                                            serde_json::Value::String(format!("{}{}", current, a));
+                                    }
+                                }
+                                crate::llm::types::StreamEvent::End(_) => {}
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                }
+
+                response_content = if accumulated_content.is_empty() {
+                    None
                 } else {
+                    Some(accumulated_content)
+                };
+
+                if current_tool_calls.is_empty() {
                     tool_calls.clear();
+                } else {
+                    let mut calls = Vec::new();
+                    let mut indices: Vec<_> = current_tool_calls.keys().copied().collect();
+                    indices.sort();
+                    for idx in indices {
+                        let mut tc = current_tool_calls.remove(&idx).unwrap();
+                        if let Some(s) = tc.arguments.as_str() {
+                            tc.arguments = serde_json::from_str(s).unwrap_or(serde_json::json!({}));
+                        }
+                        calls.push(tc);
+                    }
+                    tool_calls = calls;
                 }
 
                 crate::agent::state::AgentState::UpdateMemory

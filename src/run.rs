@@ -51,8 +51,8 @@ pub fn run_agent(args: &RunArgs) {
         max_steps: args.max_steps,
         mode: args.mode.clone(),
         provider: args.provider.clone(),
-        auto_approve: false,
-        approval_handler: None,
+        auto_approve: args.yes,
+        ..Default::default()
     };
 
     let result = rt.block_on(nib::agent::run_agent_loop(

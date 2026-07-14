@@ -32,3 +32,14 @@ impl LlmResponse {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Content(String),
+    ToolCallChunk {
+        index: usize,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+    End(String),
+}
