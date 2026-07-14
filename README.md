@@ -106,6 +106,7 @@ nib chat
 
 ## Documentation
 
+- **[End-User Guide](docs/user/guide.md)** — Complete instructions on installation, configuration, features, and usage.
 - [docs/specs/foundation/product.md](docs/specs/foundation/product.md) — Product foundation.
 - `docs/specs/done/` — Completed feature specs (FT-003 Hybrid Sandboxing, FT-004 LLM + Agent Loop).
 - `docs/tech/` — Technical references:
