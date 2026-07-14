@@ -1,6 +1,6 @@
 use crate::config::NibConfig;
 use crate::llm::LlmClient;
-use crate::session::{SessionMessage, SessionStore};
+use crate::session::SessionStore;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -19,8 +19,9 @@ pub async fn maybe_compress_session(
         None => return Ok(()),
     };
 
+    let uncompressed_messages = &session.messages[session.summary_index..];
     let mut total_chars = 0;
-    for msg in &session.messages {
+    for msg in uncompressed_messages {
         total_chars += msg.content.len();
     }
     let approx_tokens = total_chars / 4;
@@ -31,17 +32,23 @@ pub async fn maybe_compress_session(
         return Ok(());
     }
 
-    if session.messages.len() <= 5 {
+    let keep_count = 4;
+    if uncompressed_messages.len() <= keep_count {
         return Ok(());
     }
 
-    let keep_count = 4;
-    let compress_count = session.messages.len() - keep_count;
-    let to_compress = &session.messages[0..compress_count];
+    let compress_count = uncompressed_messages.len() - keep_count;
+    let to_compress = &uncompressed_messages[0..compress_count];
 
-    let mut summary_prompt = String::from(
-        "Summarize the following historic facts, code progress, decisions, and lessons learned into a compact narrative:\n\n",
-    );
+    let mut summary_prompt = if let Some(existing) = &session.summary {
+        format!(
+            "Previous summary:\n{}\n\nNew messages to append to summary:\n\n",
+            existing
+        )
+    } else {
+        String::from("Summarize the following historic facts, code progress, decisions, and lessons learned into a compact narrative:\n\n")
+    };
+
     for msg in to_compress {
         summary_prompt.push_str(&format!("{}: {}\n\n", msg.role, msg.content));
     }
@@ -56,20 +63,9 @@ pub async fn maybe_compress_session(
         .content
         .unwrap_or_else(|| "Failed to generate summary".to_string());
 
-    let mut new_messages = Vec::new();
-    new_messages.push(SessionMessage {
-        role: "system".to_string(),
-        content: format!("COMPRESSED CONTEXT SUMMARY:\n{}", summary_content),
-        timestamp: Some(chrono::Utc::now()),
-    });
+    session.summary = Some(summary_content);
+    session.summary_index += compress_count;
 
-    new_messages.extend(
-        session.messages[session.messages.len() - keep_count..]
-            .iter()
-            .cloned(),
-    );
-
-    session.messages = new_messages;
     store
         .save(&session)
         .map_err(|e| format!("Failed to save compressed session: {}", e))?;

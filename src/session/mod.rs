@@ -72,6 +72,10 @@ pub struct Session {
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub summary_index: usize,
 }
 
 #[derive(Debug, Error)]
@@ -109,6 +113,8 @@ impl SessionStore {
             messages: vec![],
             tool_calls: vec![],
             plan: None,
+            summary: None,
+            summary_index: 0,
         };
         let _ = self.save(&session);
         session
@@ -140,6 +146,8 @@ impl SessionStore {
             messages: vec![],
             tool_calls: vec![],
             plan: None,
+            summary: None,
+            summary_index: 0,
         });
         session.messages.push(SessionMessage {
             role: role.to_string(),
@@ -178,6 +186,8 @@ impl SessionStore {
             messages: vec![],
             tool_calls: vec![],
             plan: None,
+            summary: None,
+            summary_index: 0,
         });
         session.tool_calls.push(record);
         self.save(&session)

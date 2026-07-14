@@ -159,7 +159,7 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                let system_prompt = format!(
+                let mut system_prompt = format!(
                     "{}{}",
                     build_system_prompt(
                         &context_block,
@@ -169,12 +169,22 @@ pub async fn run_agent_loop(
                     ),
                     current_step_info
                 );
+
+                if let Some(session) = store.load(session_id) {
+                    if let Some(summary) = &session.summary {
+                        system_prompt = format!(
+                            "{}\n\nCOMPRESSED CONTEXT SUMMARY:\n{}",
+                            system_prompt, summary
+                        );
+                    }
+                }
+
                 messages.clear();
                 messages.push(json!({"role": "system", "content": system_prompt}));
 
                 if let Some(session) = store.load(session_id) {
                     let mut last_role: Option<String> = None;
-                    for msg in session.messages {
+                    for msg in session.messages.into_iter().skip(session.summary_index) {
                         if let Some(ref lr) = last_role {
                             if lr == &msg.role {
                                 if let Some(last_msg) = messages.last_mut() {
