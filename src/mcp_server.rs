@@ -6,8 +6,8 @@ use std::path::Path;
 
 pub async fn run_mcp_server(project_root: &Path) {
     let cfg = load_nib_config(project_root);
-    let mut executor = ToolExecutor::new(project_root.to_path_buf(), cfg.execution)
-        .with_auto_approve(false); // require human approval for dangerous tasks when called from MCP
+    let mut executor =
+        ToolExecutor::new(project_root.to_path_buf(), cfg.execution).with_auto_approve(false); // require human approval for dangerous tasks when called from MCP
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -46,14 +46,17 @@ pub async fn run_mcp_server(project_root: &Path) {
                 }
                 "tools/list" => {
                     // map openAI schema to MCP tools schema
-                    let mcp_tools: Vec<Value> = tools_schema.iter().map(|t| {
-                        let f = t.get("function").unwrap();
-                        json!({
-                            "name": f.get("name"),
-                            "description": f.get("description"),
-                            "inputSchema": f.get("parameters")
+                    let mcp_tools: Vec<Value> = tools_schema
+                        .iter()
+                        .map(|t| {
+                            let f = t.get("function").unwrap();
+                            json!({
+                                "name": f.get("name"),
+                                "description": f.get("description"),
+                                "inputSchema": f.get("parameters")
+                            })
                         })
-                    }).collect();
+                        .collect();
 
                     let resp = json!({
                         "jsonrpc": "2.0",
@@ -76,10 +79,13 @@ pub async fn run_mcp_server(project_root: &Path) {
                             project_root: Some(project_root.to_path_buf()),
                         };
                         let result = executor.execute(call, None).await;
-                        
+
                         let is_error = !result.success;
                         let text_content = if is_error {
-                            result.error.clone().unwrap_or_else(|| "Unknown error".to_string())
+                            result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "Unknown error".to_string())
                         } else {
                             result.output.clone().unwrap_or_default().to_string()
                         };

@@ -15,7 +15,9 @@ async fn test_mcp_mock_server() {
         },
     );
 
-    let mcp = McpManager::new(&servers).await.expect("Failed to initialize McpManager");
+    let mcp = McpManager::new(&servers)
+        .await
+        .expect("Failed to initialize McpManager");
 
     // 1. Test tools/list
     let tools = mcp.list_tools().await.expect("Failed to list tools");
@@ -24,10 +26,7 @@ async fn test_mcp_mock_server() {
 
     // 2. Test tools/call
     let res = mcp
-        .call_tool(
-            "mock_server::say_hello",
-            json!({"name": "Nib"}),
-        )
+        .call_tool("mock_server::say_hello", json!({"name": "Nib"}))
         .await
         .expect("Failed to call tool");
 

@@ -82,12 +82,9 @@ pub fn run_doctor(project: &Path) -> bool {
     // 4. Skills Discoverability
     print!("Checking Skills discoverability... ");
     let skills_dir = project.join(".nib").join("skills");
-    let global_skills_dir = std::env::var("HOME").ok().map(|h| {
-        PathBuf::from(h)
-            .join(".config")
-            .join("nib")
-            .join("skills")
-    });
+    let global_skills_dir = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".config").join("nib").join("skills"));
 
     let mut skills_found = 0;
     if skills_dir.exists() {

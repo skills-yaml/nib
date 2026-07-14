@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct SkillFrontmatter {
@@ -48,7 +48,7 @@ pub fn parse_skill(path: &Path) -> Option<Skill> {
     if !content.starts_with("---") {
         return None;
     }
-    
+
     let parts: Vec<&str> = content.splitn(3, "---").collect();
     if parts.len() < 3 {
         return None;
@@ -98,13 +98,18 @@ pub fn load_relevant_skills(project_path: &Path, task: Option<&str>) -> String {
         if let Some(skill) = parse_skill(&p) {
             let name_lower = skill.frontmatter.name.to_lowercase();
             let desc_lower = skill.frontmatter.description.to_lowercase();
-            
+
             // Simple heuristic matching
-            let is_relevant = task_lower.contains(&name_lower) 
-                || desc_lower.split_whitespace().any(|word| word.len() > 3 && task_lower.contains(word));
-            
+            let is_relevant = task_lower.contains(&name_lower)
+                || desc_lower
+                    .split_whitespace()
+                    .any(|word| word.len() > 3 && task_lower.contains(word));
+
             if is_relevant {
-                injected.push(format!("### Skill: {}\n{}\n\n{}", skill.frontmatter.name, skill.frontmatter.description, skill.body));
+                injected.push(format!(
+                    "### Skill: {}\n{}\n\n{}",
+                    skill.frontmatter.name, skill.frontmatter.description, skill.body
+                ));
             }
         }
     }

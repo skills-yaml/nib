@@ -120,8 +120,12 @@ impl Default for CompressionConfig {
     }
 }
 
-fn default_threshold() -> f64 { 0.50 }
-fn default_target_ratio() -> f64 { 0.20 }
+fn default_threshold() -> f64 {
+    0.50
+}
+fn default_target_ratio() -> f64 {
+    0.20
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryConfig {
@@ -140,7 +144,9 @@ impl Default for MemoryConfig {
     }
 }
 
-fn default_memory_provider() -> String { "built-in".to_string() }
+fn default_memory_provider() -> String {
+    "built-in".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonsConfig {
@@ -162,7 +168,9 @@ impl Default for DaemonsConfig {
     }
 }
 
-fn default_retention_days() -> i64 { 30 }
+fn default_retention_days() -> i64 {
+    30
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpConfig {

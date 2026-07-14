@@ -19,17 +19,14 @@ async fn test_sandbox_write_restrictions() {
     let external_path = external_dir.path();
 
     let mut boundaries = BoundaryConfig::default();
-    boundaries.allow_write.push(external_path.to_string_lossy().to_string());
+    boundaries
+        .allow_write
+        .push(external_path.to_string_lossy().to_string());
 
     // 1. Should be able to write to cwd
-    let res1 = run_sandboxed(
-        "touch test_cwd.txt",
-        cwd,
-        "restricted",
-        &boundaries,
-    )
-    .await
-    .expect("Failed to run sandbox");
+    let res1 = run_sandboxed("touch test_cwd.txt", cwd, "restricted", &boundaries)
+        .await
+        .expect("Failed to run sandbox");
     assert!(res1.0.status.success());
     assert!(cwd.join("test_cwd.txt").exists());
 
@@ -55,7 +52,7 @@ async fn test_sandbox_write_restrictions() {
     )
     .await
     .expect("Failed to run sandbox");
-    
+
     // Should fail
     assert!(!res3.0.status.success());
     assert!(!unauth_dir.path().join("test_unauth.txt").exists());

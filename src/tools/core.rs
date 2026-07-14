@@ -235,10 +235,7 @@ async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
 }
 
 async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
-    let content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     if content.is_empty() {
         return Err("Plan content is empty".to_string());
     }

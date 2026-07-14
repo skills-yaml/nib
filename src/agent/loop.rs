@@ -89,7 +89,9 @@ pub async fn run_agent_loop(
                     let level = crate::tools::registry::get_tool_metadata(name)
                         .map(|m| m.permission_level)
                         .unwrap_or(crate::tools::models::PermissionLevel::Destructive);
-                    if level == crate::tools::models::PermissionLevel::ReadOnly || level == crate::tools::models::PermissionLevel::Plan {
+                    if level == crate::tools::models::PermissionLevel::ReadOnly
+                        || level == crate::tools::models::PermissionLevel::Plan
+                    {
                         filtered_tools.push(t.clone());
                     }
                 }
@@ -102,7 +104,8 @@ pub async fn run_agent_loop(
 
     if nib_cfg.daemons.cron_enabled && nib_cfg.daemons.curator_enabled {
         crate::daemons::cron::Cron::run_maintenance(&project_root, nib_cfg.daemons.retention_days);
-    }    let mut state = crate::agent::state::AgentState::Idle;
+    }
+    let mut state = crate::agent::state::AgentState::Idle;
     let mut steps = 0u32;
     let mut messages = Vec::new();
     let mut response_content: Option<String> = None;
@@ -118,10 +121,7 @@ pub async fn run_agent_loop(
             crate::agent::state::AgentState::BuildContext => {
                 // compression
                 let _ = crate::context::compression::maybe_compress_session(
-                    &store,
-                    session_id,
-                    &llm,
-                    &nib_cfg,
+                    &store, session_id, &llm, &nib_cfg,
                 )
                 .await;
 
@@ -168,7 +168,7 @@ pub async fn run_agent_loop(
                 if let Some(content) = &response_content {
                     store.append_message(session_id, "assistant", content);
                 }
-                
+
                 if !tool_calls.is_empty() {
                     crate::agent::state::AgentState::ToolExecute
                 } else {
@@ -178,7 +178,10 @@ pub async fn run_agent_loop(
                         is_fin = true;
                     } else if let Some(c) = &response_content {
                         let lower = c.to_lowercase();
-                        if lower.contains("final answer") || lower.contains("task complete") || c.len() > 200 {
+                        if lower.contains("final answer")
+                            || lower.contains("task complete")
+                            || c.len() > 200
+                        {
                             is_fin = true;
                         }
                     }

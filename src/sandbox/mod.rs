@@ -34,7 +34,9 @@ pub async fn run_sandboxed(
 ) -> Result<(std::process::Output, Option<Vec<String>>), String> {
     let caps = detect_capabilities();
     if caps.bwrap_available && profile != "internal" {
-        run_bwrap(command, cwd, boundaries, profile).await.map(|(out, args)| (out, Some(args)))
+        run_bwrap(command, cwd, boundaries, profile)
+            .await
+            .map(|(out, args)| (out, Some(args)))
     } else {
         run_direct(command, cwd).await.map(|out| (out, None))
     }

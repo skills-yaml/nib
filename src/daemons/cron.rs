@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::daemons::curator::Curator;
+use std::path::Path;
 
 pub struct Cron {
     // Basic wrapper for daemon jobs
