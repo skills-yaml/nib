@@ -1,6 +1,6 @@
 # FT-008: Smart Approval Classifier
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
