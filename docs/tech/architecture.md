@@ -107,7 +107,7 @@ User / Workload Owner
 ### Key Modules (current + planned)
 
 - `src/session/` — Session models and Project-local SessionStore (files in .nib/sessions/)
-- `src/llm/` — LlmClient trait + providers (OpenAI, Anthropic, Gemini, Grok, Mock)
+- `src/llm/` — LlmClient trait + providers (OpenAI, Anthropic, Gemini, Grok, OpenRouter, Meta, Mock)
 - `src/agent/` — Core loop (reasoning → tool selection via executor → observation)
 - `src/tools/`
   - `models.rs` — PermissionLevel, ApprovalMode, ToolCall, Result
@@ -121,7 +121,8 @@ User / Workload Owner
 - `src/sandbox/`
   - `mod.rs` — Hybrid execution via bwrap
 - `src/integrations/` — MCP ClientManager + server exposing tools
-- `src/cli/` & `src/tui/` — Interfaces for interacting with the agent loop
+- `src/mcp_cmd.rs` & `src/skill_cmd.rs` — Dedicated CLI managers for MCP servers and Skills
+- `src/cli/` & `src/tui/` & `src/chat.rs` — Interfaces for interacting with the agent loop (including interactive REPL `/mcp` and `/skills` slash commands)
 
 ## Data Flow for a Typical Session
 
@@ -208,8 +209,8 @@ sequenceDiagram
 ## Integration Points (Ecosystem)
 
 - **AGENTS.md / CLAUDE.md**: Automatically discovered and injected. Rules can influence classification, require extra approvals, or define safe-mode allowlists.
-- **Skills (SKILL.md)**: Discovered from standard locations in the ecosystem (e.g. ~/.grok/skills and project-local). Provide instructions, constraints, wrappers, or post-hooks. nib itself can be published as a skill.
-- **MCP**: Client consumes external tools (GitHub, Notion, etc.). Server exposes nib tools (workload queries + safe executor calls) so other agents can delegate work to nib's permission model.
+- **Skills (SKILL.md)**: Discovered from standard locations in the ecosystem (e.g. `~/.config/nib/skills` and project-local `.nib/skills`). Configured via `nib skill` or `/skills`. Provide instructions, constraints, wrappers, or post-hooks. nib itself can be published as a skill.
+- **MCP**: Client consumes external tools (GitHub, Notion, etc.). Configured via `nib mcp` or `/mcp`. Server exposes nib tools (workload queries + safe executor calls) so other agents can delegate work to nib's permission model.
 - **Sub-agents / Lanes**: Delegation targets with fresh context + worktree. nib owns the lifecycle and reconciliation.
 - **Git**: Worktree isolation for changes; status/diff helpers.
 - **Libs Documentation**: Read-only scoped access during context assembly so the agent understands domain boundaries (see previous requirements).
@@ -226,7 +227,7 @@ sequenceDiagram
 
 ## Future Evolution
 
-- Production LLM clients (Grok, Anthropic, OpenAI) + streaming (FT-004).
+- Streaming support for LLM clients.
 - Richer Planner (full symphony-style + multi-step reasoning).
 - Advanced session memory (summaries, facts across turns).
 - Smarter approval classifier inside the loop.
