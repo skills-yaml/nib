@@ -1,6 +1,6 @@
 # FT-007: Advanced Session Memory & Summarization
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
