@@ -11,7 +11,7 @@ impl Worktree {
     /// Creates a new git worktree in the `.nib/worktrees/` directory based on the current HEAD.
     pub fn create(project_root: &Path, id: &str) -> Result<Self, String> {
         let worktree_dir = project_root.join(".nib").join("worktrees").join(id);
-        
+
         if worktree_dir.exists() {
             return Err(format!("Worktree {} already exists", id));
         }
@@ -22,7 +22,14 @@ impl Worktree {
         // Command: git worktree add -b <branch_name> <path> HEAD
         let output = Command::new("git")
             .current_dir(project_root)
-            .args(["worktree", "add", "-b", &branch_name, worktree_dir.to_str().unwrap(), "HEAD"])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                &branch_name,
+                worktree_dir.to_str().unwrap(),
+                "HEAD",
+            ])
             .output()
             .map_err(|e| format!("Failed to run git worktree: {}", e))?;
 
@@ -39,7 +46,7 @@ impl Worktree {
     /// Removes the worktree.
     pub fn remove(project_root: &Path, id: &str) -> Result<(), String> {
         let worktree_dir = project_root.join(".nib").join("worktrees").join(id);
-        
+
         if !worktree_dir.exists() {
             return Ok(());
         }

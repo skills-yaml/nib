@@ -50,7 +50,9 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         },
         ToolMetadata {
             name: "invoke_subagent".to_string(),
-            description: "Launch a secondary nib loop (or external model) in an isolated context/worktree.".to_string(),
+            description:
+                "Launch a secondary nib loop (or external model) in an isolated context/worktree."
+                    .to_string(),
             permission_level: PermissionLevel::Safe,
             requires_approval: false,
             requires_worktree: true,
@@ -64,7 +66,8 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         },
         ToolMetadata {
             name: "send_message".to_string(),
-            description: "Pass instructions or data between the main agent and subagents.".to_string(),
+            description: "Pass instructions or data between the main agent and subagents."
+                .to_string(),
             permission_level: PermissionLevel::Safe,
             requires_approval: false,
             requires_worktree: false,
@@ -78,28 +81,34 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         },
         ToolMetadata {
             name: "read_url_content".to_string(),
-            description: "Fetch and convert HTML to markdown for documentation parsing.".to_string(),
+            description: "Fetch and convert HTML to markdown for documentation parsing."
+                .to_string(),
             permission_level: PermissionLevel::Network,
             requires_approval: false,
             requires_worktree: false,
         },
         ToolMetadata {
             name: "manage_task".to_string(),
-            description: "Fork heavy commands into non-blocking background tasks and poll status.".to_string(),
+            description: "Fork heavy commands into non-blocking background tasks and poll status."
+                .to_string(),
             permission_level: PermissionLevel::ReadOnly,
             requires_approval: false,
             requires_worktree: false,
         },
         ToolMetadata {
             name: "schedule".to_string(),
-            description: "Set up recurring cron-like timers to wake the agent loop at a later time.".to_string(),
+            description:
+                "Set up recurring cron-like timers to wake the agent loop at a later time."
+                    .to_string(),
             permission_level: PermissionLevel::Safe,
             requires_approval: false,
             requires_worktree: false,
         },
         ToolMetadata {
             name: "ask_question".to_string(),
-            description: "Pause the agent loop and render an interactive multi-choice modal in the TUI.".to_string(),
+            description:
+                "Pause the agent loop and render an interactive multi-choice modal in the TUI."
+                    .to_string(),
             permission_level: PermissionLevel::Safe,
             requires_approval: false,
             requires_worktree: false,

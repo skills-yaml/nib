@@ -314,12 +314,16 @@ async fn run_terminal(args: &Value, cwd: &Path, config: &ExecutionConfig) -> Res
 
 fn invoke_subagent(args: &Value, cwd: &Path) -> Result<Value, String> {
     let subagent_id = format!("sub-{}", uuid::Uuid::new_v4());
-    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("help").to_string();
-    
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("help")
+        .to_string();
+
     // Create worktree
     let worktree = crate::sandbox::worktree::Worktree::create(cwd, &subagent_id)?;
     let wt_path = worktree.path.clone();
-    
+
     crate::daemons::task::TASK_MANAGER.register_subagent(subagent_id.clone());
 
     let sid = subagent_id.clone();
@@ -338,7 +342,10 @@ fn invoke_subagent(args: &Value, cwd: &Path) -> Result<Value, String> {
 }
 
 async fn manage_subagents(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("list");
     if action == "list" {
         Ok(json!({ "subagents": crate::daemons::task::TASK_MANAGER.list_tasks() }))
     } else {
@@ -347,9 +354,15 @@ async fn manage_subagents(args: &Value, _cwd: &Path) -> Result<Value, String> {
 }
 
 async fn send_message(args: &Value, cwd: &Path) -> Result<Value, String> {
-    let subagent_id = args.get("subagent_id").and_then(|v| v.as_str()).ok_or("missing subagent_id")?;
-    let message = args.get("message").and_then(|v| v.as_str()).ok_or("missing message")?;
-    
+    let subagent_id = args
+        .get("subagent_id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing subagent_id")?;
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or("missing message")?;
+
     // Append to subagent's session file so it picks it up in its loop
     let store = crate::session::SessionStore::new(cwd);
     store.append_message(subagent_id, "user", message);
@@ -366,7 +379,9 @@ async fn read_url_content(args: &Value, _cwd: &Path) -> Result<Value, String> {
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
     match reqwest::get(url).await {
         Ok(res) => match res.text().await {
-            Ok(text) => Ok(json!({ "status": "success", "content": &text[..text.len().min(1000)] })),
+            Ok(text) => {
+                Ok(json!({ "status": "success", "content": &text[..text.len().min(1000)] }))
+            }
             Err(e) => Err(format!("Failed to read text: {}", e)),
         },
         Err(e) => Err(format!("Request failed: {}", e)),
@@ -374,7 +389,10 @@ async fn read_url_content(args: &Value, _cwd: &Path) -> Result<Value, String> {
 }
 
 async fn manage_task(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("list");
     if action == "list" {
         Ok(json!({ "tasks": crate::daemons::task::TASK_MANAGER.list_tasks() }))
     } else {
@@ -383,8 +401,15 @@ async fn manage_task(args: &Value, _cwd: &Path) -> Result<Value, String> {
 }
 
 async fn schedule(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("timer fired").to_string();
-    let duration = args.get("duration_secs").and_then(|v| v.as_u64()).unwrap_or(60);
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("timer fired")
+        .to_string();
+    let duration = args
+        .get("duration_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
     let (tx, _rx) = tokio::sync::mpsc::channel(1); // Dummy channel for now
     let id = format!("timer-{}", uuid::Uuid::new_v4());
     crate::daemons::task::TASK_MANAGER.spawn_timer(id.clone(), duration, prompt, tx);
@@ -395,4 +420,3 @@ async fn ask_question(args: &Value, _cwd: &Path) -> Result<Value, String> {
     // In reality, this sets the loop state. For now, just return a prompt response
     Ok(json!({ "status": "pending_ui", "question": args.get("question") }))
 }
-
