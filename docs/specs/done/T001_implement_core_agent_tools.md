@@ -1,6 +1,12 @@
 # T001: Implement Core Agent Tools (FT-001)
 
-**Related Feature:** [FT-001: Basic Agent Tools Implementation](../feature/ft_001_basic_agent_tools.md)
+**Status:** Done
+
+**Related Feature:** [FT-001: Basic Agent Tools Implementation](../development/ft_001_basic_agent_tools.md)
+
+> Historical proposal note: sections before the 2026-07-15 reconciliation preserve
+> the original Python/global-Task design and delivery sequence. The Rust,
+> profile-session implementation described in the reconciliation is authoritative.
 
 ## Goal
 
@@ -58,9 +64,124 @@ All success criteria above are met, the code follows the rules in `AGENTS.md` an
 
 **Owner:** nib team (feat/implement-basic-agent-tools)  
 **Estimate:** 3–6 focused sessions  
-**Status:** Core delivered (registry, executor, worktree, read tools, audit, context integration, demos). Write-tool impls, full quality gates, and real E2E edits remain.
+**Implementation note:** The Rust registry, executor, worktree, tools, audit, context
+integration, and E2E edit path are present. Current completion evidence is reconciled below.
 
-**Post-execution notes (2026-06):**  
-Implementation followed the suggested order closely. See updated FT-001 "Implementation Status" for detailed delivered vs gaps. `task check` and expanded tests are open items. The task spec remains the reference definition of done for this increment. No separate .plan.md was required for the initial pass.
+**Post-execution notes (2026-06 snapshot):**
+Implementation followed the suggested order closely. At that snapshot, expanded
+tests and write-tool behavior were still open; the later reconciliation below records
+their Rust implementation and final evidence. No separate `.plan.md` was required for
+the initial pass.
 
-Update this file (or move to done/) when the remaining gaps in FT-001 are closed and all success criteria are green.
+## Reopened Audit (2026-07-15)
+
+Scope: finish the five tool interfaces, fail-closed scope/worktree enforcement,
+session/task-linked audit, policy enforcement, MCP exposure, and observable tests.
+
+Affected areas: `src/tools/`, `src/sandbox/`, `src/session/`, `src/context/`,
+`src/integrations/`, `src/tui/`, and tool/runtime integration tests.
+
+Acceptance criteria: every criterion in the Success Criteria and Exit Criteria
+sections is backed by an observable test or verified runtime artifact.
+
+Validation gates: focused success/error/denial/worktree tests, a real edit and
+reconciliation E2E, `task check`, and `task test`.
+
+## Implementation Reconciliation (2026-07-15)
+
+### Scope
+
+The shipped scope is the Rust core-tool registry and dispatcher, central gated
+executor, worktree/sandbox execution, profile-session audit, context policy, and MCP
+exposure. Historical Python/Pydantic paths and a global Task row are superseded.
+
+### Acceptance Criteria
+
+- [x] `read_file`, `list_directory`, `grep`, `apply_patch`, and `run_terminal` have
+  bounded schemas and real Rust implementations.
+- [x] Agent-selected calls pass through scope, policy, approval, dispatch, redaction,
+  and profile-session audit in `ToolExecutor`.
+- [x] Mutations require an approved persisted plan and execute in a session worktree.
+- [x] Core tools are exposed through the stdio MCP server without bypassing the executor.
+- [x] AGENTS and selected-skill rules can alter approval or deny execution.
+- [x] Final repository gates are green after all concurrent remediation.
+
+### Affected Areas
+
+`src/tools/`, `src/sandbox/`, `src/session/`, `src/context/`, `src/agent/`,
+`src/integrations/mcp_server.rs`, and executor/runtime integration tests.
+
+### Implementation Evidence
+
+- `src/tools/registry.rs`, `src/tools/core.rs`, and `src/tools/executor.rs` own schemas,
+  implementations, approval/policy, dispatch, and `ToolCallRecord` audit.
+- `src/agent/loop.rs` supplies bounded context and reconciles observations into the
+  persisted session plan; `src/sandbox/worktree.rs` owns session worktrees.
+
+### Validation Evidence
+
+- `tests/executor.rs`: `read_only_call_succeeds_and_outside_root_attempt_is_audited`,
+  `mutating_tools_require_an_approved_plan`, and
+  `patch_defaults_to_dry_run_and_terminal_nonzero_is_failure`.
+- `tests/test_runtime_e2e.rs`:
+  `approved_patch_physically_changes_only_the_session_worktree_and_is_verified` and
+  `selected_skill_can_require_tool_approval_and_denial_has_no_side_effect`.
+- `tests/test_runtime_e2e.rs`:
+  `mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio`.
+
+### Validation Gates
+
+- [x] Focused tool success, denial, scope, worktree, and MCP integration tests exist.
+- [x] `task check`.
+- [x] `task test`.
+
+### Genuine Gaps
+
+The original global Task-ID requirement was superseded. The authoritative equivalent
+is a profile-scoped session, its `PlanStep`, lifecycle events, and durable task
+records; no in-scope implementation gap remains.
+
+## Reopened Audit (2026-07-16)
+
+### Scope
+
+Close the remaining sessionless execution path so every production `ToolExecutor`
+dispatch either records a profile-session audit or fails before the tool runs.
+
+### Acceptance Criteria
+
+- [x] `ToolExecutor::execute` creates or resolves an authoritative audit session when
+  callers do not provide one.
+- [x] Successful and denied sessionless calls persist attempt and result records.
+- [x] Doctor permission probes remain functional and auditable.
+- [x] No production call can return a successful tool result without a durable audit.
+
+### Affected Areas
+
+`src/tools/executor.rs`, `src/doctor.rs`, session persistence, and executor tests.
+
+### Implementation Plan
+
+1. Resolve or create a profile-scoped session before any sessionless dispatch.
+2. Reuse that implicit audit session for the lifetime of the executor and fail closed
+   if session creation or attempt recording fails.
+3. Prove successful and denied probes, including doctor, persist complete audit records.
+
+### Risks
+
+Implicit audit sessions add local state for diagnostic callers. Reusing one session per
+executor bounds that growth, while mandatory pre-dispatch attempt persistence prevents
+an audit setup failure from becoming an unaudited action.
+
+### Completion Evidence
+
+`tests/executor.rs::sessionless_read_is_redacted_and_persisted_in_an_implicit_audit_session`
+proves mandatory implicit-session audit. Doctor tests prove successful and denied
+permission probes share that audit session. Sessionless audit context remains
+non-authoritative for schedule/background ownership, and caller-provided plan IDs
+cannot forge persisted audit linkage.
+
+### Validation Gates
+
+Focused sessionless success/denial/audit tests, `task check`, `task test`, and
+`task coverage`.

@@ -12,10 +12,33 @@ tasks:
   check:
     desc: Run Rust formatting, lint, compile, and unit tests
     cmds:
+      - task: installers:check
       - cargo fmt -- --check
       - cargo clippy -- -D warnings
       - cargo check
       - cargo test -- --test-threads=1
+
+  docs:check:
+    desc: Validate internal Markdown links and spec-state invariants
+    cmds:
+      - cargo test --test docs_integrity -- --test-threads=1
+
+  installers:check:
+    desc: Validate installer syntax and pinned release defaults
+    cmds:
+      - sh -n scripts/install.sh
+      - sh -n scripts/first-time-setup.sh
+      - bash -n scripts/publish-release.sh
+      - bash -n scripts/check-managed-process-release.sh
+      - rg -q 'skills-yaml/nib' scripts/install.sh
+      - rg -q 'skills-yaml/nib' scripts/install.ps1
+      - rg -q 'sha256' scripts/install.sh
+      - rg -qi 'sha256' scripts/install.ps1
+
+  coverage:
+    desc: Enforce at least 80 percent line coverage on runtime components
+    cmds:
+      - scripts/check-runtime-coverage.sh
 
   fix:
     desc: Auto-format and apply clippy fixes
@@ -28,10 +51,21 @@ tasks:
     cmds:
       - cargo test -- --test-threads=1
 
+  test:durable:
+    desc: Run durable background task and scheduled worker integration tests
+    cmds:
+      - cargo test --test durable_tasks -- --test-threads=1
+
   build:
     desc: Build optimized release binary (supports cross TARGET)
     cmds:
       - cargo build --locked --release {{if .TARGET}}--target {{.TARGET}}{{end}}
+
+  smoke:managed-process:
+    desc: Kill the release-binary owner and verify supervised descendant cleanup
+    cmds:
+      - task: build
+      - scripts/check-managed-process-release.sh
 
   dev:
     desc: Quick dev check (Rust-only core)

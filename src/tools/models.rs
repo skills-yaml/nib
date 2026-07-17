@@ -33,6 +33,10 @@ pub struct ToolMetadata {
     pub requires_approval: bool,
     #[serde(default)]
     pub requires_worktree: bool,
+    #[serde(default = "default_true")]
+    pub mcp_exposable: bool,
+    #[serde(default)]
+    pub input_schema: Value,
 }
 
 fn default_true() -> bool {
@@ -86,6 +90,14 @@ impl ApprovalDecision {
         }
     }
 
+    pub fn denied_by_policy(note: impl Into<String>) -> Self {
+        Self {
+            granted: false,
+            source: "policy".to_string(),
+            note: Some(note.into()),
+        }
+    }
+
     pub fn granted_classifier() -> Self {
         Self {
             granted: true,
@@ -108,6 +120,43 @@ impl ApprovalDecision {
             source: "yolo".to_string(),
             note: Some("YOLO mode".to_string()),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyEffect {
+    Allow,
+    RequireApproval,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRule {
+    pub effect: PolicyEffect,
+    pub tool_name: String,
+    pub argument_contains: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AfterToolHook {
+    pub source: String,
+    pub tool_name: String,
+    pub command: String,
+}
+
+impl PolicyRule {
+    pub fn matches(&self, call: &ToolCall) -> bool {
+        if self.tool_name != "*" && self.tool_name != call.tool_name {
+            return false;
+        }
+
+        self.argument_contains.as_ref().is_none_or(|needle| {
+            call.arguments
+                .to_string()
+                .to_lowercase()
+                .contains(&needle.to_lowercase())
+        })
     }
 }
 

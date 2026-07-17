@@ -1,7 +1,7 @@
 param(
     [ValidateSet("prod", "production", "dev", "development")]
     [string] $Channel = "prod",
-    [string] $Repo = "example/nib",
+    [string] $Repo = "skills-yaml/nib",
     [string] $InstallDir = "$env:USERPROFILE\.local\bin",
     [switch] $AddToPath
 )
@@ -29,8 +29,22 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 try {
     $Archive = Join-Path $TempDir $Asset
+    $Checksum = "$Archive.sha256"
     Write-Host "Downloading $Url"
     Invoke-WebRequest -Uri $Url -OutFile $Archive
+    Invoke-WebRequest -Uri "$Url.sha256" -OutFile $Checksum
+
+    $ChecksumLine = (Get-Content -Path $Checksum -TotalCount 1).Trim()
+    $ExpectedHash = ($ChecksumLine -split "\s+")[0].ToLowerInvariant()
+    if ($ExpectedHash -notmatch "^[0-9a-f]{64}$") {
+        throw "Invalid SHA-256 checksum downloaded from $Url.sha256"
+    }
+    $ActualHash = (Get-FileHash -Path $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualHash -ne $ExpectedHash) {
+        throw "Checksum verification failed for $Asset"
+    }
+    Write-Host "Verified SHA-256 for $Asset"
+
     Expand-Archive -Path $Archive -DestinationPath $TempDir -Force
     Copy-Item (Join-Path $TempDir "nib.exe") (Join-Path $InstallDir "nib.exe") -Force
 

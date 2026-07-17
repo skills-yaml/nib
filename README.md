@@ -1,14 +1,20 @@
 # nib
 
-nib is a command-line AI coding assistant that executes tasks in a sandboxed environment. It integrates directly with your local workspace to plan, implement, and verify code changes.
+nib is a command-line AI coding assistant that plans, executes, and reconciles work in local Git worktrees with explicit approval and audit records.
 
 ## Features
 
-- **Local Sessions:** Maintains conversation and tool call history locally in `./.nib/sessions/`.
-- **Pluggable LLMs:** Supports OpenAI, Anthropic, Gemini, Grok, and local providers.
-- **Sandboxed Execution:** Restricts file modifications outside the project root and runs dangerous commands inside a restricted boundary (`bwrap` on Linux).
-- **Human-in-the-Loop:** Pauses for approval before executing destructive actions.
+- **Local Sessions:** Stores profile-scoped history under `./.nib/profiles/<id>/sessions/`.
+- **Pluggable LLMs:** Includes configured adapters for OpenAI, Anthropic, Gemini, Grok, OpenRouter, Meta, and Mock.
+- **Layered Execution:** Isolates mutations in Git worktrees; the default hybrid provider uses Linux `bwrap` when usable and otherwise runs directly in the worktree.
+- **Human-in-the-Loop:** Manual mode prompts for plans and risky actions; explicit deny policies remain authoritative.
 - **MCP Integration:** Can act as an MCP (Model Context Protocol) server for external IDEs or clients.
+- **Durable Work:** Background commands and scheduled wakes have inspectable, cancellable, lease-fenced records.
+- **Supervised Delegation:** Foreground subagents use an independent cleanup supervisor;
+  production delegation requires a usable Linux bwrap PID namespace. Windows Job
+  Object and macOS process-group backends remain non-production native test mechanisms
+  until their cleanup authority is isolated from managed workers.
+- **Persistent Memory:** Approval-gated environment and user facts carry across sessions without replacing the raw audit trail.
 
 ## Installation
 
@@ -51,6 +57,7 @@ task build
 
 1. **Authenticate:** Configure your API keys.
    ```bash
+   cd /path/to/project
    nib auth
    ```
 
@@ -67,7 +74,13 @@ task build
    Inside the chat, you can use slash commands:
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
+   - `/skills` - Manage installed skills
+   - `/mcp` - Manage MCP servers
    - `/quit` - Exit the session
+
+Mutating work remains on a `nib/session/*` worktree branch until you review and merge
+it. `nib run --yes` bypasses interactive plan and tool prompts and should be limited to
+already trusted environments.
 
 ## Documentation
 

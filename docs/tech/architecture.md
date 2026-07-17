@@ -1,6 +1,6 @@
 # Base Architecture of nib
 
-nib is a **local-first AI coding agent**. All session data (conversations + tool calls) is stored as JSON files inside the project's `.nib/sessions/` directory. It breaks down goals, executes work safely (using hybrid bwrap + worktrees), and keeps full history per project.
+nib is a **local-first AI coding agent**. Session data (conversations + tool calls) is stored as JSON files inside the selected profile's `.nib/profiles/<id>/sessions/` directory by default. It breaks down goals, executes work through approval, worktree, and optional `bwrap` layers, and keeps an auditable history per profile.
 
 This document describes the **base architecture** — the core components, data flows, principles, and integration points that every part of nib must respect.
 
@@ -9,16 +9,18 @@ See also:
 - [Backend Rust](backend_rust.md)
 - [Permissions](permissions.md) (defense-in-depth model)
 - [Ecosystem Integration](ecosystem_integration.md) (MCP, Skills, AGENTS.md)
-- [FT-001: Basic Agent Tools](../specs/feature/ft_001_basic_agent_tools.md)
-- [FT-003: Hybrid Sandboxing](../specs/development/ft_003_adopt_codex_sandboxing.md) (reopened — implement in Rust)
-- [FT-004: LLM Integration and Agent Loop](../specs/feature/ft_004_llm_integration_and_agent_loop.md) (reasoning + tool loop)
+- [FT-001: Basic Agent Tools](../specs/development/ft_001_basic_agent_tools.md)
+- [FT-003: Hybrid Sandboxing](../specs/done/ft_003_adopt_codex_sandboxing.md) (implemented in Rust with reconciled audit evidence)
+- [FT-004: LLM Integration and Agent Loop](../specs/done/ft_004_llm_integration_and_agent_loop.md) (reasoning + tool loop)
 
 ## High-Level Principles
 
 1. **Session History is Sacred**
-   - All conversation messages and tool executions are stored as files inside the project's `.nib/sessions/` directory.
+   - All conversation messages and tool executions are stored in the selected profile's sessions directory.
    - This gives full per-session auditability without a global database.
-   - Every tool call records the exact arguments, result, approval decision, worktree, and boundaries.
+   - Every audited tool call records bounded, redacted arguments and results, its
+     approval decision, worktree, and boundaries. Raw secret values are deliberately
+     not retained.
 
 2. **Defense-in-Depth for Safety**
    - No tool action (especially destructive ones like `run_terminal` or broad patches) can occur without passing multiple independent layers: scoping, isolation (worktrees), classification, policy/AGENTS.md rules, explicit approval (manual or prior grant), redaction, and audit.
@@ -38,8 +40,8 @@ See also:
    - Escalation points (clarify, approve, review diff) are first-class.
 
 6. **Context-Rich but Token-Efficient**
-   - Early in a session: assemble rich context (AGENTS.md, relevant Skills, project standards/libs docs, recent session history, connected MCP tools).
-   - Future work will address token budgets via summarization and selective loading.
+   - Assemble AGENTS.md, relevant Skills and references, profile memory, recent session history, and connected MCP tools.
+   - Enforce a configured history budget and compress older context into an audited summary while preserving raw messages.
 
 ## Core Components
 
@@ -91,44 +93,61 @@ User / Workload Owner
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│              Reconciler                       │  (Verify diffs, run tests, update workload state,
-│  (src/agent/reconciler.rs - future)           │   link artifacts, record rationale)
+│              Reconciliation                   │  (Update plan outcome, emit lifecycle state,
+│  (src/agent/loop.rs)                          │   preserve artifacts and audit rationale)
 └──────────────┬────────────────────────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│           Session Store (file-based)         │  (plain JSON files in <project>/.nib/sessions/)
+│           Session Store (file-based)         │  (plain JSON files in the profile state directory)
 │  • Conversation history (messages)            │
 │  • Tool calls with results and approvals      │
-│  • Stored per project under .nib/             │
+│  • Stored under selected profile state        │
 └───────────────────────────────────────────────┘
 ```
 
-### Key Modules (current + planned)
+### Library Module Map
 
-- `src/session/` — Session models and Project-local SessionStore (files in .nib/sessions/)
-- `src/llm/` — LlmClient trait + providers (OpenAI, Anthropic, Gemini, Grok, OpenRouter, Meta, Mock)
-- `src/agent/` — Core loop (reasoning → tool selection via executor → observation)
-- `src/tools/`
-  - `models.rs` — PermissionLevel, ApprovalMode, ToolCall, Result
-  - `registry.rs` — Static metadata registration
-  - `executor.rs` — The central gate (all layers)
-  - `core_tools.rs` — Implementations of minimal tools
-  - `worktree.rs` — Git worktree isolation manager
-- `src/context/`
-  - `agents.rs` — Walk-up discovery + loading of AGENTS.md
-  - `loader.rs` — assemble_context() + assemble_agent_prompt()
-- `src/sandbox/`
-  - `mod.rs` — Hybrid execution via bwrap
-- `src/integrations/` — MCP ClientManager + server exposing tools
-- `src/mcp_cmd.rs` & `src/skill_cmd.rs` — Dedicated CLI managers for MCP servers and Skills
-- `src/cli/` & `src/tui/` & `src/chat.rs` — Interfaces for interacting with the agent loop (including interactive REPL `/mcp` and `/skills` slash commands)
+- `src/lib.rs` — Public library surface for the runtime modules used by the CLI and tests.
+- `src/agent/{mod.rs,loop.rs,planner.rs,state.rs}` — Agent orchestration, plan generation, cancellation/question contracts, streamed execution, and reconciled run state.
+- `src/config/mod.rs` — Strict project TOML schema, migration, validation, locking, and atomic updates.
+- `src/context/{mod.rs,agents.rs,budget.rs,compression.rs,project_docs.rs,skills.rs}` — Profile-aware prompt assembly, AGENTS.md discovery, aggregate budgeting, transcript compression, fixed-root project documentation, and bounded skill discovery/loading.
+- `src/daemons/{mod.rs,cron.rs,curator.rs,state.rs,task.rs,workload.rs}` — Cron parsing, retention, shared locked state, in-process timers, and durable detached task leases/reconciliation.
+- `src/fs_security.rs` — Shared file identity, no-symlink directory traversal, and replacement-race checks used by persistence and execution boundaries.
+- `src/integrations/mod.rs` — Integration namespace and visibility boundary.
+- `src/integrations/gateway.rs` — Normalized console and external-messaging ingress/egress contract.
+- `src/integrations/mcp.rs` — Outbound MCP stdio client lifecycle and tool dispatch.
+- `src/integrations/mcp_framing.rs` — Shared bounded, newline-delimited JSON framing for MCP client/server stdio.
+- `src/integrations/mcp_server.rs` — Inbound MCP server exposing the gated nib runtime.
+- `src/integrations/worktree.rs` — Session worktree manager built on sandbox ownership receipts.
+- `src/llm/{mod.rs,types.rs,factory.rs,openai.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral client/stream types, retry and response bounds, provider construction, concrete APIs, and deterministic test doubles.
+- `src/profile/{mod.rs,migration.rs}` — Workspace profile resolution, isolated state roots, environment loading, and legacy state migration.
+- `src/sandbox/mod.rs` — Command-shell resolution, capability checks, direct execution, and optional Linux `bwrap` isolation.
+- `src/sandbox/process.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
+- `src/sandbox/windows_job.rs` — Windows Job Object containment backend.
+- `src/sandbox/worktree.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
+- `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, events, tool audit, profile-scoped persistence, and bounded profile memory.
+- `src/tools/{mod.rs,classifier.rs,models.rs,registry.rs,executor.rs,core.rs,delegation.rs}` — Tool contracts and metadata, classification, the central approval/policy/sandbox gate, built-in tools, and linked-subagent lifecycle.
+- `src/tui/mod.rs` — Ratatui session browser and streamed interactive execution UI.
+
+### Binary Module Map
+
+- `src/main.rs` — Clap command model, runtime setup, hidden worker/relay entry points, and top-level dispatch.
+- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, interactive chat, and one-shot agent execution.
+- `src/console.rs` — Shared blocking/async console input plus approval and question handlers used by CLI flows.
+- `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.
+- `src/mcp_cmd.rs`, `src/skill_cmd.rs`, and `src/task_cmd.rs` — MCP server configuration, skill inventory/install/remove operations, and durable task management.
+- `src/version.rs` and `src/updater.rs` — Embedded build metadata display and update-channel support.
+- `src/mcp_test_fixture.rs` — Debug-build-only subprocess fixture for MCP framing, lifecycle, and process-tree tests.
 
 ## Data Flow for a Typical Session
 
 1. **Intake / Activation**
-   - User creates or resumes a session (`.nib/sessions/<id>.json`).
-   - Context + prompt builder assembles AGENTS.md, skills, recent history, and tool schemas.
+   - User creates or resumes a session in the selected profile store.
+   - Console/TUI input enters directly; external messaging adapters authenticate and receive provider traffic before passing a payload to the normalized gateway.
+   - Context + prompt builder assembles AGENTS.md, project documentation, skills,
+     profile memory, workload state, recent history, and tool schemas within one
+     aggregate model-context budget.
 
 2. **LLM Reasoning (new in FT-004)**
    - AgentLoop sends prompt to LLMClient.
@@ -145,7 +164,7 @@ User / Workload Owner
 
 4. **Loop + Reconciliation**
    - Continue until final answer, approved plan, or limit.
-   - Future Reconciler can append verification summaries to the session.
+   - Reconciliation advances or blocks the persisted plan and records the final outcome.
 
 5. **Visibility**
    - CLI/TUI shows live session history, tool calls (with boundaries/approvals), and loop state.
@@ -201,19 +220,33 @@ sequenceDiagram
 
 ## Persistence
 
-- File-based sessions stored locally in the project folder under `.nib/sessions/`.
-- Each session is a JSON file containing conversation messages and tool call records (with approvals, worktree, etc.).
-- No central global database; everything is project-local.
+- File-based sessions stored locally under `.nib/profiles/<id>/sessions/` by default.
+- Each session is a JSON file containing conversation messages, structured `PlanStep`
+  state, lifecycle events, and tool call records with approvals and worktree metadata.
+- Profile daemon state stores durable background and scheduled task records, including
+  leases, cancellation requests, and reconciliation outcomes.
+- There is no SQLite or central global Projects/Tasks/Epics backlog database. Older
+  T002 proposal text describing one is superseded by the profile-scoped session and
+  durable-task model.
 - Future: export/import, git-friendly snapshots, or optional bridges to Notion/GitHub Projects.
 
 ## Integration Points (Ecosystem)
 
 - **AGENTS.md / CLAUDE.md**: Automatically discovered and injected. Rules can influence classification, require extra approvals, or define safe-mode allowlists.
 - **Skills (SKILL.md)**: Discovered from standard locations in the ecosystem (e.g. `~/.config/nib/skills` and project-local `.nib/skills`). Configured via `nib skill` or `/skills`. Provide instructions, constraints, wrappers, or post-hooks. nib itself can be published as a skill.
-- **MCP**: Client consumes external tools (GitHub, Notion, etc.). Configured via `nib mcp` or `/mcp`. Server exposes nib tools (workload queries + safe executor calls) so other agents can delegate work to nib's permission model.
+- **MCP**: The v1 stdio client consumes configured external tools. The v1 stdio server
+  exposes agent-run/status and gated executor tools so callers cannot bypass nib's
+  permission model. HTTP/SSE transport and OAuth are future work.
+- **External messaging**: Telegram, Slack, and Discord adapters own provider
+  authentication, listeners, and reply delivery. nib accepts normalized gateway
+  payloads and does not let callers inject tool schemas.
 - **Sub-agents / Lanes**: Delegation targets with fresh context + worktree. nib owns the lifecycle and reconciliation.
 - **Git**: Worktree isolation for changes; status/diff helpers.
-- **Libs Documentation**: Read-only scoped access during context assembly so the agent understands domain boundaries (see previous requirements).
+- **Project and libs documentation**: `src/context/project_docs.rs` loads text/Markdown
+  from fixed project-local `docs/standards`, `docs/tech`, `docs/libs`, and library
+  README/docs roots. Discovery never follows symlinks, is deterministic, and is capped
+  by depth, scanned entries, file count, per-file bytes, and aggregate bytes before the
+  shared model-context budget is applied.
 
 ## Technology & Quality
 
@@ -225,16 +258,21 @@ sequenceDiagram
 - `serde` for all JSON and TOML parsing.
 - All repeatable work via Taskfile.
 
-## Future Evolution
+## Current Runtime Extensions
 
-- Streaming support for LLM clients.
-- Richer Planner (full symphony-style + multi-step reasoning).
-- Advanced session memory (summaries, facts across turns).
-- Smarter approval classifier inside the loop.
-- Deep sub-agent / lane delegation with linked sessions.
-- MCP server exposing the full agent loop.
-- TUI live streaming of LLM tokens + tool results.
+- Provider streaming feeds live model, tool, approval, question, compression, and reconciliation events to the TUI.
+- Structured plans are persisted, approved before execution, and advanced from verified tool outcomes.
+- Compression preserves raw transcripts while bounding model context; profile memory persists environment and user facts.
+- The `manage_memory` tool provides bounded list/get/set/delete operations. Reads are
+  read-only, writes require approval or an explicit allow policy, deletes are
+  destructive, and every call follows the normal session audit path.
+- `nib task list|get|cancel|reconcile` exposes durable background state without
+  replaying commands whose side effects are uncertain.
+- Linked subagents use dedicated worktrees and verification-gated merge. Repository-wide
+  merge and recovery serialize on a persistent `.nib` hardlink anchor outside the
+  replaceable subagent-records directory.
+- Outbound and inbound MCP calls retain nib's approval and audit path.
 
-This architecture keeps nib as a trustworthy, local-first orchestrator that drives LLMs safely through gated tools while maintaining complete per-project session history in `.nib/sessions/`.
+This architecture keeps nib as a trustworthy, local-first orchestrator that drives LLMs through gated tools while maintaining complete profile-scoped session history.
 
 Update this document whenever core components, flows, or principles change.

@@ -11,7 +11,7 @@ if ! command -v nib >/dev/null 2>&1; then
 fi
 
 echo "Running auth wizard for LLM providers..."
-nib auth || true
+nib auth
 
 echo ""
 echo "First-time setup complete."

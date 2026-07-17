@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::path::Path;
 
-use nib::config::{load_nib_config, save_nib_config_full, McpServerEntry};
+use nib::config::{load_nib_config_full, update_nib_config, McpServerEntry};
 
 #[derive(Args)]
 pub struct McpArgs {
@@ -32,7 +32,7 @@ pub enum McpCommands {
     },
 }
 
-pub fn run_mcp_cmd(args: &McpArgs, project_root: &Path) {
+pub fn run_mcp_cmd(args: &McpArgs, project_root: &Path) -> Result<(), String> {
     match &args.command {
         McpCommands::List => list_mcp_servers(project_root),
         McpCommands::Add {
@@ -44,49 +44,158 @@ pub fn run_mcp_cmd(args: &McpArgs, project_root: &Path) {
     }
 }
 
-pub fn list_mcp_servers(project_root: &Path) {
-    let cfg = load_nib_config(project_root);
+pub fn list_mcp_servers(project_root: &Path) -> Result<(), String> {
+    let cfg = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
     let servers = &cfg.mcp.servers;
 
     if servers.is_empty() {
         println!("No MCP servers configured.");
-        return;
+        return Ok(());
     }
 
     println!("Configured MCP Servers:");
     for (name, entry) in servers {
         println!("  - {}: {} {}", name, entry.command, entry.args.join(" "));
     }
+    Ok(())
 }
 
-pub fn add_mcp_server(project_root: &Path, name: &str, command: &str, args: &[String]) {
-    let mut cfg = load_nib_config(project_root);
-
+pub fn add_mcp_server(
+    project_root: &Path,
+    name: &str,
+    command: &str,
+    args: &[String],
+) -> Result<(), String> {
+    if name.trim().is_empty() || command.trim().is_empty() {
+        return Err("MCP server name and command must not be empty".to_string());
+    }
     let entry = McpServerEntry {
         command: command.to_string(),
         args: args.to_vec(),
         env: HashMap::new(),
+        ..McpServerEntry::default()
     };
-
-    cfg.mcp.servers.insert(name.to_string(), entry);
-
-    if let Err(e) = save_nib_config_full(project_root, &cfg) {
-        eprintln!("Failed to save config: {}", e);
-    } else {
-        println!("Successfully added MCP server '{}'.", name);
-    }
+    update_nib_config(project_root, |config| {
+        config.mcp.servers.insert(name.to_string(), entry);
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    println!("Successfully added MCP server '{}'.", name);
+    Ok(())
 }
 
-pub fn remove_mcp_server(project_root: &Path, name: &str) {
-    let mut cfg = load_nib_config(project_root);
+pub fn remove_mcp_server(project_root: &Path, name: &str) -> Result<(), String> {
+    update_nib_config(project_root, |config| {
+        config
+            .mcp
+            .servers
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| format!("MCP server '{name}' not found"))
+    })
+    .map_err(|error| error.to_string())?;
+    println!("Successfully removed MCP server '{}'.", name);
+    Ok(())
+}
 
-    if cfg.mcp.servers.remove(name).is_some() {
-        if let Err(e) = save_nib_config_full(project_root, &cfg) {
-            eprintln!("Failed to save config: {}", e);
-        } else {
-            println!("Successfully removed MCP server '{}'.", name);
-        }
-    } else {
-        println!("MCP server '{}' not found.", name);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn mcp_config_mutations_are_strict_and_persistent() {
+        let directory = tempdir().expect("tempdir");
+        let mut config = nib::config::NibConfig::default();
+        nib::config::save_nib_config_full(directory.path(), &mut config).expect("default config");
+
+        add_mcp_server(
+            directory.path(),
+            "fixture",
+            "fixture-command",
+            &["--stdio".to_string()],
+        )
+        .expect("add server");
+        let stored = load_nib_config_full(directory.path()).expect("stored config");
+        assert_eq!(stored.mcp.servers["fixture"].args, ["--stdio"]);
+
+        remove_mcp_server(directory.path(), "fixture").expect("remove server");
+        assert!(load_nib_config_full(directory.path())
+            .unwrap()
+            .mcp
+            .servers
+            .is_empty());
+        assert!(remove_mcp_server(directory.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn corrupt_config_is_never_replaced_with_defaults() {
+        let directory = tempdir().expect("tempdir");
+        let paths = nib::config::config_paths(directory.path());
+        std::fs::create_dir_all(&paths.nib_dir).expect("config directory");
+        std::fs::write(&paths.toml, "not = [valid").expect("corrupt config");
+
+        assert!(list_mcp_servers(directory.path()).is_err());
+        assert!(add_mcp_server(directory.path(), "fixture", "command", &[]).is_err());
+        assert!(remove_mcp_server(directory.path(), "fixture").is_err());
+        assert_eq!(std::fs::read_to_string(paths.toml).unwrap(), "not = [valid");
+    }
+
+    #[test]
+    fn command_dispatch_covers_empty_and_populated_server_lists() {
+        let directory = tempdir().expect("tempdir");
+        run_mcp_cmd(
+            &McpArgs {
+                command: McpCommands::List,
+            },
+            directory.path(),
+        )
+        .expect("list empty config");
+        run_mcp_cmd(
+            &McpArgs {
+                command: McpCommands::Add {
+                    name: "local".to_string(),
+                    command: "npx".to_string(),
+                    args: vec!["-y".to_string(), "fixture-server".to_string()],
+                },
+            },
+            directory.path(),
+        )
+        .expect("add through dispatcher");
+        run_mcp_cmd(
+            &McpArgs {
+                command: McpCommands::List,
+            },
+            directory.path(),
+        )
+        .expect("list populated config");
+        run_mcp_cmd(
+            &McpArgs {
+                command: McpCommands::Remove {
+                    name: "local".to_string(),
+                },
+            },
+            directory.path(),
+        )
+        .expect("remove through dispatcher");
+        assert!(load_nib_config_full(directory.path())
+            .unwrap()
+            .mcp
+            .servers
+            .is_empty());
+    }
+
+    #[test]
+    fn add_rejects_empty_and_schema_invalid_server_fields() {
+        let directory = tempdir().expect("tempdir");
+        assert!(add_mcp_server(directory.path(), "", "command", &[])
+            .expect_err("empty name")
+            .contains("must not be empty"));
+        assert!(add_mcp_server(directory.path(), "name", " ", &[])
+            .expect_err("empty command")
+            .contains("must not be empty"));
+        assert!(add_mcp_server(directory.path(), "bad/name", "command", &[])
+            .expect_err("invalid name")
+            .contains("contain only ASCII"));
     }
 }
