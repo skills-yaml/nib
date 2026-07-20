@@ -429,8 +429,8 @@ directories through the existing handle rather than opening a conflicting second
 - [x] NT failures are converted to ordinary Windows errors and an existing destination
   preserves both source and target.
 - [x] Windows visible-directory observation requests only directory-list and attribute
-  access and shares read, write, and delete, while the retained capability continues to
-  pin deletion.
+  access and shares read, write, and delete. Ordinary capabilities detect namespace
+  replacement by identity, while explicitly owned deletion capabilities may pin it.
 - [x] Directory ownership receipts use a separate observation file object. Empty-tree
   cleanup consumes and closes the strong directory capability, while recursive cleanup
   verifies a fresh DELETE-capable handle against the receipt before quarantine or delete.
@@ -468,6 +468,53 @@ regressions, `task test`, `task check`, and the hosted Windows build and smoke j
 The full Windows target graph cross-compiles locally with the WDK filesystem and Win32
 I/O bindings enabled. Native behavior remains unchecked until the hosted job executes;
 the job deliberately retains its default short-path environment as the final regression.
+
+## Hosted Windows Handle Follow-up (2026-07-20)
+
+### Scope
+
+Preserve canonical durable paths while adapting them at the external Git command
+boundary to the non-verbatim spelling supported by Git for Windows. Make retained state
+directory and file capabilities share deletion so replacement-race tests can mutate the
+visible namespace while the original identity remains pinned. Read retained locked
+files through their existing handle, and place cleanup-lease ownership outside the
+bounded JSON payload range so Windows readers can validate live leases without opening
+a conflicting byte range.
+
+### Acceptance Criteria
+
+- [x] Durable managed-worktree records retain canonical paths, while every `git
+  worktree add` target uses an equivalent non-verbatim Windows path.
+- [x] Windows state directory and child capability handles opt into read, write, and
+  delete sharing without weakening no-follow or identity checks.
+- [x] Retained worktree ownership and ref receipts are verified with positional reads
+  through the existing handle while byte-range ownership is held.
+- [x] Live cleanup-lease JSON remains readable during bounded state accounting and
+  mutation, and atomic recovery validates an identity-equal target through the already
+  locked transaction handle.
+- [x] Canonical-equivalent Windows session-store paths compare by filesystem identity
+  rather than raw DOS-short versus verbatim spelling.
+- [ ] The full hosted Windows job passes under its default `C:\Users\RUNNER~1`
+  temporary root.
+
+### Affected Areas
+
+`src/fs_security.rs`, `src/daemons/state.rs`, `src/sandbox/process.rs`,
+`src/sandbox/worktree.rs`, `src/integrations/worktree.rs`, `src/tui/mod.rs`, and focused
+Windows filesystem, persistence, and worktree regressions.
+
+### Validation Gates
+
+Focused retained-handle, cleanup-lease, canonical-path, and worktree tests;
+Windows-target `task check:all-targets`; `task test`; `task check`; `task coverage`; and
+the hosted Windows build and smoke job.
+
+### Local Validation Evidence
+
+The full state, managed-worktree, session-worktree, process-scope, TUI, and delegation
+suites pass on Linux. Windows all-target and all-feature cross-checks include the native
+sentinel lock, share-mode, identity, positional-read, and real Git-boundary regressions.
+Native Windows execution remains open until the hosted job passes.
 
 ## Remaining Implementation Plan
 

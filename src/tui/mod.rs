@@ -977,12 +977,14 @@ mod tests {
         save_nib_config_full(directory.path(), &mut config).expect("save config");
 
         let store = SessionStore::for_project(directory.path()).expect("profile store");
-        assert_eq!(
-            store.sessions_dir(),
-            directory
-                .path()
-                .join(".nib/profiles/workspace/sessions")
-                .as_path()
+        let expected = directory.path().join(".nib/profiles/workspace/sessions");
+        let actual_directory = crate::daemons::state::StableDirectory::open(store.sessions_dir())
+            .expect("opened profile session store");
+        let expected_directory = crate::daemons::state::StableDirectory::open(&expected)
+            .expect("opened expected session store");
+        assert!(
+            actual_directory.same_identity(&expected_directory),
+            "selected profile session store resolved to another directory"
         );
         assert!(!directory.path().join(".nib/sessions").exists());
     }

@@ -81,10 +81,17 @@ impl StableDirectory {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         crate::fs_security::verify_directory_without_symlinks(path)
             .map_err(|error| format!("state directory is unsafe: {error}"))?;
+        #[cfg(not(windows))]
         let directory = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())
             .map_err(|error| {
                 format!("failed to open state directory {}: {error}", path.display())
             })?;
+        #[cfg(windows)]
+        let directory = cap_std::fs::Dir::from_std_file(
+            crate::fs_security::open_directory_observation_windows(path).map_err(|error| {
+                format!("failed to open state directory {}: {error}", path.display())
+            })?,
+        );
         let identity = stable_directory_identity(&directory, path)?;
         let stable = Self {
             path: path.to_path_buf(),
@@ -185,9 +192,36 @@ impl StableDirectory {
 
     pub(crate) fn open_child(&self, path: &Path) -> Result<Self, String> {
         let relative = self.relative_file(path)?;
+        #[cfg(not(windows))]
         let directory = self.directory.open_dir(relative).map_err(|error| {
             format!("failed to open state directory {}: {error}", path.display())
         })?;
+        #[cfg(windows)]
+        let directory = {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true)._cap_fs_ext_maybe_dir(true);
+            configure_capability_no_follow(&mut options);
+            let file = self
+                .directory
+                .open_with(relative, &options)
+                .map(cap_std::fs::File::into_std)
+                .map_err(|error| {
+                    format!("failed to open state directory {}: {error}", path.display())
+                })?;
+            let metadata = file.metadata().map_err(|error| {
+                format!(
+                    "failed to inspect state directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            if crate::fs_security::metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err(format!(
+                    "state directory must be local and must not be a symlink or reparse point: {}",
+                    path.display()
+                ));
+            }
+            cap_std::fs::Dir::from_std_file(file)
+        };
         let identity = stable_directory_identity(&directory, path)?;
         let stable = Self {
             path: path.to_path_buf(),
@@ -2231,7 +2265,7 @@ fn windows_visible_directory_identity(
         .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))
 }
 
-fn read_open_file_prefix(file: &File, limit: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_open_file_prefix(file: &File, limit: usize) -> std::io::Result<Vec<u8>> {
     let mut bytes = vec![0_u8; limit];
     let mut read_total = 0_usize;
     while read_total < limit {
@@ -2284,8 +2318,13 @@ fn configure_capability_no_follow(options: &mut cap_std::fs::OpenOptions) {
     #[cfg(windows)]
     {
         use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 }
 
@@ -3589,25 +3628,31 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn open_directory_capability_blocks_daemon_lock_parent_replacement() {
+    fn open_directory_capability_detects_daemon_lock_parent_replacement() {
         let root = tempdir().expect("tempdir");
         let state_dir = root.path().join("state");
         fs::create_dir(&state_dir).expect("state directory");
         let lock_path = state_dir.join("shared.json.lock");
-        let ready_path = root.path().join("child.ready");
-        let entered_path = root.path().join("child.entered");
+        let displaced_state = root.path().join("state.displaced");
 
-        with_file_lock(&lock_path, |_| {
-            let displaced_state = root.path().join("state.displaced");
-            assert!(
-                fs::rename(&state_dir, &displaced_state).is_err(),
-                "Windows must deny replacement while the directory capability is open"
-            );
-            let mut child = spawn_lock_child(&lock_path, &ready_path, &entered_path, "blocked");
-            assert_child_remains_blocked(&mut child, &ready_path, &entered_path);
+        let error = with_file_lock(&lock_path, |_| {
+            fs::rename(&state_dir, &displaced_state).map_err(|error| error.to_string())?;
+            fs::create_dir(&state_dir).map_err(|error| error.to_string())?;
+            fs::write(state_dir.join("replacement"), b"replacement")
+                .map_err(|error| error.to_string())?;
             Ok(())
         })
-        .expect("held daemon lock");
+        .expect_err("detached daemon lock domain must fail closed");
+
+        assert!(error.contains("identity changed"), "{error}");
+        assert_eq!(
+            fs::read(state_dir.join("replacement")).expect("replacement domain"),
+            b"replacement"
+        );
+        assert!(
+            displaced_state.join("shared.json.lock").is_file(),
+            "original lock remains in the displaced domain"
+        );
     }
 
     #[cfg(unix)]
@@ -4481,7 +4526,7 @@ mod tests {
             .expect("spawn daemon lock child")
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     fn run_identity_failure_child(lock_path: &Path, ready_path: &Path, entered_path: &Path) {
         let status = spawn_lock_child(lock_path, ready_path, entered_path, "identity")
             .wait()
@@ -4491,7 +4536,7 @@ mod tests {
         assert!(!entered_path.exists(), "identity failure entered operation");
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     fn assert_child_remains_blocked(child: &mut Child, ready_path: &Path, entered_path: &Path) {
         let ready_deadline = Instant::now() + Duration::from_secs(5);
         while !ready_path.exists() {

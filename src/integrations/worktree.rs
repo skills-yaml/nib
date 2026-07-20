@@ -321,7 +321,7 @@ fn create_session_worktree(
         [
             OsString::from("worktree"),
             OsString::from("add"),
-            worktree_path.as_os_str().to_owned(),
+            crate::fs_security::path_for_external_command(&worktree_path).into_os_string(),
             OsString::from(&branch),
         ],
         cancellation,

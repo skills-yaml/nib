@@ -4,9 +4,13 @@ use nib::sandbox::worktree::Worktree;
 use nib::session::SessionStore;
 #[cfg(all(unix, debug_assertions))]
 use nib::tools::delegation::install_merge_interruption_test_barrier;
+#[cfg(unix)]
+use nib::tools::delegation::list_subagents;
+#[cfg(target_os = "linux")]
+use nib::tools::delegation::spawn_subagent;
 use nib::tools::delegation::{
-    cancel_subagent, get_subagent_record, list_subagents, send_message_to_subagent, spawn_subagent,
-    write_subagent_record, SubagentRecord,
+    cancel_subagent, get_subagent_record, send_message_to_subagent, write_subagent_record,
+    SubagentRecord,
 };
 use nib::tools::executor::{ApprovalHandler, ToolExecutor};
 use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
@@ -15,7 +19,9 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 use tempfile::{tempdir, TempDir};
 
 fn git(root: &Path, args: &[&str]) {
@@ -324,6 +330,7 @@ async fn execute_merge(
         .await
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_terminal_record(root: &Path, id: &str) -> SubagentRecord {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -338,6 +345,7 @@ async fn wait_for_terminal_record(root: &Path, id: &str) -> SubagentRecord {
     .expect("subagent reaches a terminal state")
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_terminal_record_sync(root: &Path, id: &str) -> SubagentRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -353,6 +361,7 @@ fn wait_for_terminal_record_sync(root: &Path, id: &str) -> SubagentRecord {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawned_subagents_reach_durable_completed_and_failed_results_without_stdin() {
     let root = git_repository();
@@ -403,6 +412,7 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
         .contains("without completion"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
     let root = git_repository();
@@ -447,6 +457,7 @@ async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
         .exists());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn subagent_policy_allow_cannot_bypass_mutation_or_network_ceiling() {
     let root = git_repository();
@@ -494,6 +505,7 @@ async fn subagent_policy_allow_cannot_bypass_mutation_or_network_ceiling() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn dropping_the_runtime_cannot_leave_a_spawned_record_running() {
     let root = git_repository();

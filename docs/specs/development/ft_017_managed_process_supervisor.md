@@ -415,6 +415,52 @@ The wrapper regression passes against the local exact bwrap backend: the managed
 does not touch `--unshare-net`, while the subsequent broad capability read reports the
 injected `RTM_NEWADDR` failure and retains managed-process availability.
 
+## Hosted Native Follow-up (2026-07-20)
+
+### Scope
+
+Make hosted capability and delegation validation match the production platform
+contract. Retry the exact Linux managed-process probe only after the failed attempt has
+proven cleanup, keep the retry count bounded, and retain every attempt in the terminal
+diagnostic. Run production delegation success behavior only on Linux while continuing
+to run the native Windows Job Object and macOS process-group rejection and mechanism
+tests on their respective hosts. Repair Windows cleanup-lease locking so the ownership
+sentinel does not make the bounded durable JSON payload unreadable to concurrent state
+validation or exact crash recovery.
+
+### Acceptance Criteria
+
+- [x] A transient exact Linux probe failure is retried only after cleanup is proven,
+  succeeds within a fixed attempt budget, and caches only the final result.
+- [x] Repeated cleanup-proven failures stop at the fixed attempt budget with all attempt
+  diagnostics, while cleanup-unproven failure is returned immediately without retry.
+- [x] Production delegation success and policy behavior tests run only on Linux; macOS
+  and Windows continue to prove the explicit production rejection and their native
+  containment mechanism contracts.
+- [x] An active Windows cleanup lease does not prevent bounded directory accounting,
+  scope mutation, lease-state inspection, or exact atomic recovery from reading the
+  durable lease record.
+- [ ] The exact PR revision passes required bwrap validation and the hosted Linux,
+  macOS, and Windows matrix.
+
+### Affected Areas
+
+`src/sandbox/process.rs`, `tests/delegation.rs`, managed-process capability and
+transaction recovery tests, and the hosted native CI matrix.
+
+### Validation Gates
+
+Focused probe retry and cleanup-lease regressions, required bwrap delegation tests,
+native backend tests, `task test`, `task check`, `task coverage`, managed-process smoke,
+and the hosted Linux/macOS/Windows jobs.
+
+### Local Validation Evidence
+
+Deterministic tests cover transient success, fixed-budget repeated failure, and immediate
+failure when cleanup is unproven. Required bwrap capability and production delegation
+tests pass locally. The full host `task check` and Windows all-target cross-check pass;
+native macOS/Windows runtime and exact-revision hosted evidence remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute the native Windows Job Object and macOS group-contained tests on hosted

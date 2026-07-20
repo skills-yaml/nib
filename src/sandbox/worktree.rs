@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -639,14 +639,9 @@ fn decode_durable_ownership_file(
             MAX_MANAGED_WORKTREE_OWNERSHIP_BYTES
         ));
     }
-    let mut reader = file
-        .try_clone()
-        .map_err(|error| format!("failed to clone managed worktree ownership: {error}"))?;
-    let mut encoded = Vec::with_capacity(length as usize);
-    reader
-        .by_ref()
-        .take(MAX_MANAGED_WORKTREE_OWNERSHIP_BYTES + 1)
-        .read_to_end(&mut encoded)
+    let read_limit = usize::try_from(MAX_MANAGED_WORKTREE_OWNERSHIP_BYTES + 1)
+        .map_err(|_| "managed worktree ownership read limit does not fit usize".to_string())?;
+    let encoded = crate::daemons::state::read_open_file_prefix(file, read_limit)
         .map_err(|error| format!("failed to read managed worktree ownership: {error}"))?;
     if encoded.len() as u64 > MAX_MANAGED_WORKTREE_OWNERSHIP_BYTES {
         return Err("managed worktree ownership exceeds its read limit".to_string());
@@ -2774,7 +2769,7 @@ impl Worktree {
             [
                 OsString::from("worktree"),
                 OsString::from("add"),
-                worktree_path.as_os_str().to_owned(),
+                crate::fs_security::path_for_external_command(&worktree_path).into_os_string(),
                 OsString::from(&branch),
             ],
         )
@@ -3010,7 +3005,7 @@ impl Worktree {
             [
                 OsString::from("worktree"),
                 OsString::from("add"),
-                worktree_path.as_os_str().to_owned(),
+                crate::fs_security::path_for_external_command(&worktree_path).into_os_string(),
                 OsString::from(&branch),
             ],
             cancellation,
@@ -5392,15 +5387,9 @@ fn verify_open_file_contents(file: &std::fs::File, expected: &[u8]) -> Result<()
     if metadata.len() != expected.len() as u64 {
         return Err("retained Git ref contents changed; preserving it".to_string());
     }
-    let mut file = file
-        .try_clone()
-        .map_err(|error| format!("failed to clone retained ref receipt: {error}"))?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| format!("failed to seek retained ref receipt: {error}"))?;
-    let mut actual = Vec::with_capacity(expected.len().saturating_add(1));
-    file.take(expected.len() as u64 + 1)
-        .read_to_end(&mut actual)
-        .map_err(|error| format!("failed to read retained ref receipt: {error}"))?;
+    let actual =
+        crate::daemons::state::read_open_file_prefix(file, expected.len().saturating_add(1))
+            .map_err(|error| format!("failed to read retained ref receipt: {error}"))?;
     if actual != expected {
         return Err("retained Git ref contents changed; preserving it".to_string());
     }
@@ -7399,6 +7388,28 @@ mod tests {
                 .expect("durable cleanup tombstone");
         assert_eq!(tombstone.record.phase, DurableOwnershipPhase::Complete);
         assert!(!canonical_worktree_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_worktree_create_adapts_a_verbatim_destination_for_git() {
+        let repository = repository();
+        let canonical_root = repository
+            .path()
+            .canonicalize()
+            .expect("canonical repository");
+        let id = "windows-verbatim-git-argument";
+
+        let worktree = Worktree::create(&canonical_root, id)
+            .expect("Git accepts the adapted canonical worktree destination");
+
+        assert_eq!(
+            worktree.path,
+            canonical_root.join(".nib/worktrees/subagents").join(id)
+        );
+        assert!(worktree.path.join(".git").is_file());
+        Worktree::remove(&canonical_root, id).expect("remove adapted worktree");
+        assert!(!worktree.path.exists());
     }
 
     fn git_stdout(repository: &Path, args: &[&str]) -> String {

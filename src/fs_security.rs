@@ -225,7 +225,7 @@ fn windows_long_path(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
+pub(crate) fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
@@ -256,6 +256,16 @@ fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     PathBuf::from(OsString::from_wide(&normalized))
+}
+
+#[cfg(windows)]
+pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
+    path_without_windows_verbatim_prefix(path)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(windows)]

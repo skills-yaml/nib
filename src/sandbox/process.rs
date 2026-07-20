@@ -18,6 +18,8 @@ use std::time::Instant;
 // the outer bubblewrap monitor, so version 1 state must fail closed on recovery.
 const PROCESS_SCOPE_VERSION: u32 = 2;
 const MAX_SCOPE_RECORD_BYTES: u64 = 256 * 1024;
+#[cfg(windows)]
+const CLEANUP_LEASE_LOCK_OFFSET: u64 = MAX_SCOPE_RECORD_BYTES + 1;
 const MAX_PROCESS_IDENTITY_MARKER_BYTES: usize = 1024;
 const MAX_PROCESS_CLEANUP_TEXT_BYTES: usize = 32 * 1024;
 const MAX_PROCESS_SCOPE_RECORDS: usize = 10_000;
@@ -48,6 +50,8 @@ const MAX_BWRAP_INFO_BYTES: u64 = 16 * 1024;
 const LINUX_LAUNCH_READY_FRAME: &[u8] = b"nib-ready\n";
 #[cfg(target_os = "linux")]
 const LINUX_LAUNCH_FRAME: &[u8] = b"nib-launch\n";
+#[cfg(target_os = "linux")]
+const LINUX_MANAGED_PROCESS_PROBE_ATTEMPTS: usize = 3;
 #[cfg(target_os = "linux")]
 const LINUX_LAUNCH_GATE_SCRIPT: &str = "\
 if ! printf 'nib-ready\\n'; then exit 125; fi
@@ -389,7 +393,7 @@ impl ProcessScopeStore {
                     "managed-process cleanup lease belongs to another generation".to_string(),
                 );
             }
-            match file.try_lock() {
+            match try_cleanup_lease_lock(&file) {
                 Ok(()) => Ok(CleanupLeaseState::Recoverable),
                 Err(std::fs::TryLockError::WouldBlock) => Ok(CleanupLeaseState::Live),
                 Err(std::fs::TryLockError::Error(error)) => Err(format!(
@@ -1815,6 +1819,46 @@ fn spawn_supervised_command_inner(
 
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_linux_managed_process_backend() -> Result<(), String> {
+    run_linux_managed_process_probe_attempts(probe_linux_managed_process_backend_once)
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_managed_process_probe_attempts(
+    mut probe: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for attempt in 1..=LINUX_MANAGED_PROCESS_PROBE_ATTEMPTS {
+        match probe() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let retryable = linux_managed_process_probe_failure_is_retryable(&error);
+                failures.push(format!("attempt {attempt}: {error}"));
+                if !retryable || attempt == LINUX_MANAGED_PROCESS_PROBE_ATTEMPTS {
+                    return Err(format!(
+                        "managed-process containment probe failed after {attempt} attempt(s): {}",
+                        failures.join(" | ")
+                    ));
+                }
+            }
+        }
+    }
+    unreachable!("managed-process probe attempt range is non-empty")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_managed_process_probe_failure_is_retryable(error: &str) -> bool {
+    !error.contains("supervised launch cleanup was not proven")
+        && [
+            "launch gate closed before reporting readiness",
+            "launch gate readiness timed out",
+            "launch gate returned an invalid readiness frame",
+        ]
+        .iter()
+        .any(|diagnostic| error.contains(diagnostic))
+}
+
+#[cfg(target_os = "linux")]
+fn probe_linux_managed_process_backend_once() -> Result<(), String> {
     let shell = crate::sandbox::command_shell_path()?;
     let mut child = spawn_supervised_command_inner(
         ProcessScopeBackend::LinuxPidNamespace,
@@ -1827,12 +1871,9 @@ pub(crate) fn probe_linux_managed_process_backend() -> Result<(), String> {
         },
         false,
         false,
-    )
-    .map_err(|error| format!("managed-process containment probe failed: {error}"))?;
+    )?;
 
-    child
-        .release_launch_gate()
-        .map_err(|error| format!("managed-process containment probe failed: {error}"))?;
+    child.release_launch_gate()?;
     thread::sleep(SUPERVISOR_POLL_INTERVAL);
     match child.observe_exit() {
         Ok(ChildExitObservation::Running) => {}
@@ -1843,7 +1884,7 @@ pub(crate) fn probe_linux_managed_process_backend() -> Result<(), String> {
         }
         Err(error) => {
             return Err(format!(
-                "managed-process containment probe failed to observe its launch: {error}"
+                "failed to observe managed-process probe launch: {error}"
             ));
         }
     }
@@ -1855,7 +1896,7 @@ pub(crate) fn probe_linux_managed_process_backend() -> Result<(), String> {
         Err(error) => Some(error),
     };
     if let Some(error) = terminate_error.or(wait_error).or(verify_error) {
-        Err(format!("managed-process containment probe failed: {error}"))
+        Err(error)
     } else {
         Ok(())
     }
@@ -2899,12 +2940,18 @@ fn recover_process_atomic_transaction(
         .path_exists(&previous)?
         .then(|| directory.open_read(&previous))
         .transpose()?;
+    let target_payload_file = target_file
+        .as_ref()
+        .map(|file| process_atomic_read_handle(file, temporary_file.as_ref()))
+        .transpose()?;
+    let previous_payload_file = previous_file
+        .as_ref()
+        .map(|file| process_atomic_read_handle(file, temporary_file.as_ref()))
+        .transpose()?;
     if process_atomic_transaction_is_legacy(
         target,
-        target_file.as_ref().map(|file| (file, target)),
-        previous_file
-            .as_ref()
-            .map(|file| (file, previous.as_path())),
+        target_payload_file.map(|file| (file, target)),
+        previous_payload_file.map(|file| (file, previous.as_path())),
         temporary_file
             .as_ref()
             .map(|file| (file, temporary.as_path())),
@@ -2914,7 +2961,12 @@ fn recover_process_atomic_transaction(
     }
     match (target_file.as_ref(), previous_file.as_ref()) {
         (None, Some(previous_file)) => {
-            validate_process_atomic_payload(directory, target, previous_file, kind)?;
+            validate_process_atomic_payload(
+                directory,
+                target,
+                previous_payload_file.expect("previous payload handle"),
+                kind,
+            )?;
             directory.restore_visible_file_no_replace_if_matches(
                 &previous,
                 previous_file,
@@ -2925,15 +2977,22 @@ fn recover_process_atomic_transaction(
             validate_process_atomic_pair(
                 directory,
                 target,
-                target_file,
+                target_payload_file.expect("target payload handle"),
                 &previous,
-                previous_file,
+                previous_payload_file.expect("previous payload handle"),
                 kind,
             )?;
+            directory.verify_file_identity(target, target_file)?;
             directory.remove_visible_file_if_matches_direct(&previous, previous_file)?;
         }
         (Some(target_file), None) => {
-            validate_process_atomic_payload(directory, target, target_file, kind)?;
+            validate_process_atomic_payload(
+                directory,
+                target,
+                target_payload_file.expect("target payload handle"),
+                kind,
+            )?;
+            directory.verify_file_identity(target, target_file)?;
         }
         (None, None) => {}
     }
@@ -2943,6 +3002,18 @@ fn recover_process_atomic_transaction(
         }
     }
     directory.sync_directory()
+}
+
+fn process_atomic_read_handle<'a>(
+    visible: &'a File,
+    temporary: Option<&'a File>,
+) -> Result<&'a File, String> {
+    if let Some(temporary) = temporary {
+        if crate::daemons::state::same_open_file_identity(visible, temporary)? {
+            return Ok(temporary);
+        }
+    }
+    Ok(visible)
 }
 
 fn process_atomic_transaction_is_legacy(
@@ -3077,17 +3148,15 @@ fn validate_process_atomic_pair(
 ) -> Result<(), String> {
     validate_process_atomic_payload(directory, target_path, target_file, kind)?;
     validate_process_atomic_payload(directory, target_path, previous_file, kind)?;
-    let target_file = directory.open_read(target_path)?;
-    let previous_file = directory.open_read(previous_path)?;
     match kind {
         ProcessAtomicKind::Scope => {
-            let target: ProcessScopeRecord = read_bounded_json(&target_file, target_path)?;
-            let previous: ProcessScopeRecord = read_bounded_json(&previous_file, previous_path)?;
+            let target: ProcessScopeRecord = read_bounded_json(target_file, target_path)?;
+            let previous: ProcessScopeRecord = read_bounded_json(previous_file, previous_path)?;
             validate_process_scope_transition(&previous, &target)
         }
         ProcessAtomicKind::CleanupLease => {
-            let target: CleanupLeaseRecord = read_bounded_json(&target_file, target_path)?;
-            let previous: CleanupLeaseRecord = read_bounded_json(&previous_file, previous_path)?;
+            let target: CleanupLeaseRecord = read_bounded_json(target_file, target_path)?;
+            let previous: CleanupLeaseRecord = read_bounded_json(previous_file, previous_path)?;
             if target == previous {
                 Ok(())
             } else {
@@ -3249,7 +3318,7 @@ fn recover_cleanup_lease_deletion(
                 .to_string(),
         );
     }
-    match file.try_lock() {
+    match try_cleanup_lease_lock(&file) {
         Ok(()) => {
             directory.remove_visible_file_if_matches_direct(&quarantine, &file)?;
             Ok(false)
@@ -3351,7 +3420,7 @@ fn read_process_state_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io
 }
 
 fn acquire_file_lock(file: &File, path: &Path) -> Result<(), String> {
-    match file.try_lock() {
+    match try_cleanup_lease_lock(file) {
         Ok(()) => Ok(()),
         Err(std::fs::TryLockError::WouldBlock) => Err(format!(
             "managed-process cleanup lease is already live: {}",
@@ -3361,6 +3430,44 @@ fn acquire_file_lock(file: &File, path: &Path) -> Result<(), String> {
             "failed to acquire managed-process cleanup lease {}: {error}",
             path.display()
         )),
+    }
+}
+
+#[cfg(not(windows))]
+fn try_cleanup_lease_lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    file.try_lock()
+}
+
+#[cfg(windows)]
+fn try_cleanup_lease_lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    overlapped.Anonymous.Anonymous.Offset = CLEANUP_LEASE_LOCK_OFFSET as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (CLEANUP_LEASE_LOCK_OFFSET >> 32) as u32;
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Err(std::fs::TryLockError::WouldBlock)
+    } else {
+        Err(std::fs::TryLockError::Error(error))
     }
 }
 
@@ -3483,6 +3590,57 @@ mod tests {
         root
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_process_probe_retries_a_transient_cleaned_launch_failure() {
+        let mut attempts = 0;
+        run_linux_managed_process_probe_attempts(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err("supervised Linux launch gate closed before reporting readiness".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .expect("transient cleaned probe failure is retried");
+        assert_eq!(attempts, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_process_probe_retry_budget_preserves_every_failure() {
+        let mut attempts = 0;
+        let error = run_linux_managed_process_probe_attempts(|| {
+            attempts += 1;
+            Err(format!(
+                "supervised Linux launch gate readiness timed out ({attempts})"
+            ))
+        })
+        .expect_err("repeated cleaned probe failures exhaust the retry budget");
+        assert_eq!(attempts, LINUX_MANAGED_PROCESS_PROBE_ATTEMPTS);
+        for attempt in 1..=LINUX_MANAGED_PROCESS_PROBE_ATTEMPTS {
+            assert!(error.contains(&format!("attempt {attempt}:")), "{error}");
+            assert!(error.contains(&format!("timed out ({attempt})")), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_process_probe_does_not_retry_unproven_cleanup() {
+        let mut attempts = 0;
+        let error = run_linux_managed_process_probe_attempts(|| {
+            attempts += 1;
+            Err(
+                "supervised Linux launch gate closed before reporting readiness; supervised launch cleanup was not proven: namespace survived"
+                    .to_string(),
+            )
+        })
+        .expect_err("unproven cleanup must fail immediately");
+        assert_eq!(attempts, 1);
+        assert!(error.contains("after 1 attempt(s)"), "{error}");
+        assert!(error.contains("cleanup was not proven"), "{error}");
+    }
+
     #[test]
     fn process_identity_rejects_pid_reuse_markers() {
         let identity = ProcessIdentity::current().expect("current identity");
@@ -3598,7 +3756,26 @@ mod tests {
             )
             .expect("prepare scope");
         let _lease = store.acquire_cleanup_lease(&record).expect("cleanup lease");
-        assert!(store.acquire_cleanup_lease(&record).is_err());
+        assert_eq!(
+            store
+                .cleanup_lease_state(&record)
+                .expect("inspect live cleanup lease"),
+            CleanupLeaseState::Live
+        );
+        let directory = crate::daemons::state::StableDirectory::open(&store.directory)
+            .expect("stable scope directory");
+        let path = store
+            .cleanup_lease_path(&record.scope_id)
+            .expect("cleanup lease path");
+        let readable = directory.open_read(&path).expect("open live cleanup lease");
+        let observed: CleanupLeaseRecord =
+            read_bounded_json(&readable, &path).expect("read live cleanup lease");
+        assert_eq!(observed.scope_id, record.scope_id);
+        let error = store
+            .acquire_cleanup_lease(&record)
+            .err()
+            .expect("second cleanup owner must be excluded");
+        assert!(error.contains("already live"), "{error}");
     }
 
     #[cfg(not(target_os = "linux"))]
