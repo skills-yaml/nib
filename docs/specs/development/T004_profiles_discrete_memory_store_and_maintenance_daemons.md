@@ -558,12 +558,57 @@ the hosted Windows build and smoke job.
 
 ### Local Validation Evidence
 
-The full host suite passes 610 library tests plus all binary, integration, and
-documentation suites. Runtime coverage is 83.83 percent (55,761/66,518), release build
+The full host suite passes 614 library tests plus all binary, integration, and
+documentation suites. Runtime coverage is 83.92 percent (56,345/67,143), release build
 and managed-process smoke pass, and the Windows all-target/all-feature graph
 cross-compiles the native path, range-lock, marker-identity, and replacement-contract
 changes. Equivalent-path behavior and the remaining native contracts await the exact
 hosted Windows run.
+
+## Hosted Durable Schedule Remediation (2026-07-20)
+
+### Scope
+
+Prevent a due schedule from failing when its originating agent run still owns the
+session run lease. Defer the wake without an arbitrary timeout, keep durable ownership,
+heartbeat, and cancellation checks active, then retain the acquired session lease
+through wake publication and scheduled execution. Bind that lease and execution to the
+task's exact profile session store when multiple profiles share one workspace root.
+
+### Acceptance Criteria
+
+- [x] A due schedule waits behind an active session run without publishing `timer_fired`
+  or setting an active occurrence.
+- [x] A deferred schedule remains heartbeat-active, cancellable, and worker-lease
+  fenced; cancellation publishes no late wake or scheduled-run outcome.
+- [x] After the active run releases, the worker retains the exact acquired session run
+  lease through wake publication and scheduled execution, producing one terminal
+  occurrence. Ordinary concurrent agent-loop callers still fail immediately.
+- [x] A non-default profile schedule verifies the lease against its canonical session
+  directory and keeps execution and cancellation reconciliation in that store, even
+  when another profile has the same session ID and workspace root.
+
+### Affected Areas
+
+`src/daemons/workload.rs`, `src/agent/loop.rs`, `src/session/mod.rs`, and focused durable
+schedule regressions.
+
+### Validation Gates
+
+Focused release-to-completion, cancellation-before-wake, and same-root profile-isolation
+regressions; `cargo fmt --check`; Clippy with warnings denied; spec integrity;
+`task test`; `task check`; `task coverage`; and the hosted Linux, Windows, and macOS
+jobs.
+
+### Local Validation Evidence
+
+Deterministic workload tests hold a real session run lease and prove both deferred
+single completion after release and cancellation without `timer_fired`. A two-profile
+regression holds the default profile's same-ID lease while the non-default schedule
+completes only in its own session store. The full host suite passes 614 library tests
+plus all binary, integration, and documentation suites, twelve consecutive durable
+integration stress repetitions pass, and runtime coverage is 83.92 percent
+(56,345/67,143).
 
 ## Remaining Implementation Plan
 

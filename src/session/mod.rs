@@ -535,6 +535,7 @@ pub struct SessionStore {
 
 pub(crate) struct SessionRunLease {
     session_id: String,
+    sessions_dir: PathBuf,
     lock: crate::daemons::state::HeldFileLock,
 }
 
@@ -546,6 +547,27 @@ impl SessionRunLease {
                 self.session_id
             ))
         })
+    }
+
+    pub(crate) fn verify_for(
+        &self,
+        session_id: &str,
+        sessions_dir: &Path,
+    ) -> Result<(), SessionError> {
+        if self.session_id != session_id {
+            return Err(SessionError::InvalidMutation(format!(
+                "active run lease for {} cannot authorize session {session_id}",
+                self.session_id
+            )));
+        }
+        if !crate::fs_security::canonical_paths_match(&self.sessions_dir, sessions_dir) {
+            return Err(SessionError::InvalidMutation(format!(
+                "active run lease for {} cannot authorize session directory {}",
+                self.session_id,
+                sessions_dir.display()
+            )));
+        }
+        self.verify()
     }
 }
 
@@ -667,6 +689,7 @@ impl SessionStore {
         self.verify_directory_binding()?;
         Ok(SessionRunLease {
             session_id: id.to_string(),
+            sessions_dir: self.sessions_dir.clone(),
             lock,
         })
     }

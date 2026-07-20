@@ -6,7 +6,7 @@ use crate::daemons::task::{
     deliver_background_task_observation, BackgroundTaskSession, DaemonAuditLog, DaemonAuditRecord,
 };
 use crate::profile::{Profile, ProfileRegistry};
-use crate::session::{SessionEvent, SessionStore};
+use crate::session::{SessionError, SessionEvent, SessionRunLease, SessionStore};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -602,6 +602,7 @@ impl DurableTaskStore {
         let mut records = Vec::new();
         let mut remaining_bytes = self.max_enumeration_bytes;
         for path in self.record_paths()? {
+            let (_task_id, _lock) = self.acquire_record_path_lock(&path)?;
             let (task, bytes_read, _) = self.read_path_bounded(&path, remaining_bytes)?;
             remaining_bytes = remaining_bytes
                 .checked_sub(bytes_read)
@@ -701,6 +702,7 @@ impl DurableTaskStore {
             tasks: Vec::with_capacity(self.max_reconciliation_report_tasks.min(paths.len())),
         };
         for path in paths {
+            let (_task_id, read_lock) = self.acquire_record_path_lock(&path)?;
             let record = self.read_path(&path)?.record;
             let stale_worker = matches!(
                 record.status.as_str(),
@@ -712,6 +714,7 @@ impl DurableTaskStore {
             }
             let task_id = record.id.clone();
             drop(record);
+            drop(read_lock);
             let Some(reconciled) = self.reconcile_record(&path, &task_id, now, &mut hook)? else {
                 continue;
             };
@@ -838,6 +841,7 @@ impl DurableTaskStore {
 
         let mut oldest_terminal: Option<(DateTime<Utc>, DateTime<Utc>, String)> = None;
         for path in paths {
+            let (_task_id, _lock) = self.acquire_record_path_lock(&path)?;
             let record = self.read_path(&path)?.record;
             if !record.is_terminal() {
                 continue;
@@ -1200,6 +1204,33 @@ impl DurableTaskStore {
         self.lock_anchor_path_for_stripe(task_lock_stripe(id))
     }
 
+    fn acquire_record_path_lock(&self, path: &Path) -> Result<(String, TaskLock), String> {
+        if path.parent() != Some(self.tasks_dir.as_path()) {
+            return Err(format!(
+                "task record is not a direct child of the task state directory: {}",
+                path.display()
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("task record name is not valid UTF-8: {}", path.display()))?;
+        let id = name.strip_suffix(".json").ok_or_else(|| {
+            format!(
+                "task record does not use the expected .json suffix: {}",
+                path.display()
+            )
+        })?;
+        validate_task_id(id)?;
+        if self.task_path(id) != path {
+            return Err(format!(
+                "task record path does not match its derived id {id}: {}",
+                path.display()
+            ));
+        }
+        Ok((id.to_string(), self.acquire_task_lock(id)?))
+    }
+
     fn lock_path_for_stripe(&self, stripe: usize) -> PathBuf {
         self.tasks_dir
             .join(format!(".task-stripe-{stripe:02}.lock"))
@@ -1285,16 +1316,18 @@ impl DurableTaskStore {
     }
 
     fn migrate_legacy_execution_ids(&self) -> Result<(), String> {
+        self.migrate_legacy_execution_ids_with_hook(|| Ok(()))
+    }
+
+    fn migrate_legacy_execution_ids_with_hook(
+        &self,
+        after_enumeration: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let _admission_lock = self.acquire_admission_lock()?;
-        for path in self.record_paths()? {
-            let (task, _, needs_migration) =
-                self.read_path_bounded(&path, MAX_TASK_RECORD_BYTES)?;
-            if !needs_migration {
-                continue;
-            }
-            let task_id = task.record.id.clone();
-            drop(task);
-            let _lock = self.acquire_task_lock(&task_id)?;
+        let paths = self.record_paths()?;
+        after_enumeration()?;
+        for path in paths {
+            let (_task_id, _lock) = self.acquire_record_path_lock(&path)?;
             let opened = self.read_path_bounded_opened(&path, MAX_TASK_RECORD_BYTES)?;
             if opened.needs_execution_id_migration {
                 self.write_path_expected(
@@ -1984,6 +2017,56 @@ where
     }
 }
 
+async fn wait_for_schedule_run_lease(
+    store: &DurableTaskStore,
+    owner: &WorkerOwner,
+    task_id: &str,
+    session_store: &SessionStore,
+    session_id: &str,
+) -> Result<MonitoredRun<SessionRunLease>, String> {
+    loop {
+        let record = match store.poll_worker_owned(task_id, owner, false) {
+            Ok(record) => record,
+            Err(error) if is_worker_lease_lost(&error) => return Ok(MonitoredRun::LeaseLost),
+            Err(error) => return Err(error),
+        };
+        if record.status == "reconciling" || record.is_terminal() {
+            return Ok(MonitoredRun::LeaseLost);
+        }
+        if record.cancel_requested {
+            return Ok(MonitoredRun::Cancelled);
+        }
+
+        match session_store.try_acquire_run_lease(session_id) {
+            Ok(run_lease) => {
+                let record = match store.poll_worker_owned(task_id, owner, true) {
+                    Ok(record) => record,
+                    Err(error) if is_worker_lease_lost(&error) => {
+                        return Ok(MonitoredRun::LeaseLost)
+                    }
+                    Err(error) => return Err(error),
+                };
+                if record.status == "reconciling" || record.is_terminal() {
+                    return Ok(MonitoredRun::LeaseLost);
+                }
+                if record.cancel_requested {
+                    return Ok(MonitoredRun::Cancelled);
+                }
+                run_lease
+                    .verify_for(session_id, session_store.sessions_dir())
+                    .map_err(|error| error.to_string())?;
+                return Ok(MonitoredRun::Completed(run_lease));
+            }
+            Err(SessionError::RunLeaseHeld(_)) => sleep(WORKER_POLL_INTERVAL).await,
+            Err(error) => {
+                return Err(format!(
+                    "failed to acquire scheduled agent run lease for {session_id}: {error}"
+                ))
+            }
+        }
+    }
+}
+
 struct ScheduleWorkerJob {
     prompt: String,
     project_root: PathBuf,
@@ -2425,6 +2508,38 @@ async fn run_schedule_worker(
             sleep(Duration::from_millis(delay_ms)).await;
         }
 
+        let run_lease = match wait_for_schedule_run_lease(
+            store,
+            owner,
+            task_id,
+            &session_store,
+            &job.session_id,
+        )
+        .await?
+        {
+            MonitoredRun::Completed(run_lease) => run_lease,
+            MonitoredRun::Cancelled => {
+                match publish_schedule_cancellation_owned(
+                    store,
+                    owner,
+                    task_id,
+                    &session_store,
+                    &audit,
+                    ScheduleCancellation {
+                        session_id: &job.session_id,
+                        repeat_count: job.repeat_count,
+                        occurrence,
+                        reason: "cancelled by user",
+                    },
+                ) {
+                    Ok(_) => return Ok(()),
+                    Err(error) if is_worker_lease_lost(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+            MonitoredRun::LeaseLost => return Ok(()),
+        };
+
         match publish_schedule_wake_owned(
             store,
             owner,
@@ -2446,8 +2561,10 @@ async fn run_schedule_worker(
             owner,
             task_id,
             &cancellation,
-            crate::agent::run_agent_loop(
+            crate::agent::r#loop::run_agent_loop_for_profile_with_lease(
                 job.project_root.clone(),
+                &job.profile_id,
+                &job.sessions_dir,
                 &job.session_id,
                 &job.prompt,
                 AgentLoopConfig {
@@ -2456,6 +2573,7 @@ async fn run_schedule_worker(
                     cancellation: Some(cancellation.clone()),
                     ..AgentLoopConfig::default()
                 },
+                run_lease,
             ),
         )
         .await?;
@@ -3611,6 +3729,343 @@ mod tests {
             .expect("prepare schedule");
     }
 
+    fn scheduled_agent_fixture() -> (tempfile::TempDir, DurableTaskStore, SessionStore) {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(directory.path().join(".gitignore"), ".nib/\n").expect("gitignore");
+        std::fs::write(
+            directory.path().join("README.md"),
+            "scheduled agent fixture\n",
+        )
+        .expect("readme");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "nib-tests@example.invalid"],
+            vec!["config", "user.name", "nib tests"],
+            vec!["add", ".gitignore", "README.md"],
+            vec!["commit", "--quiet", "-m", "initial"],
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(directory.path())
+                .status()
+                .expect("git command");
+            assert!(status.success());
+        }
+
+        let mut config = crate::config::NibConfig::default();
+        config.llm.active_provider = Some("mock".to_string());
+        config.llm.providers.insert(
+            "mock".to_string(),
+            crate::config::ProviderEntry {
+                model: "mock-model".to_string(),
+                ..crate::config::ProviderEntry::default()
+            },
+        );
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        crate::config::save_nib_config_full(directory.path(), &mut config).expect("runtime config");
+
+        let session_store = SessionStore::for_project(directory.path()).expect("session store");
+        session_store.create_session_with_id("origin");
+        let store = DurableTaskStore::for_project(directory.path()).expect("durable task store");
+        (directory, store, session_store)
+    }
+
+    fn prepare_owned_due_schedule(
+        directory: &tempfile::TempDir,
+        store: &DurableTaskStore,
+        session_store: &SessionStore,
+        task_id: &str,
+    ) -> (WorkerOwner, ScheduleWorkerJob, DateTime<Utc>) {
+        prepare_schedule_fixture(directory, store, session_store, task_id);
+        let owner = WorkerOwner {
+            token: format!("{task_id}-owner"),
+            pid: std::process::id(),
+        };
+        let stale_heartbeat = Utc::now() - ChronoDuration::seconds(10);
+        store
+            .update(task_id, |task| {
+                task.record.status = "running".to_string();
+                task.record.worker_pid = Some(owner.pid);
+                task.record.updated_at = stale_heartbeat;
+                task.record.next_run_at = Some(Utc::now() - ChronoDuration::seconds(1));
+                task.worker_lease = Some(WorkerLease {
+                    token: owner.token.clone(),
+                });
+                Ok(())
+            })
+            .expect("seed due schedule worker");
+        let job = ScheduleWorkerJob {
+            prompt: "scheduled plan".to_string(),
+            project_root: directory.path().to_path_buf(),
+            profile_id: "default".to_string(),
+            sessions_dir: session_store.sessions_dir().to_path_buf(),
+            session_id: "origin".to_string(),
+            interval_secs: 1,
+            repeat_count: 1,
+        };
+        (owner, job, stale_heartbeat)
+    }
+
+    async fn wait_for_worker_heartbeat(
+        store: &DurableTaskStore,
+        task_id: &str,
+        prior_heartbeat: DateTime<Utc>,
+    ) {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let record = store
+                    .get(task_id)
+                    .expect("read schedule worker")
+                    .expect("schedule worker remains present");
+                if record.updated_at > prior_heartbeat {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("schedule worker heartbeat");
+    }
+
+    #[tokio::test]
+    async fn due_schedule_waits_for_active_session_before_wake_and_completes_once() {
+        let (directory, store, session_store) = scheduled_agent_fixture();
+        let active_run = session_store
+            .try_acquire_run_lease("origin")
+            .expect("hold active session run");
+        let task_id = "schedule-waits-for-active-run";
+        let (owner, job, stale_heartbeat) =
+            prepare_owned_due_schedule(&directory, &store, &session_store, task_id);
+        let worker_store = store.clone();
+        let worker_task_id = task_id.to_string();
+        let mut worker = tokio::spawn(async move {
+            run_schedule_worker(&worker_store, &owner, &worker_task_id, job).await
+        });
+
+        wait_for_worker_heartbeat(&store, task_id, stale_heartbeat).await;
+        sleep(WORKER_POLL_INTERVAL).await;
+        assert!(
+            !worker.is_finished(),
+            "due schedule must wait for the session run"
+        );
+        let deferred = store.get_file(task_id).expect("deferred schedule");
+        assert_eq!(deferred.record.status, "running");
+        assert_eq!(deferred.active_occurrence, None);
+        let session = session_store.load("origin").expect("origin session");
+        assert!(!session.events.iter().any(|event| {
+            matches!(
+                event.kind.as_str(),
+                "timer_fired" | "scheduled_agent_run_completed" | "scheduled_agent_run_failed"
+            )
+        }));
+
+        drop(active_run);
+        timeout(Duration::from_secs(10), &mut worker)
+            .await
+            .expect("scheduled worker completes after session release")
+            .expect("scheduled worker task")
+            .expect("scheduled worker result");
+
+        let completed = store.get_file(task_id).expect("completed schedule");
+        assert_eq!(completed.record.status, "completed");
+        assert_eq!(completed.record.completed_occurrences, 1);
+        assert_eq!(completed.record.error, None);
+        assert_eq!(completed.active_occurrence, None);
+        let session = session_store.load("origin").expect("origin session");
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .filter(|event| event.kind == "timer_fired")
+                .count(),
+            1
+        );
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .filter(|event| event.kind == "scheduled_agent_run_completed")
+                .count(),
+            1
+        );
+        assert!(!session
+            .events
+            .iter()
+            .any(|event| event.kind == "scheduled_agent_run_failed"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_agent_run_keeps_the_exact_non_default_profile_scope() {
+        let (directory, _default_task_store, default_session_store) = scheduled_agent_fixture();
+        let mut config =
+            crate::config::load_nib_config_full(directory.path()).expect("load runtime config");
+        config.profiles.default = "default".to_string();
+        config.profiles.active = vec![
+            crate::config::ProfileConfig {
+                id: "default".to_string(),
+                root: PathBuf::from("."),
+                state_dir: Some(PathBuf::from(".nib/profiles/default")),
+                ..crate::config::ProfileConfig::default()
+            },
+            crate::config::ProfileConfig {
+                id: "alternate".to_string(),
+                root: PathBuf::from("."),
+                state_dir: Some(PathBuf::from(".nib/profiles/alternate")),
+                ..crate::config::ProfileConfig::default()
+            },
+        ];
+        crate::config::save_nib_config_full(directory.path(), &mut config)
+            .expect("save two-profile runtime config");
+        let profiles = ProfileRegistry::load(directory.path(), &config.profiles)
+            .expect("load profile registry");
+        let alternate = profiles.get("alternate").expect("alternate profile");
+        alternate.ensure_state_dirs().expect("alternate state");
+        let alternate_session_store = SessionStore::at_dir(alternate.sessions_dir().to_path_buf());
+        alternate_session_store.create_session_with_id("origin");
+        let store = DurableTaskStore::at_daemon_dir(alternate.daemon_dir().to_path_buf())
+            .expect("alternate durable task store");
+        let task_id = "schedule-exact-alternate-profile";
+        store
+            .prepare_schedule(DurableScheduleRequest {
+                id: task_id.to_string(),
+                prompt: "scheduled plan".to_string(),
+                project_root: directory.path().to_path_buf(),
+                profile_id: "alternate".to_string(),
+                sessions_dir: alternate_session_store.sessions_dir().to_path_buf(),
+                session_id: "origin".to_string(),
+                initial_delay: Duration::from_secs(1),
+                interval: Duration::from_secs(1),
+                repeat_count: 1,
+            })
+            .expect("prepare alternate schedule");
+        let owner = WorkerOwner {
+            token: "schedule-exact-alternate-profile-owner".to_string(),
+            pid: std::process::id(),
+        };
+        store
+            .update(task_id, |task| {
+                task.record.status = "running".to_string();
+                task.record.worker_pid = Some(owner.pid);
+                task.record.next_run_at = Some(Utc::now() - ChronoDuration::seconds(1));
+                task.worker_lease = Some(WorkerLease {
+                    token: owner.token.clone(),
+                });
+                Ok(())
+            })
+            .expect("seed alternate schedule worker");
+        let default_before = default_session_store
+            .load("origin")
+            .expect("default session before schedule");
+        let _default_run = default_session_store
+            .try_acquire_run_lease("origin")
+            .expect("hold default profile run lease");
+
+        timeout(
+            Duration::from_secs(10),
+            run_schedule_worker(
+                &store,
+                &owner,
+                task_id,
+                ScheduleWorkerJob {
+                    prompt: "scheduled plan".to_string(),
+                    project_root: directory.path().to_path_buf(),
+                    profile_id: "alternate".to_string(),
+                    sessions_dir: alternate_session_store.sessions_dir().to_path_buf(),
+                    session_id: "origin".to_string(),
+                    interval_secs: 1,
+                    repeat_count: 1,
+                },
+            ),
+        )
+        .await
+        .expect("alternate schedule completes")
+        .expect("alternate schedule result");
+
+        assert_eq!(
+            default_session_store
+                .load("origin")
+                .expect("default session after schedule"),
+            default_before
+        );
+        let alternate_session = alternate_session_store
+            .load("origin")
+            .expect("alternate session after schedule");
+        assert!(alternate_session
+            .messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content == "scheduled plan" }));
+        assert!(alternate_session.plan.is_some());
+        assert_eq!(
+            alternate_session
+                .events
+                .iter()
+                .filter(|event| event.kind == "timer_fired")
+                .count(),
+            1
+        );
+        assert_eq!(
+            alternate_session
+                .events
+                .iter()
+                .filter(|event| event.kind == "scheduled_agent_run_completed")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_due_schedule_waiting_for_active_session_never_publishes_wake() {
+        let (directory, store, session_store) = scheduled_agent_fixture();
+        let _active_run = session_store
+            .try_acquire_run_lease("origin")
+            .expect("hold active session run");
+        let task_id = "cancel-schedule-waiting-for-active-run";
+        let (owner, job, stale_heartbeat) =
+            prepare_owned_due_schedule(&directory, &store, &session_store, task_id);
+        let worker_store = store.clone();
+        let worker_task_id = task_id.to_string();
+        let mut worker = tokio::spawn(async move {
+            run_schedule_worker(&worker_store, &owner, &worker_task_id, job).await
+        });
+
+        wait_for_worker_heartbeat(&store, task_id, stale_heartbeat).await;
+        sleep(WORKER_POLL_INTERVAL).await;
+        assert!(!worker.is_finished(), "due schedule must still be waiting");
+        store
+            .update(task_id, |task| {
+                task.record.cancel_requested = true;
+                task.record.status = "cancelling".to_string();
+                task.record.updated_at = Utc::now();
+                Ok(())
+            })
+            .expect("request schedule cancellation");
+        timeout(Duration::from_secs(10), &mut worker)
+            .await
+            .expect("deferred schedule observes cancellation")
+            .expect("scheduled worker task")
+            .expect("scheduled worker result");
+
+        let cancelled = store.get_file(task_id).expect("cancelled schedule");
+        assert_eq!(cancelled.record.status, "cancelled");
+        assert_eq!(cancelled.active_occurrence, None);
+        let session = session_store.load("origin").expect("origin session");
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .filter(|event| event.kind == "timer_cancelled")
+                .count(),
+            1
+        );
+        assert!(!session.events.iter().any(|event| {
+            matches!(
+                event.kind.as_str(),
+                "timer_fired" | "scheduled_agent_run_completed" | "scheduled_agent_run_failed"
+            )
+        }));
+    }
+
     fn terminal_request(
         directory: &tempfile::TempDir,
         session_store: &SessionStore,
@@ -3707,6 +4162,89 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, id);
         writer.join().expect("atomic task writer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn constructor_migration_waits_for_atomic_record_evacuation() {
+        let (directory, store, session_store) = fixture();
+        let id = "migration-during-replacement";
+        store
+            .prepare_terminal(terminal_request(&directory, &session_store, id))
+            .expect("prepare durable task");
+
+        let migration_store = store.clone();
+        let (enumerated, enumeration_observed) = std::sync::mpsc::sync_channel(0);
+        let (continue_migration, migration_released) = std::sync::mpsc::sync_channel(0);
+        let (migration_result, result_observed) = std::sync::mpsc::sync_channel(1);
+        let migration = std::thread::spawn(move || {
+            let result = migration_store.migrate_legacy_execution_ids_with_hook(|| {
+                enumerated
+                    .send(())
+                    .map_err(|error| format!("signal task enumeration: {error}"))?;
+                migration_released
+                    .recv()
+                    .map_err(|error| format!("wait to continue task migration: {error}"))?;
+                Ok(())
+            });
+            migration_result
+                .send(result)
+                .expect("return migration result");
+        });
+        enumeration_observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("migration enumerated the task record");
+
+        let writer_store = store.clone();
+        let path = store.task_path(id);
+        let writer_path = path.clone();
+        let (evacuated, evacuation_observed) = std::sync::mpsc::sync_channel(0);
+        let (publish, publication_released) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            let _lock = writer_store
+                .acquire_task_lock(id)
+                .expect("hold task publication lock");
+            let opened = writer_store
+                .read_path_opened(&writer_path)
+                .expect("open task record for publication");
+            let encoded = serde_json::to_vec_pretty(&opened.task).expect("encode task record");
+            writer_store
+                .tasks_directory
+                .save_bytes_atomically_expected_with_after_evacuation_hook(
+                    &writer_path,
+                    &encoded,
+                    ".task-",
+                    crate::daemons::state::FileExpectation::Present(&opened.file),
+                    || {
+                        evacuated.send(()).expect("signal target evacuation");
+                        publication_released
+                            .recv()
+                            .expect("wait to publish replacement");
+                    },
+                )
+                .expect("publish replacement task record");
+        });
+        evacuation_observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer evacuated the enumerated task record");
+        assert!(!path.exists(), "writer must hold the target evacuated");
+
+        continue_migration
+            .send(())
+            .expect("continue migration while target is evacuated");
+        assert_eq!(
+            result_observed.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "migration must wait for the task publication lock before its first read"
+        );
+
+        publish.send(()).expect("release task publication");
+        writer.join().expect("atomic task writer");
+        result_observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("migration resumed after publication")
+            .expect("migration succeeds after publication");
+        migration.join().expect("task migration");
     }
 
     fn prepare_reconcilable_terminal(

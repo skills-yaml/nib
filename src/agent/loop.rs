@@ -8,14 +8,15 @@ use crate::context::{
 };
 use crate::llm::{create_client, LlmClient, StreamEvent, ToolCallAccumulator, ToolCallRequest};
 use crate::session::{
-    normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionStore, ToolCallRecord,
+    normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionRunLease, SessionStore,
+    ToolCallRecord,
 };
 use crate::tools::executor::{ApprovalHandler, StdinApprovalHandler};
 use crate::tools::models::{AfterToolHook, PermissionLevel, PolicyEffect, PolicyRule, ToolCall};
 use crate::tools::ToolExecutor;
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -161,31 +162,124 @@ pub async fn run_agent_loop(
     goal: &str,
     cfg: AgentLoopConfig,
 ) -> Result<AgentRunSummary, String> {
-    let run_lease_store = SessionStore::for_project(&project_root)?;
-    let run_lease = run_lease_store
+    let runtime = prepare_agent_loop_runtime(
+        &project_root,
+        None,
+        None,
+        cfg.provider.as_deref(),
+        cfg.model.as_deref(),
+    )?;
+    let run_lease = runtime
+        .session_store
         .try_acquire_run_lease(session_id)
+        .map_err(|error| error.to_string())?;
+    run_agent_loop_with_runtime(runtime, session_id, goal, cfg, run_lease).await
+}
+
+pub(crate) async fn run_agent_loop_for_profile_with_lease(
+    project_root: PathBuf,
+    profile_id: &str,
+    sessions_dir: &Path,
+    session_id: &str,
+    goal: &str,
+    cfg: AgentLoopConfig,
+    run_lease: SessionRunLease,
+) -> Result<AgentRunSummary, String> {
+    let runtime = prepare_agent_loop_runtime(
+        &project_root,
+        Some(profile_id),
+        Some(sessions_dir),
+        cfg.provider.as_deref(),
+        cfg.model.as_deref(),
+    )?;
+    run_agent_loop_with_runtime(runtime, session_id, goal, cfg, run_lease).await
+}
+
+struct AgentLoopRuntime {
+    nib_cfg: crate::config::NibConfig,
+    profile: crate::profile::Profile,
+    session_store: SessionStore,
+}
+
+fn prepare_agent_loop_runtime(
+    project_root: &Path,
+    profile_id: Option<&str>,
+    expected_sessions_dir: Option<&Path>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<AgentLoopRuntime, String> {
+    let mut nib_cfg =
+        crate::config::load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    apply_model_override(&mut nib_cfg, provider, model)?;
+    let profiles = crate::profile::ProfileRegistry::load(project_root, &nib_cfg.profiles)
+        .map_err(|error| error.to_string())?;
+    let profile = match profile_id {
+        Some(profile_id) => profiles
+            .get(profile_id)
+            .ok_or_else(|| format!("agent profile no longer exists: {profile_id}"))?,
+        None => profiles
+            .for_workspace(project_root)
+            .unwrap_or_else(|| profiles.default_profile()),
+    }
+    .clone();
+    profile
+        .ensure_state_dirs()
+        .map_err(|error| error.to_string())?;
+    let session_store = SessionStore::at_dir(profile.sessions_dir().to_path_buf());
+    if let Some(expected_sessions_dir) = expected_sessions_dir {
+        let expected_sessions_dir = expected_sessions_dir
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve agent session scope: {error}"))?;
+        if !crate::fs_security::canonical_paths_match(
+            session_store.sessions_dir(),
+            &expected_sessions_dir,
+        ) {
+            return Err(format!(
+                "agent profile session scope changed: expected {}, got {}",
+                expected_sessions_dir.display(),
+                session_store.sessions_dir().display()
+            ));
+        }
+    }
+    Ok(AgentLoopRuntime {
+        nib_cfg,
+        profile,
+        session_store,
+    })
+}
+
+async fn run_agent_loop_with_runtime(
+    runtime: AgentLoopRuntime,
+    session_id: &str,
+    goal: &str,
+    cfg: AgentLoopConfig,
+    run_lease: SessionRunLease,
+) -> Result<AgentRunSummary, String> {
+    let sessions_dir = runtime.session_store.sessions_dir().to_path_buf();
+    run_lease
+        .verify_for(session_id, &sessions_dir)
         .map_err(|error| error.to_string())?;
     let cancellation = cfg.cancellation.clone();
     let stream_tx = cfg.stream_tx.clone();
-    let cancellation_root = project_root.clone();
+    let cancellation_store = runtime.session_store.clone();
     let run_result = if let Some(cancellation) = cancellation {
         if cancellation.is_cancelled() {
-            reconcile_cancelled_run(&cancellation_root, session_id, &stream_tx).await
+            reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
         } else {
-            let mut running = Box::pin(run_agent_loop_inner(project_root, session_id, goal, cfg));
+            let mut running = Box::pin(run_agent_loop_inner(runtime, session_id, goal, cfg));
             tokio::select! {
                 biased;
                 result = &mut running => result,
                 _ = cancellation.cancelled() => {
                     drop(running);
-                    reconcile_cancelled_run(&cancellation_root, session_id, &stream_tx).await
+                    reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
                 }
             }
         }
     } else {
-        run_agent_loop_inner(project_root, session_id, goal, cfg).await
+        run_agent_loop_inner(runtime, session_id, goal, cfg).await
     };
-    let result = match (run_result, run_lease.verify()) {
+    let result = match (run_result, run_lease.verify_for(session_id, &sessions_dir)) {
         (Ok(summary), Ok(())) => Ok(summary),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error.to_string()),
@@ -200,7 +294,7 @@ pub async fn run_agent_loop(
 }
 
 async fn run_agent_loop_inner(
-    project_root: PathBuf,
+    runtime: AgentLoopRuntime,
     session_id: &str,
     goal: &str,
     cfg: AgentLoopConfig,
@@ -213,18 +307,11 @@ async fn run_agent_loop_inner(
         return Err(format!("unsupported agent mode: {}", cfg.mode));
     }
 
-    let mut nib_cfg =
-        crate::config::load_nib_config_full(&project_root).map_err(|error| error.to_string())?;
-    apply_model_override(&mut nib_cfg, cfg.provider.as_deref(), cfg.model.as_deref())?;
-    let profiles = crate::profile::ProfileRegistry::load(&project_root, &nib_cfg.profiles)
-        .map_err(|error| error.to_string())?;
-    let profile = profiles
-        .for_workspace(&project_root)
-        .unwrap_or_else(|| profiles.default_profile())
-        .clone();
-    profile
-        .ensure_state_dirs()
-        .map_err(|error| error.to_string())?;
+    let AgentLoopRuntime {
+        nib_cfg,
+        profile,
+        session_store: store,
+    } = runtime;
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
         nib_cfg.agent.max_turns.max(1)
@@ -233,7 +320,6 @@ async fn run_agent_loop_inner(
     };
     let max_transitions = max_turns.saturating_mul(10).saturating_add(10);
     let llm: Arc<dyn LlmClient> = create_client(&nib_cfg.llm, cfg.provider.as_deref())?;
-    let store = SessionStore::at_dir(profile.sessions_dir().to_path_buf());
     let active_skills = select_profile_skills(&project_root, &nib_cfg, &profile, goal)?;
     let policy_rules = skill_policy_rules(&active_skills);
     let after_tool_hooks = skill_after_tool_hooks(&active_skills);
@@ -1770,11 +1856,10 @@ fn workload_context_sections(
 }
 
 async fn reconcile_cancelled_run(
-    project_root: &std::path::Path,
+    store: &SessionStore,
     session_id: &str,
     stream_tx: &Option<Sender<StreamEvent>>,
 ) -> Result<AgentRunSummary, String> {
-    let store = SessionStore::for_project(project_root)?;
     if store
         .load_result(session_id)
         .map_err(|error| error.to_string())?

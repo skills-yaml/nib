@@ -506,7 +506,7 @@ Validate/macOS jobs.
 The required exact capability suite passes locally. A privileged Ubuntu 24.04 container
 with bubblewrap 0.9 and a non-reaping Bash PID 1 passed 35 fresh-process probe runs and
 left no zombies. The focused Linux supervisor and MCP cancellation suites, full
-`task check`, `task coverage` at 83.83 percent (55,761/66,518), release build, and
+`task check`, `task coverage` at 83.92 percent (56,345/67,143), release build, and
 managed-process smoke pass. Hosted Validate run `29774526036` passed the AppArmor setup,
 exact containment probe, checks, tests, coverage, release build, and owner-loss smoke on
 revision `3d0cc9b82bc2`. The Windows all-target graph cross-compiles; native hosted macOS

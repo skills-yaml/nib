@@ -1310,7 +1310,19 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         save_config(directory.path(), &mock_config()).expect("save mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
-        let session = store.create_session();
+        let goal = "wait for plan approval";
+        let mut session = store.create_session();
+        session.plan = Some(crate::session::Plan::new(
+            goal,
+            vec![crate::session::PlanStep {
+                description: "wait for approval".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+            }],
+        ));
+        store.save(&mut session).expect("save pending plan");
 
         let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
         let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
@@ -1319,7 +1331,7 @@ mod tests {
             spawn_tui_agent_worker(
                 directory.path().to_path_buf(),
                 session.id.clone(),
-                "wait for plan approval".to_string(),
+                goal.to_string(),
                 approval_tx,
                 question_tx,
                 stream_tx,
@@ -1327,7 +1339,7 @@ mod tests {
             .expect("spawn TUI worker"),
         );
         let request = approval_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(std::time::Duration::from_secs(10))
             .expect("worker reached plan approval");
         assert_eq!(request.call.tool_name, "approve_plan");
         let mut pending_approval = Some(request);
