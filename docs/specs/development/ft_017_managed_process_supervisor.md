@@ -377,7 +377,10 @@ Make the production managed-process preflight obey the existing independent-prob
 decision. Keep the broad sandbox probe, including `--unshare-net`, authoritative for
 general bwrap and network-boundary availability, while deriving managed-process
 availability only from the exact PID-namespace launch, gate, pidfd termination, wait,
-and descendant-reap probe.
+and descendant-reap probe. Keep bubblewrap's info pipe at its dynamically allocated
+descriptor so Rust's internal `Command` pipes cannot collide with fixed slots. Carry the
+launch fence over the child's standard input and output so every POSIX shell can enforce
+it without non-portable multi-digit descriptor redirections.
 
 ### Acceptance Criteria
 
@@ -387,12 +390,18 @@ and descendant-reap probe.
   managed-process availability without weakening network-boundary diagnostics.
 - [x] A Linux integration regression wraps bwrap, rejects only `--unshare-net`, and
   proves production preflight succeeds before broad diagnostics report their failure.
+- [x] The bwrap info descriptor retains its actual allocated number across `exec`, while
+  the shell gate uses standard input/output and no custom `--sync-fd`.
+- [x] A subprocess regression retains the low descriptor range through descriptor 63
+  before the exact probe and proves the dynamic info handoff works with `/bin/sh`.
+- [x] A focused supervisor regression proves the internal launch frame cannot consume or
+  alter payload stdin bytes sent after durable Running publication.
 - [ ] The exact PR revision passes the hosted Validate job with required bwrap tests.
 
 ### Affected Areas
 
-`src/sandbox/mod.rs`, exact managed-process capability tests, delegation integration
-tests, and the Linux Validate job.
+`src/sandbox/mod.rs`, `src/sandbox/process.rs`, exact managed-process capability tests,
+delegation integration tests, and the Linux Validate job.
 
 ### Validation Gates
 

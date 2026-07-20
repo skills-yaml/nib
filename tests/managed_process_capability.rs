@@ -2,9 +2,13 @@
 
 use nib::sandbox::process::ProcessScopeBackend;
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const HIGH_DESCRIPTOR_CHILD: &str = "NIB_TEST_HIGH_DESCRIPTOR_MANAGED_PROBE";
 
 struct EnvironmentGuard {
     key: &'static str,
@@ -78,6 +82,61 @@ fn managed_process_probe_is_independent_from_broad_network_sandbox_probe() {
         .is_some_and(|error| error.contains("RTM_NEWADDR")));
     assert!(capabilities.managed_process_available);
     assert!(capabilities.managed_process_error.is_none());
+}
+
+#[test]
+fn managed_process_probe_survives_high_descriptor_allocation() {
+    if std::env::var_os(HIGH_DESCRIPTOR_CHILD).is_some() {
+        let mut reservations = Vec::new();
+        loop {
+            let file = File::open("/dev/null").expect("descriptor reservation");
+            let descriptor = file.as_raw_fd();
+            reservations.push(file);
+            if descriptor >= 63 {
+                break;
+            }
+        }
+        ProcessScopeBackend::production().expect("managed probe with high descriptors");
+        std::hint::black_box(&reservations);
+        return;
+    }
+
+    let Some(real_bwrap) = find_bwrap() else {
+        assert!(
+            std::env::var_os("NIB_REQUIRE_BWRAP_TESTS").is_none(),
+            "CI requires an installed bwrap"
+        );
+        return;
+    };
+    let fixture = tempfile::tempdir().expect("dynamic-descriptor wrapper directory");
+    let wrapper = fixture.path().join("bwrap");
+    let script = format!(
+        "#!/bin/sh\nprevious=\nfound_info=\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--sync-fd\" ]; then exit 91; fi\n  if [ \"$previous\" = \"--info-fd\" ]; then\n    case $arg in ''|*[!0-9]*) exit 92;; esac\n    if [ \"$arg\" -lt 64 ]; then exit 93; fi\n    found_info=1\n  fi\n  previous=$arg\ndone\nif [ -z \"$found_info\" ]; then exit 94; fi\nexec {} \"$@\"\n",
+        shell_quote(&real_bwrap)
+    );
+    std::fs::write(&wrapper, script).expect("dynamic-descriptor bwrap wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("executable dynamic-descriptor wrapper");
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![fixture.path().to_path_buf()];
+    path_entries.extend(std::env::split_paths(&original_path));
+    let wrapped_path = std::env::join_paths(path_entries).expect("dynamic-descriptor PATH");
+    let status = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "managed_process_probe_survives_high_descriptor_allocation",
+            "--nocapture",
+        ])
+        .env(HIGH_DESCRIPTOR_CHILD, "1")
+        .env("NIB_POSIX_SHELL", "/bin/sh")
+        .env("NIB_REQUIRE_BWRAP_TESTS", "1")
+        .env("PATH", wrapped_path)
+        .status()
+        .expect("high-descriptor probe child");
+    assert!(
+        status.success(),
+        "high-descriptor probe child failed: {status}"
+    );
 }
 
 fn find_bwrap() -> Option<PathBuf> {

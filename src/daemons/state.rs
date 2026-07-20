@@ -4,7 +4,7 @@ use std::ffi::OsString;
 #[cfg(test)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -900,7 +900,7 @@ impl StableDirectory {
         let mut name_bytes = 0_usize;
         for entry in self
             .directory
-            .read_dir(".")
+            .entries()
             .map_err(|error| format!("failed to list {}: {error}", self.path.display()))?
         {
             let name = entry
@@ -1201,11 +1201,7 @@ impl StableDirectory {
             };
             exact_publication_committed = true;
             self.verify_published_file(path, &file, publication)?;
-            let mut published_file = self.open_read(path)?;
-            let mut published = Vec::with_capacity(encoded.len().saturating_add(1));
-            (&mut published_file)
-                .take(encoded.len() as u64 + 1)
-                .read_to_end(&mut published)
+            let published = read_open_file_prefix(&file, encoded.len().saturating_add(1))
                 .map_err(|error| format!("failed to verify published state: {error}"))?;
             if published != encoded {
                 return Err(format!(
@@ -1259,6 +1255,16 @@ impl StableDirectory {
                     Ok(())
                 }
             });
+        let unlock_result = file
+            .unlock()
+            .map_err(|error| format!("failed to unlock published state file: {error}"));
+        let temporary_cleanup = match (temporary_cleanup, unlock_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(cleanup_error), Err(unlock_error)) => {
+                Err(format!("{cleanup_error}; {unlock_error}"))
+            }
+        };
         match (write_result, temporary_cleanup) {
             (Ok(receipt), Ok(())) => {
                 drop(file);
@@ -1627,23 +1633,14 @@ impl StableDirectory {
         expected_file: &File,
         expected_bytes: &[u8],
     ) -> Result<(), String> {
-        let mut opened = self.open_read(path)?;
-        if !same_open_file_identity(&opened, expected_file)? {
-            return Err(format!(
-                "state publication identity changed while finalizing {}",
-                path.display()
-            ));
-        }
-        let mut actual = Vec::with_capacity(expected_bytes.len().saturating_add(1));
-        (&mut opened)
-            .take(expected_bytes.len() as u64 + 1)
-            .read_to_end(&mut actual)
+        self.verify_file_identity(path, expected_file)?;
+        let actual = read_open_file_prefix(expected_file, expected_bytes.len().saturating_add(1))
             .map_err(|error| {
-                format!(
-                    "failed to read state publication while finalizing {}: {error}",
-                    path.display()
-                )
-            })?;
+            format!(
+                "failed to read state publication while finalizing {}: {error}",
+                path.display()
+            )
+        })?;
         if actual != expected_bytes {
             return Err(format!(
                 "state publication bytes changed while finalizing {}",
@@ -2234,6 +2231,42 @@ fn windows_visible_directory_identity(
         .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))
 }
 
+fn read_open_file_prefix(file: &File, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut bytes = vec![0_u8; limit];
+    let mut read_total = 0_usize;
+    while read_total < limit {
+        let offset = u64::try_from(read_total)
+            .map_err(|_| std::io::Error::other("state read offset overflowed"))?;
+        match read_open_file_at(file, &mut bytes[read_total..], offset) {
+            Ok(0) => break,
+            Ok(read) => read_total = read_total.saturating_add(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    bytes.truncate(read_total);
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn read_open_file_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_open_file_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_open_file_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
 fn configure_capability_owner_only(_options: &mut cap_std::fs::OpenOptions) {
     #[cfg(unix)]
     {
@@ -2740,19 +2773,25 @@ fn open_daemon_lock_anchor_bound_with_hook(
     anchor_path: &Path,
     mut before_open: impl FnMut() -> Result<(), String>,
 ) -> Result<File, String> {
-    let lock_exists = lock_directory.path_exists(lock_path)?;
-    let anchor_exists = anchor_directory.path_exists(anchor_path)?;
-    if !anchor_exists {
-        return if lock_exists {
-            lock_directory.open_read_write(lock_path)
-        } else {
-            lock_directory.open_read_write_create(lock_path)
-        };
-    }
+    const MAX_NAMESPACE_RETRIES: usize = 8;
 
-    before_open()?;
-    match anchor_directory.open_read_write(anchor_path) {
-        Ok(anchor_file) => {
+    for attempt in 0..MAX_NAMESPACE_RETRIES {
+        let observed = (
+            lock_directory.path_exists(lock_path)?,
+            anchor_directory.path_exists(anchor_path)?,
+        );
+        let opened = (|| {
+            let (lock_exists, anchor_exists) = observed;
+            if !anchor_exists {
+                return if lock_exists {
+                    lock_directory.open_read_write(lock_path)
+                } else {
+                    lock_directory.open_read_write_create(lock_path)
+                };
+            }
+
+            before_open()?;
+            let anchor_file = anchor_directory.open_read_write(anchor_path)?;
             if lock_exists {
                 let visible = lock_directory.open_read_write(lock_path)?;
                 let anchor_identity = daemon_lock_identity(&anchor_file, anchor_path)?;
@@ -2764,12 +2803,27 @@ fn open_daemon_lock_anchor_bound_with_hook(
                 }
             }
             Ok(anchor_file)
+        })();
+        match opened {
+            Ok(file) => return Ok(file),
+            Err(error) => {
+                let current = (
+                    lock_directory.path_exists(lock_path)?,
+                    anchor_directory.path_exists(anchor_path)?,
+                );
+                if current == observed {
+                    return Err(error);
+                }
+                if attempt + 1 == MAX_NAMESPACE_RETRIES {
+                    return Err(format!(
+                        "daemon lock namespace changed repeatedly while opening {}: {error}",
+                        lock_path.display()
+                    ));
+                }
+            }
         }
-        Err(_) if !anchor_directory.path_exists(anchor_path)? => {
-            lock_directory.open_read_write(lock_path)
-        }
-        Err(error) => Err(error),
     }
+    unreachable!("bounded daemon lock open loop always returns")
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -3427,6 +3481,74 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    fn lock_pair_removed_before_open_retries_first_use_acquisition() {
+        let root = tempdir().expect("tempdir");
+        let state_dir = root.path().join("state");
+        fs::create_dir(&state_dir).expect("state directory");
+        let lock_path = state_dir.join("shared.json.lock");
+        let anchor_path = daemon_lock_anchor_path(&lock_path).expect("anchor path");
+        let lock_directory = StableDirectory::open(&state_dir).expect("stable state directory");
+        let anchor_directory = StableDirectory::open(root.path()).expect("stable anchor directory");
+        drop(
+            lock_directory
+                .open_read_write_create(&lock_path)
+                .expect("visible lock"),
+        );
+        lock_directory
+            .hard_link_to(&lock_path, &anchor_directory, &anchor_path)
+            .expect("initial anchor");
+        let mut removed = false;
+
+        let lock_file = open_daemon_lock_anchor_bound_with_hook(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            || {
+                if removed {
+                    return Ok(());
+                }
+                let anchor = anchor_directory.open_read_write(&anchor_path)?;
+                anchor_directory.remove_file_if_matches(
+                    &anchor_path,
+                    &anchor,
+                    ".nib-test-anchor-delete-",
+                )?;
+                let visible = lock_directory.open_read_write(&lock_path)?;
+                lock_directory.remove_file_if_matches(
+                    &lock_path,
+                    &visible,
+                    ".nib-test-lock-delete-",
+                )?;
+                removed = true;
+                Ok(())
+            },
+        )
+        .expect("retry after disappearing lock pair");
+
+        assert!(removed, "test did not remove the first lock pair");
+        let identity = daemon_lock_identity(&lock_file, &lock_path).expect("lock identity");
+        lock_file.lock().expect("lock recreated visible inode");
+        repair_daemon_lock_anchor(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            &identity,
+        )
+        .expect("repair recreated lock pair");
+        verify_daemon_lock_paths_bound(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            &identity,
+        )
+        .expect("verified recreated lock pair");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
     fn legacy_lock_cleanup_preserves_a_replacement_at_the_delete_boundary() {
         let root = tempdir().expect("tempdir");
         let visible_root = root.path().join("visible");
@@ -3690,6 +3812,34 @@ mod tests {
 
         assert_eq!(fs::read(existing).expect("updated state"), b"new");
         assert_eq!(fs::read(missing).expect("created state"), b"created");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_receipt_does_not_retain_a_mandatory_byte_lock() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("receipt.json");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+
+        let receipt = directory
+            .save_bytes_atomically_expected_with_receipt(
+                &target,
+                b"published",
+                ".receipt-publication-",
+                FileExpectation::Missing,
+            )
+            .expect("publish with retained receipt");
+
+        assert!(receipt.exact_identity);
+        assert_eq!(
+            fs::read(&target).expect("read while receipt remains alive"),
+            b"published"
+        );
+        assert!(same_open_file_identity(
+            &receipt.file,
+            &directory.open_read(&target).expect("reopen publication")
+        )
+        .expect("receipt identity"));
     }
 
     #[cfg(windows)]
@@ -4283,6 +4433,29 @@ mod tests {
             .for_each_entry_bounded(3, 8, |_| Ok(()))
             .expect_err("filename byte cap must stop the streaming scan");
         assert!(name_error.contains("bounded scan limit"), "{name_error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_capable_directory_scan_uses_its_retained_handle() {
+        let root = tempdir().expect("tempdir");
+        let child = root.path().join("owned");
+        fs::create_dir(&child).expect("owned child");
+        fs::write(child.join("payload"), b"data").expect("owned child payload");
+        let root_directory = StableDirectory::open(root.path()).expect("stable root");
+        let owned = root_directory
+            .open_owned_child(&child)
+            .expect("delete-capable child");
+        let mut names = Vec::new();
+
+        owned
+            .for_each_entry_bounded(4, 128, |name| {
+                names.push(name);
+                Ok(())
+            })
+            .expect("scan through retained delete-capable handle");
+
+        assert_eq!(names, [OsString::from("payload")]);
     }
 
     #[cfg(any(unix, windows))]

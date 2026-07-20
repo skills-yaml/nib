@@ -413,7 +413,13 @@ DOS short aliases without accepting reparse traversal; and let an observation-on
 visible-directory handle coexist with the retained DELETE-capable directory handle.
 Keep durable ownership receipts share-compatible, then acquire and identity-check a
 fresh DELETE-capable file object for destructive cleanup. Separate reopenable namespace
-directories from short-lived, consumed directory-mutation capabilities.
+directories from short-lived, consumed directory-mutation capabilities. Verify bytes
+through the already-open publication handle while its Windows byte-range lock is held,
+and canonicalize containment roots before comparing them with canonical child paths.
+Make persistent daemon-lock acquisition retry a concurrent final-owner cleanup that
+temporarily removes both the visible lock and its anchor. Persist canonical worktree
+ownership roots across DOS-short aliases, and enumerate retained DELETE-capable
+directories through the existing handle rather than opening a conflicting second one.
 
 ### Acceptance Criteria
 
@@ -434,12 +440,23 @@ directories from short-lived, consumed directory-mutation capabilities.
 - [x] Focused source/target collision, present/missing publication, directory quarantine,
   namespace reopen, receipt coexistence, and handle-lifetime deletion regressions are
   present and cross-compile.
+- [x] Windows publication verification reads bytes through the locked publication handle
+  while independently proving that the destination path still names that file.
+- [x] Canonical child containment accepts the runner's valid DOS-short project root
+  without weakening component-level reparse rejection.
+- [x] Concurrent first-use daemon-lock acquisition tolerates another owner's exact
+  visible-lock/anchor cleanup without losing serialized pin updates.
+- [x] Durable worktree ownership records remain valid when reservation, restart, and
+  cleanup use equivalent DOS-short and canonical project-root spellings.
+- [x] Bounded nested-tree scans operate through a retained DELETE-capable directory
+  handle without triggering a Windows sharing violation.
 - [ ] The full Windows job passes with its default `C:\Users\RUNNER~1` temporary root.
 
 ### Affected Areas
 
-`src/fs_security.rs`, `src/daemons/state.rs`, `src/sandbox/worktree.rs`, Windows-only
-filesystem/state tests, and the `windows-sys` feature surface in `Cargo.toml`.
+`src/fs_security.rs`, `src/daemons/state.rs`, `src/daemons/curator.rs`, containment
+callers, `src/sandbox/worktree.rs`, Windows-only filesystem/state tests, and the
+`windows-sys` feature surface in `Cargo.toml`.
 
 ### Validation Gates
 

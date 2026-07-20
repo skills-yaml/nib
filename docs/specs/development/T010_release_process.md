@@ -294,6 +294,8 @@ native canonical-alias regression.
   child process uses the physical runner temporary directory.
 - [x] The macOS release smoke creates its fixture explicitly below `RUNNER_TEMP`.
 - [x] Windows CI retains the runner's default temporary environment.
+- [x] Native test fixtures keep an MCP error-producing child alive until its response is
+  consumed and accept every bounded cleanup-deadline diagnostic emitted by the runtime.
 - [ ] The exact PR revision passes the hosted macOS and Windows jobs.
 
 ### Affected Areas And Validation

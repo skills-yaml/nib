@@ -1713,7 +1713,7 @@ mod tests {
                 args: vec![
                     "-c".to_string(),
                     format!(
-                        "IFS= read -r request; printf '%s\\n' \"$MCP_API_TOKEN\" >&2; printf '%s\\n' '{response}'"
+                        "IFS= read -r request; printf '%s\\n' \"$MCP_API_TOKEN\" >&2; printf '%s\\n' '{response}'; sleep 1"
                     ),
                 ],
                 env: HashMap::from([("MCP_API_TOKEN".to_string(), secret.to_string())]),

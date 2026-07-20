@@ -7,8 +7,6 @@ use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(target_os = "linux")]
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, LazyLock, Mutex};
@@ -47,21 +45,14 @@ const POST_BWRAP_SPAWN_PAUSE_ENV: &str = "NIB_TEST_PROCESS_SCOPE_POST_BWRAP_SPAW
 #[cfg(target_os = "linux")]
 const MAX_BWRAP_INFO_BYTES: u64 = 16 * 1024;
 #[cfg(target_os = "linux")]
-const LINUX_BWRAP_INFO_FD: libc::c_int = 8;
-#[cfg(target_os = "linux")]
-const LINUX_LAUNCH_GATE_FD: libc::c_int = 9;
-#[cfg(target_os = "linux")]
-const LINUX_HANDSHAKE_FD_MINIMUM: libc::c_int = 10;
-#[cfg(target_os = "linux")]
 const LINUX_LAUNCH_READY_FRAME: &[u8] = b"nib-ready\n";
 #[cfg(target_os = "linux")]
 const LINUX_LAUNCH_FRAME: &[u8] = b"nib-launch\n";
 #[cfg(target_os = "linux")]
 const LINUX_LAUNCH_GATE_SCRIPT: &str = "\
-if ! printf 'nib-ready\\n' >&9; then exit 125; fi
-if ! IFS= read -r nib_gate <&9; then exit 125; fi
+if ! printf 'nib-ready\\n'; then exit 125; fi
+if ! IFS= read -r nib_gate; then exit 125; fi
 if [ \"$nib_gate\" != 'nib-launch' ]; then exit 125; fi
-exec 9>&-
 exec \"$@\"";
 
 #[derive(Clone, Copy)]
@@ -1193,20 +1184,22 @@ where
         .ok_or("supervised child stderr is unavailable")?;
     let stdout_reader = spawn_bounded_reader(stdout, "stdout")?;
     let stderr_reader = spawn_bounded_reader(stderr, "stderr")?;
-    let child_stdin = child_scope
-        .child
-        .stdin
-        .take()
-        .ok_or("supervised child stdin is unavailable")?;
-    let input_writer = spawn_input_writer(child_stdin, command.stdin.clone())?;
     ready(&running)?;
 
     let mut owner_lost = false;
     let mut cancelled = false;
     let mut pending_owner_signal = owner_eof_rx.try_recv().ok();
-    if pending_owner_signal.is_none() {
+    let input_writer = if pending_owner_signal.is_none() {
         child_scope.release_launch_gate()?;
-    }
+        let child_stdin = child_scope
+            .child
+            .stdin
+            .take()
+            .ok_or("supervised child stdin is unavailable")?;
+        Some(spawn_input_writer(child_stdin, command.stdin.clone())?)
+    } else {
+        None
+    };
     let exit_status = loop {
         if let Some(cancellation_requested) = pending_owner_signal
             .take()
@@ -1246,10 +1239,13 @@ where
         }
     };
 
-    let input_error = match input_writer.recv_timeout(SUPERVISOR_CLEANUP_TIMEOUT) {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(error) => Some(format!("supervised stdin writer did not finish: {error}")),
+    let input_error = match input_writer {
+        Some(input_writer) => match input_writer.recv_timeout(SUPERVISOR_CLEANUP_TIMEOUT) {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(format!("supervised stdin writer did not finish: {error}")),
+        },
+        None => None,
     };
     let stdout = join_bounded_reader(stdout_reader, "stdout")?;
     let mut stderr = join_bounded_reader(stderr_reader, "stderr")?;
@@ -1386,8 +1382,6 @@ struct SupervisedChild {
     child: std::process::Child,
     backend: SupervisedBackendHandle,
     scope_root: ProcessIdentity,
-    #[cfg(target_os = "linux")]
-    launch_gate: Option<UnixStream>,
     backend_cleanup_started: bool,
     direct_reaped: bool,
     cleanup_complete: bool,
@@ -1406,11 +1400,17 @@ impl SupervisedChild {
     fn release_launch_gate(&mut self) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(mut gate) = self.launch_gate.take() {
-                gate.write_all(LINUX_LAUNCH_FRAME).map_err(|error| {
-                    format!("failed to release supervised Linux namespace init: {error}")
-                })?;
-            }
+            let stdin = self
+                .child
+                .stdin
+                .as_mut()
+                .ok_or("supervised Linux launch gate stdin is unavailable")?;
+            stdin.write_all(LINUX_LAUNCH_FRAME).map_err(|error| {
+                format!("failed to release supervised Linux namespace init: {error}")
+            })?;
+            stdin.flush().map_err(|error| {
+                format!("failed to flush supervised Linux launch gate: {error}")
+            })?;
         }
         Ok(())
     }
@@ -1424,7 +1424,6 @@ impl SupervisedChild {
                 if let Err(error) = signal_linux_process_identity(&self.scope_root) {
                     first_error = Some(error);
                 }
-                self.launch_gate.take();
                 if !self.direct_reaped {
                     if let Err(error) = signal_process_group(*monitor_group) {
                         first_error.get_or_insert(error);
@@ -1592,17 +1591,13 @@ fn spawn_supervised_command_inner(
     }
 
     #[cfg(target_os = "linux")]
-    let (mut process, info_reader, info_writer, mut launch_gate, launch_gate_child) = {
+    let (mut process, info_reader, info_writer) = {
         if backend != ProcessScopeBackend::LinuxPidNamespace {
             return Err("Linux supervisor received a non-Linux backend".to_string());
         }
         let (info_reader, info_writer) = create_cloexec_pipe("bubblewrap namespace information")?;
-        let (launch_gate, launch_gate_child) =
-            create_cloexec_socket_pair("bubblewrap launch gate")?;
-        launch_gate
-            .set_read_timeout(Some(SUPERVISOR_CLEANUP_TIMEOUT))
-            .map_err(|error| format!("failed to bound bubblewrap launch readiness: {error}"))?;
         let command_shell = crate::sandbox::command_shell_path()?;
+        let info_write_fd = info_writer.as_raw_fd();
         let mut process = Command::new("bwrap");
         process.args([
             "--ro-bind",
@@ -1621,9 +1616,7 @@ fn spawn_supervised_command_inner(
         ]);
         process
             .arg("--info-fd")
-            .arg(LINUX_BWRAP_INFO_FD.to_string())
-            .arg("--sync-fd")
-            .arg(LINUX_LAUNCH_GATE_FD.to_string())
+            .arg(info_write_fd.to_string())
             .arg("--bind");
         process.arg(&command.cwd).arg(&command.cwd).arg("--chdir");
         process
@@ -1635,13 +1628,7 @@ fn spawn_supervised_command_inner(
             .arg("nib-managed-launch-gate")
             .arg(&command.program);
         process.args(&command.args);
-        (
-            process,
-            info_reader,
-            info_writer,
-            launch_gate,
-            launch_gate_child,
-        )
+        (process, info_reader, info_writer)
     };
     #[cfg(target_os = "macos")]
     let mut process = {
@@ -1680,12 +1667,10 @@ fn spawn_supervised_command_inner(
     {
         use std::os::unix::process::CommandExt;
         let info_write_fd = info_writer.as_raw_fd();
-        let launch_gate_fd = launch_gate_child.as_raw_fd();
         process.process_group(0);
         unsafe {
             process.pre_exec(move || {
-                duplicate_fd_to(info_write_fd, LINUX_BWRAP_INFO_FD)?;
-                duplicate_fd_to(launch_gate_fd, LINUX_LAUNCH_GATE_FD)?;
+                clear_close_on_exec(info_write_fd)?;
                 Ok(())
             });
         }
@@ -1700,11 +1685,9 @@ fn spawn_supervised_command_inner(
             }
         }
         drop(info_writer);
-        drop(launch_gate_child);
         let group = match i32::try_from(child.id()) {
             Ok(group) => group,
             Err(_) => {
-                drop(launch_gate);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("supervised process identifier exceeds the Unix pid range".to_string());
@@ -1713,7 +1696,6 @@ fn spawn_supervised_command_inner(
         let namespace_pid = match read_bwrap_namespace_pid(info_reader) {
             Ok(pid) if !inject_info_failure => pid,
             Ok(_) => {
-                drop(launch_gate);
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
                 return Err(append_linux_spawn_cleanup_error(
                     "injected bubblewrap namespace information failure".to_string(),
@@ -1721,7 +1703,6 @@ fn spawn_supervised_command_inner(
                 ));
             }
             Err(error) => {
-                drop(launch_gate);
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
                 return Err(append_linux_spawn_cleanup_error(error, cleanup));
             }
@@ -1729,7 +1710,6 @@ fn spawn_supervised_command_inner(
         let scope_root = match ProcessIdentity::capture(namespace_pid) {
             Ok(identity) => identity,
             Err(error) => {
-                drop(launch_gate);
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
                 return Err(append_linux_spawn_cleanup_error(
                     format!("failed to identify supervised Linux namespace init: {error}"),
@@ -1738,31 +1718,20 @@ fn spawn_supervised_command_inner(
             }
         };
         if let Err(error) = validate_bwrap_namespace_init(&scope_root, child.id()) {
-            drop(launch_gate);
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
             return Err(append_linux_spawn_cleanup_error(error, cleanup));
         }
-        let mut ready = vec![0_u8; LINUX_LAUNCH_READY_FRAME.len()];
-        if let Err(error) = launch_gate.read_exact(&mut ready) {
-            drop(launch_gate);
+        let ready = child
+            .stdout
+            .as_mut()
+            .ok_or_else(|| "supervised Linux launch gate stdout is unavailable".to_string());
+        if let Err(error) = ready.and_then(read_linux_launch_ready) {
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
-            return Err(append_linux_spawn_cleanup_error(
-                format!("supervised Linux launch gate did not become ready: {error}"),
-                cleanup,
-            ));
-        }
-        if ready != LINUX_LAUNCH_READY_FRAME {
-            drop(launch_gate);
-            let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
-            return Err(append_linux_spawn_cleanup_error(
-                "supervised Linux launch gate returned an invalid readiness frame".to_string(),
-                cleanup,
-            ));
+            return Err(append_linux_spawn_cleanup_error(error, cleanup));
         }
         match ProcessIdentity::capture(scope_root.pid) {
             Ok(current) if current == scope_root => {}
             Ok(_) => {
-                drop(launch_gate);
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
                 return Err(append_linux_spawn_cleanup_error(
                     "supervised Linux namespace init changed identity during launch".to_string(),
@@ -1770,7 +1739,6 @@ fn spawn_supervised_command_inner(
                 ));
             }
             Err(error) => {
-                drop(launch_gate);
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
                 return Err(append_linux_spawn_cleanup_error(
                     format!(
@@ -1781,7 +1749,6 @@ fn spawn_supervised_command_inner(
             }
         }
         if let Err(error) = validate_bwrap_namespace_init(&scope_root, child.id()) {
-            drop(launch_gate);
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
             return Err(append_linux_spawn_cleanup_error(error, cleanup));
         }
@@ -1791,7 +1758,6 @@ fn spawn_supervised_command_inner(
                 monitor_group: group,
             },
             scope_root,
-            launch_gate: Some(launch_gate),
             backend_cleanup_started: false,
             direct_reaped: false,
             cleanup_complete: false,
@@ -1906,63 +1872,70 @@ fn create_cloexec_pipe(label: &str) -> Result<(File, File), String> {
     }
     let reader = unsafe { File::from_raw_fd(descriptors[0]) };
     let writer = unsafe { File::from_raw_fd(descriptors[1]) };
-    Ok((
-        move_file_fd_at_least(reader, LINUX_HANDSHAKE_FD_MINIMUM, label)?,
-        move_file_fd_at_least(writer, LINUX_HANDSHAKE_FD_MINIMUM, label)?,
-    ))
+    Ok((reader, writer))
 }
 
 #[cfg(target_os = "linux")]
-fn create_cloexec_socket_pair(label: &str) -> Result<(UnixStream, UnixStream), String> {
-    let (left, right) =
-        UnixStream::pair().map_err(|error| format!("failed to create {label} socket: {error}"))?;
-    Ok((
-        move_stream_fd_at_least(left, LINUX_HANDSHAKE_FD_MINIMUM, label)?,
-        move_stream_fd_at_least(right, LINUX_HANDSHAKE_FD_MINIMUM, label)?,
-    ))
+fn clear_close_on_exec(descriptor: libc::c_int) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn move_file_fd_at_least(file: File, minimum: libc::c_int, label: &str) -> Result<File, String> {
-    if file.as_raw_fd() >= minimum {
-        return Ok(file);
+fn read_linux_launch_ready(stdout: &mut std::process::ChildStdout) -> Result<(), String> {
+    let deadline = Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT;
+    let mut ready = [0_u8; LINUX_LAUNCH_READY_FRAME.len()];
+    let mut offset = 0_usize;
+    while offset < ready.len() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("supervised Linux launch gate readiness timed out".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let timeout = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+        let mut descriptor = libc::pollfd {
+            fd: stdout.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if result == 0 {
+            return Err("supervised Linux launch gate readiness timed out".to_string());
+        }
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!(
+                "failed to wait for supervised Linux launch gate readiness: {error}"
+            ));
+        }
+        match stdout.read(&mut ready[offset..]) {
+            Ok(0) => {
+                return Err(
+                    "supervised Linux launch gate closed before reporting readiness".to_string(),
+                )
+            }
+            Ok(read) => offset += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to read supervised Linux launch gate readiness: {error}"
+                ))
+            }
+        }
     }
-    let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
-    if duplicate == -1 {
-        return Err(format!(
-            "failed to reserve {label} descriptor: {}",
-            std::io::Error::last_os_error()
-        ));
+    if ready != LINUX_LAUNCH_READY_FRAME {
+        return Err("supervised Linux launch gate returned an invalid readiness frame".to_string());
     }
-    Ok(unsafe { File::from_raw_fd(duplicate) })
-}
-
-#[cfg(target_os = "linux")]
-fn move_stream_fd_at_least(
-    stream: UnixStream,
-    minimum: libc::c_int,
-    label: &str,
-) -> Result<UnixStream, String> {
-    if stream.as_raw_fd() >= minimum {
-        return Ok(stream);
-    }
-    let duplicate = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
-    if duplicate == -1 {
-        return Err(format!(
-            "failed to reserve {label} descriptor: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(unsafe { UnixStream::from_raw_fd(duplicate) })
-}
-
-#[cfg(target_os = "linux")]
-fn duplicate_fd_to(source: libc::c_int, target: libc::c_int) -> std::io::Result<()> {
-    if unsafe { libc::dup2(source, target) } == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -4365,6 +4338,72 @@ mod tests {
             "oversized fixture"
         )
         .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_gate_preserves_payload_stdin_bytes() {
+        use std::os::unix::net::UnixStream;
+
+        if !crate::sandbox::detect_capabilities().managed_process_available {
+            assert!(
+                std::env::var_os("NIB_REQUIRE_BWRAP_TESTS").is_none(),
+                "CI requires a usable bwrap PID namespace"
+            );
+            return;
+        }
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-gated-stdin",
+                "subagent",
+                88,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare gated stdin scope");
+        let launched = root.path().join("payload-launched");
+        let payload = b"nib-launch\npayload after the internal gate\n";
+        let (owner_read, owner_write) = UnixStream::pair().expect("owner lifetime pipe");
+        let output = supervise_foreground_with_ready(
+            &store,
+            &record,
+            owner_read,
+            SupervisedCommand {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    OsString::from("-c"),
+                    OsString::from("printf launched > \"$1\"; cat"),
+                    OsString::from("nib-gated-stdin-fixture"),
+                    launched.as_os_str().to_os_string(),
+                ],
+                cwd: root.path().to_path_buf(),
+                stdin: payload.to_vec(),
+                environment: Vec::new(),
+            },
+            |running| {
+                if running.status != ProcessScopeStatus::Running
+                    || store.load(&running.scope_id)?.status != ProcessScopeStatus::Running
+                    || launched.exists()
+                {
+                    return Err(
+                        "launch gate was released before durable Running publication".to_string(),
+                    );
+                }
+                Ok(())
+            },
+        )
+        .expect("supervise gated stdin fixture");
+
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout, payload);
+        assert_eq!(
+            std::fs::read(&launched).expect("payload launch marker"),
+            b"launched"
+        );
+        assert!(output.cleanup_proof.descendants_reaped);
+        drop(owner_write);
     }
 
     #[cfg(target_os = "linux")]

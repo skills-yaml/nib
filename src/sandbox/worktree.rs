@@ -343,6 +343,42 @@ fn reservation_worktree_staging_path(
     Ok(parent.join(format!(".nib-worktree-reservation-{receipt_id}")))
 }
 
+fn canonical_managed_worktree_reservation_paths(
+    project_root: &Path,
+    worktree_path: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let canonical_project_root = project_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve managed worktree project root {}: {error}",
+            project_root.display()
+        )
+    })?;
+    if !canonical_project_root.is_dir() {
+        return Err(format!(
+            "managed worktree project root is not a directory: {}",
+            canonical_project_root.display()
+        ));
+    }
+    let relative_worktree_path = worktree_path
+        .strip_prefix(project_root)
+        .or_else(|_| worktree_path.strip_prefix(&canonical_project_root))
+        .map_err(|_| {
+            format!(
+                "managed worktree path is outside the project root: {}",
+                worktree_path.display()
+            )
+        })?;
+    if relative_worktree_path.as_os_str().is_empty()
+        || relative_worktree_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("managed worktree path has an unsafe project-relative component".to_string());
+    }
+    let canonical_worktree_path = canonical_project_root.join(relative_worktree_path);
+    Ok((canonical_project_root, canonical_worktree_path))
+}
+
 fn managed_branch_paths(
     common_git_dir: &Path,
     branch_reference: &str,
@@ -408,6 +444,12 @@ fn validate_durable_ownership_record(
     kind: ManagedWorktreeKind,
     logical_id: &str,
 ) -> Result<(), String> {
+    let project_root = project_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve managed worktree ownership project root {}: {error}",
+            project_root.display()
+        )
+    })?;
     if record.schema_version != MANAGED_WORKTREE_OWNERSHIP_SCHEMA_VERSION {
         return Err(format!(
             "unsupported managed worktree ownership schema version {}",
@@ -433,7 +475,7 @@ fn validate_durable_ownership_record(
     {
         return Err("managed worktree reservation staging path is invalid".to_string());
     }
-    if !record.common_git_dir.is_absolute() || !record.common_git_dir.starts_with(project_root) {
+    if !record.common_git_dir.is_absolute() || !record.common_git_dir.starts_with(&project_root) {
         return Err("managed worktree common Git directory escapes the repository".to_string());
     }
     if let Some(registration) = &record.registration_path {
@@ -1180,23 +1222,25 @@ pub(crate) fn reserve_managed_worktree_sync_controlled(
     branch: &str,
     cancellation: Option<&BlockingGitCancellation>,
 ) -> Result<ManagedWorktreeReservation, String> {
+    let (project_root, worktree_path) =
+        canonical_managed_worktree_reservation_paths(project_root, worktree_path)?;
     let head = run_git_bounded_sync_with_timeout_controlled(
-        project_root,
+        &project_root,
         ["rev-parse", "--verify", "HEAD^{commit}"],
         GIT_COMMAND_TIMEOUT,
         cancellation,
     )?;
     let initial_oid = parse_git_oid(&head, "resolve reserved branch base")?;
     let common = run_git_bounded_sync_with_timeout_controlled(
-        project_root,
+        &project_root,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
         GIT_COMMAND_TIMEOUT,
         cancellation,
     )?;
-    let common = parse_common_git_directory(project_root, &common)?;
+    let common = parse_common_git_directory(&project_root, &common)?;
     let branch_reference = format!("refs/heads/{branch}");
     let existing = run_git_bounded_sync_with_timeout_controlled(
-        project_root,
+        &project_root,
         ["show-ref", "--verify", "--quiet", branch_reference.as_str()],
         GIT_COMMAND_TIMEOUT,
         cancellation,
@@ -1213,12 +1257,12 @@ pub(crate) fn reserve_managed_worktree_sync_controlled(
     }
     let common_directory = crate::daemons::state::StableDirectory::open(&common)?;
     let registration_snapshot =
-        capture_worktree_registration_snapshot_from_common(common_directory, worktree_path)?;
+        capture_worktree_registration_snapshot_from_common(common_directory, &worktree_path)?;
     persist_managed_worktree_reservation(
-        project_root,
+        &project_root,
         kind,
         logical_id,
-        worktree_path,
+        &worktree_path,
         branch_reference,
         initial_oid,
         registration_snapshot,
@@ -1233,23 +1277,25 @@ async fn reserve_managed_worktree_cancellable(
     branch: &str,
     cancellation: Option<&crate::agent::CancellationSignal>,
 ) -> Result<ManagedWorktreeReservation, String> {
+    let (project_root, worktree_path) =
+        canonical_managed_worktree_reservation_paths(project_root, worktree_path)?;
     let head = run_git_cancellable(
-        project_root,
+        &project_root,
         ["rev-parse", "--verify", "HEAD^{commit}"],
         cancellation,
     )
     .await?;
     let initial_oid = parse_git_oid(&head, "resolve reserved branch base")?;
     let common = run_git_cancellable(
-        project_root,
+        &project_root,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
         cancellation,
     )
     .await?;
-    let common = parse_common_git_directory(project_root, &common)?;
+    let common = parse_common_git_directory(&project_root, &common)?;
     let branch_reference = format!("refs/heads/{branch}");
     let existing = run_git_cancellable(
-        project_root,
+        &project_root,
         ["show-ref", "--verify", "--quiet", branch_reference.as_str()],
         cancellation,
     )
@@ -1266,12 +1312,12 @@ async fn reserve_managed_worktree_cancellable(
     }
     let common_directory = crate::daemons::state::StableDirectory::open(&common)?;
     let registration_snapshot =
-        capture_worktree_registration_snapshot_from_common(common_directory, worktree_path)?;
+        capture_worktree_registration_snapshot_from_common(common_directory, &worktree_path)?;
     persist_managed_worktree_reservation(
-        project_root,
+        &project_root,
         kind,
         logical_id,
-        worktree_path,
+        &worktree_path,
         branch_reference,
         initial_oid,
         registration_snapshot,
@@ -4515,7 +4561,7 @@ fn cleanup_time_remaining(
         .checked_duration_since(Instant::now())
         .ok_or_else(|| {
             format!(
-                "partial worktree cleanup exceeded {} seconds",
+                "partial worktree cleanup deadline exceeded after {} seconds",
                 cleanup_timeout.as_secs_f64()
             )
         })
@@ -7219,6 +7265,140 @@ mod tests {
             .unwrap()
             .success());
         directory
+    }
+
+    #[cfg(windows)]
+    fn windows_path_without_verbatim_prefix(path: &Path) -> PathBuf {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        const BACKSLASH: u16 = b'\\' as u16;
+        const QUESTION: u16 = b'?' as u16;
+        const COLON: u16 = b':' as u16;
+        let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if !encoded.starts_with(&[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH]) {
+            return path.to_path_buf();
+        }
+        let remainder = &encoded[4..];
+        let ascii_eq = |value: u16, expected: u8| {
+            value == u16::from(expected) || value == u16::from(expected.to_ascii_lowercase())
+        };
+        let normalized = if remainder.len() >= 4
+            && ascii_eq(remainder[0], b'U')
+            && ascii_eq(remainder[1], b'N')
+            && ascii_eq(remainder[2], b'C')
+            && remainder[3] == BACKSLASH
+        {
+            let mut normalized = vec![BACKSLASH, BACKSLASH];
+            normalized.extend_from_slice(&remainder[4..]);
+            normalized
+        } else if remainder.get(1) == Some(&COLON) {
+            remainder.to_vec()
+        } else {
+            return path.to_path_buf();
+        };
+        PathBuf::from(OsString::from_wide(&normalized))
+    }
+
+    #[cfg(windows)]
+    fn windows_dos_short_path(path: &Path) -> PathBuf {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let path = windows_path_without_verbatim_prefix(path);
+        let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        input.push(0);
+        let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+        assert_ne!(
+            required,
+            0,
+            "failed to size the DOS short-path buffer: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut output = vec![0_u16; required as usize];
+        let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+        assert_ne!(
+            written,
+            0,
+            "failed to resolve the DOS short path: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            (written as usize) < output.len(),
+            "DOS short-path output exceeded its sized buffer"
+        );
+        output.truncate(written as usize);
+        PathBuf::from(OsString::from_wide(&output))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_reservation_canonicalizes_a_dos_short_project_root() {
+        let repository = repository();
+        let canonical_root = repository
+            .path()
+            .canonicalize()
+            .expect("canonical repository");
+        let short_root = windows_dos_short_path(&canonical_root);
+        if short_root == windows_path_without_verbatim_prefix(&canonical_root) {
+            return;
+        }
+
+        let id = "dos-short-reservation";
+        let relative_path = Path::new(".nib/worktrees/subagents").join(id);
+        let short_worktree_path = short_root.join(&relative_path);
+        crate::fs_security::ensure_directory_without_symlinks(
+            short_worktree_path.parent().expect("worktree parent"),
+        )
+        .expect("worktree parent");
+        let reservation = reserve_managed_worktree_sync_controlled(
+            &short_root,
+            ManagedWorktreeKind::Subagent,
+            id,
+            &short_worktree_path,
+            &branch_name(id),
+            None,
+        )
+        .expect("reserve through DOS short project root");
+        let record = reservation.intent.revision.record.clone();
+        let canonical_worktree_path = canonical_root.join(relative_path);
+
+        assert_eq!(record.project_root, canonical_root);
+        assert_eq!(record.worktree_path, canonical_worktree_path);
+        assert_eq!(
+            record.worktree_staging_path.parent(),
+            canonical_worktree_path.parent()
+        );
+        assert!(record.common_git_dir.starts_with(&record.project_root));
+        assert!(
+            reservation
+                .intent
+                .revision
+                .path
+                .starts_with(&record.project_root),
+            "durable ownership path retained the DOS short root"
+        );
+        validate_durable_ownership_record(&record, &short_root, ManagedWorktreeKind::Subagent, id)
+            .expect("validate canonical ownership through DOS short root");
+        drop(reservation);
+
+        let reloaded =
+            load_durable_ownership_revision(&canonical_root, ManagedWorktreeKind::Subagent, id)
+                .expect("reload reservation through canonical root")
+                .expect("durable reservation");
+        assert_eq!(reloaded.record.project_root, record.project_root);
+        assert_eq!(reloaded.record.worktree_path, record.worktree_path);
+        drop(reloaded);
+
+        Worktree::remove(&canonical_root, id)
+            .expect("clean short-root reservation through canonical root");
+        let tombstone =
+            load_durable_ownership_revision(&short_root, ManagedWorktreeKind::Subagent, id)
+                .expect("reload cleanup through DOS short root")
+                .expect("durable cleanup tombstone");
+        assert_eq!(tombstone.record.phase, DurableOwnershipPhase::Complete);
+        assert!(!canonical_worktree_path.exists());
     }
 
     fn git_stdout(repository: &Path, args: &[&str]) -> String {

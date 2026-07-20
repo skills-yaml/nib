@@ -150,6 +150,13 @@ pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn canonical_path_starts_with(
+    canonical_path: &Path,
+    requested_root: &Path,
+) -> io::Result<bool> {
+    Ok(canonical_path.starts_with(requested_root.canonicalize()?))
+}
+
 fn verify_existing_directory_components(absolute: &Path, display: &Path) -> io::Result<()> {
     let mut current = PathBuf::new();
     for component in absolute.components() {
@@ -2113,6 +2120,11 @@ mod tests {
             canonical
         );
         verify_directory_without_symlinks(&short_path).expect("verify DOS short alias");
+        let nested = canonical.join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        let canonical_nested = nested.canonicalize().expect("canonical nested directory");
+        assert!(canonical_path_starts_with(&canonical_nested, &short_path)
+            .expect("compare canonical child with DOS short root"));
     }
 
     #[cfg(windows)]
