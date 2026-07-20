@@ -277,3 +277,32 @@ job on the exact committed revision.
 
 Plain grep patterns could accidentally change matching semantics. Fixed-string `-F`
 preserves literal matching, while `-i` remains limited to the PowerShell checksum check.
+
+## Hosted Matrix Environment Remediation (2026-07-20)
+
+### Scope And Design
+
+Place macOS test and smoke fixtures under the runner's physical temporary directory.
+The default macOS `/var/folders` path traverses the `/var` symlink and would make
+security tests fail before reaching their deliberately injected link. Do not override
+Windows TEMP/TMP: its default DOS-short path is valid product input and remains the
+native canonical-alias regression.
+
+### Acceptance Criteria
+
+- [x] A macOS setup step appends `TMPDIR=$RUNNER_TEMP` to `GITHUB_ENV` so every later
+  child process uses the physical runner temporary directory.
+- [x] The macOS release smoke creates its fixture explicitly below `RUNNER_TEMP`.
+- [x] Windows CI retains the runner's default temporary environment.
+- [ ] The exact PR revision passes the hosted macOS and Windows jobs.
+
+### Affected Areas And Validation
+
+`.github/workflows/ci.yml`, `docs/tech/ci.md`, the full native test suites, release builds,
+and smoke commands. The final gate is a successful hosted matrix on the exact revision.
+
+### Risk
+
+This runner setup does not relax path validation. Ambient macOS product staging that
+uses the platform default temporary path remains separate T006/FT-006 work and must not
+be declared complete from this CI fixture change.

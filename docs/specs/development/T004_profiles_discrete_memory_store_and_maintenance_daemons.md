@@ -403,10 +403,59 @@ until executed.
 macOS publication uses the native no-replace rename path and fails closed if its
 identity checks do not hold; macOS runtime execution also remains unchecked.
 
+## Hosted Windows Persistence Remediation (2026-07-20)
+
+### Scope
+
+Repair the Windows-only persistence primitives exposed by the first hosted runtime
+execution. Preserve direct-child, handle-relative, no-replace publication; accept valid
+DOS short aliases without accepting reparse traversal; and let an observation-only
+visible-directory handle coexist with the retained DELETE-capable directory handle.
+Keep durable ownership receipts share-compatible, then acquire and identity-check a
+fresh DELETE-capable file object for destructive cleanup. Separate reopenable namespace
+directories from short-lived, consumed directory-mutation capabilities.
+
+### Acceptance Criteria
+
+- [x] File publication, directory quarantine, and recursive-removal quarantine share one
+  native `NtSetInformationFile(FileRenameInformation)` helper with the retained parent
+  as `RootDirectory`, a validated one-component destination, and replace disabled.
+- [x] NT failures are converted to ordinary Windows errors and an existing destination
+  preserves both source and target.
+- [x] Windows visible-directory observation requests only directory-list and attribute
+  access and shares read, write, and delete, while the retained capability continues to
+  pin deletion.
+- [x] Directory ownership receipts use a separate observation file object. Empty-tree
+  cleanup consumes and closes the strong directory capability, while recursive cleanup
+  verifies a fresh DELETE-capable handle against the receipt before quarantine or delete.
+- [x] Ordinary and long-lived child directories do not request DELETE access, so task,
+  session, lease, lock, and Git registration namespaces can be reopened concurrently.
+  Rename and empty-directory removal require an explicit owned child capability.
+- [x] Focused source/target collision, present/missing publication, directory quarantine,
+  namespace reopen, receipt coexistence, and handle-lifetime deletion regressions are
+  present and cross-compile.
+- [ ] The full Windows job passes with its default `C:\Users\RUNNER~1` temporary root.
+
+### Affected Areas
+
+`src/fs_security.rs`, `src/daemons/state.rs`, `src/sandbox/worktree.rs`, Windows-only
+filesystem/state tests, and the `windows-sys` feature surface in `Cargo.toml`.
+
+### Validation Gates
+
+Windows-target `task check:all-targets`, the focused Windows runtime
+regressions, `task test`, `task check`, and the hosted Windows build and smoke job.
+
+### Validation Evidence
+
+The full Windows target graph cross-compiles locally with the WDK filesystem and Win32
+I/O bindings enabled. Native behavior remains unchecked until the hosted job executes;
+the job deliberately retains its default short-path environment as the final regression.
+
 ## Remaining Implementation Plan
 
-1. Execute Windows reparse/identity and Windows/macOS daemon, curator, memory, and task
-   runtime gates on their configured platforms.
+1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS
+   daemon, curator, memory, and task runtime gates on their configured platforms.
 2. Rerun the canonical Task gates and two-stage review before moving T004 to `done/`.
 
 ## Current Risks

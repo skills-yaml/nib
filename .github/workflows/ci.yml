@@ -71,6 +71,9 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check all targets and features
+        run: task check:all-targets
+
       - name: Run tests
         run: task test
 
@@ -117,6 +120,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Configure physical temporary directory
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
@@ -124,6 +131,9 @@ jobs:
         uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check all targets and features
+        run: task check:all-targets
 
       - name: Run tests
         run: task test
@@ -139,7 +149,7 @@ jobs:
           "$binary" --help >/dev/null
           "$binary" version >/dev/null
 
-          fixture="$(mktemp -d)"
+          fixture="$(mktemp -d "$RUNNER_TEMP/nib-smoke.XXXXXX")"
           trap 'rm -rf "$fixture"' EXIT
           mkdir -p "$fixture/home"
           git -C "$fixture" init --quiet

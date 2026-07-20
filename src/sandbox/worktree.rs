@@ -1288,14 +1288,24 @@ pub(crate) fn finish_managed_worktree_reservation(
     reservation: ManagedWorktreeReservation,
     ownership: ManagedWorktreeReceipt,
 ) -> Result<ManagedWorktreeReceipt, ManagedWorktreeCaptureError> {
-    finalize_managed_worktree_intent(reservation.intent, ownership)
+    let ManagedWorktreeReservation {
+        intent,
+        registration_snapshot,
+    } = reservation;
+    drop(registration_snapshot);
+    finalize_managed_worktree_intent(intent, ownership)
 }
 
 pub(crate) fn reconcile_failed_managed_worktree_reservation(
     reservation: ManagedWorktreeReservation,
     primary: String,
 ) -> String {
-    match reconcile_unfinished_intent(reservation.intent.revision, &primary) {
+    let ManagedWorktreeReservation {
+        intent,
+        registration_snapshot,
+    } = reservation;
+    drop(registration_snapshot);
+    match reconcile_unfinished_intent(intent.revision, &primary) {
         Ok(()) => primary,
         Err(recovery) => format!("{primary}; durable creation-intent recovery failed: {recovery}"),
     }
@@ -1494,7 +1504,7 @@ fn promote_durable_intent(
         "managed worktree intent path",
     )?;
     let common_directory = reopen_common_git_directory(&record)?;
-    let worktree_directory = crate::daemons::state::StableDirectory::open(&record.worktree_path)?;
+    let worktree_directory = open_stable_direct_child(&record.worktree_path)?;
     let registration_path = parse_gitdir_pointer(
         &read_small_stable_file(&worktree_directory, &record.worktree_path.join(".git"))?,
         "managed worktree intent .git pointer",
@@ -1537,7 +1547,12 @@ fn promote_durable_intent(
     {
         return Err("managed worktree registration reused a pre-intent identity".to_string());
     }
-    validate_reciprocal_worktree_link(&record.worktree_path, &registration_path)?;
+    validate_reciprocal_worktree_link_opened(
+        &record.worktree_path,
+        &worktree_directory,
+        &registration_path,
+        &registration_directory,
+    )?;
     let owned_branch = reopen_owned_branch(&record, &record.current_oid, false)?;
     let mut committed = record;
     committed.phase = DurableOwnershipPhase::Owned;
@@ -1985,13 +2000,13 @@ fn reconcile_unfinished_intent_path(revision: &mut DurableOwnershipRevision) -> 
     }
     if owned_path == revision.record.worktree_staging_path {
         let parent_directory = crate::daemons::state::StableDirectory::open(&parent)?;
-        let staged_directory = parent_directory.open_child(&owned_path)?;
+        let staged_directory = parent_directory.open_owned_child(&owned_path)?;
         if staged_directory.directory_removal_receipt()?.identity() != receipt.identity() {
             return Err(
                 "reserved worktree staging identity changed; replacement preserved".to_string(),
             );
         }
-        parent_directory.remove_empty_child_directory_if_matches(&owned_path, &staged_directory)?;
+        parent_directory.remove_empty_child_directory_if_matches(&owned_path, staged_directory)?;
     } else {
         crate::fs_security::remove_directory_tree_capability_bound_if_matches(
             &parent,
@@ -2332,6 +2347,7 @@ fn rehydrate_owned_worktree(
     {
         return Err("managed worktree registration namespace identity changed".to_string());
     }
+    drop(registration_namespace);
     let (registration_receipt, registration_removed) = reopen_durable_directory_artifact(
         registration_parent,
         &registration_path,
@@ -2340,7 +2356,16 @@ fn rehydrate_owned_worktree(
         "Git worktree registration",
     )?;
     if !path_removed && !registration_removed {
-        validate_reciprocal_worktree_link(&record.worktree_path, &registration_path)?;
+        validate_reciprocal_worktree_link(
+            &record.worktree_path,
+            path_receipt
+                .as_ref()
+                .ok_or("durable managed worktree path receipt is unavailable")?,
+            &registration_path,
+            registration_receipt
+                .as_ref()
+                .ok_or("durable managed worktree registration receipt is unavailable")?,
+        )?;
     }
     let expected_oid = adopted_oid.unwrap_or(&record.current_oid);
     let adopting_new_revision = adopted_oid.is_some()
@@ -3138,14 +3163,14 @@ pub(crate) fn publish_reserved_empty_worktree_destination(
         ));
     }
 
-    let staging_directory = parent_directory.create_child_directory(&staging)?;
+    let staging_directory = parent_directory.create_owned_child_directory(&staging)?;
     let receipt = staging_directory.directory_removal_receipt()?;
     let mut record = revision.record.clone();
     record.worktree_identity = Some(receipt.identity());
     record.path_cleanup = DurableArtifactPhase::Present;
     if let Err(error) = persist_durable_ownership_revision(revision, record) {
         let cleanup =
-            parent_directory.remove_empty_child_directory_if_matches(&staging, &staging_directory);
+            parent_directory.remove_empty_child_directory_if_matches(&staging, staging_directory);
         return Err(match cleanup {
             Ok(()) => error,
             Err(cleanup) => {
@@ -3154,16 +3179,8 @@ pub(crate) fn publish_reserved_empty_worktree_destination(
         });
     }
 
-    parent_directory.rename_child_directory(&staging, &path)?;
-    let published = crate::fs_security::capture_directory_removal_receipt(parent, &path)
-        .map_err(|error| format!("failed to retain published worktree destination: {error}"))?;
-    if !receipt.same_identity(&published) {
-        return Err(
-            "published worktree destination no longer matches its durable reservation identity"
-                .to_string(),
-        );
-    }
-    Ok(published)
+    parent_directory.rename_child_directory(&staging, &staging_directory, &path)?;
+    Ok(receipt)
 }
 
 #[cfg(test)]
@@ -3182,9 +3199,11 @@ pub(crate) fn publish_owned_empty_worktree_destination(
         ".nib-worktree-create-{}",
         uuid::Uuid::new_v4().simple()
     ));
-    let staging_directory = parent_directory.create_child_directory(&staging)?;
+    let staging_directory = parent_directory.create_owned_child_directory(&staging)?;
     let receipt = staging_directory.directory_removal_receipt()?;
-    if let Err(error) = parent_directory.rename_child_directory(&staging, path) {
+    if let Err(error) = parent_directory.rename_child_directory(&staging, &staging_directory, path)
+    {
+        drop(staging_directory);
         let deadline = Instant::now() + CANCELLED_CREATE_CLEANUP_TIMEOUT;
         let published_cleanup =
             crate::fs_security::remove_directory_tree_capability_bound_if_matches(
@@ -3209,28 +3228,6 @@ pub(crate) fn publish_owned_empty_worktree_destination(
                 published_cleanup.expect_err("published cleanup failed")
             ),
         });
-    }
-    let published = crate::fs_security::capture_directory_removal_receipt(parent, path);
-    match published {
-        Ok(published) if receipt.same_identity(&published) => {}
-        result => {
-            let validation = match result {
-                Ok(_) => "published worktree destination identity changed".to_string(),
-                Err(error) => format!("failed to validate published worktree destination: {error}"),
-            };
-            let cleanup = crate::fs_security::remove_directory_tree_capability_bound_if_matches(
-                parent,
-                path,
-                receipt.clone(),
-                Instant::now() + CANCELLED_CREATE_CLEANUP_TIMEOUT,
-            );
-            return Err(match cleanup {
-                Ok(()) => validation,
-                Err(cleanup) => format!(
-                    "{validation}; exact published worktree cleanup failed and any replacement was preserved: {cleanup}"
-                ),
-            });
-        }
     }
     Ok(receipt)
 }
@@ -3361,13 +3358,7 @@ fn capture_worktree_registration_snapshot_from_common(
                     Ok(())
                 },
             )?;
-            let visible_directory = common_directory.open_child(&registrations_path)?;
-            if !directory.same_identity(&visible_directory) {
-                return Err(
-                    "Git worktree registration directory changed during pre-add inspection"
-                        .to_string(),
-                );
-            }
+            directory.verify_visible_at(&registrations_path)?;
             Some(ExistingWorktreeRegistrations { directory, entries })
         }
     };
@@ -3433,7 +3424,7 @@ fn capture_managed_worktree_receipt(
         );
     }
 
-    let worktree_directory = crate::daemons::state::StableDirectory::open(path)?;
+    let worktree_directory = open_stable_direct_child(path)?;
     let visible_path = worktree_directory.directory_removal_receipt()?;
     if !path_receipt.same_identity(&visible_path) {
         return Err(format!(
@@ -3448,15 +3439,14 @@ fn capture_managed_worktree_receipt(
         "managed worktree .git pointer",
     )?;
     let registrations = common_git_dir.join("worktrees");
-    let registrations_directory = common_directory.open_child(&registrations)?;
-    if let Some(existing) = &registration_snapshot.registrations {
-        if !existing.directory.same_identity(&registrations_directory) {
-            return Err(
-                "Git worktree registration directory identity changed after pre-add inspection"
-                    .into(),
-            );
-        }
-    }
+    let opened_registrations;
+    let registrations_directory = if let Some(existing) = &registration_snapshot.registrations {
+        existing.directory.verify_visible_at(&registrations)?;
+        &existing.directory
+    } else {
+        opened_registrations = common_directory.open_child(&registrations)?;
+        &opened_registrations
+    };
     if registration_path.parent() != Some(registrations.as_path())
         || registration_path.file_name().is_none()
     {
@@ -3499,6 +3489,13 @@ fn capture_managed_worktree_receipt(
         )
         .into());
     }
+    let reciprocal_validation = validate_reciprocal_worktree_link_opened(
+        path,
+        &worktree_directory,
+        &registration_path,
+        &registration_directory,
+    );
+    let reciprocal_link_proven = reciprocal_validation.is_ok();
     let ownership = ManagedWorktreeReceipt {
         path: path.to_path_buf(),
         path_receipt: Some(path_receipt.clone()),
@@ -3509,11 +3506,11 @@ fn capture_managed_worktree_receipt(
             path_removed: false,
             registration_removed: false,
             branch_removed: false,
-            reciprocal_link_proven: false,
+            reciprocal_link_proven,
             durable: None,
         }),
     };
-    match validate_managed_worktree_ownership(&ownership) {
+    match reciprocal_validation.and_then(|()| validate_owned_ref_receipt(owned_branch)) {
         Ok(()) => Ok(ownership),
         Err(message) => Err(ManagedWorktreeCaptureError {
             message,
@@ -3522,22 +3519,41 @@ fn capture_managed_worktree_receipt(
     }
 }
 
-fn validate_reciprocal_worktree_link(path: &Path, registration_path: &Path) -> Result<(), String> {
-    let worktree = crate::daemons::state::StableDirectory::open(path)?;
-    let registration_parent = registration_path
-        .parent()
-        .ok_or("managed worktree registration has no parent")?;
-    let registrations = crate::daemons::state::StableDirectory::open(registration_parent)?;
-    let registration = registrations.open_child(registration_path)?;
+fn validate_reciprocal_worktree_link(
+    path: &Path,
+    path_receipt: &crate::fs_security::DirectoryRemovalReceipt,
+    registration_path: &Path,
+    registration_receipt: &crate::fs_security::DirectoryRemovalReceipt,
+) -> Result<(), String> {
+    let worktree = open_stable_direct_child(path)?;
+    if worktree.directory_removal_receipt()?.identity() != path_receipt.identity() {
+        return Err("managed worktree path identity changed".to_string());
+    }
+    let registration = open_stable_direct_child(registration_path)?;
+    if registration.directory_removal_receipt()?.identity() != registration_receipt.identity() {
+        return Err("Git worktree registration identity changed".to_string());
+    }
+    validate_reciprocal_worktree_link_opened(path, &worktree, registration_path, &registration)
+}
+
+fn validate_reciprocal_worktree_link_opened(
+    path: &Path,
+    worktree: &crate::daemons::state::StableDirectory,
+    registration_path: &Path,
+    registration: &crate::daemons::state::StableDirectory,
+) -> Result<(), String> {
+    if worktree.path() != path || registration.path() != registration_path {
+        return Err("managed worktree reciprocal-link capability path changed".to_string());
+    }
     let linked_registration = parse_gitdir_pointer(
-        &read_small_stable_file(&worktree, &path.join(".git"))?,
+        &read_small_stable_file(worktree, &path.join(".git"))?,
         "managed worktree .git pointer",
     )?;
     if linked_registration != registration_path {
         return Err("managed worktree registration pointer changed".to_string());
     }
     let linked_worktree = parse_plain_path(
-        &read_small_stable_file(&registration, &registration_path.join("gitdir"))?,
+        &read_small_stable_file(registration, &registration_path.join("gitdir"))?,
         "Git worktree registration backlink",
     )?;
     let expected = path.join(".git");
@@ -3547,7 +3563,16 @@ fn validate_reciprocal_worktree_link(path: &Path, registration_path: &Path) -> R
             expected.display()
         ));
     }
+    worktree.verify_visible()?;
+    registration.verify_visible()?;
     Ok(())
+}
+
+fn open_stable_direct_child(path: &Path) -> Result<crate::daemons::state::StableDirectory, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("managed directory has no parent: {}", path.display()))?;
+    crate::daemons::state::StableDirectory::open(parent)?.open_child(path)
 }
 
 fn parse_gitdir_pointer(contents: &[u8], label: &str) -> Result<PathBuf, String> {
@@ -4003,7 +4028,17 @@ pub(crate) fn cleanup_managed_worktree(
     } else {
         match (&path_validation, &registration_validation) {
             (Ok(()), Ok(())) if !state.path_removed && !state.registration_removed => {
-                validate_reciprocal_worktree_link(&ownership.path, &ownership.registration_path)
+                validate_reciprocal_worktree_link(
+                    &ownership.path,
+                    ownership
+                        .path_receipt
+                        .as_ref()
+                        .ok_or("managed worktree path ownership receipt is unavailable")?,
+                    &ownership.registration_path,
+                    ownership.registration_receipt.as_ref().ok_or(
+                        "Git worktree registration ownership receipt is unavailable",
+                    )?,
+                )
             }
             _ => Err("reciprocal worktree linkage could not be proven because an owned directory identity changed".to_string()),
         }
@@ -4218,7 +4253,18 @@ fn validate_managed_worktree_directories(ownership: &ManagedWorktreeReceipt) -> 
             .ok_or("Git worktree registration ownership receipt is unavailable")?,
         "Git worktree registration",
     )?;
-    validate_reciprocal_worktree_link(&ownership.path, &ownership.registration_path)?;
+    validate_reciprocal_worktree_link(
+        &ownership.path,
+        ownership
+            .path_receipt
+            .as_ref()
+            .ok_or("managed worktree path ownership receipt is unavailable")?,
+        &ownership.registration_path,
+        ownership
+            .registration_receipt
+            .as_ref()
+            .ok_or("Git worktree registration ownership receipt is unavailable")?,
+    )?;
     Ok(())
 }
 
@@ -8823,7 +8869,7 @@ mod tests {
         let parent_directory =
             crate::daemons::state::StableDirectory::open(&parent).expect("stable worktree parent");
         parent_directory
-            .create_child_directory(&record.worktree_staging_path)
+            .create_owned_child_directory(&record.worktree_staging_path)
             .expect("reserved worktree staging");
         let branch_parent = crate::fs_security::ensure_directory_without_symlinks(
             record
@@ -8882,7 +8928,7 @@ mod tests {
         let parent_directory =
             crate::daemons::state::StableDirectory::open(&parent).expect("stable worktree parent");
         let staged_directory = parent_directory
-            .create_child_directory(&record.worktree_staging_path)
+            .create_owned_child_directory(&record.worktree_staging_path)
             .expect("reserved worktree staging");
         let staged_receipt = staged_directory
             .directory_removal_receipt()

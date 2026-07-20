@@ -390,8 +390,7 @@ pub fn detect_capabilities() -> SandboxCapabilities {
     } else {
         (false, Some("bwrap executable not found".to_string()))
     };
-    let (managed_process_available, managed_process_error) =
-        managed_process_availability(bwrap_available, bwrap_error.as_deref());
+    let (managed_process_available, managed_process_error) = managed_process_availability();
 
     SandboxCapabilities {
         bwrap_installed,
@@ -403,14 +402,9 @@ pub fn detect_capabilities() -> SandboxCapabilities {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn require_managed_process_capability() -> Result<(), String> {
-    let bwrap_installed = command_succeeds("bwrap", &["--version"]);
-    let (bwrap_available, bwrap_error) = if bwrap_installed {
-        probe_bwrap()
-    } else {
-        (false, Some("bwrap executable not found".to_string()))
-    };
-    let (available, error) = managed_process_availability(bwrap_available, bwrap_error.as_deref());
+    let (available, error) = managed_process_availability();
     if available {
         Ok(())
     } else {
@@ -421,35 +415,21 @@ pub(crate) fn require_managed_process_capability() -> Result<(), String> {
     }
 }
 
-fn managed_process_availability(
-    bwrap_available: bool,
-    bwrap_error: Option<&str>,
-) -> (bool, Option<String>) {
-    if bwrap_available {
-        #[cfg(target_os = "linux")]
-        {
-            static MANAGED_PROCESS_PROBE: LazyLock<Result<(), String>> =
-                LazyLock::new(process::probe_linux_managed_process_backend);
-            match &*MANAGED_PROCESS_PROBE {
-                Ok(()) => (true, None),
-                Err(error) => (false, Some(error.clone())),
-            }
+fn managed_process_availability() -> (bool, Option<String>) {
+    #[cfg(target_os = "linux")]
+    {
+        static MANAGED_PROCESS_PROBE: LazyLock<Result<(), String>> =
+            LazyLock::new(process::probe_linux_managed_process_backend);
+        match &*MANAGED_PROCESS_PROBE {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error.clone())),
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            (
-                false,
-                Some("production managed-process supervision is Linux-only".to_string()),
-            )
-        }
-    } else {
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
         (
             false,
-            Some(
-                bwrap_error
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "bwrap is unavailable".to_string()),
-            ),
+            Some("production managed-process supervision is Linux-only".to_string()),
         )
     }
 }

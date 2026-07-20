@@ -369,6 +369,43 @@ design are both proven.
   `tests/managed_process_supervisor_windows.rs` and
   `tests/managed_process_supervisor_macos.rs`; they have not executed on this Linux host.
 
+## Hosted Linux Probe Remediation (2026-07-20)
+
+### Scope
+
+Make the production managed-process preflight obey the existing independent-probe
+decision. Keep the broad sandbox probe, including `--unshare-net`, authoritative for
+general bwrap and network-boundary availability, while deriving managed-process
+availability only from the exact PID-namespace launch, gate, pidfd termination, wait,
+and descendant-reap probe.
+
+### Acceptance Criteria
+
+- [x] Production managed-process preflight does not execute the broad bwrap probe,
+  `bwrap --version`, Git, or another unrelated diagnostic.
+- [x] A failed broad `--unshare-net` probe can coexist with successful exact
+  managed-process availability without weakening network-boundary diagnostics.
+- [x] A Linux integration regression wraps bwrap, rejects only `--unshare-net`, and
+  proves production preflight succeeds before broad diagnostics report their failure.
+- [ ] The exact PR revision passes the hosted Validate job with required bwrap tests.
+
+### Affected Areas
+
+`src/sandbox/mod.rs`, exact managed-process capability tests, delegation integration
+tests, and the Linux Validate job.
+
+### Validation Gates
+
+`task test:managed-process-capability`, required bwrap
+supervisor/delegation regressions, `task test`, `task check`, managed-process smoke, and
+the hosted Validate job.
+
+### Local Validation Evidence
+
+The wrapper regression passes against the local exact bwrap backend: the managed probe
+does not touch `--unshare-net`, while the subsequent broad capability read reports the
+injected `RTM_NEWADDR` failure and retains managed-process availability.
+
 ## Remaining Implementation Plan
 
 1. Execute the native Windows Job Object and macOS group-contained tests on hosted

@@ -109,11 +109,48 @@ pub(crate) fn ensure_directory_without_symlinks(path: &Path) -> io::Result<PathB
             ),
         ));
     }
-    Ok(canonical)
+    verify_existing_directory_components(&absolute, path)?;
+    let confirmed = absolute.canonicalize()?;
+    if !canonical_paths_match(&confirmed, &canonical) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "directory path changed while it was validated: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(confirmed)
 }
 
 pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
     let absolute = absolute_path(path)?;
+    verify_existing_directory_components(&absolute, path)?;
+    let canonical = absolute.canonicalize()?;
+    if !canonical_paths_match(&canonical, &absolute) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "directory path resolves through a symlink: {}",
+                path.display()
+            ),
+        ));
+    }
+    verify_existing_directory_components(&absolute, path)?;
+    let confirmed = absolute.canonicalize()?;
+    if !canonical_paths_match(&confirmed, &canonical) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "directory path changed while it was validated: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_existing_directory_components(absolute: &Path, display: &Path) -> io::Result<()> {
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -125,7 +162,7 @@ pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
                     io::ErrorKind::InvalidInput,
                     format!(
                         "directory path contains a parent component: {}",
-                        path.display()
+                        display.display()
                     ),
                 ))
             }
@@ -138,16 +175,6 @@ pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
             }
         }
     }
-    let canonical = absolute.canonicalize()?;
-    if !canonical_paths_match(&canonical, &absolute) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "directory path resolves through a symlink: {}",
-                path.display()
-            ),
-        ));
-    }
     Ok(())
 }
 
@@ -158,8 +185,36 @@ fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
 
 #[cfg(windows)]
 fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
-    path_without_windows_verbatim_prefix(canonical)
-        == path_without_windows_verbatim_prefix(requested)
+    let canonical = path_without_windows_verbatim_prefix(canonical);
+    let normalized_requested = path_without_windows_verbatim_prefix(requested);
+    canonical == normalized_requested
+        || windows_long_path(requested)
+            .map(|path| path_without_windows_verbatim_prefix(&path) == canonical)
+            .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn windows_long_path(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if input.contains(&0) {
+        return None;
+    }
+    input.push(0);
+    let required = unsafe { GetLongPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return None;
+    }
+    let mut output = vec![0_u16; required as usize];
+    let written = unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 || written as usize >= output.len() {
+        return None;
+    }
+    output.truncate(written as usize);
+    Some(PathBuf::from(OsString::from_wide(&output)))
 }
 
 #[cfg(windows)]
@@ -194,6 +249,88 @@ fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     PathBuf::from(OsString::from_wide(&normalized))
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_open_entry_no_replace_windows<
+    S: std::os::windows::io::AsRawHandle + ?Sized,
+>(
+    parent: &cap_std::fs::Dir,
+    source: &S,
+    destination: &Path,
+) -> io::Result<()> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+    };
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut components = destination.components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative rename requires a direct-child destination",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative rename requires a direct-child destination",
+        ));
+    }
+
+    let destination = name.encode_wide().collect::<Vec<_>>();
+    if destination.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative rename requires a non-empty destination",
+        ));
+    }
+    let filename_bytes = destination
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    let filename_bytes = u32::try_from(filename_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    let buffer_len = size_of::<FILE_RENAME_INFORMATION>()
+        .checked_add(filename_bytes as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    let buffer_len_u32 = u32::try_from(buffer_len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    let storage_len = buffer_len.div_ceil(size_of::<usize>());
+    let mut buffer = vec![0_usize; storage_len];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = parent.as_raw_handle();
+        (*info).FileNameLength = filename_bytes;
+        std::ptr::copy_nonoverlapping(
+            destination.as_ptr(),
+            buffer
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(offset_of!(FILE_RENAME_INFORMATION, FileName))
+                .cast::<u16>(),
+            destination.len(),
+        );
+        NtSetInformationFile(
+            source.as_raw_handle(),
+            &mut io_status,
+            buffer.as_ptr().cast(),
+            buffer_len_u32,
+            FileRenameInformation,
+        )
+    };
+    if status >= 0 {
+        Ok(())
+    } else {
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        Err(io::Error::from_raw_os_error(code as i32))
+    }
 }
 
 fn ensure_directory_component(path: &Path) -> io::Result<()> {
@@ -364,13 +501,44 @@ pub(crate) fn capture_directory_removal_receipt(
     directory: &Path,
 ) -> io::Result<DirectoryRemovalReceipt> {
     verify_directory_without_symlinks(parent)?;
+    #[cfg(windows)]
+    direct_child_path(parent, directory)?;
+    #[cfg(not(windows))]
     let relative = direct_child_path(parent, directory)?;
+    #[cfg(windows)]
+    let parent_identity = {
+        let parent_file = open_directory_observation_windows(parent)?;
+        removal_identity_from_file(&parent_file)?
+    };
+    #[cfg(not(windows))]
     let parent_directory =
         cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    #[cfg(windows)]
+    let source = open_directory_observation_windows(directory)?;
+    #[cfg(not(windows))]
     let source = open_capability_entry_no_follow(&parent_directory, &relative)?;
     let metadata = source.metadata()?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(invalid_directory_component(directory));
+    }
+    #[cfg(windows)]
+    {
+        let source_identity = removal_identity_from_file(&source)?;
+        verify_directory_without_symlinks(parent)?;
+        let visible_parent_file = open_directory_observation_windows(parent)?;
+        if removal_identity_from_file(&visible_parent_file)? != parent_identity {
+            return Err(io::Error::other(format!(
+                "directory receipt parent identity changed: {}",
+                parent.display()
+            )));
+        }
+        let visible_source = open_directory_observation_windows(directory)?;
+        if removal_identity_from_file(&visible_source)? != source_identity {
+            return Err(io::Error::other(format!(
+                "directory receipt identity changed while it was captured: {}",
+                directory.display()
+            )));
+        }
     }
     DirectoryRemovalReceipt::from_open_directory(source)
 }
@@ -462,20 +630,19 @@ fn remove_directory_tree_capability_bound_inner(
         return Err(invalid_directory_component(directory));
     }
     let source_identity = removal_identity_from_file(&source_file)?;
-    if expected
-        .as_ref()
-        .is_some_and(|receipt| receipt.identity != source_identity)
-    {
-        return Err(io::Error::other(format!(
-            "directory identity no longer matches its ownership receipt; replacement preserved: {}",
-            directory.display()
-        )));
+    if let Some(receipt) = expected.as_ref() {
+        if removal_identity_from_file(&receipt.file)? != receipt.identity {
+            return Err(io::Error::other(
+                "directory ownership receipt identity changed while it was retained",
+            ));
+        }
+        if receipt.identity != source_identity {
+            return Err(io::Error::other(format!(
+                "directory identity no longer matches its ownership receipt; replacement preserved: {}",
+                directory.display()
+            )));
+        }
     }
-    let source_file = if let Some(expected) = expected.as_ref() {
-        expected.file.try_clone()?
-    } else {
-        source_file
-    };
     ensure_same_removal_filesystem(parent_identity, source_identity, directory)?;
     let source_directory = cap_std::fs::Dir::from_std_file(source_file.try_clone()?);
     let before_quarantine = build_removal_plan(&source_directory, source_identity, deadline)?;
@@ -692,6 +859,26 @@ fn open_capability_entry_no_follow(
                 relative.display()
             ),
         ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_directory_observation_windows(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(invalid_directory_component(path));
     }
     Ok(file)
 }
@@ -1175,44 +1362,7 @@ fn quarantine_open_entry_no_replace(
     source_file: &std::fs::File,
     destination: &Path,
 ) -> io::Result<()> {
-    use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
-    };
-
-    let destination = destination.as_os_str().encode_wide().collect::<Vec<_>>();
-    let filename_bytes = destination
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
-    let buffer_len = offset_of!(FILE_RENAME_INFO, FileName)
-        .checked_add(filename_bytes)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
-    let storage_len = buffer_len.div_ceil(size_of::<usize>());
-    let mut buffer = vec![0_usize; storage_len];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    unsafe {
-        (*info).Anonymous.ReplaceIfExists = false;
-        (*info).RootDirectory = parent.as_raw_handle();
-        (*info).FileNameLength = filename_bytes as u32;
-        std::ptr::copy_nonoverlapping(
-            destination.as_ptr(),
-            (*info).FileName.as_mut_ptr(),
-            destination.len(),
-        );
-        if SetFileInformationByHandle(
-            source_file.as_raw_handle(),
-            FileRenameInfo,
-            buffer.as_ptr().cast(),
-            buffer_len as u32,
-        ) == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
+    rename_open_entry_no_replace_windows(parent, source_file, destination)
 }
 
 #[cfg(all(
@@ -1919,6 +2069,89 @@ mod tests {
             nested.canonicalize().expect("canonical directory")
         );
         verify_directory_without_symlinks(&nested).expect("verify safe directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_dos_short_alias_accepts_a_real_directory() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let root = tempdir().expect("tempdir");
+        let canonical = root.path().canonicalize().expect("canonical tempdir");
+        let long_path = path_without_windows_verbatim_prefix(&canonical);
+        let mut input = long_path.as_os_str().encode_wide().collect::<Vec<_>>();
+        input.push(0);
+        let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+        if required == 0 {
+            panic!(
+                "failed to size the DOS short-path buffer: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        let mut output = vec![0_u16; required as usize];
+        let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+        if written == 0 {
+            panic!(
+                "failed to resolve the DOS short path: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        assert!(
+            (written as usize) < output.len(),
+            "DOS short-path output exceeded its sized buffer"
+        );
+        output.truncate(written as usize);
+        let short_path = PathBuf::from(OsString::from_wide(&output));
+        if short_path == long_path {
+            return;
+        }
+
+        assert_eq!(
+            ensure_directory_without_symlinks(&short_path).expect("safe DOS short alias"),
+            canonical
+        );
+        verify_directory_without_symlinks(&short_path).expect("verify DOS short alias");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rooted_rename_is_no_replace_and_preserves_the_open_source() {
+        let root = tempdir().expect("tempdir");
+        std::fs::write(root.path().join("source"), b"source").expect("source");
+        let parent = cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+            .expect("parent capability");
+        let source =
+            open_capability_entry_no_follow(&parent, Path::new("source")).expect("open source");
+
+        rename_open_entry_no_replace_windows(&parent, &source, Path::new("moved"))
+            .expect("rooted rename");
+        assert!(!root.path().join("source").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("moved")).expect("moved source"),
+            b"source"
+        );
+
+        std::fs::write(root.path().join("collision-source"), b"new").expect("collision source");
+        std::fs::write(root.path().join("collision-target"), b"old").expect("collision target");
+        let collision_source =
+            open_capability_entry_no_follow(&parent, Path::new("collision-source"))
+                .expect("open collision source");
+        rename_open_entry_no_replace_windows(
+            &parent,
+            &collision_source,
+            Path::new("collision-target"),
+        )
+        .expect_err("existing destination must not be replaced");
+        assert_eq!(
+            std::fs::read(root.path().join("collision-source")).expect("preserved source"),
+            b"new"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("collision-target")).expect("preserved target"),
+            b"old"
+        );
     }
 
     #[cfg(windows)]

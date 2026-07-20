@@ -18,6 +18,11 @@ tasks:
       - cargo check
       - cargo test -- --test-threads=1
 
+  check:all-targets:
+    desc: Type-check every Rust target and feature (supports cross TARGET)
+    cmds:
+      - cargo check --all-targets --all-features {{if .TARGET}}--target {{.TARGET}}{{end}}
+
   docs:check:
     desc: Validate internal Markdown links and spec-state invariants
     cmds:
@@ -55,6 +60,11 @@ tasks:
     desc: Run durable background task and scheduled worker integration tests
     cmds:
       - cargo test --test durable_tasks -- --test-threads=1
+
+  test:managed-process-capability:
+    desc: Verify the exact managed-process backend probe independently
+    cmds:
+      - cargo test --test managed_process_capability -- --test-threads=1
 
   build:
     desc: Build optimized release binary (supports cross TARGET)

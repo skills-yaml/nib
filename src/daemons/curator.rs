@@ -589,7 +589,7 @@ impl Curator {
                 report.errors.push(error);
                 continue;
             }
-            let skill_directory = match managed_directory.open_child(&path) {
+            let skill_directory = match managed_directory.open_owned_child(&path) {
                 Ok(directory) => directory,
                 Err(error) => {
                     report.errors.push(error);
@@ -712,7 +712,9 @@ impl Curator {
                 report.errors.push(error);
                 continue;
             }
-            if let Err(error) = managed_directory.rename_child_directory(&path, &quarantine_path) {
+            if let Err(error) =
+                managed_directory.rename_child_directory(&path, &skill_directory, &quarantine_path)
+            {
                 report.errors.push(error.clone());
                 self.audit(
                     "cleanup_skill",
@@ -723,22 +725,7 @@ impl Curator {
                 )?;
                 continue;
             }
-            let quarantine_directory = managed_directory.open_child(&quarantine_path)?;
-            if !quarantine_directory.same_identity(&skill_directory) {
-                let error = format!(
-                    "managed skill directory changed while it was quarantined: {}",
-                    path.display()
-                );
-                report.errors.push(error.clone());
-                self.audit(
-                    "cleanup_skill",
-                    Some(&directory_id),
-                    "error",
-                    true,
-                    Some(error),
-                )?;
-                continue;
-            }
+            let quarantine_directory = skill_directory.try_clone_at(&quarantine_path)?;
             let quarantined_marker = quarantine_directory.path().join(MANAGED_SKILL_MARKER);
             quarantine_directory.verify_file_identity(&quarantined_marker, &marker_file)?;
             quarantines.push(ManagedSkillQuarantine {
@@ -1354,17 +1341,16 @@ fn managed_skill_quarantine_id(name: &str) -> Option<String> {
 }
 
 fn delete_managed_skill_quarantine(quarantine: ManagedSkillQuarantine) -> Result<(), String> {
-    quarantine.directory.verify_visible()?;
+    let ManagedSkillQuarantine {
+        id: _,
+        path,
+        parent,
+        directory,
+    } = quarantine;
+    directory.verify_visible()?;
     let mut budget = ManagedSkillTreeBudget::default();
-    delete_managed_skill_tree_contents(
-        &quarantine.directory,
-        0,
-        &mut budget,
-        MANAGED_SKILL_TREE_LIMITS,
-    )?;
-    quarantine
-        .parent
-        .remove_empty_child_directory_if_matches(&quarantine.path, &quarantine.directory)
+    delete_managed_skill_tree_contents(&directory, 0, &mut budget, MANAGED_SKILL_TREE_LIMITS)?;
+    parent.remove_empty_child_directory_if_matches(&path, directory)
 }
 
 fn delete_managed_skill_tree_contents(
@@ -1407,9 +1393,9 @@ fn delete_managed_skill_tree_contents(
                 directory.remove_file_if_matches(&path, &file, ".nib-skill-tree-delete-")?;
             }
             Some(crate::daemons::state::StableEntryKind::Directory) => {
-                let child = directory.open_child(&path)?;
+                let child = directory.open_owned_child(&path)?;
                 delete_managed_skill_tree_contents(&child, depth + 1, budget, limits)?;
-                directory.remove_empty_child_directory_if_matches(&path, &child)?;
+                directory.remove_empty_child_directory_if_matches(&path, child)?;
             }
             None => {}
         }

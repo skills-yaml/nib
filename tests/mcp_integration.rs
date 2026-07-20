@@ -1,6 +1,6 @@
-use nib::config::{
-    load_nib_config_full, save_nib_config_full, ExecutionConfig, McpServerEntry, NibConfig,
-};
+#[cfg(target_os = "linux")]
+use nib::config::load_nib_config_full;
+use nib::config::{save_nib_config_full, ExecutionConfig, McpServerEntry, NibConfig};
 use nib::integrations::mcp::McpManager;
 use nib::session::SessionStore;
 use nib::tools::ToolExecutor;

@@ -316,8 +316,9 @@ Windows/filesystem remediation below.
 Apply the advertised discovery-entry bound before allocating and sorting project
 documentation directory contents, instrument the retained heap so the regression
 observes its peak storage directly, and prove opened document identity on every
-supported platform in CI. Treat Windows canonical verbatim-path syntax as the same
-lexical path without weakening component-level symlink rejection or changing the
+supported platform in CI. Treat Windows canonical verbatim-path syntax and DOS 8.3
+short aliases as the same lexical path without weakening component-level symlink or
+reparse rejection, skipping the second component-validation pass, or changing the
 canonical path returned to callers.
 
 ### Acceptance Criteria
@@ -329,9 +330,9 @@ canonical path returned to callers.
 - [x] File replacement between path validation and read cannot bypass identity checks on
   the local Unix host; unsupported local identity semantics fail closed.
 - [ ] Windows file replacement and reparse runtime regressions prove the same guarantee.
-- [ ] Windows `\\?\` canonical prefixes do not make ordinary absolute directories fail
-  validation, while every path component is still checked for symlinks and every other
-  reparse-point type before acceptance.
+- [ ] Windows `\\?\` canonical prefixes and DOS 8.3 short aliases do not make ordinary
+  absolute directories fail validation, while every path component is checked twice
+  for symlinks and every other reparse-point type before acceptance.
 - [ ] CI executes the Rust test suite on Windows so the Windows replacement regression is
   compiled and run rather than only cross-compiled by the release workflow.
 - [x] Overflow and symlink regressions pass on the local Unix validation host.
@@ -356,14 +357,18 @@ proves a project-local `docs` symlink is rejected even when its target remains i
 the project, and bounded reads revalidate document parents around file identity checks.
 Directory entries plus the pre/post metadata for every accepted document use the shared
 symlink-or-reparse predicate; the focused project-document suite passes 6/6 locally.
-Local filesystem component-link regressions pass. Fresh local Task gates execute 772
+Local filesystem component-link regressions pass. Windows lexical comparison now uses
+`GetLongPathNameW` only after the first component check, repeats the component check and
+canonicalization, and includes a real `GetShortPathNameW` alias regression that skips
+only when the volume cannot produce a distinct short path. Fresh local Task gates execute 772
 tests, coverage passes at 83.94 percent (53,734/64,015), and the locked build plus Linux
 release/PTY smoke pass on 2026-07-16. The Windows CI job is configured; its file-identity
 and canonical-prefix tests remain unchecked until that remote job executes.
 
 ## Remaining Implementation Plan
 
-1. Execute the configured Windows replacement, reparse-point, and verbatim-path
+1. Execute the configured Windows replacement, reparse-point, verbatim-path, and DOS
+   short-alias
    regressions on a Windows runner.
 2. Remediate any platform-specific identity or path-normalization failure while
    preserving the current component checks and discovery bounds.

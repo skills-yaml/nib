@@ -42,7 +42,7 @@ const MAX_SUPERVISED_OUTPUT_BYTES: usize = 1024 * 1024;
 const PRE_RUNNING_PAUSE_ENV: &str = "NIB_TEST_PROCESS_SCOPE_PRE_RUNNING_PAUSE";
 #[cfg(debug_assertions)]
 const PRE_SPAWN_PAUSE_ENV: &str = "NIB_TEST_PROCESS_SCOPE_PRE_SPAWN_PAUSE";
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, target_os = "linux"))]
 const POST_BWRAP_SPAWN_PAUSE_ENV: &str = "NIB_TEST_PROCESS_SCOPE_POST_BWRAP_SPAWN_PAUSE";
 #[cfg(target_os = "linux")]
 const MAX_BWRAP_INFO_BYTES: u64 = 16 * 1024;
@@ -669,6 +669,7 @@ impl ProcessScopeStore {
         })
     }
 
+    #[cfg(target_os = "linux")]
     fn complete_launch_abort(
         &self,
         scope_id: &str,

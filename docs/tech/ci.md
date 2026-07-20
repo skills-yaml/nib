@@ -8,10 +8,16 @@ Follows skm project structure.
 - Rust toolchain via dtolnay/rust-toolchain.
 - Task via arduino/setup-task.
 - Install bwrap on Linux and require the PID-namespace supervisor regressions.
-- Run `task test` plus native backend and production-rejection tests on Windows and
+- Keep broad bwrap/network diagnostics separate from the exact managed-process backend
+  probe so restricted network namespaces do not suppress a usable PID supervisor.
+- Run `task check:all-targets` and `task test` plus native backend and
+  production-rejection tests on Windows and
   macOS in addition to the Linux validation/coverage and production supervisor smoke.
   Production delegation remains Linux-only until a separate spec proves protected
   cleanup authority on those platforms.
+- Export macOS `TMPDIR` from the physical `RUNNER_TEMP` root through `GITHUB_ENV` because the platform's
+  default `/var` temporary path traverses a symlink. Keep the Windows runner's default
+  DOS-short temporary path so canonical alias handling remains a native regression gate.
 - Cross-platform release builds for linux/macos/windows.
 - Channels: prod (main), development.
 - Workflow actions are pinned to reviewed commits. Repository contents are read-only

@@ -65,6 +65,7 @@ pub(crate) struct StableDirectory {
     path: PathBuf,
     directory: cap_std::fs::Dir,
     identity: crate::fs_security::FileIdentity,
+    delete_capable: bool,
 }
 
 impl std::fmt::Debug for StableDirectory {
@@ -89,6 +90,7 @@ impl StableDirectory {
             path: path.to_path_buf(),
             directory,
             identity,
+            delete_capable: false,
         };
         stable.verify_visible()?;
         Ok(stable)
@@ -101,6 +103,31 @@ impl StableDirectory {
     pub(crate) fn directory_removal_receipt(
         &self,
     ) -> Result<crate::fs_security::DirectoryRemovalReceipt, String> {
+        #[cfg(windows)]
+        let file = {
+            let file = windows_visible_directory_file(&self.path)?;
+            let visible_identity =
+                crate::fs_security::FileIdentity::from_file(file.try_clone().map_err(|error| {
+                    format!(
+                        "failed to clone directory observation {}: {error}",
+                        self.path.display()
+                    )
+                })?)
+                .map_err(|error| {
+                    format!(
+                        "failed to identify directory observation {}: {error}",
+                        self.path.display()
+                    )
+                })?;
+            if visible_identity != self.identity {
+                return Err(format!(
+                    "state directory identity changed while its ownership was retained: {}",
+                    self.path.display()
+                ));
+            }
+            file
+        };
+        #[cfg(not(windows))]
         let file = self
             .directory
             .try_clone()
@@ -125,7 +152,31 @@ impl StableDirectory {
             path: self.path.clone(),
             directory,
             identity,
+            delete_capable: self.delete_capable,
         })
+    }
+
+    pub(crate) fn try_clone_at(&self, path: &Path) -> Result<Self, String> {
+        self.verify_visible_at(path)?;
+        let directory = self
+            .directory
+            .try_clone()
+            .map_err(|error| format!("failed to clone {}: {error}", path.display()))?;
+        let identity = stable_directory_identity(&directory, path)?;
+        if identity != self.identity {
+            return Err(format!(
+                "state directory identity changed while it was relocated: {}",
+                path.display()
+            ));
+        }
+        let stable = Self {
+            path: path.to_path_buf(),
+            directory,
+            identity,
+            delete_capable: self.delete_capable,
+        };
+        stable.verify_visible()?;
+        Ok(stable)
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -133,6 +184,22 @@ impl StableDirectory {
     }
 
     pub(crate) fn open_child(&self, path: &Path) -> Result<Self, String> {
+        let relative = self.relative_file(path)?;
+        let directory = self.directory.open_dir(relative).map_err(|error| {
+            format!("failed to open state directory {}: {error}", path.display())
+        })?;
+        let identity = stable_directory_identity(&directory, path)?;
+        let stable = Self {
+            path: path.to_path_buf(),
+            directory,
+            identity,
+            delete_capable: false,
+        };
+        stable.verify_visible()?;
+        Ok(stable)
+    }
+
+    pub(crate) fn open_owned_child(&self, path: &Path) -> Result<Self, String> {
         let relative = self.relative_file(path)?;
         #[cfg(not(windows))]
         let directory = self.directory.open_dir(relative).map_err(|error| {
@@ -170,6 +237,7 @@ impl StableDirectory {
             path: path.to_path_buf(),
             directory,
             identity,
+            delete_capable: true,
         };
         stable.verify_visible()?;
         Ok(stable)
@@ -188,20 +256,42 @@ impl StableDirectory {
         self.open_child(path)
     }
 
+    pub(crate) fn create_owned_child_directory(&self, path: &Path) -> Result<Self, String> {
+        let relative = self.relative_file(path)?;
+        if self.entry_kind(path)?.is_some() {
+            return Err(format!("state entry already exists: {}", path.display()));
+        }
+        self.verify_visible()?;
+        self.directory
+            .create_dir(relative)
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+        self.sync_directory()?;
+        self.open_owned_child(path)
+    }
+
     pub(crate) fn verify_visible(&self) -> Result<(), String> {
-        crate::fs_security::verify_directory_without_symlinks(&self.path)
+        self.verify_visible_at(&self.path)
+    }
+
+    pub(crate) fn verify_visible_at(&self, path: &Path) -> Result<(), String> {
+        crate::fs_security::verify_directory_without_symlinks(path)
             .map_err(|error| format!("state directory changed: {error}"))?;
-        let visible = cap_std::fs::Dir::open_ambient_dir(&self.path, cap_std::ambient_authority())
+        #[cfg(not(windows))]
+        let visible = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())
             .map_err(|error| {
                 format!(
                     "failed to re-open state directory {}: {error}",
-                    self.path.display()
+                    path.display()
                 )
             })?;
-        if stable_directory_identity(&visible, &self.path)? != self.identity {
+        #[cfg(not(windows))]
+        let visible_identity = stable_directory_identity(&visible, path)?;
+        #[cfg(windows)]
+        let visible_identity = windows_visible_directory_identity(path)?;
+        if visible_identity != self.identity {
             return Err(format!(
                 "state directory identity changed while it was in use: {}",
-                self.path.display()
+                path.display()
             ));
         }
         Ok(())
@@ -446,8 +536,16 @@ impl StableDirectory {
     pub(crate) fn rename_child_directory(
         &self,
         source: &Path,
+        expected: &Self,
         destination: &Path,
     ) -> Result<(), String> {
+        #[cfg(windows)]
+        if !expected.delete_capable {
+            return Err(format!(
+                "state directory lacks the retained DELETE capability required for rename: {}",
+                source.display()
+            ));
+        }
         if self.entry_kind(source)? != Some(StableEntryKind::Directory) {
             return Err(format!(
                 "state directory does not exist or is not local: {}",
@@ -461,11 +559,11 @@ impl StableDirectory {
             ));
         }
         self.verify_visible()?;
-        let opened = self.open_child(source)?;
+        expected.verify_visible_at(source)?;
         rename_open_directory_no_replace_platform(
             &self.directory,
             self.relative_file(source)?,
-            &opened.directory,
+            &expected.directory,
             self.relative_file(destination)?,
         )
         .map_err(|error| {
@@ -475,40 +573,58 @@ impl StableDirectory {
             )
         })?;
         self.sync_directory()?;
-        let published = self.open_child(destination)?;
-        if !published.same_identity(&opened) {
-            return Err(format!(
-                "state directory changed while it was quarantined: {}",
-                source.display()
-            ));
-        }
+        expected.verify_visible_at(destination)?;
         self.verify_visible()
     }
 
     pub(crate) fn remove_empty_child_directory_if_matches(
         &self,
         path: &Path,
-        expected: &Self,
+        expected: Self,
     ) -> Result<(), String> {
-        if self.entry_kind(path)? != Some(StableEntryKind::Directory) {
+        #[cfg(windows)]
+        if !expected.delete_capable {
             return Err(format!(
-                "state directory does not exist or is not local: {}",
+                "state directory lacks the retained DELETE capability required for removal: {}",
                 path.display()
             ));
         }
-        let visible = self.open_child(path)?;
-        if !visible.same_identity(expected) {
-            return Err(format!(
-                "state directory identity changed before removal: {}",
-                path.display()
-            ));
-        }
-        let relative = self.relative_file(path)?;
         self.verify_visible()?;
+        self.relative_file(path)?;
+        expected.verify_visible_at(path)?;
+        #[cfg(windows)]
+        {
+            let Self {
+                directory,
+                identity,
+                path: _,
+                delete_capable: _,
+            } = expected;
+            drop(identity);
+            let path_bound = directory.into_std_file();
+            delete_open_file_platform(&path_bound).map_err(|error| {
+                format!(
+                    "failed to remove the expected open state directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            drop(path_bound);
+        }
+        #[cfg(not(windows))]
+        drop(expected);
+        #[cfg(not(windows))]
+        let relative = self.relative_file(path)?;
+        #[cfg(not(windows))]
         self.directory
             .remove_dir(relative)
             .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
         self.sync_directory()?;
+        if self.entry_kind(path)?.is_some() {
+            return Err(format!(
+                "state directory reappeared during removal; replacement preserved: {}",
+                path.display()
+            ));
+        }
         self.verify_visible()
     }
 
@@ -1925,48 +2041,7 @@ fn rename_open_directory_no_replace_platform(
     source_directory: &cap_std::fs::Dir,
     destination: &Path,
 ) -> std::io::Result<()> {
-    use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
-    };
-
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
-    let filename_bytes = destination
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long")
-        })?;
-    let buffer_len = offset_of!(FILE_RENAME_INFO, FileName)
-        .checked_add(filename_bytes)
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long")
-        })?;
-    let storage_len = buffer_len.div_ceil(size_of::<usize>());
-    let mut buffer = vec![0_usize; storage_len];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    unsafe {
-        (*info).Anonymous.ReplaceIfExists = false;
-        (*info).RootDirectory = parent.as_raw_handle();
-        (*info).FileNameLength = filename_bytes as u32;
-        std::ptr::copy_nonoverlapping(
-            destination.as_ptr(),
-            (*info).FileName.as_mut_ptr(),
-            destination.len(),
-        );
-        if SetFileInformationByHandle(
-            source_directory.as_raw_handle(),
-            FileRenameInfo,
-            buffer.as_ptr().cast(),
-            buffer_len as u32,
-        ) == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
+    crate::fs_security::rename_open_entry_no_replace_windows(parent, source_directory, destination)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -2036,47 +2111,7 @@ fn publish_open_file_no_replace_platform(
     source_file: &File,
     destination: &Path,
 ) -> std::io::Result<HandlePublication> {
-    use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
-    };
-
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
-    let filename_bytes = destination
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long")
-        })?;
-    let buffer_len = offset_of!(FILE_RENAME_INFO, FileName)
-        .checked_add(filename_bytes)
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long")
-        })?;
-    let storage_len = buffer_len.div_ceil(size_of::<usize>());
-    let mut buffer = vec![0_usize; storage_len];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    unsafe {
-        (*info).Anonymous.ReplaceIfExists = false;
-        (*info).RootDirectory = directory.as_raw_handle();
-        (*info).FileNameLength = filename_bytes as u32;
-        std::ptr::copy_nonoverlapping(
-            destination.as_ptr(),
-            (*info).FileName.as_mut_ptr(),
-            destination.len(),
-        );
-        if SetFileInformationByHandle(
-            source_file.as_raw_handle(),
-            FileRenameInfo,
-            buffer.as_ptr().cast(),
-            buffer_len as u32,
-        ) == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
+    crate::fs_security::rename_open_entry_no_replace_windows(directory, source_file, destination)?;
     Ok(HandlePublication::Moved)
 }
 
@@ -2179,6 +2214,24 @@ fn stable_directory_identity(
             .map_err(|error| format!("failed to clone directory {}: {error}", path.display()))?,
     )
     .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn windows_visible_directory_file(path: &Path) -> Result<File, String> {
+    crate::fs_security::open_directory_observation_windows(path).map_err(|error| {
+        format!(
+            "failed to observe state directory {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_visible_directory_identity(
+    path: &Path,
+) -> Result<crate::fs_security::FileIdentity, String> {
+    crate::fs_security::FileIdentity::from_file(windows_visible_directory_file(path)?)
+        .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))
 }
 
 fn configure_capability_owner_only(_options: &mut cap_std::fs::OpenOptions) {
@@ -3030,6 +3083,69 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_namespace_children_reopen_before_exclusive_deletion() {
+        let root = tempdir().expect("tempdir");
+        let child_path = root.path().join("child");
+        fs::create_dir(&child_path).expect("child directory");
+        let parent = StableDirectory::open(root.path()).expect("stable parent");
+        let child = parent
+            .open_child(&child_path)
+            .expect("ordinary namespace child");
+        let reopened = parent
+            .open_child(&child_path)
+            .expect("second ordinary namespace child");
+        assert!(child.same_identity(&reopened));
+
+        child.verify_visible().expect("first visible identity");
+        child
+            .verify_visible_at(&child_path)
+            .expect("second visible identity");
+        let receipt = child
+            .directory_removal_receipt()
+            .expect("share-compatible ownership receipt");
+
+        drop(reopened);
+        drop(child);
+        let owned = parent
+            .open_owned_child(&child_path)
+            .expect("delete-capable child beside observation receipt");
+        parent
+            .remove_empty_child_directory_if_matches(&child_path, owned)
+            .expect("handle-bound empty-directory deletion");
+        assert!(!child_path.exists());
+        let _retained_identity = receipt.identity();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_observation_receipt_supports_recursive_handle_bound_cleanup() {
+        let root = tempdir().expect("tempdir");
+        let tree_path = root.path().join("tree");
+        let parent = StableDirectory::open(root.path()).expect("stable parent");
+        let tree = parent
+            .create_owned_child_directory(&tree_path)
+            .expect("owned tree");
+        fs::write(tree_path.join("payload"), b"owned").expect("tree payload");
+        let receipt = tree
+            .directory_removal_receipt()
+            .expect("observation receipt");
+        let retained_receipt = receipt.clone();
+        drop(tree);
+
+        crate::fs_security::remove_directory_tree_capability_bound_if_matches(
+            root.path(),
+            &tree_path,
+            receipt,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("receipt-bound recursive cleanup");
+
+        assert!(!tree_path.exists());
+        let _retained_identity = retained_receipt.identity();
+    }
+
     #[test]
     fn daemon_file_lock_replacement_child_process() {
         let Some(lock_path) = std::env::var_os(LOCK_CHILD_PATH) else {
@@ -3585,10 +3701,25 @@ mod tests {
         fs::create_dir(&source).expect("source directory");
         fs::write(source.join("marker.json"), b"managed").expect("source marker");
         let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let ordinary = directory.open_child(&source).expect("ordinary source");
+        let error = directory
+            .rename_child_directory(&source, &ordinary, &quarantine)
+            .expect_err("ordinary namespace capability must not mutate");
+        assert!(
+            error.contains("lacks the retained DELETE capability"),
+            "{error}"
+        );
+        drop(ordinary);
+        let source_directory = directory
+            .open_owned_child(&source)
+            .expect("source capability");
 
         directory
-            .rename_child_directory(&source, &quarantine)
+            .rename_child_directory(&source, &source_directory, &quarantine)
             .expect("handle-bound directory quarantine");
+        source_directory
+            .verify_visible_at(&quarantine)
+            .expect("quarantined source identity");
 
         assert!(!source.exists());
         assert_eq!(
