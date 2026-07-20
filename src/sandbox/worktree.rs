@@ -1842,6 +1842,7 @@ fn with_owned_ref_namespace_locks<T>(
 
 fn reconcile_removing_branch_from_anchor(
     revision: &mut DurableOwnershipRevision,
+    retained_anchor: Option<&std::fs::File>,
 ) -> Result<(), String> {
     if revision.record.branch_cleanup != DurableArtifactPhase::Removing {
         return Ok(());
@@ -1888,8 +1889,14 @@ fn reconcile_removing_branch_from_anchor(
             ));
             }
             if directory.path_exists(&anchor_path)? {
-                let anchor = directory.open_read(&anchor_path)?;
-                let identity = crate::fs_security::file_identity_snapshot(&anchor)
+                let reopened_anchor = retained_anchor
+                    .is_none()
+                    .then(|| directory.open_read(&anchor_path))
+                    .transpose()?;
+                let anchor = retained_anchor
+                    .or(reopened_anchor.as_ref())
+                    .expect("anchor path was present");
+                let identity = crate::fs_security::file_identity_snapshot(anchor)
                     .map_err(|error| format!("failed to inspect managed branch anchor: {error}"))?;
                 if Some(identity) != record.branch_identity {
                     return Err(
@@ -1897,11 +1904,11 @@ fn reconcile_removing_branch_from_anchor(
                         .to_string(),
                 );
                 }
-                verify_open_file_contents(&anchor, &contents)?;
+                verify_open_file_contents(anchor, &contents)?;
                 remove_owned_file_receipt(
                     &directory,
                     &anchor_path,
-                    &anchor,
+                    anchor,
                     &contents,
                     ".nib-owned-ref-anchor-delete-",
                 )?;
@@ -2074,7 +2081,7 @@ fn reconcile_unfinished_intent_branch(
         return Err("managed worktree intent branch has no durable attribution".to_string());
     }
     if revision.record.branch_cleanup == DurableArtifactPhase::Removing {
-        reconcile_removing_branch_from_anchor(revision)?;
+        reconcile_removing_branch_from_anchor(revision, None)?;
         if revision.record.branch_cleanup == DurableArtifactPhase::Removed {
             return Ok(());
         }
@@ -2142,12 +2149,11 @@ fn reconcile_unfinished_intent_branch(
         let mut removing = revision.record.clone();
         removing.branch_cleanup = DurableArtifactPhase::Removing;
         persist_durable_ownership_revision(revision, removing)?;
-        return reconcile_removing_branch_from_anchor(revision);
+        return reconcile_removing_branch_from_anchor(revision, None);
     }
     if record.branch_cleanup == DurableArtifactPhase::Reserved {
         let anchor = directory.open_read_write(&anchor_path)?;
         let contents = format!("{}\n", record.current_oid).into_bytes();
-        verify_open_file_contents(&anchor, &contents)?;
         match anchor.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -2162,13 +2168,16 @@ fn reconcile_unfinished_intent_branch(
                 ));
             }
         }
+        verify_open_file_contents(&anchor, &contents)?;
         let identity = crate::fs_security::file_identity_snapshot(&anchor)
             .map_err(|error| format!("failed to capture reserved branch anchor: {error}"))?;
         let mut removing = revision.record.clone();
         removing.branch_identity = Some(identity);
         removing.branch_cleanup = DurableArtifactPhase::Removing;
         persist_durable_ownership_revision(revision, removing)?;
-        return reconcile_removing_branch_from_anchor(revision);
+        // The retained lock bridges the liveness check and durable identity CAS to
+        // exact cleanup. On Windows, reopening this byte-locked file cannot read it.
+        return reconcile_removing_branch_from_anchor(revision, Some(&anchor));
     }
     if !anchor_exists {
         return Err(
@@ -2180,7 +2189,7 @@ fn reconcile_unfinished_intent_branch(
         let mut removing = revision.record.clone();
         removing.branch_cleanup = DurableArtifactPhase::Removing;
         persist_durable_ownership_revision(revision, removing)?;
-        return reconcile_removing_branch_from_anchor(revision);
+        return reconcile_removing_branch_from_anchor(revision, None);
     }
     let owned_branch = reopen_owned_branch(&record, &record.current_oid, false)?;
     persist_intent_cleanup_phase(
@@ -2194,7 +2203,7 @@ fn reconcile_unfinished_intent_branch(
         GIT_COMMAND_TIMEOUT,
     ) {
         Ok(()) => persist_durable_branch_removed(revision),
-        Err(error) => match reconcile_removing_branch_from_anchor(revision) {
+        Err(error) => match reconcile_removing_branch_from_anchor(revision, None) {
             Ok(()) if revision.record.branch_cleanup == DurableArtifactPhase::Removed => Ok(()),
             Ok(()) => Err(error),
             Err(recovery) => Err(format!("{error}; exact branch recovery failed: {recovery}")),
@@ -2350,7 +2359,7 @@ fn rehydrate_owned_worktree(
         return Err("managed worktree ownership is already complete".to_string());
     }
     reconcile_previous_branch_anchor(&mut revision)?;
-    reconcile_removing_branch_from_anchor(&mut revision)?;
+    reconcile_removing_branch_from_anchor(&mut revision, None)?;
     if revision.record.phase == DurableOwnershipPhase::Complete {
         return Err("managed worktree ownership cleanup is already complete".to_string());
     }
@@ -5822,6 +5831,13 @@ pub(crate) fn delete_owned_branch_sync_with_timeout(
 fn stage_reserved_branch_publication(
     reservation: &mut ManagedWorktreeReservation,
 ) -> Result<ReservedBranchPublication, String> {
+    stage_reserved_branch_publication_with_hook(reservation, || {})
+}
+
+fn stage_reserved_branch_publication_with_hook(
+    reservation: &mut ManagedWorktreeReservation,
+    before_present_cas: impl FnOnce(),
+) -> Result<ReservedBranchPublication, String> {
     let revision = &mut reservation.intent.revision;
     if revision.record.phase != DurableOwnershipPhase::Intent
         || revision.record.branch_cleanup != DurableArtifactPhase::Reserved
@@ -5863,7 +5879,7 @@ fn stage_reserved_branch_publication(
         ));
     }
     let contents = format!("{}\n", revision.record.initial_oid).into_bytes();
-    let publication = ref_directory.save_bytes_atomically_expected_with_receipt(
+    let publication = ref_directory.save_bytes_atomically_expected_with_locked_receipt(
         &expected_staging_path,
         &contents,
         RESERVED_REF_TEMPORARY_PREFIX,
@@ -5907,6 +5923,7 @@ fn stage_reserved_branch_publication(
     let mut record = revision.record.clone();
     record.branch_identity = Some(identity);
     record.branch_cleanup = DurableArtifactPhase::Present;
+    before_present_cas();
     if let Err(error) = persist_durable_ownership_revision(revision, record) {
         let cleanup = verify_open_file_contents(&publication.file, &contents).and_then(|()| {
             ref_directory
@@ -5918,6 +5935,11 @@ fn stage_reserved_branch_publication(
                 format!("{error}; exact reserved branch staging cleanup failed: {cleanup}")
             }
         });
+    }
+    if let Err(error) = publication.file.unlock() {
+        return Err(format!(
+            "failed to release reserved branch publication lock: {error}; its durable staging anchor was preserved for exact recovery"
+        ));
     }
     Ok(ReservedBranchPublication {
         path: expected_staging_path,
@@ -8469,16 +8491,21 @@ mod tests {
     #[test]
     fn collected_tombstone_fallback_respects_cleanup_deadline_while_lock_is_held() {
         let repository = repository();
+        let project_root =
+            repository_root_bounded_sync(repository.path()).expect("validated repository root");
         let directory =
-            managed_worktree_ownership_directory(repository.path()).expect("ownership directory");
+            managed_worktree_ownership_directory(&project_root).expect("ownership directory");
         let _held = OwnershipCompactionLock::acquire(&directory, Duration::from_secs(2))
             .expect("hold ownership lock");
+        let timeout = Duration::from_millis(100);
         let started = Instant::now();
+        let deadline = started + timeout;
 
-        let error = Worktree::remove_bounded_sync(
-            repository.path(),
+        let error = remove_registered_worktree_until(
+            &project_root,
             "deadline-with-collected-tombstone",
-            Duration::from_millis(100),
+            deadline,
+            timeout,
         )
         .expect_err("held ownership lock must exhaust cleanup deadline");
 
@@ -9073,6 +9100,84 @@ mod tests {
             retry.contains("post-snapshot Git worktree registration"),
             "{retry}"
         );
+    }
+
+    #[test]
+    fn reserved_branch_publisher_excludes_recovery_until_present_cas() {
+        let repository = repository();
+        let project_root = repository
+            .path()
+            .canonicalize()
+            .expect("canonical repository");
+        let id = "live-reserved-branch-publisher";
+        let branch = branch_name(id);
+        let path = project_root.join(".nib/worktrees/subagents").join(id);
+        let mut reservation = reserve_managed_worktree_sync_controlled(
+            &project_root,
+            ManagedWorktreeKind::Subagent,
+            id,
+            &path,
+            &branch,
+            None,
+        )
+        .expect("durable reservation");
+        let mut record = reservation.intent.revision.record.clone();
+        record.path_cleanup = DurableArtifactPhase::Removed;
+        record.registration_cleanup = DurableArtifactPhase::Removed;
+        persist_durable_ownership_revision(&mut reservation.intent.revision, record.clone())
+            .expect("isolate branch recovery");
+        let recovery_attempted = std::cell::Cell::new(false);
+
+        let staged = stage_reserved_branch_publication_with_hook(&mut reservation, || {
+            let error = Worktree::remove(&project_root, id)
+                .expect_err("recovery must preserve a live reserved branch publisher");
+            assert!(error.contains("live publisher"), "{error}");
+            assert!(
+                record.branch_staging_path.is_file(),
+                "recovery removed the live publisher's staging anchor"
+            );
+            let observed =
+                load_durable_ownership_revision(&project_root, ManagedWorktreeKind::Subagent, id)
+                    .expect("read live reservation")
+                    .expect("durable reservation");
+            assert_eq!(
+                observed.record.branch_cleanup,
+                DurableArtifactPhase::Reserved
+            );
+            recovery_attempted.set(true);
+        })
+        .expect("publish reserved branch identity");
+
+        assert!(recovery_attempted.get());
+        assert_eq!(
+            reservation.intent.revision.record.branch_cleanup,
+            DurableArtifactPhase::Present
+        );
+        let branch_directory = crate::daemons::state::StableDirectory::open(
+            staged.path.parent().expect("branch staging parent"),
+        )
+        .expect("stable branch parent");
+        let contender = branch_directory
+            .open_read_write(&staged.path)
+            .expect("open post-CAS lock contender");
+        contender
+            .try_lock()
+            .expect("publisher must release the staging lock after the Present CAS");
+        contender.unlock().expect("release lock contender");
+        let staged_path = staged.path.clone();
+        drop(contender);
+        drop(branch_directory);
+        drop(staged);
+        drop(reservation);
+
+        Worktree::remove(&project_root, id).expect("recover released staged branch");
+
+        assert!(!staged_path.exists());
+        let revision =
+            load_durable_ownership_revision(&project_root, ManagedWorktreeKind::Subagent, id)
+                .expect("durable receipt")
+                .expect("complete tombstone");
+        assert_eq!(revision.record.phase, DurableOwnershipPhase::Complete);
     }
 
     #[test]

@@ -482,7 +482,7 @@ coverage.
   or descendant absence cannot be proven.
 - [x] Probe launch diagnostics retain the child status and bounded stderr needed to
   distinguish a shell-gate failure from containment cleanup failure.
-- [ ] Hosted Linux loads the targeted packaged bwrap AppArmor profile and runs the exact
+- [x] Hosted Linux loads the targeted packaged bwrap AppArmor profile and runs the exact
   required capability probe before the broader validation suite.
 - [x] MCP integration tests execute production delegation only on Linux; macOS and
   Windows assert the platform rejection contract while native containment tests remain
@@ -506,9 +506,11 @@ Validate/macOS jobs.
 The required exact capability suite passes locally. A privileged Ubuntu 24.04 container
 with bubblewrap 0.9 and a non-reaping Bash PID 1 passed 35 fresh-process probe runs and
 left no zombies. The focused Linux supervisor and MCP cancellation suites, full
-`task check`, `task coverage` at 83.82 percent (55,680/66,429), release build, and
-managed-process smoke pass. The Windows all-target graph cross-compiles; native hosted
-Linux and macOS evidence remains open.
+`task check`, `task coverage` at 83.83 percent (55,761/66,518), release build, and
+managed-process smoke pass. Hosted Validate run `29774526036` passed the AppArmor setup,
+exact containment probe, checks, tests, coverage, release build, and owner-loss smoke on
+revision `3d0cc9b82bc2`. The Windows all-target graph cross-compiles; native hosted macOS
+evidence remains open.
 
 ## Remaining Implementation Plan
 
