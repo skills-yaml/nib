@@ -4726,7 +4726,11 @@ mod tests {
             .recover_stale_temporary_files(prefix, 16, 4096)
             .expect("live published writer must be skipped");
         assert_eq!(recovered, 0);
-        assert_eq!(fs::read(&target).expect("published target"), b"new session");
+        assert!(target.exists());
+        assert!(previous.exists());
+        directory
+            .verify_publication_bytes(&target, &published, b"new session")
+            .expect("published target bytes through lock-owning handle");
         assert_eq!(
             fs::read(&previous).expect("preserved prior"),
             b"prior session"
@@ -4793,7 +4797,11 @@ mod tests {
             error.contains("target is still owned by a live writer"),
             "{error}"
         );
-        assert_eq!(fs::read(&target).expect("preserved target"), b"published");
+        assert!(target.exists());
+        assert!(previous.exists());
+        directory
+            .verify_publication_bytes(&target, &target_file, b"published")
+            .expect("preserved target bytes through lock-owning handle");
         assert_eq!(fs::read(&previous).expect("preserved prior"), b"prior");
 
         target_file.unlock().expect("release published target");
