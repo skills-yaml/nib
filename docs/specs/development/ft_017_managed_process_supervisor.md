@@ -461,6 +461,52 @@ failure when cleanup is unproven. Required bwrap capability and production deleg
 tests pass locally. The full host `task check` and Windows all-target cross-check pass;
 native macOS/Windows runtime and exact-revision hosted evidence remain open.
 
+## Hosted Native Runtime Follow-up II (2026-07-20)
+
+### Scope
+
+Repair the exact Linux probe teardown exposed by Ubuntu 24.04 and bubblewrap 0.9.
+After exact-signalling namespace PID 1, keep the bubblewrap monitor alive until it reaps
+that child and the recorded host identity is absent, then reap or force-clean the
+monitor. Preserve the fail-closed identity and cleanup-proof boundary. Load Ubuntu
+Noble's packaged bwrap AppArmor profile before the exact CI capability gate. Restrict
+the MCP Git-stall cancellation fixture to Linux because it exercises production
+subagent delegation, which is intentionally rejected on macOS and Windows.
+
+### Acceptance Criteria
+
+- [x] The exact managed-process probe succeeds repeatedly with Ubuntu 24.04 and
+  bubblewrap 0.9 without leaving its namespace or payload alive.
+- [x] Probe teardown still fails closed when exact namespace termination, monitor reap,
+  or descendant absence cannot be proven.
+- [x] Probe launch diagnostics retain the child status and bounded stderr needed to
+  distinguish a shell-gate failure from containment cleanup failure.
+- [ ] Hosted Linux loads the targeted packaged bwrap AppArmor profile and runs the exact
+  required capability probe before the broader validation suite.
+- [x] The MCP Git-stall cancellation fixture runs only where production delegation is
+  supported, while native macOS and Windows containment contract tests remain enabled.
+- [ ] The exact PR revision passes the hosted Validate and macOS jobs.
+
+### Affected Areas
+
+`src/sandbox/process.rs`, managed-process capability regressions,
+`tests/mcp_integration.rs`, `.github/workflows/ci.yml`, and the hosted Linux/macOS jobs.
+
+### Validation Gates
+
+Ubuntu 24.04 bubblewrap probe/delegation reproduction, focused MCP integration tests,
+required bwrap tests, `task test`, `task check`, managed-process smoke, and the hosted
+Validate/macOS jobs.
+
+### Local Validation Evidence
+
+The required exact capability suite passes locally. A privileged Ubuntu 24.04 container
+with bubblewrap 0.9 and a non-reaping Bash PID 1 passed 35 fresh-process probe runs and
+left no zombies. The focused Linux supervisor and MCP cancellation suites, full
+`task check`, `task coverage` at 83.85 percent (55,662/66,385), release build, and
+managed-process smoke pass. The Windows all-target graph cross-compiles; native hosted
+Linux and macOS evidence remains open.
+
 ## Remaining Implementation Plan
 
 1. Execute the native Windows Job Object and macOS group-contained tests on hosted

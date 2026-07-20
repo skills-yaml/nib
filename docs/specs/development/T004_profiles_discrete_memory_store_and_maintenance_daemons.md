@@ -516,6 +516,55 @@ suites pass on Linux. Windows all-target and all-feature cross-checks include th
 sentinel lock, share-mode, identity, positional-read, and real Git-boundary regressions.
 Native Windows execution remains open until the hosted job passes.
 
+## Hosted Windows Runtime Follow-up II (2026-07-20)
+
+### Scope
+
+Accept Git for Windows registration pointers whose parent is the same trusted
+`worktrees` directory under an equivalent slash, verbatim-prefix, or DOS-alias spelling,
+without replacing direct-child and no-reparse validation with lexical trust. Ensure all
+retained observation and capability directory handles share namespace deletion where no
+active descendant lock pins the tree. Treat Windows' stronger denial of a parent move
+around a live byte-range lock as a valid fail-closed result and prove the original lock
+domain remains intact. Keep durable ownership and ref payload validation readable while
+their ownership protocol is active, without weakening live-owner exclusion.
+
+### Acceptance Criteria
+
+- [x] Managed worktree capture matches the reported registration parent to the trusted
+  canonical namespace using only equivalent Windows spellings, then rebuilds and opens
+  exactly one normal direct-child component beneath the trusted parent.
+- [ ] Equivalent Windows path spellings do not cause worktree creation, integration,
+  compensation, delegation, or MCP flows to reject a valid Git registration.
+- [x] Retained state and capability directory handles permit visible namespace
+  replacement when the tree has no active descendant lock; a live Windows lock may
+  instead pin the parent and must preserve the original namespace and state.
+- [x] Durable ownership and ref receipts remain bounded and readable while ownership is
+  held, and a live writer is still excluded from recovery or destructive cleanup.
+- [ ] The exact PR revision passes the full hosted Windows job under its default
+  `C:\Users\RUNNER~1` temporary root.
+
+### Affected Areas
+
+`src/fs_security.rs`, `src/daemons/state.rs`, `src/daemons/curator.rs`,
+`src/sandbox/worktree.rs`, `src/session/mod.rs`, native integration fixtures, focused
+Windows filesystem/worktree regressions, and the hosted Windows job.
+
+### Validation Gates
+
+Focused registration-identity, namespace-replacement, and retained-receipt regressions;
+Windows-target `task check:all-targets`; `task test`; `task check`; `task coverage`; and
+the hosted Windows build and smoke job.
+
+### Local Validation Evidence
+
+The full host suite passes 609 library tests plus all binary, integration, and
+documentation suites. Runtime coverage is 83.85 percent (55,662/66,385), release build
+and managed-process smoke pass, and the Windows all-target/all-feature graph
+cross-compiles the native path, range-lock, marker-identity, and replacement-contract
+changes. Equivalent-path behavior and the remaining native contracts await the exact
+hosted Windows run.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS

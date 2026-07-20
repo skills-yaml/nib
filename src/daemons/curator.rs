@@ -686,11 +686,25 @@ impl Curator {
                 continue;
             }
 
+            let marker_identity = crate::fs_security::file_identity_snapshot(&marker_file)
+                .map_err(|error| {
+                    format!(
+                        "failed to retain managed skill marker identity {}: {error}",
+                        marker_path.display()
+                    )
+                })?;
+            drop(marker_file);
             before_quarantine(&path);
             if let Err(error) = pins_directory
                 .verify_file_expectation(&self.pins_path, pins.expectation())
                 .and_then(|()| skill_directory.verify_visible())
-                .and_then(|()| skill_directory.verify_file_identity(&marker_path, &marker_file))
+                .and_then(|()| {
+                    verify_managed_skill_marker_identity(
+                        &skill_directory,
+                        &marker_path,
+                        marker_identity,
+                    )
+                })
             {
                 report.errors.push(error.clone());
                 self.audit(
@@ -727,7 +741,11 @@ impl Curator {
             }
             let quarantine_directory = skill_directory.try_clone_at(&quarantine_path)?;
             let quarantined_marker = quarantine_directory.path().join(MANAGED_SKILL_MARKER);
-            quarantine_directory.verify_file_identity(&quarantined_marker, &marker_file)?;
+            verify_managed_skill_marker_identity(
+                &quarantine_directory,
+                &quarantined_marker,
+                marker_identity,
+            )?;
             quarantines.push(ManagedSkillQuarantine {
                 id: directory_id,
                 path: quarantine_path,
@@ -1338,6 +1356,23 @@ fn managed_skill_quarantine_id(name: &str) -> Option<String> {
     validate_identifier(id, "managed skill quarantine id")
         .ok()
         .map(|()| id.to_string())
+}
+
+fn verify_managed_skill_marker_identity(
+    directory: &crate::daemons::state::StableDirectory,
+    path: &Path,
+    expected: crate::fs_security::FileIdentitySnapshot,
+) -> Result<(), String> {
+    let file = directory.open_read(path)?;
+    let actual = crate::fs_security::file_identity_snapshot(&file)
+        .map_err(|error| format!("failed to inspect managed skill marker identity: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "managed skill marker identity changed while cleanup was authorized: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn delete_managed_skill_quarantine(quarantine: ManagedSkillQuarantine) -> Result<(), String> {

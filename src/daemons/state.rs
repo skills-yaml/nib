@@ -53,6 +53,13 @@ impl From<String> for FilePublicationError {
 struct AtomicSaveExpectation<'a> {
     require_attached_before_commit: bool,
     file: FileExpectation<'a>,
+    retain_publication_lock: bool,
+}
+
+struct AtomicSaveHooks<BeforeCommit, AfterEvacuation, BeforeReceipt> {
+    before_commit: BeforeCommit,
+    after_evacuation: AfterEvacuation,
+    before_receipt: BeforeReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1004,9 +1011,57 @@ impl StableDirectory {
             AtomicSaveExpectation {
                 require_attached_before_commit: true,
                 file: expected,
+                retain_publication_lock: false,
             },
             || Ok(()),
             || {},
+        )
+    }
+
+    pub(crate) fn save_bytes_atomically_expected_with_locked_receipt(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        expected: FileExpectation<'_>,
+    ) -> Result<FilePublicationReceipt, FilePublicationError> {
+        self.save_bytes_atomically_expected_with_hooks(
+            path,
+            encoded,
+            temporary_prefix,
+            AtomicSaveExpectation {
+                require_attached_before_commit: true,
+                file: expected,
+                retain_publication_lock: true,
+            },
+            || Ok(()),
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn save_bytes_atomically_expected_with_locked_receipt_before_return(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        expected: FileExpectation<'_>,
+        before_receipt: impl FnOnce(),
+    ) -> Result<FilePublicationReceipt, FilePublicationError> {
+        self.save_bytes_atomically_expected_with_all_hooks(
+            path,
+            encoded,
+            temporary_prefix,
+            AtomicSaveExpectation {
+                require_attached_before_commit: true,
+                file: expected,
+                retain_publication_lock: true,
+            },
+            AtomicSaveHooks {
+                before_commit: || Ok(()),
+                after_evacuation: || {},
+                before_receipt,
+            },
         )
     }
 
@@ -1078,6 +1133,7 @@ impl StableDirectory {
             AtomicSaveExpectation {
                 require_attached_before_commit,
                 file: expected,
+                retain_publication_lock: false,
             },
             before_commit,
             || {},
@@ -1124,6 +1180,7 @@ impl StableDirectory {
             AtomicSaveExpectation {
                 require_attached_before_commit: true,
                 file: expected,
+                retain_publication_lock: false,
             },
             || Ok(()),
             after_evacuation,
@@ -1141,10 +1198,37 @@ impl StableDirectory {
         before_commit: impl FnOnce() -> Result<(), String>,
         after_evacuation: impl FnOnce(),
     ) -> Result<FilePublicationReceipt, FilePublicationError> {
+        self.save_bytes_atomically_expected_with_all_hooks(
+            path,
+            encoded,
+            temporary_prefix,
+            expectation,
+            AtomicSaveHooks {
+                before_commit,
+                after_evacuation,
+                before_receipt: || {},
+            },
+        )
+    }
+
+    fn save_bytes_atomically_expected_with_all_hooks(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        expectation: AtomicSaveExpectation<'_>,
+        hooks: AtomicSaveHooks<impl FnOnce() -> Result<(), String>, impl FnOnce(), impl FnOnce()>,
+    ) -> Result<FilePublicationReceipt, FilePublicationError> {
         let AtomicSaveExpectation {
             require_attached_before_commit,
             file: expected,
+            retain_publication_lock,
         } = expectation;
+        let AtomicSaveHooks {
+            before_commit,
+            after_evacuation,
+            before_receipt,
+        } = hooks;
         let destination = self.relative_file(path)?.to_path_buf();
         let temporary = deterministic_artifact_name(
             temporary_prefix,
@@ -1186,7 +1270,6 @@ impl StableDirectory {
         file.lock()
             .map_err(|error| format!("failed to lock temporary state file: {error}"))?;
         let mut evacuated_previous = None;
-        let mut failed_receipt = None;
         let mut exact_publication_committed = false;
         let write_result = (|| {
             file.write_all(encoded).map_err(|error| error.to_string())?;
@@ -1243,20 +1326,14 @@ impl StableDirectory {
                     path.display()
                 ));
             }
-            let receipt = FilePublicationReceipt {
-                file: file.try_clone().map_err(|error| {
-                    format!("failed to retain the published state file: {error}")
-                })?,
-                exact_identity: true,
-            };
             let post_publication = (|| {
                 self.sync_directory()?;
                 if let Some(previous_file) = evacuated_previous.as_ref() {
                     self.remove_bound_file_if_matches(&previous_path, previous_file, || {
-                        self.verify_exact_publication_bytes(path, &receipt, encoded)
+                        self.verify_publication_bytes(path, &file, encoded)
                     })?;
                 }
-                self.verify_exact_publication_bytes(path, &receipt, encoded)?;
+                self.verify_publication_bytes(path, &file, encoded)?;
                 let after_commit_attachment_error = self.verify_visible().err();
                 match (
                     before_commit_attachment_error,
@@ -1267,11 +1344,8 @@ impl StableDirectory {
                 }
             })();
             match post_publication {
-                Ok(()) => Ok(receipt),
-                Err(error) => {
-                    failed_receipt = Some(receipt);
-                    Err(error)
-                }
+                Ok(()) => Ok(()),
+                Err(error) => Err(error),
             }
         })();
         let temporary_cleanup = self
@@ -1289,9 +1363,13 @@ impl StableDirectory {
                     Ok(())
                 }
             });
-        let unlock_result = file
-            .unlock()
-            .map_err(|error| format!("failed to unlock published state file: {error}"));
+        let unlock_result = if retain_publication_lock && exact_publication_committed {
+            Ok(())
+        } else {
+            file.unlock()
+                .map_err(|error| format!("failed to unlock published state file: {error}"))
+        };
+        before_receipt();
         let temporary_cleanup = match (temporary_cleanup, unlock_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -1300,32 +1378,28 @@ impl StableDirectory {
             }
         };
         match (write_result, temporary_cleanup) {
-            (Ok(receipt), Ok(())) => {
-                drop(file);
-                Ok(receipt)
-            }
+            (Ok(()), Ok(())) => Ok(FilePublicationReceipt {
+                file,
+                exact_identity: true,
+            }),
             (Err(message), Ok(())) => {
-                let receipt = failed_receipt.or_else(|| {
-                    exact_publication_committed.then_some(FilePublicationReceipt {
-                        file,
-                        exact_identity: true,
-                    })
+                let receipt = exact_publication_committed.then_some(FilePublicationReceipt {
+                    file,
+                    exact_identity: true,
                 });
                 Err(FilePublicationError { message, receipt })
             }
-            (Ok(receipt), Err(message)) => {
-                drop(file);
-                Err(FilePublicationError {
-                    message,
-                    receipt: Some(receipt),
-                })
-            }
+            (Ok(()), Err(message)) => Err(FilePublicationError {
+                message,
+                receipt: Some(FilePublicationReceipt {
+                    file,
+                    exact_identity: true,
+                }),
+            }),
             (Err(message), Err(cleanup_error)) => {
-                let receipt = failed_receipt.or_else(|| {
-                    exact_publication_committed.then_some(FilePublicationReceipt {
-                        file,
-                        exact_identity: true,
-                    })
+                let receipt = exact_publication_committed.then_some(FilePublicationReceipt {
+                    file,
+                    exact_identity: true,
                 });
                 Err(FilePublicationError {
                     message: format!(
@@ -3628,7 +3702,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn open_directory_capability_detects_daemon_lock_parent_replacement() {
+    fn open_directory_capability_blocks_daemon_lock_parent_replacement() {
         let root = tempdir().expect("tempdir");
         let state_dir = root.path().join("state");
         fs::create_dir(&state_dir).expect("state directory");
@@ -3636,22 +3710,16 @@ mod tests {
         let displaced_state = root.path().join("state.displaced");
 
         let error = with_file_lock(&lock_path, |_| {
-            fs::rename(&state_dir, &displaced_state).map_err(|error| error.to_string())?;
-            fs::create_dir(&state_dir).map_err(|error| error.to_string())?;
-            fs::write(state_dir.join("replacement"), b"replacement")
-                .map_err(|error| error.to_string())?;
-            Ok(())
+            fs::rename(&state_dir, &displaced_state).map_err(|error| error.to_string())
         })
-        .expect_err("detached daemon lock domain must fail closed");
+        .expect_err("a live Windows lock domain must pin its parent namespace");
 
-        assert!(error.contains("identity changed"), "{error}");
-        assert_eq!(
-            fs::read(state_dir.join("replacement")).expect("replacement domain"),
-            b"replacement"
-        );
+        assert!(!error.is_empty());
+        assert!(state_dir.is_dir(), "original lock domain remains visible");
+        assert!(!displaced_state.exists(), "lock domain was not displaced");
         assert!(
-            displaced_state.join("shared.json.lock").is_file(),
-            "original lock remains in the displaced domain"
+            lock_path.is_file(),
+            "original lock remains in the pinned domain"
         );
     }
 
@@ -3773,6 +3841,7 @@ mod tests {
                 AtomicSaveExpectation {
                     require_attached_before_commit: true,
                     file: FileExpectation::Present(&expected),
+                    retain_publication_lock: false,
                 },
                 || {
                     fs::rename(&state_dir, &displaced)
@@ -3877,6 +3946,11 @@ mod tests {
 
         assert!(receipt.exact_identity);
         assert_eq!(
+            read_open_file_prefix(&receipt.file, b"published".len() + 1)
+                .expect("read retained receipt"),
+            b"published"
+        );
+        assert_eq!(
             fs::read(&target).expect("read while receipt remains alive"),
             b"published"
         );
@@ -3885,6 +3959,55 @@ mod tests {
             &directory.open_read(&target).expect("reopen publication")
         )
         .expect("receipt identity"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn locked_publication_receipt_continuously_excludes_recovery() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("owned-receipt.json");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let mut checked_before_return = false;
+
+        let receipt = directory
+            .save_bytes_atomically_expected_with_locked_receipt_before_return(
+                &target,
+                b"owned",
+                ".owned-receipt-publication-",
+                FileExpectation::Missing,
+                || {
+                    assert!(target.is_file(), "publication is visible before return");
+                    let contender = directory
+                        .open_read_write(&target)
+                        .expect("open pre-return recovery contender");
+                    assert!(matches!(
+                        contender.try_lock(),
+                        Err(std::fs::TryLockError::WouldBlock)
+                    ));
+                    checked_before_return = true;
+                },
+            )
+            .expect("publish retained locked receipt");
+        assert!(checked_before_return);
+        assert_eq!(
+            read_open_file_prefix(&receipt.file, b"owned".len() + 1)
+                .expect("read through lock-owning receipt"),
+            b"owned"
+        );
+
+        let contender = directory
+            .open_read_write(&target)
+            .expect("open recovery contender");
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(receipt);
+        contender
+            .try_lock()
+            .expect("dropping the receipt releases ownership");
+        contender.unlock().expect("release contender lock");
     }
 
     #[cfg(windows)]
@@ -4034,6 +4157,7 @@ mod tests {
                 AtomicSaveExpectation {
                     require_attached_before_commit: true,
                     file: FileExpectation::Present(&expected),
+                    retain_publication_lock: false,
                 },
                 || Ok(()),
                 || fs::write(&target, b"new-target").expect("conflicting target"),
@@ -4131,6 +4255,7 @@ mod tests {
                 AtomicSaveExpectation {
                     require_attached_before_commit: true,
                     file: FileExpectation::Present(&expected),
+                    retain_publication_lock: false,
                 },
                 || Ok(()),
                 || {
@@ -4591,6 +4716,7 @@ mod tests {
                     AtomicSaveExpectation {
                         require_attached_before_commit: true,
                         file: FileExpectation::Present(&expected),
+                        retain_publication_lock: false,
                     },
                     || -> Result<(), String> {
                         fs::write(&ready, b"ready").expect("publish atomic crash readiness");
@@ -4613,6 +4739,7 @@ mod tests {
                     AtomicSaveExpectation {
                         require_attached_before_commit: true,
                         file: FileExpectation::Present(&expected),
+                        retain_publication_lock: false,
                     },
                     || Ok(()),
                     || {

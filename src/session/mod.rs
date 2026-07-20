@@ -2412,30 +2412,61 @@ mod tests {
         let session = store.create_session_with_id("replace-session-directory");
         let sessions_dir = store.sessions_dir().to_path_buf();
         let displaced = root.path().join("displaced-sessions");
-        let replacement_path = sessions_dir.join(format!("{}.json", session.id));
-        let mut replacement = Session::new(session.id.clone());
-        replacement.summary = Some("replacement-directory".to_string());
-        let replacement_bytes = serde_json::to_vec_pretty(&replacement).expect("serialize");
+        #[cfg(unix)]
+        let (replacement_path, replacement_bytes) = {
+            let replacement_path = sessions_dir.join(format!("{}.json", session.id));
+            let mut replacement = Session::new(session.id.clone());
+            replacement.summary = Some("replacement-directory".to_string());
+            let replacement_bytes = serde_json::to_vec_pretty(&replacement).expect("serialize");
+            (replacement_path, replacement_bytes)
+        };
 
         let error = store
             .update_session(&session.id, |current| {
-                fs::rename(&sessions_dir, &displaced)?;
-                fs::create_dir(&sessions_dir)?;
-                fs::write(&replacement_path, &replacement_bytes)?;
-                current.summary = Some("must-not-publish".to_string());
-                Ok(())
+                #[cfg(unix)]
+                {
+                    fs::rename(&sessions_dir, &displaced)?;
+                    fs::create_dir(&sessions_dir)?;
+                    fs::write(&replacement_path, &replacement_bytes)?;
+                    current.summary = Some("must-not-publish".to_string());
+                    Ok(())
+                }
+                #[cfg(windows)]
+                {
+                    let _ = current;
+                    let error = fs::rename(&sessions_dir, &displaced)
+                        .expect_err("live Windows session lock pins the sessions directory");
+                    Err::<(), SessionError>(SessionError::Io(error))
+                }
             })
             .expect_err("detached directory must fail");
 
-        assert!(error.to_string().contains("directory"), "{error}");
-        assert_eq!(
-            fs::read(&replacement_path).expect("replacement session"),
-            replacement_bytes
-        );
-        assert!(store.list_result().is_err());
-        assert!(SessionStore::new(root.path())
-            .load_result(&session.id)
-            .is_err());
+        #[cfg(unix)]
+        {
+            assert!(error.to_string().contains("directory"), "{error}");
+            assert_eq!(
+                fs::read(&replacement_path).expect("replacement session"),
+                replacement_bytes
+            );
+            assert!(store.list_result().is_err());
+            assert!(SessionStore::new(root.path())
+                .load_result(&session.id)
+                .is_err());
+        }
+        #[cfg(windows)]
+        {
+            assert!(!error.to_string().is_empty());
+            assert!(sessions_dir.is_dir());
+            assert!(!displaced.exists());
+            assert_eq!(
+                store
+                    .load_result(&session.id)
+                    .expect("original session remains readable")
+                    .expect("original session remains present")
+                    .summary,
+                session.summary
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]

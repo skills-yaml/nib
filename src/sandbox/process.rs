@@ -1421,42 +1421,47 @@ impl SupervisedChild {
 
     fn terminate(&mut self) -> Result<(), String> {
         self.backend_cleanup_started = true;
-        let mut first_error = None;
-        match &mut self.backend {
-            #[cfg(target_os = "linux")]
-            SupervisedBackendHandle::LinuxPidNamespace { monitor_group } => {
-                if let Err(error) = signal_linux_process_identity(&self.scope_root) {
-                    first_error = Some(error);
+        #[cfg(target_os = "linux")]
+        {
+            let SupervisedBackendHandle::LinuxPidNamespace { monitor_group } = &self.backend;
+            let result = cleanup_linux_namespace_and_monitor(
+                &mut self.child,
+                *monitor_group,
+                &self.scope_root,
+            );
+            if self.child.try_wait().ok().flatten().is_some() {
+                self.direct_reaped = true;
+            }
+            result
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut first_error = None;
+            match &mut self.backend {
+                #[cfg(target_os = "macos")]
+                SupervisedBackendHandle::ProcessGroup(group) => {
+                    if let Err(error) = signal_process_group(*group) {
+                        first_error = Some(error);
+                    }
                 }
-                if !self.direct_reaped {
-                    if let Err(error) = signal_process_group(*monitor_group) {
-                        first_error.get_or_insert(error);
+                #[cfg(windows)]
+                SupervisedBackendHandle::WindowsJob(job) => job.terminate(),
+            }
+            if !self.direct_reaped {
+                match self.child.kill() {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| {
+                            format!("failed to terminate supervised child: {error}")
+                        });
                     }
                 }
             }
-            #[cfg(target_os = "macos")]
-            SupervisedBackendHandle::ProcessGroup(group) => {
-                if let Err(error) = signal_process_group(*group) {
-                    first_error = Some(error);
-                }
+            match first_error {
+                Some(error) => Err(error),
+                None => Ok(()),
             }
-            #[cfg(windows)]
-            SupervisedBackendHandle::WindowsJob(job) => job.terminate(),
-        }
-        if !self.direct_reaped {
-            match self.child.kill() {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
-                Err(error) => {
-                    first_error.get_or_insert_with(|| {
-                        format!("failed to terminate supervised child: {error}")
-                    });
-                }
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
         }
     }
 
@@ -1702,13 +1707,19 @@ fn spawn_supervised_command_inner(
             Ok(_) => {
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
                 return Err(append_linux_spawn_cleanup_error(
-                    "injected bubblewrap namespace information failure".to_string(),
+                    append_linux_launch_diagnostics(
+                        "injected bubblewrap namespace information failure".to_string(),
+                        &mut child,
+                    ),
                     cleanup,
                 ));
             }
             Err(error) => {
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
-                return Err(append_linux_spawn_cleanup_error(error, cleanup));
+                return Err(append_linux_spawn_cleanup_error(
+                    append_linux_launch_diagnostics(error, &mut child),
+                    cleanup,
+                ));
             }
         };
         let scope_root = match ProcessIdentity::capture(namespace_pid) {
@@ -1716,14 +1727,20 @@ fn spawn_supervised_command_inner(
             Err(error) => {
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, None);
                 return Err(append_linux_spawn_cleanup_error(
-                    format!("failed to identify supervised Linux namespace init: {error}"),
+                    append_linux_launch_diagnostics(
+                        format!("failed to identify supervised Linux namespace init: {error}"),
+                        &mut child,
+                    ),
                     cleanup,
                 ));
             }
         };
         if let Err(error) = validate_bwrap_namespace_init(&scope_root, child.id()) {
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
-            return Err(append_linux_spawn_cleanup_error(error, cleanup));
+            return Err(append_linux_spawn_cleanup_error(
+                append_linux_launch_diagnostics(error, &mut child),
+                cleanup,
+            ));
         }
         let ready = child
             .stdout
@@ -1731,22 +1748,32 @@ fn spawn_supervised_command_inner(
             .ok_or_else(|| "supervised Linux launch gate stdout is unavailable".to_string());
         if let Err(error) = ready.and_then(read_linux_launch_ready) {
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
-            return Err(append_linux_spawn_cleanup_error(error, cleanup));
+            return Err(append_linux_spawn_cleanup_error(
+                append_linux_launch_diagnostics(error, &mut child),
+                cleanup,
+            ));
         }
         match ProcessIdentity::capture(scope_root.pid) {
             Ok(current) if current == scope_root => {}
             Ok(_) => {
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
                 return Err(append_linux_spawn_cleanup_error(
-                    "supervised Linux namespace init changed identity during launch".to_string(),
+                    append_linux_launch_diagnostics(
+                        "supervised Linux namespace init changed identity during launch"
+                            .to_string(),
+                        &mut child,
+                    ),
                     cleanup,
                 ));
             }
             Err(error) => {
                 let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
                 return Err(append_linux_spawn_cleanup_error(
-                    format!(
-                        "failed to revalidate supervised Linux namespace init during launch: {error}"
+                    append_linux_launch_diagnostics(
+                        format!(
+                            "failed to revalidate supervised Linux namespace init during launch: {error}"
+                        ),
+                        &mut child,
                     ),
                     cleanup,
                 ));
@@ -1754,7 +1781,10 @@ fn spawn_supervised_command_inner(
         }
         if let Err(error) = validate_bwrap_namespace_init(&scope_root, child.id()) {
             let cleanup = cleanup_failed_linux_spawn(&mut child, group, Some(&scope_root));
-            return Err(append_linux_spawn_cleanup_error(error, cleanup));
+            return Err(append_linux_spawn_cleanup_error(
+                append_linux_launch_diagnostics(error, &mut child),
+                cleanup,
+            ));
         }
         Ok(SupervisedChild {
             child,
@@ -1848,6 +1878,7 @@ fn run_linux_managed_process_probe_attempts(
 #[cfg(target_os = "linux")]
 fn linux_managed_process_probe_failure_is_retryable(error: &str) -> bool {
     !error.contains("supervised launch cleanup was not proven")
+        && !error.contains("bubblewrap stderr:")
         && [
             "launch gate closed before reporting readiness",
             "launch gate readiness timed out",
@@ -2035,6 +2066,157 @@ fn append_linux_spawn_cleanup_error(launch_error: String, cleanup: Result<(), St
 }
 
 #[cfg(target_os = "linux")]
+fn append_linux_launch_diagnostics(
+    mut launch_error: String,
+    child: &mut std::process::Child,
+) -> String {
+    let status = match child.try_wait() {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            launch_error.push_str("; bubblewrap monitor was still running after launch cleanup");
+            return launch_error;
+        }
+        Err(error) => {
+            launch_error.push_str(&format!(
+                "; failed to inspect bubblewrap monitor after launch cleanup: {error}"
+            ));
+            return launch_error;
+        }
+    };
+    launch_error.push_str(&format!("; bubblewrap monitor status: {status}"));
+    let Some(mut stderr) = child.stderr.take() else {
+        return launch_error;
+    };
+    let descriptor = stderr.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        launch_error.push_str(&format!(
+            "; failed to make bubblewrap stderr nonblocking: {}",
+            std::io::Error::last_os_error()
+        ));
+        return launch_error;
+    }
+    let mut bytes = Vec::new();
+    let deadline = Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT;
+    let mut timed_out = false;
+    let mut read_error = None;
+    while bytes.len() <= MAX_PROCESS_CLEANUP_TEXT_BYTES {
+        let mut buffer = [0_u8; 1024];
+        match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let now = Instant::now();
+                if now >= deadline {
+                    timed_out = true;
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let timeout = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+                let mut poll_descriptor = libc::pollfd {
+                    fd: descriptor,
+                    events: libc::POLLIN | libc::POLLHUP,
+                    revents: 0,
+                };
+                let result = unsafe { libc::poll(&mut poll_descriptor, 1, timeout) };
+                if result == 0 {
+                    timed_out = true;
+                    break;
+                }
+                if result == -1 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    read_error = Some(error);
+                    break;
+                }
+            }
+            Err(error) => {
+                read_error = Some(error);
+                break;
+            }
+        }
+    }
+    let truncated = bytes.len() > MAX_PROCESS_CLEANUP_TEXT_BYTES;
+    bytes.truncate(MAX_PROCESS_CLEANUP_TEXT_BYTES);
+    let diagnostic = String::from_utf8_lossy(&bytes);
+    let diagnostic = diagnostic.trim();
+    if !diagnostic.is_empty() {
+        launch_error.push_str("; bubblewrap stderr: ");
+        launch_error.push_str(diagnostic);
+        if truncated {
+            launch_error.push_str(" [truncated]");
+        }
+    }
+    if timed_out {
+        launch_error.push_str("; timed out draining bubblewrap stderr");
+    }
+    if let Some(error) = read_error {
+        launch_error.push_str(&format!(
+            "; failed to read bubblewrap stderr after launch cleanup: {error}"
+        ));
+    }
+    launch_error
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_linux_namespace_and_monitor(
+    child: &mut std::process::Child,
+    monitor_group: i32,
+    scope_root: &ProcessIdentity,
+) -> Result<(), String> {
+    let signal_result = signal_linux_process_identity(scope_root);
+    let (initially_absent, initial_identity_error) =
+        match wait_for_linux_identity_absent(scope_root, SUPERVISOR_CLEANUP_TIMEOUT) {
+            Ok(absent) => (absent, None),
+            Err(error) => (false, Some(error)),
+        };
+
+    if !initially_absent {
+        let _ = signal_process_group(monitor_group);
+        let _ = child.kill();
+    }
+
+    let mut reap_result = wait_for_child_reap(child, SUPERVISOR_CLEANUP_TIMEOUT);
+    if reap_result.is_err() {
+        let group_result = signal_process_group(monitor_group);
+        let child_result = match child.kill() {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(error) => Err(format!("failed to terminate bubblewrap monitor: {error}")),
+        };
+        reap_result = wait_for_child_reap(child, SUPERVISOR_CLEANUP_TIMEOUT);
+        group_result?;
+        child_result?;
+    }
+
+    let final_identity_result = if initially_absent {
+        Ok(true)
+    } else {
+        wait_for_linux_identity_absent(scope_root, SUPERVISOR_CLEANUP_TIMEOUT)
+    };
+    signal_result?;
+    reap_result?;
+    if let Some(error) = initial_identity_error {
+        return Err(format!(
+            "failed to observe namespace cleanup before forced monitor teardown: {error}"
+        ));
+    }
+    match final_identity_result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "bubblewrap namespace init {} survived ordered cleanup",
+            scope_root.pid
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn cleanup_failed_linux_spawn(
     child: &mut std::process::Child,
     monitor_group: i32,
@@ -2070,21 +2252,7 @@ fn cleanup_failed_linux_spawn(
         );
     };
 
-    let signal_result = signal_linux_process_identity(&scope_root);
-    let _ = signal_process_group(monitor_group);
-    let _ = child.kill();
-    let reap_result = wait_for_child_reap(child, SUPERVISOR_CLEANUP_TIMEOUT);
-    let identity_absent = wait_for_linux_identity_absent(&scope_root, SUPERVISOR_CLEANUP_TIMEOUT)?;
-    signal_result?;
-    reap_result?;
-    if identity_absent {
-        Ok(())
-    } else {
-        Err(format!(
-            "bubblewrap namespace init {} survived failed-launch cleanup",
-            scope_root.pid
-        ))
-    }
+    cleanup_linux_namespace_and_monitor(child, monitor_group, &scope_root)
 }
 
 #[cfg(target_os = "linux")]
@@ -3639,6 +3807,45 @@ mod tests {
         assert_eq!(attempts, 1);
         assert!(error.contains("after 1 attempt(s)"), "{error}");
         assert!(error.contains("cleanup was not proven"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_process_probe_does_not_retry_diagnosed_monitor_exit() {
+        let mut attempts = 0;
+        let error = run_linux_managed_process_probe_attempts(|| {
+            attempts += 1;
+            Err(
+                "supervised Linux launch gate closed before reporting readiness; bubblewrap monitor status: exit status: 1; bubblewrap stderr: mount denied"
+                    .to_string(),
+            )
+        })
+        .expect_err("diagnosed monitor exit must not be retried");
+        assert_eq!(attempts, 1);
+        assert!(error.contains("mount denied"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_linux_launch_diagnostics_capture_status_and_stderr() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf 'mount denied' >&2; exit 42"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("diagnostic fixture");
+        child.wait().expect("diagnostic fixture exit");
+
+        let diagnostic = append_linux_launch_diagnostics("launch failed".to_string(), &mut child);
+
+        assert!(
+            diagnostic.contains("bubblewrap monitor status:"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("42"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("bubblewrap stderr: mount denied"),
+            "{diagnostic}"
+        );
     }
 
     #[test]

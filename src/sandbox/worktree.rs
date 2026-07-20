@@ -1546,16 +1546,16 @@ fn promote_durable_intent(
     )?;
     let common_directory = reopen_common_git_directory(&record)?;
     let worktree_directory = open_stable_direct_child(&record.worktree_path)?;
-    let registration_path = parse_gitdir_pointer(
+    let reported_registration_path = parse_gitdir_pointer(
         &read_small_stable_file(&worktree_directory, &record.worktree_path.join(".git"))?,
         "managed worktree intent .git pointer",
     )?;
     let registrations_path = record.common_git_dir.join("worktrees");
-    if registration_path.parent() != Some(registrations_path.as_path()) {
-        return Err(
-            "managed worktree intent points outside the registration namespace".to_string(),
-        );
-    }
+    let registration_path = trusted_git_registration_path(
+        &registrations_path,
+        &reported_registration_path,
+        "managed worktree intent",
+    )?;
     let registration_name = registration_path
         .file_name()
         .ok_or("managed worktree registration has no filename")?;
@@ -3383,7 +3383,10 @@ fn capture_worktree_registration_snapshot_from_common(
                         &read_small_stable_file(&registration, &gitdir_path)?,
                         "Git worktree registration backlink",
                     )?;
-                    if backlink == expected_git_file {
+                    if crate::fs_security::canonical_paths_match(
+                        &expected_git_file,
+                        &backlink,
+                    ) {
                         return Err(format!(
                             "pre-existing Git worktree registration already points to {}; preserving it: {}",
                             expected_git_file.display(),
@@ -3475,7 +3478,7 @@ fn capture_managed_worktree_receipt(
         .into());
     }
     let git_file = path.join(".git");
-    let registration_path = parse_gitdir_pointer(
+    let reported_registration_path = parse_gitdir_pointer(
         &read_small_stable_file(&worktree_directory, &git_file)?,
         "managed worktree .git pointer",
     )?;
@@ -3488,16 +3491,11 @@ fn capture_managed_worktree_receipt(
         opened_registrations = common_directory.open_child(&registrations)?;
         &opened_registrations
     };
-    if registration_path.parent() != Some(registrations.as_path())
-        || registration_path.file_name().is_none()
-    {
-        return Err(format!(
-            "managed worktree registration is not a direct child of {}: {}",
-            registrations.display(),
-            registration_path.display()
-        )
-        .into());
-    }
+    let registration_path = trusted_git_registration_path(
+        &registrations,
+        &reported_registration_path,
+        "managed worktree registration",
+    )?;
     let registration_name = registration_path
         .file_name()
         .expect("registration filename was validated above");
@@ -3590,7 +3588,7 @@ fn validate_reciprocal_worktree_link_opened(
         &read_small_stable_file(worktree, &path.join(".git"))?,
         "managed worktree .git pointer",
     )?;
-    if linked_registration != registration_path {
+    if !crate::fs_security::canonical_paths_match(registration_path, &linked_registration) {
         return Err("managed worktree registration pointer changed".to_string());
     }
     let linked_worktree = parse_plain_path(
@@ -3598,7 +3596,7 @@ fn validate_reciprocal_worktree_link_opened(
         "Git worktree registration backlink",
     )?;
     let expected = path.join(".git");
-    if linked_worktree != expected {
+    if !crate::fs_security::canonical_paths_match(&expected, &linked_worktree) {
         return Err(format!(
             "Git worktree registration does not point back to {}",
             expected.display()
@@ -3614,6 +3612,41 @@ fn open_stable_direct_child(path: &Path) -> Result<crate::daemons::state::Stable
         .parent()
         .ok_or_else(|| format!("managed directory has no parent: {}", path.display()))?;
     crate::daemons::state::StableDirectory::open(parent)?.open_child(path)
+}
+
+fn trusted_git_registration_path(
+    registrations: &Path,
+    reported: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    if reported.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(format!(
+            "{label} contains a non-direct registration path: {}",
+            reported.display()
+        ));
+    }
+    let parent = reported
+        .parent()
+        .ok_or_else(|| format!("{label} registration has no parent: {}", reported.display()))?;
+    let name = reported.file_name().ok_or_else(|| {
+        format!(
+            "{label} registration has no filename: {}",
+            reported.display()
+        )
+    })?;
+    if !crate::fs_security::canonical_paths_match(registrations, parent) {
+        return Err(format!(
+            "{label} is not a direct child of {}: {}",
+            registrations.display(),
+            reported.display()
+        ));
+    }
+    Ok(registrations.join(name))
 }
 
 fn parse_gitdir_pointer(contents: &[u8], label: &str) -> Result<PathBuf, String> {
@@ -4003,7 +4036,10 @@ fn prove_managed_worktree_namespace_absent_until(
         let registration = registrations_directory.open_child(&registration_path)?;
         let gitdir_path = registration_path.join("gitdir");
         let gitdir = read_small_stable_file(&registration, &gitdir_path)?;
-        if parse_plain_path(&gitdir, "Git worktree registration backlink")? == expected_git_file {
+        if crate::fs_security::canonical_paths_match(
+            &expected_git_file,
+            &parse_plain_path(&gitdir, "Git worktree registration backlink")?,
+        ) {
             matching_registration = Some(registration_path);
         }
         Ok(())
@@ -4629,7 +4665,7 @@ impl OwnedRefLock {
         contents: Vec<u8>,
     ) -> Result<Self, String> {
         let retained_directory = directory.try_clone()?;
-        let receipt = match directory.save_bytes_atomically_expected_with_receipt(
+        let receipt = match directory.save_bytes_atomically_expected_with_locked_receipt(
             &path,
             &contents,
             MANAGED_REF_LOCK_TEMPORARY_PREFIX,
@@ -4667,8 +4703,6 @@ impl OwnedRefLock {
                 ),
             });
         }
-        // Atomic publication locks the temporary inode before linking or moving it;
-        // the returned receipt retains that locked file description.
         Ok(Self {
             directory: retained_directory,
             path,
@@ -9132,6 +9166,9 @@ mod tests {
         stage_reserved_branch_publication(&mut reservation)
             .expect("persist staged branch identity");
         let staged_record = reservation.intent.revision.record.clone();
+        drop(staged_receipt);
+        drop(staged_directory);
+        drop(parent_directory);
         drop(reservation);
 
         Worktree::remove(&project_root, id).expect("recover identity-bound staging");

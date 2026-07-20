@@ -973,11 +973,22 @@ mod tests {
 
         let sessions_path = store.sessions_dir().to_path_buf();
         let displaced_sessions = sessions_path.with_extension("displaced");
-        fs::rename(&sessions_path, &displaced_sessions).expect("displace sessions directory");
-        fs::create_dir(&sessions_path).expect("replace sessions directory");
-        run_child("timeout");
-        fs::remove_dir_all(&sessions_path).expect("remove replacement sessions directory");
-        fs::rename(&displaced_sessions, &sessions_path).expect("restore sessions directory");
+        #[cfg(unix)]
+        {
+            fs::rename(&sessions_path, &displaced_sessions).expect("displace sessions directory");
+            fs::create_dir(&sessions_path).expect("replace sessions directory");
+            run_child("timeout");
+            fs::remove_dir_all(&sessions_path).expect("remove replacement sessions directory");
+            fs::rename(&displaced_sessions, &sessions_path).expect("restore sessions directory");
+        }
+        #[cfg(windows)]
+        {
+            fs::rename(&sessions_path, &displaced_sessions)
+                .expect_err("live Windows gateway lock pins the sessions directory");
+            assert!(sessions_path.is_dir());
+            assert!(!displaced_sessions.exists());
+            run_child("timeout");
+        }
 
         drop(held);
         acquire_gateway_dispatch_guard(

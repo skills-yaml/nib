@@ -2245,6 +2245,7 @@ mod tests {
                 Err(error) => panic!("kill managed-process fixture child: {error}"),
             }
             child.wait().expect("reap managed-process fixture child");
+            drop(child);
             let direct_child = self
                 .scope
                 .direct_child

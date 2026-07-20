@@ -23,9 +23,9 @@ const MCP_FIXTURE_ACTIVATION_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_FIXTURE";
 const MCP_FIXTURE_MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 #[cfg(debug_assertions)]
 const MCP_FIXTURE_HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, target_os = "linux"))]
 const MCP_GIT_FIXTURE_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, target_os = "linux"))]
 const MCP_GIT_FIXTURE_TOKEN: &str = "nib-mcp-git-lifecycle-fixture-v1";
 
 #[cfg(debug_assertions)]
@@ -145,7 +145,7 @@ fn install_terminal_tree_fixture(root: &Path) -> std::path::PathBuf {
     executable
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, target_os = "linux"))]
 fn install_git_stall_fixture(root: &Path, heartbeat: &Path) -> std::ffi::OsString {
     let bin = root.join("mcp-git-fixture-bin");
     std::fs::create_dir(&bin).expect("MCP Git fixture bin directory");
@@ -579,6 +579,7 @@ async fn wait_for_tool_completion(root: &Path, tool_name: &str) {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_nib_run_cancellation_audit(root: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1400,9 +1401,9 @@ async fn blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform(
     wait_for_cancellation_audit(project.path(), "backpressured-terminal.heartbeat").await;
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, target_os = "linux"))]
 #[tokio::test]
-async fn nib_run_cancellation_reaps_git_descendants_on_every_platform() {
+async fn linux_nib_run_cancellation_reaps_git_descendants() {
     let project = tempfile::tempdir().expect("portable nib_run cancellation fixture");
     initialize_server_fixture(project.path());
     let heartbeat = project.path().join("cancelled-nib-run-git.heartbeat");

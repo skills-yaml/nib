@@ -186,12 +186,12 @@ fn verify_existing_directory_components(absolute: &Path, display: &Path) -> io::
 }
 
 #[cfg(not(windows))]
-fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
+pub(crate) fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
     canonical == requested
 }
 
 #[cfg(windows)]
-fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
+pub(crate) fn canonical_paths_match(canonical: &Path, requested: &Path) -> bool {
     let canonical = path_without_windows_verbatim_prefix(canonical);
     let normalized_requested = path_without_windows_verbatim_prefix(requested);
     canonical == normalized_requested

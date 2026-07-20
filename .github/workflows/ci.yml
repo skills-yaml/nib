@@ -16,7 +16,7 @@ permissions:
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -30,13 +30,22 @@ jobs:
       - name: Install coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
 
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Configure bubblewrap containment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor-profiles bubblewrap
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          bwrap --version
 
       - name: Install Task
         uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify managed-process containment
+        env:
+          NIB_REQUIRE_BWRAP_TESTS: "1"
+        run: task test:managed-process-capability
 
       - name: Run checks
         run: task check
