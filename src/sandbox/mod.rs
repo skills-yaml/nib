@@ -1176,6 +1176,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::ffi::{OsStr, OsString};
+    #[cfg(unix)]
     use std::time::Duration;
     use tempfile::tempdir;
 

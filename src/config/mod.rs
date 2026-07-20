@@ -1729,9 +1729,9 @@ fn config_state_error(error: String) -> ConfigError {
     ConfigError::Operation(error)
 }
 
-fn sync_directory(path: &Path) -> Result<(), ConfigError> {
+fn sync_directory(_path: &Path) -> Result<(), ConfigError> {
     #[cfg(unix)]
-    File::open(path)?.sync_all()?;
+    File::open(_path)?.sync_all()?;
     Ok(())
 }
 

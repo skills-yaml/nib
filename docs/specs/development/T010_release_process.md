@@ -235,3 +235,45 @@ scope, and every pinned action commit.
   the rolling Release endpoints cannot close with compare-and-swap.
 - The exact current remote workflow revision has not run; local harness results do not
   substitute for that external evidence.
+
+## CI Portability Remediation (2026-07-20)
+
+### Problem
+
+The canonical `task installers:check` gate used `rg` for four fixed-file assertions,
+but the clean Ubuntu GitHub Actions runner does not install ripgrep. The release checks
+therefore failed before Rust validation even though their repository and checksum
+assertions require only a standard fixed-string search.
+
+### Scope And Design
+
+Use POSIX `grep` with fixed-string and quiet flags for the repository and checksum
+assertions, retaining case-insensitive checksum matching for the PowerShell installer.
+Do not add a workflow-only dependency for a gate that should remain portable when run
+through Task.
+
+### Non-Goals
+
+- Changing installer behavior, release artifact contents, or checksum policy.
+- Updating unrelated GitHub Actions or their runtime versions.
+
+### Acceptance Criteria
+
+- [x] `task installers:check` no longer invokes undeclared `rg` tooling.
+- [x] The Unix and PowerShell installers are still checked for the canonical repository
+  and checksum handling.
+- [ ] The exact PR revision passes the hosted `Validate` job from a clean runner.
+
+### Affected Areas
+
+`Taskfile.yml` and the pull-request validation workflow execution.
+
+### Validation Gates
+
+`task installers:check`, `task check`, `task docs:check`, and the hosted PR `Validate`
+job on the exact committed revision.
+
+### Risks And Mitigations
+
+Plain grep patterns could accidentally change matching semantics. Fixed-string `-F`
+preserves literal matching, while `-i` remains limited to the PowerShell checksum check.

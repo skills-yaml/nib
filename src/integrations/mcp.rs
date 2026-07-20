@@ -1330,6 +1330,7 @@ fn is_valid_external_tool_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use serial_test::serial;
 
     fn tool(name: impl Into<String>) -> Value {

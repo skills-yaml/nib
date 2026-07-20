@@ -30,10 +30,10 @@ tasks:
       - sh -n scripts/first-time-setup.sh
       - bash -n scripts/publish-release.sh
       - bash -n scripts/check-managed-process-release.sh
-      - rg -q 'skills-yaml/nib' scripts/install.sh
-      - rg -q 'skills-yaml/nib' scripts/install.ps1
-      - rg -q 'sha256' scripts/install.sh
-      - rg -qi 'sha256' scripts/install.ps1
+      - grep -Fq 'skills-yaml/nib' scripts/install.sh
+      - grep -Fq 'skills-yaml/nib' scripts/install.ps1
+      - grep -Fq 'sha256' scripts/install.sh
+      - grep -Fiq 'sha256' scripts/install.ps1
 
   coverage:
     desc: Enforce at least 80 percent line coverage on runtime components

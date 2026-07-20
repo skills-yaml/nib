@@ -724,6 +724,7 @@ impl ProcessScopeStore {
 
     /// Completes a crashed Linux supervisor scope only after the exact cleanup
     /// lease is recoverable and both recorded process generations are gone.
+    #[cfg(target_os = "linux")]
     pub fn recover_linux_supervisor_loss(
         &self,
         expected: &ProcessScopeRecord,
@@ -862,6 +863,23 @@ impl ProcessScopeStore {
             cleanup_lease.release_after_launch_abort(proof)?;
         }
         Ok(completed)
+    }
+
+    /// Rejects persisted Linux recovery records on hosts that cannot prove Linux
+    /// process identity or signal the namespace root.
+    #[cfg(not(target_os = "linux"))]
+    pub fn recover_linux_supervisor_loss(
+        &self,
+        expected: &ProcessScopeRecord,
+    ) -> Result<ProcessScopeRecord, String> {
+        validate_record(expected)?;
+        if expected.backend != ProcessScopeBackend::LinuxPidNamespace {
+            return Err(
+                "automatic supervisor-loss recovery is supported only for Linux PID namespaces"
+                    .to_string(),
+            );
+        }
+        Err("Linux supervisor-loss recovery is unavailable on this platform".to_string())
     }
 
     pub fn acquire_cleanup_lease(
@@ -3387,11 +3405,6 @@ fn linux_identity_still_matches(identity: &ProcessIdentity) -> Result<bool, Stri
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn linux_identity_still_matches(_identity: &ProcessIdentity) -> Result<bool, String> {
-    Err("Linux process identity recovery is unavailable on this platform".to_string())
-}
-
 #[cfg(target_os = "linux")]
 fn platform_process_start_marker(pid: u32) -> Result<String, String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -3612,6 +3625,38 @@ mod tests {
             .expect("prepare scope");
         let _lease = store.acquire_cleanup_lease(&record).expect("cleanup lease");
         assert!(store.acquire_cleanup_lease(&record).is_err());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn linux_supervisor_loss_recovery_fails_closed_on_other_platforms() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-linux-recovery",
+                "subagent",
+                12,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+
+        let error = store
+            .recover_linux_supervisor_loss(&record)
+            .expect_err("non-Linux hosts cannot recover a Linux process scope");
+
+        assert!(error.contains("unavailable on this platform"), "{error}");
+        assert_eq!(
+            store.load(&record.scope_id).expect("scope remains intact"),
+            record
+        );
+        assert_eq!(
+            store
+                .cleanup_lease_state(&record)
+                .expect("cleanup lease state"),
+            CleanupLeaseState::Missing
+        );
     }
 
     #[test]

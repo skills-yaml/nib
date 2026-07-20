@@ -2181,11 +2181,11 @@ fn stable_directory_identity(
     .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))
 }
 
-fn configure_capability_owner_only(options: &mut cap_std::fs::OpenOptions) {
+fn configure_capability_owner_only(_options: &mut cap_std::fs::OpenOptions) {
     #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
-        options.mode(0o600);
+        _options.mode(0o600);
     }
 }
 
