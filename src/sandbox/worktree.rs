@@ -4716,11 +4716,7 @@ impl OwnedRefLock {
             return Ok(());
         };
         #[cfg(test)]
-        if OWNED_REF_LOCK_RELEASE_FAILURES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.path)
-        {
+        if take_owned_ref_lock_release_failure(&self.path) {
             return Err("injected owned ref lock release failure".to_string());
         }
         verify_open_file_contents(&receipt.file, &self.contents)?;
@@ -4729,6 +4725,18 @@ impl OwnedRefLock {
         self.receipt = None;
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn take_owned_ref_lock_release_failure(path: &Path) -> bool {
+    let mut failures = OWNED_REF_LOCK_RELEASE_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let matched = failures
+        .iter()
+        .find(|candidate| crate::fs_security::canonical_paths_match(path, candidate))
+        .cloned();
+    matched.is_some_and(|matched| failures.remove(&matched))
 }
 
 fn managed_ref_lock_contents(receipt_id: &str, reference: &str, role: &str) -> Vec<u8> {
@@ -9105,7 +9113,7 @@ mod tests {
         .expect("branch staging parent");
         let branch_directory = crate::daemons::state::StableDirectory::open(&branch_parent)
             .expect("stable branch parent");
-        branch_directory
+        let staged_receipt = branch_directory
             .save_bytes_atomically_expected_with_receipt(
                 &record.branch_staging_path,
                 format!("{}\n", record.current_oid).as_bytes(),
@@ -9113,6 +9121,9 @@ mod tests {
                 crate::daemons::state::FileExpectation::Missing,
             )
             .expect("reserved branch staging");
+        drop(staged_receipt);
+        drop(branch_directory);
+        drop(parent_directory);
         drop(reservation);
 
         Worktree::remove(&project_root, id).expect("recover receipt-bound reserved staging");

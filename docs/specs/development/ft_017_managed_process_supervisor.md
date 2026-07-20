@@ -470,8 +470,9 @@ After exact-signalling namespace PID 1, keep the bubblewrap monitor alive until 
 that child and the recorded host identity is absent, then reap or force-clean the
 monitor. Preserve the fail-closed identity and cleanup-proof boundary. Load Ubuntu
 Noble's packaged bwrap AppArmor profile before the exact CI capability gate. Restrict
-the MCP Git-stall cancellation fixture to Linux because it exercises production
-subagent delegation, which is intentionally rejected on macOS and Windows.
+production `nib_run` expectations to Linux because subagent delegation is intentionally
+rejected on macOS and Windows; retain cross-platform MCP status, audit, and rejection
+coverage.
 
 ### Acceptance Criteria
 
@@ -483,14 +484,16 @@ subagent delegation, which is intentionally rejected on macOS and Windows.
   distinguish a shell-gate failure from containment cleanup failure.
 - [ ] Hosted Linux loads the targeted packaged bwrap AppArmor profile and runs the exact
   required capability probe before the broader validation suite.
-- [x] The MCP Git-stall cancellation fixture runs only where production delegation is
-  supported, while native macOS and Windows containment contract tests remain enabled.
+- [x] MCP integration tests execute production delegation only on Linux; macOS and
+  Windows assert the platform rejection contract while native containment tests remain
+  enabled.
 - [ ] The exact PR revision passes the hosted Validate and macOS jobs.
 
 ### Affected Areas
 
 `src/sandbox/process.rs`, managed-process capability regressions,
-`tests/mcp_integration.rs`, `.github/workflows/ci.yml`, and the hosted Linux/macOS jobs.
+`tests/mcp_integration.rs`, `tests/test_runtime_e2e.rs`, `.github/workflows/ci.yml`, and
+the hosted Linux/macOS jobs.
 
 ### Validation Gates
 
@@ -503,7 +506,7 @@ Validate/macOS jobs.
 The required exact capability suite passes locally. A privileged Ubuntu 24.04 container
 with bubblewrap 0.9 and a non-reaping Bash PID 1 passed 35 fresh-process probe runs and
 left no zombies. The focused Linux supervisor and MCP cancellation suites, full
-`task check`, `task coverage` at 83.85 percent (55,662/66,385), release build, and
+`task check`, `task coverage` at 83.82 percent (55,680/66,429), release build, and
 managed-process smoke pass. The Windows all-target graph cross-compiles; native hosted
 Linux and macOS evidence remains open.
 

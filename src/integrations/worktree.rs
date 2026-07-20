@@ -734,13 +734,16 @@ mod tests {
         assert_eq!(rehydrated, created);
         assert_eq!(restarted.get_path(session_id), Some(created.clone()));
         let registrations = git_stdout(repository.path(), &["worktree", "list", "--porcelain"]);
-        let registration_line = format!("worktree {}", created.display());
+        let matching_registrations = registrations
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .filter(|registered| {
+                crate::fs_security::canonical_paths_match(&created, Path::new(registered))
+            })
+            .count();
         assert_eq!(
-            registrations
-                .lines()
-                .filter(|line| *line == registration_line)
-                .count(),
-            1
+            matching_registrations, 1,
+            "rehydrated worktree registration was not unique: {registrations}"
         );
     }
 

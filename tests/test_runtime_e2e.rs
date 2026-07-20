@@ -15,7 +15,9 @@ use nib::llm::{LlmClient, LlmResponse, StreamEvent};
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
 use nib::session::{Plan, PlanStep, SessionError, SessionStore};
-use nib::tools::delegation::{get_subagent_record, write_subagent_record, SubagentRecord};
+#[cfg(target_os = "linux")]
+use nib::tools::delegation::get_subagent_record;
+use nib::tools::delegation::{write_subagent_record, SubagentRecord};
 use nib::tools::executor::ApprovalHandler;
 use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
 use nib::tools::ToolExecutor;
@@ -1223,15 +1225,33 @@ async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() 
         )
         .await;
     assert!(started.success, "{:?}", started.error);
-    let started_content = &started.output.as_ref().unwrap()["structuredContent"];
-    assert_eq!(started_content["status"], "started");
-    let delegated_id = started_content["subagent_id"]
-        .as_str()
-        .expect("delegated run id");
-    let linked = get_subagent_record(root.path(), delegated_id).expect("linked delegation record");
-    assert_eq!(linked.child_session_id, delegated_id);
-    assert_eq!(linked.prompt, "inspect the delegated fixture");
-    assert!(linked.worktree_path.is_dir());
+    #[cfg(target_os = "linux")]
+    {
+        let started_content = &started.output.as_ref().unwrap()["structuredContent"];
+        assert_eq!(started_content["status"], "started");
+        let delegated_id = started_content["subagent_id"]
+            .as_str()
+            .expect("delegated run id");
+        let linked =
+            get_subagent_record(root.path(), delegated_id).expect("linked delegation record");
+        assert_eq!(linked.child_session_id, delegated_id);
+        assert_eq!(linked.prompt, "inspect the delegated fixture");
+        assert!(linked.worktree_path.is_dir());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let response = started.output.as_ref().expect("MCP rejection response");
+        assert_eq!(response["isError"], true);
+        assert!(response["structuredContent"].is_null());
+        let error = response["content"][0]["text"]
+            .as_str()
+            .expect("MCP rejection text");
+        assert!(
+            error.contains("production")
+                && (error.contains("unavailable") || error.contains("unsupported")),
+            "{error}"
+        );
+    }
 
     let audit = store.load("mcp-audit").expect("MCP audit");
     assert_eq!(audit.tool_calls.len(), 3);

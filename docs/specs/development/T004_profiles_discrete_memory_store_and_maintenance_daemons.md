@@ -559,7 +559,7 @@ the hosted Windows build and smoke job.
 ### Local Validation Evidence
 
 The full host suite passes 609 library tests plus all binary, integration, and
-documentation suites. Runtime coverage is 83.85 percent (55,662/66,385), release build
+documentation suites. Runtime coverage is 83.82 percent (55,680/66,429), release build
 and managed-process smoke pass, and the Windows all-target/all-feature graph
 cross-compiles the native path, range-lock, marker-identity, and replacement-contract
 changes. Equivalent-path behavior and the remaining native contracts await the exact

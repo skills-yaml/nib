@@ -693,29 +693,58 @@ impl Curator {
                         marker_path.display()
                     )
                 })?;
+            let directory_identity = skill_directory
+                .directory_removal_receipt()
+                .map_err(|error| {
+                    format!(
+                        "failed to retain managed skill directory identity {}: {error}",
+                        path.display()
+                    )
+                })?
+                .identity();
             drop(marker_file);
+            drop(skill_directory);
             before_quarantine(&path);
-            if let Err(error) = pins_directory
+            let skill_directory = match pins_directory
                 .verify_file_expectation(&self.pins_path, pins.expectation())
-                .and_then(|()| skill_directory.verify_visible())
                 .and_then(|()| {
+                    let skill_directory = managed_directory.open_owned_child(&path)?;
+                    let visible_identity = skill_directory
+                        .directory_removal_receipt()
+                        .map_err(|error| {
+                            format!(
+                                "failed to re-check managed skill directory identity {}: {error}",
+                                path.display()
+                            )
+                        })?
+                        .identity();
+                    if visible_identity != directory_identity {
+                        return Err(format!(
+                            "managed skill directory identity changed while cleanup was authorized: {}",
+                            path.display()
+                        ));
+                    }
                     verify_managed_skill_marker_identity(
                         &skill_directory,
                         &marker_path,
                         marker_identity,
-                    )
+                    )?;
+                    Ok(skill_directory)
                 })
             {
-                report.errors.push(error.clone());
-                self.audit(
-                    "cleanup_skill",
-                    Some(&directory_id),
-                    "error",
-                    true,
-                    Some(error),
-                )?;
-                continue;
-            }
+                Ok(skill_directory) => skill_directory,
+                Err(error) => {
+                    report.errors.push(error.clone());
+                    self.audit(
+                        "cleanup_skill",
+                        Some(&directory_id),
+                        "error",
+                        true,
+                        Some(error),
+                    )?;
+                    continue;
+                }
+            };
             let quarantine_path =
                 managed_skill_quarantine_path(managed_directory.path(), &directory_id);
             if managed_directory.entry_kind(&quarantine_path)?.is_some() {

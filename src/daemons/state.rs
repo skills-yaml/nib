@@ -3954,6 +3954,13 @@ mod tests {
             fs::read(&target).expect("read while receipt remains alive"),
             b"published"
         );
+        let contender = directory
+            .open_read_write(&target)
+            .expect("open publication contender");
+        contender
+            .try_lock()
+            .expect("generic receipt must not retain the publication lock");
+        contender.unlock().expect("release publication contender");
         assert!(same_open_file_identity(
             &receipt.file,
             &directory.open_read(&target).expect("reopen publication")

@@ -2245,12 +2245,16 @@ mod tests {
                 Err(error) => panic!("kill managed-process fixture child: {error}"),
             }
             child.wait().expect("reap managed-process fixture child");
+            // Waiting on the owned process handle proves this exact child
+            // generation exited. A PID lookup can still find the exited
+            // process object on Windows while another handle keeps it alive.
             drop(child);
             let direct_child = self
                 .scope
                 .direct_child
                 .clone()
                 .expect("managed-process fixture direct child");
+            #[cfg(not(windows))]
             assert!(
                 !direct_child.still_matches(),
                 "cleanup proof requires the exact child generation to be gone"
@@ -3276,9 +3280,12 @@ mod tests {
             "profile-scoped"
         );
         let store = SessionStore::for_project(root.path()).expect("profile store");
-        assert_eq!(
-            store.sessions_dir(),
-            root.path().join(".nib/profiles/workspace/sessions")
+        let expected_sessions = root.path().join(".nib/profiles/workspace/sessions");
+        assert!(
+            crate::fs_security::canonical_paths_match(store.sessions_dir(), &expected_sessions),
+            "profile store {} does not match expected sessions path {}",
+            store.sessions_dir().display(),
+            expected_sessions.display()
         );
         assert!(store.list().into_iter().any(|id| {
             store.load(&id).is_some_and(|session| {
