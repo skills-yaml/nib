@@ -1029,52 +1029,12 @@ fn verify_existing_directory_without_symlinks(
     path: &Path,
     description: &str,
 ) -> Result<PathBuf, String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| format!("failed to resolve {description}: {error}"))?
-            .join(path)
-    };
-    let mut current = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            std::path::Component::RootDir => current.push(component.as_os_str()),
-            std::path::Component::CurDir => continue,
-            std::path::Component::ParentDir => {
-                return Err(format!(
-                    "{description} contains a parent component: {}",
-                    path.display()
-                ))
-            }
-            std::path::Component::Normal(part) => {
-                current.push(part);
-                let metadata = fs::symlink_metadata(&current).map_err(|error| {
-                    format!(
-                        "failed to inspect {description} component {}: {error}",
-                        current.display()
-                    )
-                })?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(format!(
-                        "{description} component must be a real local directory: {}",
-                        current.display()
-                    ));
-                }
-            }
-        }
-    }
-    let canonical = absolute
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve {description}: {error}"))?;
-    if canonical != absolute {
-        return Err(format!(
-            "{description} resolves through a symlink: {}",
+    nib::fs_security::canonicalize_existing_directory_without_symlinks(path).map_err(|error| {
+        format!(
+            "failed to validate {description} {}: {error}",
             path.display()
-        ));
-    }
-    Ok(canonical)
+        )
+    })
 }
 
 fn copy_bounded_resource(source: &Path, target: &Path) -> Result<u64, String> {
@@ -1337,6 +1297,17 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn missing_directory_validation_does_not_create_source_components() {
+        let source = tempdir().expect("source tempdir");
+        let missing = source.path().join("missing/nested");
+
+        verify_existing_directory_without_symlinks(&missing, "skill resource")
+            .expect_err("missing resource parent must fail validation");
+
+        assert!(!source.path().join("missing").exists());
     }
 
     #[cfg(unix)]
@@ -1970,7 +1941,8 @@ mod tests {
 
         restore_env("NIB_SKILLS_DIR", previous);
         let error = result.expect_err("malformed installed skill must fail listing");
-        assert!(error.contains("broken/SKILL.md"));
+        let malformed_path = PathBuf::from("broken").join("SKILL.md");
+        assert!(error.contains(malformed_path.to_string_lossy().as_ref()));
         assert!(error.contains("must start with YAML frontmatter"));
     }
 

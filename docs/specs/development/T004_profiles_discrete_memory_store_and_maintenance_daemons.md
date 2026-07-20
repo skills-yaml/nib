@@ -610,6 +610,66 @@ plus all binary, integration, and documentation suites, twelve consecutive durab
 integration stress repetitions pass, and runtime coverage is 83.92 percent
 (56,345/67,143).
 
+## Hosted Cross-Platform Runtime Follow-up III (2026-07-20)
+
+### Scope
+
+Treat an identity-distinct target and prior artifact as an in-flight atomic publication
+when the temporary pathname has already moved to the target and the writer still owns
+that target's advisory lock. Preserve fail-closed ambiguity once no live writer owns the
+published target. Reuse the shared Windows canonical-path validation for skill sources
+so an equivalent DOS short alias is not misclassified as a symlink, while retaining
+component-level reparse rejection. Make skill diagnostics path-separator portable. On
+Windows, do not report bounded command cleanup complete until process handles captured
+from the Job Object have entered the signaled state as well as job accounting reaching
+zero active processes. Keep the Linux owner-loss coverage fixture deterministic under
+instrumentation by synchronizing its escaped-descendant probe explicitly instead of
+relying on a fixed child lifetime.
+
+### Acceptance Criteria
+
+- [x] Non-strict recovery skips an identity-distinct target/prior pair while the moved
+  target is locked by a live atomic writer, preserving both paths and their bytes.
+- [x] Strict recovery waits within its existing bound for a moved live writer, then
+  rechecks path identity and accepts the writer's completed prior cleanup; an unlocked
+  identity-distinct target/prior pair remains an ambiguity error.
+- [ ] Skill installation accepts an existing real directory reached through an
+  equivalent Windows DOS short alias while symlinks and Windows reparse points remain
+  rejected.
+- [ ] Skill-list malformed-manifest diagnostics are asserted with the host path
+  separator.
+- [ ] Windows bounded-command cleanup waits for the captured Job Object process handles
+  to become signaled before returning and still verifies zero active job processes.
+- [x] The Linux owner-loss recovery fixture uses an explicit release barrier and still
+  proves that an escaped descendant cannot survive namespace recovery.
+- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+
+### Affected Areas
+
+`src/daemons/state.rs`, `src/fs_security.rs`, `src/skill_cmd.rs`,
+`src/sandbox/windows_job.rs`, focused atomic-recovery and Windows runtime regressions,
+`tests/managed_process_supervisor_recovery.rs`, and the hosted CI matrix.
+
+### Validation Gates
+
+Focused moved-publication recovery and skill-command regressions; Windows-target
+`task check:all-targets`; `task test:durable`; `task test`; `task check`;
+`task docs:check`; `task coverage`; managed-process smoke; and the exact-revision hosted
+Linux, macOS, and Windows jobs.
+
+### Local Validation Evidence
+
+Deterministic atomic-recovery regressions cover the live moved-publication handoff,
+bounded strict timeout, unlocked ambiguity, and namespace retry after prior cleanup.
+The full host `task check` passes 617 library tests, 62 binary tests, and every integration
+and documentation suite; twelve consecutive `task test:durable` repetitions pass.
+Instrumented validation passes at 83.98 percent runtime line coverage (56,591/67,385),
+including the release-barrier owner-loss regression. The Windows all-target graph
+cross-compiles, and the release build plus managed-process owner-loss smoke pass.
+Independent spec-compliance and code-quality reviews report no remaining findings.
+Native Windows short-alias and Job Object execution and the exact-revision hosted matrix
+remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS

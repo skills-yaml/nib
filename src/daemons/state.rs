@@ -62,6 +62,18 @@ struct AtomicSaveHooks<BeforeCommit, AfterEvacuation, BeforeReceipt> {
     before_receipt: BeforeReceipt,
 }
 
+#[derive(Clone, Copy)]
+struct AtomicRecoveryPolicy {
+    skip_live_writer: bool,
+    reject_obscured_live_writer: bool,
+    strict_deadline: Option<Instant>,
+}
+
+struct AtomicRecoveryHooks<'a> {
+    previous_open: &'a mut dyn FnMut() -> Result<(), String>,
+    live_target: &'a mut dyn FnMut(),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StableEntryKind {
     File,
@@ -1485,7 +1497,11 @@ impl StableDirectory {
             if !self.path_exists(&path)? {
                 continue;
             }
-            let file = self.open_read_write(&path)?;
+            let file = match self.open_read_write(&path) {
+                Ok(file) => file,
+                Err(_) if !self.path_exists(&path)? => continue,
+                Err(error) => return Err(error),
+            };
             match file.try_lock() {
                 Ok(()) => {
                     self.remove_visible_file_if_matches(&path, &file, || Ok(()))?;
@@ -1526,6 +1542,100 @@ impl StableDirectory {
         skip_live_writer: bool,
         reject_obscured_live_writer: bool,
     ) -> Result<bool, String> {
+        self.recover_atomic_transaction_with_live_target_hook(
+            target,
+            temporary,
+            previous,
+            skip_live_writer,
+            reject_obscured_live_writer,
+            &mut || {},
+        )
+    }
+
+    fn recover_atomic_transaction_with_live_target_hook(
+        &self,
+        target: &Path,
+        temporary: &Path,
+        previous: &Path,
+        skip_live_writer: bool,
+        reject_obscured_live_writer: bool,
+        live_target_hook: &mut impl FnMut(),
+    ) -> Result<bool, String> {
+        let mut previous_open_hook = || Ok(());
+        self.recover_atomic_transaction_with_hooks(
+            target,
+            temporary,
+            previous,
+            skip_live_writer,
+            reject_obscured_live_writer,
+            AtomicRecoveryHooks {
+                previous_open: &mut previous_open_hook,
+                live_target: live_target_hook,
+            },
+        )
+    }
+
+    fn recover_atomic_transaction_with_hooks(
+        &self,
+        target: &Path,
+        temporary: &Path,
+        previous: &Path,
+        skip_live_writer: bool,
+        reject_obscured_live_writer: bool,
+        mut hooks: AtomicRecoveryHooks<'_>,
+    ) -> Result<bool, String> {
+        const MAX_NAMESPACE_RETRIES: usize = 8;
+
+        let policy = AtomicRecoveryPolicy {
+            skip_live_writer,
+            reject_obscured_live_writer,
+            strict_deadline: reject_obscured_live_writer
+                .then(|| Instant::now() + STRICT_RECOVERY_LIVE_WRITER_WAIT),
+        };
+        for attempt in 0..MAX_NAMESPACE_RETRIES {
+            let observed = (
+                self.path_exists(target)?,
+                self.path_exists(temporary)?,
+                self.path_exists(previous)?,
+            );
+            match self
+                .recover_atomic_transaction_once(target, temporary, previous, policy, &mut hooks)
+            {
+                Ok(recovered) => return Ok(recovered),
+                Err(error) => {
+                    let current = (
+                        self.path_exists(target)?,
+                        self.path_exists(temporary)?,
+                        self.path_exists(previous)?,
+                    );
+                    if current == observed {
+                        return Err(error);
+                    }
+                    if attempt + 1 == MAX_NAMESPACE_RETRIES {
+                        return Err(format!(
+                            "atomic state namespace changed repeatedly while recovering {}: {error}",
+                            target.display()
+                        ));
+                    }
+                }
+            }
+        }
+        unreachable!("bounded atomic recovery loop always returns")
+    }
+
+    fn recover_atomic_transaction_once(
+        &self,
+        target: &Path,
+        temporary: &Path,
+        previous: &Path,
+        policy: AtomicRecoveryPolicy,
+        hooks: &mut AtomicRecoveryHooks<'_>,
+    ) -> Result<bool, String> {
+        let AtomicRecoveryPolicy {
+            skip_live_writer,
+            reject_obscured_live_writer,
+            strict_deadline,
+        } = policy;
         let temporary_file = if self.path_exists(temporary)? {
             let file = self.open_read_write(temporary)?;
             match file.try_lock() {
@@ -1537,7 +1647,8 @@ impl StableDirectory {
                         return Ok(false);
                     }
 
-                    let deadline = Instant::now() + STRICT_RECOVERY_LIVE_WRITER_WAIT;
+                    let deadline = strict_deadline
+                        .expect("strict live-writer rejection carries a recovery deadline");
                     loop {
                         let now = Instant::now();
                         if now >= deadline {
@@ -1578,13 +1689,70 @@ impl StableDirectory {
 
         let mut recovered = false;
         if self.path_exists(previous)? {
+            (hooks.previous_open)()?;
             let previous_file = self.open_read_write(previous)?;
             if self.path_exists(target)? {
-                let target_file = self.open_read(target)?;
+                let target_file = self.open_read_write(target)?;
                 if same_open_file_identity(&target_file, &previous_file)? {
                     self.remove_visible_file_if_matches(previous, &previous_file, || Ok(()))?;
                     recovered = true;
                 } else {
+                    match target_file.try_lock() {
+                        Ok(()) => {
+                            self.verify_file_identity(target, &target_file)?;
+                            if !self.path_exists(previous)? {
+                                return Ok(false);
+                            }
+                            self.verify_file_identity(previous, &previous_file)?;
+                        }
+                        Err(std::fs::TryLockError::WouldBlock) if skip_live_writer => {
+                            (hooks.live_target)();
+                            if !reject_obscured_live_writer {
+                                return Ok(false);
+                            }
+
+                            let deadline = strict_deadline
+                                .expect("strict live-writer rejection carries a recovery deadline");
+                            loop {
+                                let now = Instant::now();
+                                if now >= deadline {
+                                    return Err(format!(
+                                        "atomic state target is still owned by a live writer: {}",
+                                        target.display()
+                                    ));
+                                }
+                                thread::sleep(STRICT_RECOVERY_POLL_INTERVAL.min(deadline - now));
+                                match target_file.try_lock() {
+                                    Ok(()) => break,
+                                    Err(std::fs::TryLockError::WouldBlock) => {}
+                                    Err(std::fs::TryLockError::Error(error)) => {
+                                        return Err(format!(
+                                            "failed while waiting for published state ownership {}: {error}",
+                                            target.display()
+                                        ));
+                                    }
+                                }
+                            }
+
+                            self.verify_file_identity(target, &target_file)?;
+                            if !self.path_exists(previous)? {
+                                return Ok(false);
+                            }
+                            self.verify_file_identity(previous, &previous_file)?;
+                        }
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            return Err(format!(
+                                "atomic state target is still owned by a live writer: {}",
+                                target.display()
+                            ));
+                        }
+                        Err(std::fs::TryLockError::Error(error)) => {
+                            return Err(format!(
+                                "failed to inspect published state ownership {}: {error}",
+                                target.display()
+                            ));
+                        }
+                    }
                     return Err(format!(
                         "atomic state target and an ambiguous prior artifact both exist; both were preserved: {}",
                         target.display()
@@ -4469,6 +4637,172 @@ mod tests {
         );
         assert!(!previous.exists());
         assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn atomic_recovery_retries_when_prior_disappears_before_open() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("session.json");
+        fs::write(&target, b"published session").expect("session target");
+        let prefix = ".nib-session-";
+        let temporary = root.path().join(deterministic_artifact_name(
+            prefix,
+            target.file_name().unwrap().as_encoded_bytes(),
+            ".tmp",
+        ));
+        let previous = root.path().join(
+            deterministic_previous_artifact_name(prefix, target.file_name().unwrap())
+                .expect("previous artifact"),
+        );
+        fs::write(&previous, b"prior session").expect("prior artifact");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let writer_directory = StableDirectory::open(root.path()).expect("writer directory");
+        let previous_file = writer_directory
+            .open_read(&previous)
+            .expect("retained prior state");
+        let previous_for_hook = previous.clone();
+        let mut pending_cleanup = Some((writer_directory, previous_file));
+        let mut remove_before_open = || {
+            let (writer_directory, previous_file) =
+                pending_cleanup.take().expect("prior-open hook runs once");
+            writer_directory.remove_visible_file_if_matches(
+                &previous_for_hook,
+                &previous_file,
+                || Ok(()),
+            )
+        };
+        let mut live_target_hook = || {};
+
+        let recovered = directory
+            .recover_atomic_transaction_with_hooks(
+                &target,
+                &temporary,
+                &previous,
+                true,
+                false,
+                AtomicRecoveryHooks {
+                    previous_open: &mut remove_before_open,
+                    live_target: &mut live_target_hook,
+                },
+            )
+            .expect("changed namespace must be re-evaluated");
+
+        drop(remove_before_open);
+        assert!(!recovered);
+        assert!(pending_cleanup.is_none());
+        assert_eq!(
+            fs::read(&target).expect("published target"),
+            b"published session"
+        );
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn recovery_recognizes_a_live_writer_after_temporary_publication() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("session.json");
+        fs::write(&target, b"prior session").expect("session target");
+        let prefix = ".nib-session-";
+        let temporary = root.path().join(deterministic_artifact_name(
+            prefix,
+            target.file_name().unwrap().as_encoded_bytes(),
+            ".tmp",
+        ));
+        let previous = root.path().join(
+            deterministic_previous_artifact_name(prefix, target.file_name().unwrap())
+                .expect("previous artifact"),
+        );
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let mut published = directory
+            .open_read_write_create(&temporary)
+            .expect("temporary publication");
+        published.write_all(b"new session").expect("new state");
+        published.sync_all().expect("sync new state");
+        published.lock().expect("own atomic publication");
+        fs::rename(&target, &previous).expect("evacuate prior state");
+        fs::rename(&temporary, &target).expect("publish locked temporary");
+
+        let recovered = directory
+            .recover_stale_temporary_files(prefix, 16, 4096)
+            .expect("live published writer must be skipped");
+        assert_eq!(recovered, 0);
+        assert_eq!(fs::read(&target).expect("published target"), b"new session");
+        assert_eq!(
+            fs::read(&previous).expect("preserved prior"),
+            b"prior session"
+        );
+
+        let writer_directory = StableDirectory::open(root.path()).expect("writer directory");
+        let writer_previous = previous.clone();
+        let writer_previous_file = writer_directory
+            .open_read(&previous)
+            .expect("retained prior state");
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = thread::spawn(move || {
+            blocked_rx.recv().expect("recovery reached target lock");
+            writer_directory
+                .remove_visible_file_if_matches(&writer_previous, &writer_previous_file, || Ok(()))
+                .expect("finish prior cleanup");
+            published.unlock().expect("release publication");
+        });
+        let mut report_live_target = || {
+            blocked_tx
+                .send(())
+                .expect("report live published target to writer");
+        };
+        directory
+            .recover_atomic_transaction_with_live_target_hook(
+                &target,
+                &temporary,
+                &previous,
+                true,
+                true,
+                &mut report_live_target,
+            )
+            .expect("strict recovery must observe completed publication");
+
+        writer.join().expect("atomic writer");
+        assert_eq!(fs::read(&target).expect("published target"), b"new session");
+        assert!(!previous.exists());
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn strict_recovery_times_out_then_preserves_unlocked_publication_ambiguity() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("session.json");
+        let previous = root.path().join(
+            deterministic_previous_artifact_name(".nib-session-", target.file_name().unwrap())
+                .expect("previous artifact"),
+        );
+        fs::write(&target, b"published").expect("published target");
+        fs::write(&previous, b"prior").expect("prior artifact");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let target_file = directory.open_read_write(&target).expect("target handle");
+        target_file.lock().expect("own published target");
+
+        let started = Instant::now();
+        let error = directory
+            .recover_stale_temporary_files_strict(".nib-session-", 16, 4096)
+            .expect_err("live published target must reach the strict deadline");
+        assert!(
+            started.elapsed() >= STRICT_RECOVERY_LIVE_WRITER_WAIT / 2,
+            "strict recovery returned before its live-writer wait"
+        );
+        assert!(
+            error.contains("target is still owned by a live writer"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&target).expect("preserved target"), b"published");
+        assert_eq!(fs::read(&previous).expect("preserved prior"), b"prior");
+
+        target_file.unlock().expect("release published target");
+        let error = directory
+            .recover_stale_temporary_files_strict(".nib-session-", 16, 4096)
+            .expect_err("unlocked identity-distinct state must stay ambiguous");
+        assert!(error.contains("both were preserved"), "{error}");
+        assert_eq!(fs::read(&target).expect("preserved target"), b"published");
+        assert_eq!(fs::read(&previous).expect("preserved prior"), b"prior");
     }
 
     #[test]

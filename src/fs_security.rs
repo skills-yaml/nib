@@ -124,6 +124,15 @@ pub(crate) fn ensure_directory_without_symlinks(path: &Path) -> io::Result<PathB
 }
 
 pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
+    canonicalize_existing_directory_without_symlinks(path).map(drop)
+}
+
+/// Resolves an existing directory without creating any missing path component.
+///
+/// This is public only for the `nib` binary's skill installer, which must share the
+/// library's Windows DOS-alias and reparse-point handling.
+#[doc(hidden)]
+pub fn canonicalize_existing_directory_without_symlinks(path: &Path) -> io::Result<PathBuf> {
     let absolute = absolute_path(path)?;
     verify_existing_directory_components(&absolute, path)?;
     let canonical = absolute.canonicalize()?;
@@ -147,7 +156,7 @@ pub(crate) fn verify_directory_without_symlinks(path: &Path) -> io::Result<()> {
             ),
         ));
     }
-    Ok(())
+    Ok(confirmed)
 }
 
 pub(crate) fn canonical_path_starts_with(

@@ -127,6 +127,8 @@ fn crashed_supervisor_is_recovered_only_after_pid_namespace_exit() {
     wait_for_identity_exit(&namespace_init, Duration::from_secs(10));
     namespace_guard.disarm();
 
+    std::fs::write(root.path().join("descendant.release"), b"release")
+        .expect("release escaped descendant probe");
     std::thread::sleep(Duration::from_millis(2200));
     assert!(!root.path().join("descendant.survived").exists());
 }
@@ -416,13 +418,9 @@ fn supervisor_helper() {
     let root = fixture_root();
     let store = ProcessScopeStore::open(&root).expect("scope store");
     let prepared = store.load(SCOPE_ID).expect("prepared scope");
-    let descendant = root.join("descendant.started");
-    let survived = root.join("descendant.survived");
-    let command = format!(
-        "setsid sh -c 'printf started > {}; sleep 2; printf survived > {}' & wait",
-        descendant.display(),
-        survived.display()
-    );
+    let command = "setsid sh -c 'printf started > descendant.started; \
+        while [ ! -e descendant.release ]; do sleep 0.05; done; \
+        printf survived > descendant.survived' & wait";
     let ready = root.join("supervisor.ready");
     let _ = supervise_foreground_with_ready(
         &store,
