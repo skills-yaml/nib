@@ -235,14 +235,19 @@ the explicit event details.
 
 ### Scope
 
-Make the Windows MCP terminal-tree fixture observe its native descendant at a test-owned
-absolute heartbeat path without transporting that native path through Git-for-Windows'
-POSIX shell. Pass only the heartbeat basename through the shell, then have the copied
-native fixture resolve that basename against its own executable directory before it
-spawns the heartbeat child. Poll the corresponding absolute path from the test process.
-Keep the Linux and macOS heartbeat worktree-relative; Linux containment exposes only the
-session worktree as writable. Do not change production shell selection, command syntax,
-or Job Object ownership.
+Make the MCP terminal-tree fixture observe its native descendant at a test-owned
+heartbeat path without transporting a native Windows path through Git-for-Windows'
+POSIX shell. Pass only the heartbeat basename through the shell and keep the Windows
+native fixture's `current_exe().parent()` resolution. Present the four process-lifecycle
+repositories as valid Git-file worktrees so these tests do not spend their fixed startup
+deadline creating an unrelated nested session worktree before terminal dispatch. Poll
+the heartbeat at the fixture root on every platform. Do not change production shell
+selection, command syntax, timeout, sandbox dispatch, or Job Object ownership.
+
+The same hosted run exposed a separate session-enumeration race while an MCP audit was
+being atomically replaced. T003 owns the production fix: public strict enumeration must
+join the existing skill-usage mutation lock domain without weakening corruption or
+detachment failures.
 
 ### Acceptance Criteria
 
@@ -252,7 +257,10 @@ or Job Object ownership.
 - [x] The native fixture resolves a relative Windows heartbeat against
   `current_exe().parent()` before spawning its child and passes that child the resolved
   path; existing absolute heartbeat inputs remain unchanged.
-- [x] Linux and macOS retain the relative session-worktree heartbeat path and lookup.
+- [x] The four portable process-lifecycle repositories use a valid Git-file worktree,
+  poll their fixture-root heartbeat, and do not create a nested session worktree.
+- [x] Public session enumeration is serialized with audit mutation while retaining
+  strict persistence errors and the curator's non-recursive locked enumeration path.
 - [ ] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
   regressions start the native fixture, stop its descendant, and retain cancellation
   audit evidence on Windows.
@@ -262,8 +270,8 @@ or Job Object ownership.
 
 ### Affected Areas
 
-`tests/mcp_integration.rs`, `src/mcp_test_fixture.rs`, FT-016 hosted Windows evidence, and
-the native CI matrix.
+`tests/mcp_integration.rs`, `src/mcp_test_fixture.rs`, `src/session/mod.rs`, the T003
+session-persistence follow-up, FT-016 hosted Windows evidence, and the native CI matrix.
 
 ### Validation Gates
 
@@ -293,6 +301,18 @@ heuristics do not make an exact rewrite provable from this log. Passing only a b
 and resolving it inside the copied native fixture removes both shell conversion and
 native-current-directory behavior from the assertion without changing production cleanup.
 
+Hosted run `29804410327` passed Linux and macOS completely and again passed the repaired
+native Windows supervisor tests. The basename-resolving fixture still did not publish a
+heartbeat in four inbound tests. Each audit attempt was durable in under one second, but
+the terminal result remained absent when the fixed ten-second deadline expired. The
+gated executor records that attempt before it provisions a required session worktree;
+that provisioning launches roughly three dozen managed Git processes on Windows before
+terminal dispatch. The run therefore supersedes the earlier path-only diagnosis: the
+process-lifecycle deadline includes unrelated worktree preparation. A fifth Windows test
+observed `SessionStore::list_result` enumerate an audit JSON just as atomic publication
+evacuated the prior generation, producing a transient `NotFound` that strict enumeration
+misclassified as corruption.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -307,6 +327,14 @@ The basename-resolution revision passed `task fix`, `task test`, `task check`,
 `git diff --check`. Its 25-test Linux MCP suite again passed all four portable lifecycle
 regressions, while the Windows-target build compiled the native `current_exe()` branch.
 Native Windows behavior and the exact hosted matrix remain open.
+
+The Git-file and enumeration-serialization revision passed `task fix`, `task test`,
+`task check`, `task docs:check`,
+`task check:all-targets TARGET=x86_64-pc-windows-msvc`, and `git diff --check`. The
+25-test Linux MCP suite passed all four Git-file lifecycle regressions without creating
+a nested session worktree, and the deterministic session regression proved that strict
+enumeration joins the mutation lock domain. Native Windows behavior and the exact hosted
+matrix remain open.
 
 ## Remaining Implementation Plan
 

@@ -339,6 +339,48 @@ validation.
 The exact float regression, concurrent merge stress, `task check`, `task test`,
 `task coverage`, and strict format/Clippy/diff gates.
 
+## Hosted Windows Enumeration Serialization Follow-up (2026-07-21)
+
+### Scope
+
+Serialize public strict session enumeration with the same anchored skill-usage lock that
+guards existing-session writes and deletion. This prevents an in-progress atomic rewrite's
+intentional target-evacuation window from appearing as a corrupt missing file while still
+surfacing real recovery, identity, corruption, detachment, and scan-limit failures. Keep
+the curator's internal enumeration entry point non-recursive because its aggregate path
+already owns that lock.
+
+### Acceptance Criteria
+
+- [x] `SessionStore::list_result` holds the anchored skill-usage lock across recovery,
+  bounded enumeration, and strict content validation.
+- [x] A configured lock timeout is one absolute deadline shared by the outer mutation
+  lock and every nested session validation lock.
+- [x] `list_for_skill_usage` remains available to the curator while it already owns the
+  mutation lock; no recursive lock acquisition is introduced.
+- [x] A deterministic regression proves strict enumeration times out while the mutation
+  lock is held and succeeds after release; existing corruption regressions remain strict.
+- [ ] The exact PR revision passes the Windows MCP stdout-backpressure regression and the
+  full hosted matrix.
+
+### Affected Areas
+
+`src/session/mod.rs`, MCP audit polling integration coverage, curator aggregation, T003
+validation evidence, and the native CI matrix.
+
+### Validation Gates
+
+Focused session lock/enumeration tests, the Windows MCP backpressure regression,
+`task test`, `task check`, `task docs:check`, Windows-target `task check:all-targets`,
+`git diff --check`, and the exact-revision hosted CI matrix.
+
+### Local Validation Evidence
+
+The strict enumeration regression and existing corrupt-session regressions passed in
+`task test` and `task check`. The revision also passed `task fix`, `task docs:check`,
+`task check:all-targets TARGET=x86_64-pc-windows-msvc`, and `git diff --check`. Native
+Windows runtime behavior and the exact hosted matrix remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows and macOS session/context runtime gates on their configured

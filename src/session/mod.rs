@@ -668,6 +668,11 @@ impl SessionStore {
         self
     }
 
+    #[doc(hidden)]
+    pub fn with_lock_timeout_for_testing(self, timeout: Duration) -> Self {
+        self.with_lock_timeout(timeout)
+    }
+
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
     }
@@ -1445,6 +1450,7 @@ impl SessionStore {
         max_sessions: usize,
         max_total_bytes: Option<u64>,
         validate_contents: bool,
+        deadline: Option<Instant>,
     ) -> Result<Vec<String>, SessionError> {
         self.verify_directory_binding()?;
         let directory = self.directory()?;
@@ -1527,7 +1533,7 @@ impl SessionStore {
         if validate_contents {
             for id in &ids {
                 let path = self.path(id);
-                self.with_session_lock(id, |locked_directory| {
+                let validate = |locked_directory: &crate::daemons::state::StableDirectory| {
                     self.load_opened_unlocked(locked_directory, id)?
                         .map(|_| ())
                         .ok_or_else(|| {
@@ -1536,7 +1542,11 @@ impl SessionStore {
                                 path.display()
                             ))
                         })
-                })?;
+                };
+                match deadline {
+                    Some(deadline) => self.with_session_lock_until(id, deadline, validate),
+                    None => self.with_session_lock(id, validate),
+                }?;
             }
         }
         self.verify_directory_binding()?;
@@ -1544,7 +1554,12 @@ impl SessionStore {
     }
 
     pub fn list_result(&self) -> Result<Vec<String>, SessionError> {
-        self.list_entries_result(MAX_LISTED_SESSIONS, None, true)
+        let deadline = self.lock_deadline();
+        let list = || self.list_entries_result(MAX_LISTED_SESSIONS, None, true, deadline);
+        match deadline {
+            Some(deadline) => self.with_skill_usage_lock_until(deadline, list),
+            None => self.with_skill_usage_lock(list),
+        }
     }
 
     pub(crate) fn list_for_skill_usage(
@@ -1553,7 +1568,7 @@ impl SessionStore {
         max_total_bytes: u64,
     ) -> Result<Vec<String>, SessionError> {
         // This is a metadata preflight; the curator strictly loads every returned ID.
-        self.list_entries_result(max_sessions, Some(max_total_bytes), false)
+        self.list_entries_result(max_sessions, Some(max_total_bytes), false, None)
     }
 
     pub fn list(&self) -> Vec<String> {
@@ -2341,6 +2356,50 @@ mod tests {
         skill_holder.join().expect("skill lock holder");
         release_session_tx.send(()).expect("release session lock");
         session_holder.join().expect("session lock holder");
+    }
+
+    #[test]
+    fn strict_enumeration_uses_the_session_mutation_lock() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("serialized-list-session");
+        let holder_store = store.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            holder_store
+                .with_skill_usage_lock(|| {
+                    held_tx.send(()).expect("signal mutation lock held");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release mutation lock");
+                    Ok(())
+                })
+                .expect("hold mutation lock");
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mutation lock is held");
+
+        let bounded_store = store.clone().with_lock_timeout(Duration::from_millis(100));
+        let started = Instant::now();
+        let error = bounded_store
+            .list_result()
+            .expect_err("strict enumeration must join the mutation lock domain");
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring session lock"),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        release_tx.send(()).expect("release mutation lock");
+        holder.join().expect("mutation lock holder");
+        assert_eq!(
+            store.list_result().expect("strict session enumeration"),
+            vec![session.id]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

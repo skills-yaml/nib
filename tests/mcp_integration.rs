@@ -23,6 +23,7 @@ const MCP_FIXTURE_ACTIVATION_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_FIXTURE";
 const MCP_FIXTURE_MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 #[cfg(debug_assertions)]
 const MCP_FIXTURE_HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
+const MCP_SESSION_OBSERVATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(all(debug_assertions, target_os = "linux"))]
 const MCP_GIT_FIXTURE_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
 #[cfg(all(debug_assertions, target_os = "linux"))]
@@ -206,6 +207,25 @@ fn initialize_server_fixture(root: &Path) {
     save_nib_config_full(root, &mut config).expect("server config");
 }
 
+fn observed_session_store(root: &Path) -> SessionStore {
+    SessionStore::for_project(root)
+        .expect("profile session store")
+        .with_lock_timeout_for_testing(MCP_SESSION_OBSERVATION_LOCK_TIMEOUT)
+}
+
+#[cfg(debug_assertions)]
+fn initialize_terminal_tree_server_fixture(root: &Path) {
+    initialize_server_fixture(root);
+    let git_directory = root.join(".git");
+    let relocated_git_directory = root.join(".nib/terminal-lifecycle.git");
+    std::fs::rename(&git_directory, &relocated_git_directory)
+        .expect("relocate terminal lifecycle Git directory");
+    std::fs::write(&git_directory, "gitdir: .nib/terminal-lifecycle.git\n")
+        .expect("terminal lifecycle Git file");
+    assert!(git_directory.is_file(), "terminal fixture uses a Git file");
+    git(root, &["rev-parse", "--show-toplevel"]);
+}
+
 fn spawn_server(
     root: &Path,
 ) -> (
@@ -257,19 +277,8 @@ async fn start_portable_terminal_tree(
     executable: &Path,
     heartbeat_name: &str,
 ) -> std::path::PathBuf {
-    let requested_heartbeat = if cfg!(windows) {
-        executable
-            .parent()
-            .expect("terminal lifecycle fixture parent directory")
-            .join(heartbeat_name)
-    } else {
-        std::path::PathBuf::from(heartbeat_name)
-    };
-    let fixture_heartbeat = if cfg!(windows) {
-        std::path::PathBuf::from(heartbeat_name)
-    } else {
-        requested_heartbeat.clone()
-    };
+    let requested_heartbeat = root.join(heartbeat_name);
+    let fixture_heartbeat = std::path::PathBuf::from(heartbeat_name);
     let command = terminal_process_tree_command(executable, &fixture_heartbeat);
     write_request(
         stdin,
@@ -286,37 +295,35 @@ async fn start_portable_terminal_tree(
     .await;
     let started = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if requested_heartbeat.is_absolute() {
-                if std::fs::metadata(&requested_heartbeat).is_ok_and(|metadata| metadata.len() > 0)
-                {
-                    return requested_heartbeat.clone();
-                }
-            } else {
-                let sessions = root.join(".nib/worktrees/sessions");
-                if let Ok(entries) = std::fs::read_dir(sessions) {
-                    for entry in entries.flatten() {
-                        let heartbeat = entry.path().join(heartbeat_name);
-                        if std::fs::metadata(&heartbeat).is_ok_and(|metadata| metadata.len() > 0) {
-                            return heartbeat;
-                        }
-                    }
-                }
+            if std::fs::metadata(&requested_heartbeat).is_ok_and(|metadata| metadata.len() > 0) {
+                return requested_heartbeat.clone();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
     let heartbeat = started.unwrap_or_else(|_| {
-        let store = SessionStore::for_project(root).expect("profile session store");
-        let sessions = store
-            .list()
-            .into_iter()
-            .filter_map(|id| store.load(&id))
-            .collect::<Vec<_>>();
+        let store = observed_session_store(root);
+        let sessions = store.list_result().and_then(|ids| {
+            let sessions = ids
+                .into_iter()
+                .map(|id| store.load_result(&id))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(sessions.into_iter().flatten().collect::<Vec<_>>())
+        });
         panic!(
             "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; command={command:?}; sessions={sessions:#?}"
         );
     });
+    let session_worktrees = root.join(".nib/worktrees/sessions");
+    assert!(
+        !session_worktrees.exists()
+            || std::fs::read_dir(&session_worktrees)
+                .expect("session worktree directory")
+                .next()
+                .is_none(),
+        "portable lifecycle fixture created an unrelated session worktree"
+    );
     wait_for_audit_attempt(root, heartbeat_name).await;
     heartbeat
 }
@@ -512,18 +519,22 @@ async fn wait_for_process_tree(token: &str) -> Vec<i32> {
 async fn wait_for_audit_attempt(root: &Path, token: &str) -> String {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let store = SessionStore::for_project(root).expect("profile session store");
-            let audited = store.list().into_iter().find(|id| {
-                store.load(id).is_some_and(|session| {
-                    session.events.iter().any(|event| {
-                        event.kind == "tool_attempted"
-                            && event.details["tool_name"] == "run_terminal"
-                            && event.details["arguments"]["command"]
-                                .as_str()
-                                .is_some_and(|command| command.contains(token))
+            let store = observed_session_store(root);
+            let audited = store
+                .list_result()
+                .unwrap_or_else(|error| panic!("failed to list MCP audit attempts: {error}"))
+                .into_iter()
+                .find(|id| {
+                    store.load(id).is_some_and(|session| {
+                        session.events.iter().any(|event| {
+                            event.kind == "tool_attempted"
+                                && event.details["tool_name"] == "run_terminal"
+                                && event.details["arguments"]["command"]
+                                    .as_str()
+                                    .is_some_and(|command| command.contains(token))
+                        })
                     })
-                })
-            });
+                });
             if let Some(id) = audited {
                 return id;
             }
@@ -537,23 +548,27 @@ async fn wait_for_audit_attempt(root: &Path, token: &str) -> String {
 async fn wait_for_cancellation_audit(root: &Path, token: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let store = SessionStore::for_project(root).expect("profile session store");
-            let reconciled = store.list().into_iter().any(|id| {
-                store.load(&id).is_some_and(|session| {
-                    let attempted = session.events.iter().any(|event| {
-                        event.kind == "tool_attempted"
-                            && event.details["arguments"]["command"]
-                                .as_str()
-                                .is_some_and(|command| command.contains(token))
-                    });
-                    let cancelled = session.events.iter().any(|event| {
-                        event.kind == "mcp_request_cancelled"
-                            && event.details["tool_name"] == "run_terminal"
-                            && event.details["reconciled"] == true
-                    });
-                    attempted && cancelled
-                })
-            });
+            let store = observed_session_store(root);
+            let reconciled = store
+                .list_result()
+                .unwrap_or_else(|error| panic!("failed to list MCP cancellation audits: {error}"))
+                .into_iter()
+                .any(|id| {
+                    store.load(&id).is_some_and(|session| {
+                        let attempted = session.events.iter().any(|event| {
+                            event.kind == "tool_attempted"
+                                && event.details["arguments"]["command"]
+                                    .as_str()
+                                    .is_some_and(|command| command.contains(token))
+                        });
+                        let cancelled = session.events.iter().any(|event| {
+                            event.kind == "mcp_request_cancelled"
+                                && event.details["tool_name"] == "run_terminal"
+                                && event.details["reconciled"] == true
+                        });
+                        attempted && cancelled
+                    })
+                });
             if reconciled {
                 return;
             }
@@ -567,18 +582,22 @@ async fn wait_for_cancellation_audit(root: &Path, token: &str) {
 async fn wait_for_tool_completion(root: &Path, tool_name: &str) {
     let completed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let store = SessionStore::for_project(root).expect("profile session store");
-            let completed = store.list().into_iter().any(|id| {
-                store.load(&id).is_some_and(|session| {
-                    session.tool_calls.iter().any(|call| {
-                        call.tool_name.as_deref() == Some(tool_name)
-                            && call
-                                .result
-                                .as_ref()
-                                .is_some_and(|result| result["success"] == true)
+            let store = observed_session_store(root);
+            let completed = store
+                .list_result()
+                .unwrap_or_else(|error| panic!("failed to list MCP tool audits: {error}"))
+                .into_iter()
+                .any(|id| {
+                    store.load(&id).is_some_and(|session| {
+                        session.tool_calls.iter().any(|call| {
+                            call.tool_name.as_deref() == Some(tool_name)
+                                && call
+                                    .result
+                                    .as_ref()
+                                    .is_some_and(|result| result["success"] == true)
+                        })
                     })
-                })
-            });
+                });
             if completed {
                 return;
             }
@@ -587,9 +606,10 @@ async fn wait_for_tool_completion(root: &Path, tool_name: &str) {
     })
     .await;
     if completed.is_err() {
-        let store = SessionStore::for_project(root).expect("profile session store");
+        let store = observed_session_store(root);
         let matching = store
-            .list()
+            .list_result()
+            .unwrap_or_else(|error| panic!("failed to list timed-out MCP tool audits: {error}"))
             .into_iter()
             .filter_map(|id| store.load(&id))
             .flat_map(|session| session.tool_calls)
@@ -603,22 +623,26 @@ async fn wait_for_tool_completion(root: &Path, tool_name: &str) {
 async fn wait_for_nib_run_cancellation_audit(root: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let store = SessionStore::for_project(root).expect("profile session store");
-            let reconciled = store.list().into_iter().any(|id| {
-                store.load(&id).is_some_and(|session| {
-                    let tool_audited = session
-                        .tool_calls
-                        .iter()
-                        .any(|call| call.tool_name.as_deref() == Some("spawn_subagent"));
-                    let cancellation_audited = session.events.iter().any(|event| {
-                        event.kind == "mcp_request_cancelled"
-                            && event.details["tool_name"] == "nib_run"
-                            && event.details["outcome"] == "cancelled"
-                            && event.details["reconciled"] == true
-                    });
-                    tool_audited && cancellation_audited
-                })
-            });
+            let store = observed_session_store(root);
+            let reconciled = store
+                .list_result()
+                .unwrap_or_else(|error| panic!("failed to list nib_run audits: {error}"))
+                .into_iter()
+                .any(|id| {
+                    store.load(&id).is_some_and(|session| {
+                        let tool_audited = session
+                            .tool_calls
+                            .iter()
+                            .any(|call| call.tool_name.as_deref() == Some("spawn_subagent"));
+                        let cancellation_audited = session.events.iter().any(|event| {
+                            event.kind == "mcp_request_cancelled"
+                                && event.details["tool_name"] == "nib_run"
+                                && event.details["outcome"] == "cancelled"
+                                && event.details["reconciled"] == true
+                        });
+                        tool_audited && cancellation_audited
+                    })
+                });
             if reconciled {
                 return;
             }
@@ -1277,7 +1301,7 @@ async fn final_audit_lock_stall_is_responsive_and_bounded() {
 #[tokio::test]
 async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP cancellation fixture");
-    initialize_server_fixture(project.path());
+    initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
@@ -1316,7 +1340,7 @@ async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
 #[tokio::test]
 async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP disconnect fixture");
-    initialize_server_fixture(project.path());
+    initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
@@ -1342,7 +1366,7 @@ async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
 #[tokio::test]
 async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP fatal-input fixture");
-    initialize_server_fixture(project.path());
+    initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
@@ -1375,7 +1399,7 @@ async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
 #[tokio::test]
 async fn blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP backpressure fixture");
-    initialize_server_fixture(project.path());
+    initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     std::fs::write(project.path().join("large.txt"), vec![b'x'; 220_000])
         .expect("large MCP response fixture");
@@ -2112,9 +2136,10 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
         String::from_utf8_lossy(&worktrees.stdout).contains(".nib/worktrees/subagents"),
         "unproven post-error registration was deleted"
     );
-    let store = SessionStore::for_project(project.path()).expect("profile session store");
+    let store = observed_session_store(project.path());
     let audit_sessions = store
-        .list()
+        .list_result()
+        .unwrap_or_else(|error| panic!("failed to list compensated MCP audits: {error}"))
         .into_iter()
         .filter_map(|id| store.load(&id))
         .collect::<Vec<_>>();
