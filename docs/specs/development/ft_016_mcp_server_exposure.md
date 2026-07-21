@@ -501,7 +501,7 @@ cancellation behavior, sandbox policy, Windows Job containment, and the public t
 - [x] Temporary pre-shell trace hooks and fixture plumbing are removed after their hosted
   diagnostic evidence is recorded.
 - [x] Canonical local, documentation, and Windows-target validation gates pass.
-- [ ] The exact hosted Windows revision passes all four portable MCP lifecycle tests.
+- [x] The exact hosted Windows revision passes all four portable MCP lifecycle tests.
 - [ ] The exact hosted Linux, macOS, and Windows matrix is green.
 
 ### Affected Areas
@@ -527,6 +527,16 @@ pre-existing Linux `crashed_supervisor_is_recovered_only_after_pid_namespace_exi
 that unrelated test passed on both subsequent canonical runs and does not execute the
 modified terminal sandbox path. Native Windows behavior and the exact hosted matrix remain
 open.
+
+Hosted run `29829874790` passed Validate and macOS completely. Windows passed all 13 MCP
+integration tests in 11.68 seconds, including targeted cancellation, stdin disconnect,
+fatal input, and blocked-stdout cleanup with their immediate-EOF prerequisite. This
+confirms that null terminal stdin removes the Git Bash startup stall and preserves Job
+cleanup semantics. The Windows job later failed in the separate T003 session persistence
+suite because its cross-process whole-directory replacement regression expected a live
+sessions directory to be renameable, contrary to the existing Windows directory-pinning
+contract. The full hosted matrix remains open while that platform-specific test contract
+is corrected.
 
 ## Remaining Implementation Plan
 

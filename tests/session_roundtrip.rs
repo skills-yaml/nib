@@ -395,10 +395,15 @@ fn child_process_rejects_whole_session_directory_replacement() {
     let session = store.create_session_with_id("process-directory-replacement");
     let sessions_dir = store.sessions_dir().to_path_buf();
     let displaced = root.join(".nib/displaced-sessions");
-    let replacement_path = sessions_dir.join(format!("{}.json", session.id));
-    let mut replacement = session.clone();
-    replacement.summary = Some("replacement-directory".to_string());
-    let replacement_bytes = serde_json::to_vec_pretty(&replacement).expect("serialize");
+    #[cfg(unix)]
+    let (replacement_path, replacement_bytes) = {
+        let replacement_path = sessions_dir.join(format!("{}.json", session.id));
+        let mut replacement = session.clone();
+        replacement.summary = Some("replacement-directory".to_string());
+        let replacement_bytes = serde_json::to_vec_pretty(&replacement).expect("serialize");
+        (replacement_path, replacement_bytes)
+    };
+    drop(store);
 
     let child = spawn_store_child(
         "pause-session-update",
@@ -409,18 +414,48 @@ fn child_process_rejects_whole_session_directory_replacement() {
         None,
     );
     wait_for_path(&coordination.join("lock-held"), Duration::from_secs(20));
-    fs::rename(&sessions_dir, &displaced).expect("displace session directory");
-    fs::create_dir(&sessions_dir).expect("create replacement session directory");
-    fs::write(&replacement_path, &replacement_bytes).expect("write replacement session");
-    fs::write(coordination.join("continue"), b"continue").expect("release child");
 
-    let output = child.wait_with_output().expect("wait for child");
-    assert_child_failed(output, "session directory replacement");
-    assert_eq!(
-        fs::read(&replacement_path).expect("replacement bytes"),
-        replacement_bytes
-    );
-    assert!(SessionStore::new(&root).load_result(&session.id).is_err());
+    #[cfg(unix)]
+    {
+        fs::rename(&sessions_dir, &displaced).expect("displace session directory");
+        fs::create_dir(&sessions_dir).expect("create replacement session directory");
+        fs::write(&replacement_path, &replacement_bytes).expect("write replacement session");
+        fs::write(coordination.join("continue"), b"continue").expect("release child");
+
+        let output = child.wait_with_output().expect("wait for child");
+        assert_child_failed(output, "session directory replacement");
+        assert_eq!(
+            fs::read(&replacement_path).expect("replacement bytes"),
+            replacement_bytes
+        );
+        assert!(SessionStore::new(&root).load_result(&session.id).is_err());
+    }
+
+    #[cfg(windows)]
+    {
+        let rename = fs::rename(&sessions_dir, &displaced);
+        fs::write(coordination.join("continue"), b"continue").expect("release child");
+        let output = child.wait_with_output().expect("wait for child");
+
+        rename.expect_err("live Windows session lock must pin the sessions directory");
+        assert!(
+            output.status.success(),
+            "child failed after pinned-directory update:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(sessions_dir.is_dir());
+        assert!(!displaced.exists());
+        assert_eq!(
+            SessionStore::new(&root)
+                .load_result(&session.id)
+                .expect("load original session")
+                .expect("original session remains present")
+                .summary
+                .as_deref(),
+            Some("child-update")
+        );
+    }
 }
 
 #[cfg(any(unix, windows))]

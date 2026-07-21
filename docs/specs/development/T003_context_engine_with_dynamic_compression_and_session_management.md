@@ -381,6 +381,48 @@ The strict enumeration regression and existing corrupt-session regressions passe
 `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and `git diff --check`. Native
 Windows runtime behavior and the exact hosted matrix remain open.
 
+## Hosted Windows Directory Pinning Follow-up (2026-07-21)
+
+### Scope
+
+Align the real-child whole-session-directory replacement regression with the platform
+contract already exercised by the same-process test. Unix must detach and replace the
+directory while the child owns the session lock, then prove the child fails closed and
+replacement state is not accepted. Windows must prove the live cross-process session lock
+prevents the directory rename at the operating-system boundary, release and join the
+child, and verify that its update commits to the unchanged original directory. Do not
+weaken retained directory identity, lock, publication, or detachment validation.
+
+### Acceptance Criteria
+
+- [x] The real-child regression preserves the Unix detachment and fail-closed assertions.
+- [x] On Windows, the same regression requires the live sessions-directory rename to fail,
+  always releases and joins the child, and verifies the original child update succeeds.
+- [x] File replacement and lock replacement regressions remain unchanged.
+- [x] Canonical local, documentation, and Windows-target validation gates pass.
+- [ ] The exact hosted Windows revision passes `session_roundtrip` and the full CI matrix.
+
+### Affected Areas
+
+`tests/session_roundtrip.rs`, T003 validation evidence, and the native CI matrix.
+
+### Validation Gates
+
+The session roundtrip integration suite, `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`,
+`git diff --check`, fresh spec-compliance and code-quality reviews, and exact-revision
+hosted CI.
+
+### Local Validation Evidence
+
+The platform-specific real-child regression passed in both `task test` and the complete
+test rerun inside `task check`; its Unix branch retained successful namespace detachment,
+child failure, and replacement preservation. The revision also passed `task fix`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. The Windows target compiled the child-only pinning proof, unconditional
+child release and join, original-directory assertions, and successful-update readback.
+Native Windows execution and the exact hosted matrix remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows and macOS session/context runtime gates on their configured
