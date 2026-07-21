@@ -1424,8 +1424,16 @@ mod tests {
         std::fs::write(directory.path().join("probe.rs"), b"fn main() {}\n")
             .expect("MSVC linker probe source");
 
+        let command = concat!(
+            "test -n \"${ProgramData-}\" || { printf '%s\\n' 'missing ProgramData' >&2; exit 10; }; ",
+            "test -n \"${PROGRAMFILES-}\" || { printf '%s\\n' 'missing PROGRAMFILES' >&2; exit 11; }; ",
+            "test -n \"$(printenv 'ProgramFiles(x86)')\" || { printf '%s\\n' 'missing ProgramFiles(x86)' >&2; exit 12; }; ",
+            "test -z \"${NIB_TEST_UNRELATED_HOST_VARIABLE-}\" || { printf '%s\\n' 'unrelated host variable leaked' >&2; exit 13; }; ",
+            "command -v link.exe || { printf '%s\\n' 'link.exe missing from Git PATH' >&2; exit 14; }; ",
+            "rustc --print link-args probe.rs -o probe.exe",
+        );
         let (output, arguments) = run_sandboxed_with_environment(
-            "test -n \"${ProgramData-}\" && test -n \"${ProgramFiles-}\" && test -n \"$(printenv 'ProgramFiles(x86)')\" && test -z \"${NIB_TEST_UNRELATED_HOST_VARIABLE-}\" && command -v link.exe && rustc --print link-args probe.rs -o probe.exe",
+            command,
             directory.path(),
             "internal",
             "internal",
@@ -1438,7 +1446,8 @@ mod tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success(),
-            "rustc linker probe failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            "rustc linker probe failed with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
         );
         assert!(arguments.is_none());
         assert!(directory.path().join("probe.exe").is_file());

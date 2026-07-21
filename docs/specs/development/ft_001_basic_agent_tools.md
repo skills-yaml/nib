@@ -329,11 +329,11 @@ canonical path returned to callers.
 - [x] Selection remains deterministic within the global entry, depth, file, and byte caps.
 - [x] File replacement between path validation and read cannot bypass identity checks on
   the local Unix host; unsupported local identity semantics fail closed.
-- [ ] Windows file replacement and reparse runtime regressions prove the same guarantee.
-- [ ] Windows `\\?\` canonical prefixes and DOS 8.3 short aliases do not make ordinary
+- [x] Windows file replacement and reparse runtime regressions prove the same guarantee.
+- [x] Windows `\\?\` canonical prefixes and DOS 8.3 short aliases do not make ordinary
   absolute directories fail validation, while every path component is checked twice
   for symlinks and every other reparse-point type before acceptance.
-- [ ] CI executes the Rust test suite on Windows so the Windows replacement regression is
+- [x] CI executes the Rust test suite on Windows so the Windows replacement regression is
   compiled and run rather than only cross-compiled by the release workflow.
 - [x] Overflow and symlink regressions pass on the local Unix validation host.
 
@@ -362,23 +362,25 @@ Local filesystem component-link regressions pass. Windows lexical comparison now
 canonicalization, and includes a real `GetShortPathNameW` alias regression that skips
 only when the volume cannot produce a distinct short path. Fresh local Task gates execute 772
 tests, coverage passes at 83.94 percent (53,734/64,015), and the locked build plus Linux
-release/PTY smoke pass on 2026-07-16. The Windows CI job is configured; its file-identity
-and canonical-prefix tests remain unchecked until that remote job executes.
+release/PTY smoke pass on 2026-07-16. Hosted Windows run `29842405062` executes and
+passes `windows_file_replacement_cannot_bypass_opened_identity_check`, the directory and
+nested-junction reparse regressions, the real DOS short-alias regression, and both
+verbatim-prefix regressions.
 
 ## Remaining Implementation Plan
 
-1. Execute the configured Windows replacement, reparse-point, verbatim-path, and DOS
-   short-alias
-   regressions on a Windows runner.
-2. Remediate any platform-specific identity or path-normalization failure while
-   preserving the current component checks and discovery bounds.
+1. Complete the hosted Windows core-tool portability follow-up below and pass the exact
+   revision's full CI matrix.
+2. Keep the native file-identity, reparse-point, verbatim-path, and DOS short-alias
+   regressions mandatory for future filesystem changes.
 3. Rerun the canonical Task gates and two-stage review before moving FT-001 to `done/`.
 
 ## Current Risks
 
-- Windows file identity and reparse behavior is compiled but has not been executed.
-- A path-normalization fix could weaken component-level link rejection unless the same
-  replacement and reparse regressions remain mandatory.
+- A future path-normalization change could weaken component-level link rejection unless
+  the passing native Windows replacement and reparse regressions remain mandatory.
+- The hosted terminal linker and full-matrix risks remain open in the portability
+  follow-up below.
 
 ## Hosted Windows Core-Tool Portability Follow-up (2026-07-21)
 
@@ -455,3 +457,17 @@ under `ProgramData`; merely making the `vswhere` executable reachable does not p
 that enumeration reaches its fallback. The next hosted gate must exercise a real rustc
 link through the sanitized Git Bash process chain before the environment criterion can
 be checked.
+
+### Second Hosted Remediation Evidence
+
+Hosted run `29842405062` on revision `3ec0fbb4859dea143a34fc219309a1c88c1b3179`
+passed Validate, macOS, the Windows all-targets check, and 546 of 547 Windows library
+tests. Its new linker probe failed in 0.14 seconds with empty output before invoking
+rustc, so the original coding E2E did not run and this revision neither confirmed nor
+disproved the `ProgramData` remediation.
+
+Git for Windows canonicalizes the native `ProgramFiles` key to `PROGRAMFILES` while
+importing it into the case-sensitive POSIX shell. The probe incorrectly checked the
+mixed-case spelling in a silent `&&` chain. The next revision must use the shell-visible
+spelling, emit a named error for every environment precondition, include the process
+status in assertion output, and retain the real rustc plus Cargo linking gates.
