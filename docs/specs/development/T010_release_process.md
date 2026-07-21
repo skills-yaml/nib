@@ -308,3 +308,34 @@ and smoke commands. The final gate is a successful hosted matrix on the exact re
 This runner setup does not relax path validation. Ambient macOS product staging that
 uses the platform default temporary path remains separate T006/FT-006 work and must not
 be declared complete from this CI fixture change.
+
+## Hosted Windows Workflow Fixture Portability (2026-07-21)
+
+### Scope And Design
+
+Make static release-workflow regressions independent of Git checkout line-ending policy.
+Canonicalize repository fixture text from CRLF to LF at the shared test read boundary,
+then retain the exact source assertions for action pins, permission scope, ordering, and
+embedded shell commands. Do not change the release workflow or publication behavior.
+
+### Acceptance Criteria
+
+- [x] Release-workflow source assertions consume the same canonical LF representation on
+  Unix and Windows checkouts.
+- [x] A deterministic regression covers CRLF canonicalization without weakening any
+  workflow-content or transaction-order assertion.
+- [ ] The exact PR revision passes the full hosted Windows job and PR matrix.
+
+### Affected Areas And Validation
+
+`tests/installers.rs`, release-workflow validation evidence, `task test`, `task check`,
+Windows-target `task check:all-targets`, and the exact-revision hosted matrix.
+
+### Reproduction Evidence
+
+Hosted Windows run `29797222053` passed all 543 library tests, all four durable-worker
+tests, and the gateway timing regression before two installer tests read a CRLF checkout
+of `.github/workflows/release.yml` and failed exact substrings containing LF. Four later
+LF-sensitive assertions were masked by those first failures; the shared canonicalization
+covers all of them. Canonicalizing fixture text at read time preserves the intended
+source-level checks and leaves production files unchanged.

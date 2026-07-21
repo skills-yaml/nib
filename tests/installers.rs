@@ -30,10 +30,28 @@ fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn normalize_repository_text(text: String) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn read_repository_text(relative_path: &str) -> String {
+    let path = repository_root().join(relative_path);
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read repository file {}: {error}", path.display()));
+    normalize_repository_text(text)
+}
+
+#[test]
+fn repository_text_normalization_accepts_windows_line_endings() {
+    assert_eq!(
+        normalize_repository_text("first\r\nsecond\r\n".to_string()),
+        "first\nsecond\n"
+    );
+}
+
 #[test]
 fn release_workflow_emits_portable_checksum_manifests() {
-    let workflow = fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
-        .expect("read release workflow");
+    let workflow = read_repository_text(".github/workflows/release.yml");
     let enter_dist = workflow
         .find("          cd dist\n")
         .expect("Unix packaging must enter the artifact directory");
@@ -59,10 +77,8 @@ fn release_workflow_emits_portable_checksum_manifests() {
 
 #[test]
 fn release_workflow_serializes_channels_and_rejects_stale_publication() {
-    let workflow = fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
-        .expect("read release workflow");
-    let transaction = fs::read_to_string(repository_root().join("scripts/publish-release.sh"))
-        .expect("read release transaction");
+    let workflow = read_repository_text(".github/workflows/release.yml");
+    let transaction = read_repository_text("scripts/publish-release.sh");
 
     assert!(workflow.contains("concurrency:\n"));
     assert!(workflow.contains(
