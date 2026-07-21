@@ -670,6 +670,51 @@ Independent spec-compliance and code-quality reviews report no remaining finding
 Native Windows short-alias and Job Object execution and the exact-revision hosted matrix
 remain open.
 
+## Hosted Windows Agent Stack Follow-up IV (2026-07-21)
+
+### Scope
+
+Keep the large agent-loop state machine off the platform-limited caller stack for both
+cancellable and ordinary runs. The shared runtime wrapper must heap-pin the inner loop
+before either branch awaits it, so CLI entrypoints do not depend on the operating
+system's main-thread stack reservation. Exercise the existing durable CLI workflows
+under a deterministic 1 MiB child-process stack budget on Unix while retaining native
+Windows execution as the final platform gate.
+
+### Acceptance Criteria
+
+- [x] Cancellable and non-cancellable agent runs heap-pin the inner future before awaiting it
+  without changing cancellation precedence, run-lease verification, or reconciliation.
+- [x] All four durable CLI integration workflows complete under a 1 MiB main-thread
+  stack budget instead of aborting before their first tool result.
+- [x] The canonical Task gates and Windows all-target graph remain green.
+- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+
+### Affected Areas
+
+`src/agent/loop.rs`, `tests/durable_tasks.rs`, durable task validation evidence, and the
+hosted CI matrix.
+
+### Validation Gates
+
+The constrained-stack `task test:durable` regression; cancellation-focused agent-loop
+tests; `task test`; `task check`; `task docs:check`; Windows-target
+`task check:all-targets`; and the exact-revision hosted Linux, macOS, and Windows jobs.
+
+### Reproduction Evidence
+
+Hosted Windows run `29792159373` passed delegation and reached `tests/durable_tasks.rs`,
+where all four spawned `nib run` processes printed their session headers and then
+aborted with a main-thread stack overflow. The same four failures reproduce locally
+with a 1 MiB stack limit, while all four pass with a 2 MiB limit. The ordinary CLI path
+previously awaited `run_agent_loop_inner` directly; it now heap-pins that future like the
+cancellation-configured branch. The constrained regression applies the 1 MiB limit to
+every Unix `nib` child and its inherited detached worker, and passes all four workflows.
+Compiler type-size inspection measures the inner future at 26,440 bytes while the patched
+runtime wrapper is 3,584 bytes and the public loop future is 4,856 bytes. `task check`,
+`task test:durable`, documentation integrity, and the Windows all-target graph pass.
+Independent diagnosis and quality review report no remaining findings.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS

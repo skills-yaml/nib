@@ -277,7 +277,7 @@ async fn run_agent_loop_with_runtime(
             }
         }
     } else {
-        run_agent_loop_inner(runtime, session_id, goal, cfg).await
+        Box::pin(run_agent_loop_inner(runtime, session_id, goal, cfg)).await
     };
     let result = match (run_result, run_lease.verify_for(session_id, &sessions_dir)) {
         (Ok(summary), Ok(())) => Ok(summary),

@@ -56,11 +56,29 @@ fn fixture() -> TempDir {
 }
 
 fn nib(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nib"))
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("nib starts")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
+    command.current_dir(root).args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        const WINDOWS_MAIN_STACK_BYTES: libc::rlim_t = 1024 * 1024;
+        // SAFETY: the closure only applies a process-local resource limit before exec.
+        unsafe {
+            command.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: WINDOWS_MAIN_STACK_BYTES,
+                    rlim_max: WINDOWS_MAIN_STACK_BYTES,
+                };
+                if libc::setrlimit(libc::RLIMIT_STACK, &limit) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    command.output().expect("nib starts")
 }
 
 fn successful_nib(root: &Path, args: &[&str]) -> Output {
