@@ -258,11 +258,19 @@ async fn start_portable_terminal_tree(
     heartbeat_name: &str,
 ) -> std::path::PathBuf {
     let requested_heartbeat = if cfg!(windows) {
-        root.join(heartbeat_name)
+        executable
+            .parent()
+            .expect("terminal lifecycle fixture parent directory")
+            .join(heartbeat_name)
     } else {
         std::path::PathBuf::from(heartbeat_name)
     };
-    let command = terminal_process_tree_command(executable, &requested_heartbeat);
+    let fixture_heartbeat = if cfg!(windows) {
+        std::path::PathBuf::from(heartbeat_name)
+    } else {
+        requested_heartbeat.clone()
+    };
+    let command = terminal_process_tree_command(executable, &fixture_heartbeat);
     write_request(
         stdin,
         json!({

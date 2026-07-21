@@ -200,18 +200,31 @@ fn run_git_wrapper(heartbeat: &str) -> io::Result<()> {
 }
 
 fn spawn_heartbeat_descendant(inherit_stdio: bool) -> io::Result<()> {
-    let heartbeat = std::env::var_os(HEARTBEAT_ENV).ok_or_else(|| {
+    let heartbeat = std::path::PathBuf::from(std::env::var_os(HEARTBEAT_ENV).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "internal MCP lifecycle heartbeat path is missing",
         )
-    })?;
+    })?);
+    #[cfg(windows)]
+    let heartbeat = if heartbeat.is_relative() {
+        let executable = std::env::current_exe()?;
+        let directory = executable.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "internal MCP lifecycle fixture executable has no parent directory",
+            )
+        })?;
+        directory.join(heartbeat)
+    } else {
+        heartbeat
+    };
     let mut command = Command::new(std::env::current_exe()?);
     command
         .env_clear()
         .env(ACTIVATION_ENV, ACTIVATION_TOKEN)
         .env(MODE_ENV, "heartbeat")
-        .env(HEARTBEAT_ENV, heartbeat);
+        .env(HEARTBEAT_ENV, &heartbeat);
     if inherit_stdio {
         command
             .stdin(Stdio::inherit())
@@ -224,7 +237,7 @@ fn spawn_heartbeat_descendant(inherit_stdio: bool) -> io::Result<()> {
             .stderr(Stdio::null());
     }
     command.spawn()?;
-    wait_for_heartbeat_start()
+    wait_for_heartbeat_path(&heartbeat)
 }
 
 fn wait_for_root_exit_trigger() -> io::Result<()> {
@@ -245,16 +258,6 @@ fn wait_for_root_exit_trigger() -> io::Result<()> {
         io::ErrorKind::TimedOut,
         "internal MCP lifecycle root-exit trigger did not arrive",
     ))
-}
-
-fn wait_for_heartbeat_start() -> io::Result<()> {
-    let heartbeat = std::env::var_os(HEARTBEAT_ENV).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "internal MCP lifecycle heartbeat path is missing",
-        )
-    })?;
-    wait_for_heartbeat_path(std::path::Path::new(&heartbeat))
 }
 
 fn wait_for_heartbeat_path(heartbeat: &std::path::Path) -> io::Result<()> {

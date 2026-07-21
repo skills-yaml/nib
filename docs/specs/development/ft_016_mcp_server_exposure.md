@@ -235,18 +235,23 @@ the explicit event details.
 
 ### Scope
 
-Make the Windows MCP terminal-tree fixture observe its native descendant through a
-test-owned absolute heartbeat path. The command crosses Git-for-Windows' POSIX shell
-boundary before launching a native executable, so the cancellation test must not also
-depend on that native descendant resolving a relative path inside the shell's worktree.
+Make the Windows MCP terminal-tree fixture observe its native descendant at a test-owned
+absolute heartbeat path without transporting that native path through Git-for-Windows'
+POSIX shell. Pass only the heartbeat basename through the shell, then have the copied
+native fixture resolve that basename against its own executable directory before it
+spawns the heartbeat child. Poll the corresponding absolute path from the test process.
 Keep the Linux and macOS heartbeat worktree-relative; Linux containment exposes only the
 session worktree as writable. Do not change production shell selection, command syntax,
 or Job Object ownership.
 
 ### Acceptance Criteria
 
-- [x] Windows terminal-tree fixtures pass an absolute heartbeat path to the native
-  executable and poll that exact path, without increasing the startup timeout.
+- [x] Windows terminal-tree commands pass only the heartbeat basename across the POSIX
+  shell and poll the matching absolute path below the fixture executable's directory,
+  without increasing the startup timeout.
+- [x] The native fixture resolves a relative Windows heartbeat against
+  `current_exe().parent()` before spawning its child and passes that child the resolved
+  path; existing absolute heartbeat inputs remain unchanged.
 - [x] Linux and macOS retain the relative session-worktree heartbeat path and lookup.
 - [ ] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
   regressions start the native fixture, stop its descendant, and retain cancellation
@@ -257,7 +262,8 @@ or Job Object ownership.
 
 ### Affected Areas
 
-`tests/mcp_integration.rs`, FT-016 hosted Windows evidence, and the native CI matrix.
+`tests/mcp_integration.rs`, `src/mcp_test_fixture.rs`, FT-016 hosted Windows evidence, and
+the native CI matrix.
 
 ### Validation Gates
 
@@ -277,14 +283,30 @@ the cross-runtime relative-path observation the narrow fixture boundary to remov
 run does not show a production Job cleanup failure because none of the four tests reached
 its cancellation assertion.
 
+Hosted run `29802465012` passed Linux and macOS completely, including their release
+builds and smoke tests. Windows again passed the native supervisor regression and all
+outbound MCP lifecycle tests, but the same four inbound tests timed out while polling
+their now-absolute requested paths. The native parent cannot remain active until it has
+observed a marker, so this outcome is consistent with another path-boundary mismatch but
+does not expose the value received by the fixture. Current Git-for-Windows path-conversion
+heuristics do not make an exact rewrite provable from this log. Passing only a basename
+and resolving it inside the copied native fixture removes both shell conversion and
+native-current-directory behavior from the assertion without changing production cleanup.
+
 ### Local Validation Evidence
 
-The final implementation tree passed `task fix`, `task test`, `task check`,
+The absolute-path revision passed `task fix`, `task test`, `task check`,
 `task docs:check`, and
 `task check:all-targets TARGET=x86_64-pc-windows-msvc`. The 25-test Linux MCP process
 suite passed with all four portable terminal-descendant regressions retaining their
 relative worktree heartbeat. Native Windows execution and the exact hosted CI matrix
 remain open until the pushed revision completes on GitHub.
+
+The basename-resolution revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. Its 25-test Linux MCP suite again passed all four portable lifecycle
+regressions, while the Windows-target build compiled the native `current_exe()` branch.
+Native Windows behavior and the exact hosted matrix remain open.
 
 ## Remaining Implementation Plan
 
