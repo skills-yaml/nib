@@ -1150,13 +1150,14 @@ async fn integrated_pending_commit_ignores_stale_worktree_for_verification_then_
     assert!(!worktree.path.exists());
     let record = get_subagent_record(root.path(), "sub-partial-cleanup").expect("merged record");
     assert_eq!(record.status, "merged");
+    let canonical_root = root.path().canonicalize().expect("canonical parent root");
     assert_eq!(
         record
             .verification
             .as_ref()
             .expect("parent verification evidence")
             .worktree_path,
-        root.path()
+        canonical_root
     );
 }
 

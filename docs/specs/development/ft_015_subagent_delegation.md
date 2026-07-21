@@ -472,13 +472,17 @@ enables line-ending conversion through system or global configuration. Recovery
 fixtures that manually establish an already-integrated commit and executor/end-to-end
 fixtures that inspect patched worktree bytes must use the same repository-local
 conversion policy seen by nib's managed Git, which deliberately disables ambient
-configuration sources.
+configuration sources. Assertions over persisted verification evidence must compare the
+canonical project root required by delegation rather than the runner's potentially
+DOS-short spelling of the same temporary directory.
 
 ### Acceptance Criteria
 
 - [x] Git-backed delegation, executor, and end-to-end integration repositories pin
   `core.autocrlf=false` before their first commit, so fixture setup and managed Git
   interpret worktree bytes consistently.
+- [ ] Already-integrated recovery records verification against the canonical parent
+  worktree even when the test runner supplies an equivalent DOS-short project path.
 - [ ] Already-integrated merge recovery remains clean and succeeds on Windows when the
   host Git installation enables `core.autocrlf` outside the repository.
 - [ ] Worktree patch assertions remain byte-stable when Windows enables ambient
@@ -502,7 +506,12 @@ With an isolated global Git configuration setting `core.autocrlf=true`, `task te
 passes 617 library tests, 62 binary tests, and every integration and documentation suite.
 This includes 21 delegation tests, 15 executor tests, and 9 end-to-end runtime tests.
 The canonical `task check` gate passes, and the all-target/all-feature graph cross-checks
-for `x86_64-pc-windows-msvc`.
+for `x86_64-pc-windows-msvc`. Hosted Windows run `29790855194` reached the repaired
+already-integrated recovery path and persisted its canonical parent worktree, then exposed
+only a lexical assertion against the runner's equivalent DOS-short temporary path. The
+assertion now derives the expected canonical root. A fresh hostile-config `task test`,
+canonical `task check`, documentation integrity gate, and Windows all-target cross-check
+pass; an independent path-assertion audit found no related mixed-representation equality.
 
 ## Remaining Implementation Plan
 
