@@ -23,6 +23,8 @@ const MCP_FIXTURE_ACTIVATION_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_FIXTURE";
 const MCP_FIXTURE_MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 #[cfg(debug_assertions)]
 const MCP_FIXTURE_HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
+#[cfg(debug_assertions)]
+const MCP_FIXTURE_TRACE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_TRACE";
 const MCP_SESSION_OBSERVATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(all(debug_assertions, target_os = "linux"))]
 const MCP_GIT_FIXTURE_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
@@ -112,63 +114,34 @@ fn shell_path(path: &Path) -> String {
 }
 
 #[cfg(debug_assertions)]
-fn terminal_process_tree_command(executable: &Path, heartbeat: &Path) -> String {
-    #[cfg(windows)]
-    let nib = format!(
-        "./{}",
-        executable
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("terminal lifecycle fixture filename")
-    );
-    #[cfg(not(windows))]
+fn terminal_process_tree_command(executable: &Path, heartbeat: &Path, trace: &Path) -> String {
     let nib = shell_path(executable);
     #[cfg(windows)]
     let launch = shell_quote(&nib);
     #[cfg(not(windows))]
     let launch = format!("exec {}", shell_quote(&nib));
     format!(
-        "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {launch}",
+        "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {trace_env}={trace} {launch}",
         activation = MCP_FIXTURE_ACTIVATION_ENV,
         token = shell_quote(MCP_FIXTURE_TOKEN),
         mode = MCP_FIXTURE_MODE_ENV,
         heartbeat_env = MCP_FIXTURE_HEARTBEAT_ENV,
         heartbeat = shell_quote(&shell_path(heartbeat)),
+        trace_env = MCP_FIXTURE_TRACE_ENV,
+        trace = shell_quote(&shell_path(trace)),
     )
 }
 
 #[cfg(debug_assertions)]
-fn terminal_tree_project() -> tempfile::TempDir {
+fn terminal_tree_fixture(root: &Path) -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        let executable = Path::new(env!("CARGO_BIN_EXE_nib"));
-        tempfile::Builder::new()
-            .prefix("nib-mcp-terminal-")
-            .tempdir_in(
-                executable
-                    .parent()
-                    .expect("terminal lifecycle fixture executable directory"),
-            )
-            .expect("same-volume portable MCP terminal fixture")
+        let _ = root;
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_nib"))
     }
     #[cfg(not(windows))]
     {
-        tempfile::tempdir().expect("portable MCP terminal fixture")
-    }
-}
-
-#[cfg(debug_assertions)]
-fn install_terminal_tree_fixture(root: &Path) -> std::path::PathBuf {
-    let executable = root.join(if cfg!(windows) {
-        "mcp-lifecycle-fixture.exe"
-    } else {
-        "mcp-lifecycle-fixture"
-    });
-    #[cfg(windows)]
-    std::fs::hard_link(env!("CARGO_BIN_EXE_nib"), &executable)
-        .expect("hard-link terminal lifecycle fixture executable");
-    #[cfg(not(windows))]
-    {
+        let executable = root.join("mcp-lifecycle-fixture");
         std::fs::copy(env!("CARGO_BIN_EXE_nib"), &executable)
             .expect("copy terminal lifecycle fixture executable");
 
@@ -179,8 +152,160 @@ fn install_terminal_tree_fixture(root: &Path) -> std::path::PathBuf {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .expect("terminal lifecycle fixture mode");
+        executable
     }
-    executable
+}
+
+#[cfg(debug_assertions)]
+fn diagnostic_directory_entries(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    std::fs::read_dir(path)
+        .map_err(|error| error.to_string())?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
+fn create_lifecycle_trace(executable: &Path, heartbeat_name: &str) -> std::path::PathBuf {
+    let directory = executable
+        .parent()
+        .expect("terminal lifecycle fixture executable directory");
+    let trace = tempfile::Builder::new()
+        .prefix(&format!("{heartbeat_name}-"))
+        .suffix(".trace.jsonl")
+        .tempfile_in(directory)
+        .expect("create terminal lifecycle trace beside fixture image");
+    let (file, path) = trace
+        .keep()
+        .expect("persist terminal lifecycle trace for fixture processes");
+    drop(file);
+    path
+}
+
+#[cfg(debug_assertions)]
+fn complete_lifecycle_trace(path: &Path) -> Option<Vec<serde_json::Value>> {
+    let encoded = std::fs::read_to_string(path).ok()?;
+    let records = encoded
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<serde_json::Value>, _>>()
+        .ok()?;
+    ["fixture-entry", "child-entry", "first-flush"]
+        .into_iter()
+        .all(|stage| {
+            records.iter().any(|record| {
+                record.get("stage").and_then(serde_json::Value::as_str) == Some(stage)
+            })
+        })
+        .then_some(records)
+}
+
+#[cfg(debug_assertions)]
+async fn verify_lifecycle_trace(trace: &Path, root: &Path, heartbeat_name: &str) {
+    let records = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(records) = complete_lifecycle_trace(trace) {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "terminal lifecycle trace did not complete; trace={trace:?}; contents={:#?}",
+            std::fs::read_to_string(trace)
+        )
+    });
+    let record_for = |stage: &str| {
+        records
+            .iter()
+            .find(|record| record.get("stage").and_then(serde_json::Value::as_str) == Some(stage))
+            .unwrap_or_else(|| panic!("terminal lifecycle trace is missing {stage}: {records:#?}"))
+    };
+    for record in &records {
+        assert!(
+            record
+                .get("process_id")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "terminal lifecycle trace has no process ID: {record:#?}"
+        );
+        for field in [
+            "current_exe",
+            "current_dir",
+            "raw_heartbeat",
+            "resolved_heartbeat",
+            "trace_path",
+        ] {
+            assert!(
+                record
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty() && !value.starts_with("<error:")),
+                "terminal lifecycle trace has no valid {field}: {record:#?}"
+            );
+        }
+    }
+
+    let fixture_entry = record_for("fixture-entry");
+    assert_eq!(
+        fixture_entry
+            .get("raw_heartbeat")
+            .and_then(serde_json::Value::as_str),
+        Some(heartbeat_name),
+        "fixture entry must retain the shell-safe heartbeat basename"
+    );
+    let traced_directory = std::path::PathBuf::from(
+        fixture_entry
+            .get("current_dir")
+            .and_then(serde_json::Value::as_str)
+            .expect("validated fixture current directory"),
+    );
+    assert_eq!(
+        traced_directory
+            .canonicalize()
+            .expect("canonical traced fixture directory"),
+        root.canonicalize().expect("canonical fixture root"),
+        "fixture process must inherit the project working directory"
+    );
+    let resolved_heartbeat = std::path::PathBuf::from(
+        fixture_entry
+            .get("resolved_heartbeat")
+            .and_then(serde_json::Value::as_str)
+            .expect("validated resolved heartbeat"),
+    );
+    let resolved_heartbeat = if resolved_heartbeat.is_absolute() {
+        resolved_heartbeat
+    } else {
+        traced_directory.join(resolved_heartbeat)
+    };
+    assert_eq!(
+        resolved_heartbeat
+            .canonicalize()
+            .expect("canonical resolved fixture heartbeat"),
+        root.join(heartbeat_name)
+            .canonicalize()
+            .expect("canonical requested fixture heartbeat"),
+        "fixture entry must resolve the heartbeat below the project root"
+    );
+
+    let fixture_resolved = fixture_entry
+        .get("resolved_heartbeat")
+        .and_then(serde_json::Value::as_str);
+    for stage in ["child-entry", "first-flush"] {
+        assert_eq!(
+            record_for(stage)
+                .get("raw_heartbeat")
+                .and_then(serde_json::Value::as_str),
+            fixture_resolved,
+            "heartbeat child must inherit the resolved fixture path at {stage}"
+        );
+    }
+    let _ = std::fs::remove_file(trace);
 }
 
 #[cfg(all(debug_assertions, target_os = "linux"))]
@@ -316,12 +441,19 @@ async fn start_portable_terminal_tree(
 ) -> std::path::PathBuf {
     let requested_heartbeat = root.join(heartbeat_name);
     let fixture_heartbeat = std::path::PathBuf::from(heartbeat_name);
-    let command = terminal_process_tree_command(executable, &fixture_heartbeat);
+    let requested_trace = create_lifecycle_trace(executable, heartbeat_name);
+    let fixture_trace = std::path::PathBuf::from(
+        requested_trace
+            .file_name()
+            .expect("terminal lifecycle trace filename"),
+    );
+    let command = terminal_process_tree_command(executable, &fixture_heartbeat, &fixture_trace);
     #[cfg(windows)]
     {
+        let expected_fixture = shell_quote(&shell_path(Path::new(env!("CARGO_BIN_EXE_nib"))));
         assert!(
-            command.ends_with("'./mcp-lifecycle-fixture.exe'"),
-            "Windows lifecycle fixture must use its project-relative hard link: {command}"
+            command.ends_with(&expected_fixture),
+            "Windows lifecycle fixture must use the already-built native image: {command}"
         );
         assert!(
             !command.contains(" exec "),
@@ -359,10 +491,25 @@ async fn start_portable_terminal_tree(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(sessions.into_iter().flatten().collect::<Vec<_>>())
         });
+        let trace = std::fs::read_to_string(&requested_trace);
+        let git_file = std::fs::read_to_string(root.join(".git"));
+        let root_entries = diagnostic_directory_entries(root);
+        let session_worktree_entries = diagnostic_directory_entries(
+            &root.join(".nib/worktrees/sessions"),
+        );
+        let original_image_heartbeat = Path::new(env!("CARGO_BIN_EXE_nib"))
+            .parent()
+            .map(|parent| parent.join(heartbeat_name));
+        let original_image_heartbeat_length = original_image_heartbeat.as_ref().map(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| error.to_string())
+        });
         panic!(
-            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; command={command:?}; sessions={sessions:#?}"
+            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_trace={requested_trace:?}; trace={trace:#?}; original_image_heartbeat={original_image_heartbeat:?}; original_image_heartbeat_length={original_image_heartbeat_length:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
         );
     });
+    verify_lifecycle_trace(&requested_trace, root, heartbeat_name).await;
     let session_worktrees = root.join(".nib/worktrees/sessions");
     assert!(
         !session_worktrees.exists()
@@ -1348,9 +1495,9 @@ async fn final_audit_lock_stall_is_responsive_and_bounded() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
-    let project = terminal_tree_project();
+    let project = tempfile::tempdir().expect("portable MCP cancellation fixture");
     initialize_terminal_tree_server_fixture(project.path());
-    let fixture = install_terminal_tree_fixture(project.path());
+    let fixture = terminal_tree_fixture(project.path());
     let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
@@ -1387,9 +1534,9 @@ async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
-    let project = terminal_tree_project();
+    let project = tempfile::tempdir().expect("portable MCP disconnect fixture");
     initialize_terminal_tree_server_fixture(project.path());
-    let fixture = install_terminal_tree_fixture(project.path());
+    let fixture = terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
@@ -1413,9 +1560,9 @@ async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
-    let project = terminal_tree_project();
+    let project = tempfile::tempdir().expect("portable MCP fatal-input fixture");
     initialize_terminal_tree_server_fixture(project.path());
-    let fixture = install_terminal_tree_fixture(project.path());
+    let fixture = terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
@@ -1446,9 +1593,9 @@ async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform() {
-    let project = terminal_tree_project();
+    let project = tempfile::tempdir().expect("portable MCP backpressure fixture");
     initialize_terminal_tree_server_fixture(project.path());
-    let fixture = install_terminal_tree_fixture(project.path());
+    let fixture = terminal_tree_fixture(project.path());
     std::fs::write(project.path().join("large.txt"), vec![b'x'; 220_000])
         .expect("large MCP response fixture");
     let (mut server, mut stdin, _unread_stdout) = spawn_server(project.path());

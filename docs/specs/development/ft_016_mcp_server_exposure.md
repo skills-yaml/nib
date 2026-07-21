@@ -238,17 +238,19 @@ the explicit event details.
 Make the MCP terminal-tree fixture observe its native descendant at a test-owned
 heartbeat path without transporting a native Windows path through Git-for-Windows'
 POSIX shell. Pass only the heartbeat basename through the shell and resolve it against
-the fixture executable's directory inside the Windows native fixture. Present the four
-process-lifecycle repositories as valid Git-file worktrees so these tests do not spend
-their fixed startup deadline creating an unrelated nested session worktree before terminal
-dispatch. On Windows, create those temporary repositories beside `CARGO_BIN_EXE_nib` and
-hard-link that already-built image into each repository instead of copying the roughly
-254 MB debug executable to a fresh path. Invoke the co-located hard link by its relative
-path without an explicit MSYS `exec` overlay. Job assignment and inheritance retain the
-native tree whether the noninteractive shell remains its parent or optimizes its final
-external command. Poll the heartbeat at the fixture root on every platform. Keep the Unix
-copied-fixture and `exec` path unchanged, and do not change production shell selection,
-timeout, sandbox dispatch, or Job Object ownership.
+the inherited project working directory inside the Windows native fixture. Present the
+four process-lifecycle repositories as valid Git-file worktrees so these tests do not
+spend their fixed startup deadline creating an unrelated nested session worktree before
+terminal dispatch. On Windows, invoke the already-built `CARGO_BIN_EXE_nib` image instead
+of making a fresh copy or hard-link alias, and do so without an explicit MSYS `exec`
+overlay. Job assignment and inheritance retain the native tree whether the noninteractive
+shell remains its parent or optimizes its final external command. Poll the heartbeat at
+the fixture root on every platform and persist a test-only native trace beside the fixture
+image with the executable, working directory, raw and resolved heartbeat, child entry, and
+first flush. Keep trace writes non-fatal to the lifecycle processes, but require the
+success path to parse and verify all trace stages within a separate bounded deadline. Keep
+the Unix copied-fixture and `exec` path unchanged, and do not change production shell
+selection, timeout, sandbox dispatch, or Job Object ownership.
 
 The same hosted run exposed a separate session-enumeration race while an MCP audit was
 being atomically replaced. T003 owns the production fix: public strict enumeration must
@@ -258,12 +260,11 @@ detachment failures.
 ### Acceptance Criteria
 
 - [x] Windows terminal-tree commands pass only the heartbeat basename across the POSIX
-  shell, invoke a same-volume hard link of the already-built native image by its relative
-  path without using MSYS `exec`, and poll below the fixture root without increasing the
-  timeout.
+  shell, invoke the already-built native image without a copy, hard link, or MSYS `exec`,
+  and poll below the fixture root without increasing the timeout.
 - [x] The native fixture resolves a relative Windows heartbeat against
-  `current_exe().parent()` before spawning its child and passes that child the resolved
-  path; existing absolute heartbeat inputs remain unchanged.
+  `current_dir()` before spawning its child and passes that child the resolved path;
+  existing absolute heartbeat inputs remain unchanged.
 - [x] The four portable process-lifecycle repositories use a valid Git-file worktree,
   poll their fixture-root heartbeat, and do not create a nested session worktree.
 - [x] Public session enumeration is serialized with audit mutation while retaining
@@ -273,6 +274,10 @@ detachment failures.
   audit evidence on Windows.
 - [x] Fixture startup failures identify the exact requested heartbeat path alongside the
   bounded session audit rather than reporting only an ambiguous publication timeout.
+- [x] The fixture-image-relative native lifecycle trace records fixture entry, child entry,
+  first flush, `current_exe()`, `current_dir()`, and raw and resolved heartbeat paths;
+  success verifies those records without making trace I/O lifecycle-fatal, while timeout
+  output includes that trace and the project/worktree state.
 - [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
@@ -330,6 +335,17 @@ and the absolute path passed to Git-for-Windows `exec`. The next revision replac
 copy with a same-volume hard link and invokes that link relatively without `exec`, while
 retaining the production shell and Job Object containment path.
 
+Hosted run `29812038803` passed Linux and macOS completely and again passed the native
+Windows Job supervisor and strict enumeration regressions. Replacing the executable copy
+with a same-volume hard link did not publish the four requested fixture-root heartbeats;
+each attempt was durable in roughly 36 milliseconds and remained active without a terminal
+result for the full ten-second poll. Because `process_tree` loops only after its child has
+published a heartbeat, this is consistent with `current_exe()` selecting a different peer
+hard-link name and resolving the marker outside the temporary project, although the hosted
+log cannot prove that path. The next revision removes both executable aliases and
+`current_exe()`-relative test state, while adding a native trace that exposes every path if
+startup still fails.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -360,6 +376,14 @@ lifecycle regressions, and the Windows-target build compiled the same-volume tem
 project, hard-link, relative launch, and no-`exec` branches. Native Windows execution and
 the exact hosted matrix remain open.
 
+The direct-image and project-working-directory revision passed `task fix`, `task test`,
+`task check`, `task docs:check`,
+`task check:all-targets TARGET=x86_64-pc-windows-msvc`, and `git diff --check`. The full
+25-test Linux MCP suite passed all four portable lifecycle regressions and parsed each
+fixture-entry, child-entry, and first-flush trace. The Windows target compiled the
+original-image launch, `current_dir()` heartbeat resolution, and fixture-image-relative
+trace branches. Native Windows execution and the exact hosted matrix remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured
@@ -374,5 +398,3 @@ the exact hosted matrix remain open.
 - Cancellation protocol publication depends on durable audit persistence; persistence
   failure must continue to fail closed rather than emit an unaudited cancellation.
 - Windows Job Object runtime behavior has not been executed on this Linux host.
-- The Windows lifecycle fixture requires same-volume hard-link support and intentionally
-  fails during setup instead of falling back to a fresh executable copy.

@@ -9,6 +9,7 @@ const ACTIVATION_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_FIXTURE";
 const ACTIVATION_TOKEN: &str = "nib-mcp-client-lifecycle-fixture-v1";
 const MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 const HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
+const TRACE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_TRACE";
 const GIT_WRAPPER_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
 const GIT_WRAPPER_TOKEN: &str = "nib-mcp-git-lifecycle-fixture-v1";
 
@@ -208,23 +209,20 @@ fn spawn_heartbeat_descendant(inherit_stdio: bool) -> io::Result<()> {
     })?);
     #[cfg(windows)]
     let heartbeat = if heartbeat.is_relative() {
-        let executable = std::env::current_exe()?;
-        let directory = executable.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "internal MCP lifecycle fixture executable has no parent directory",
-            )
-        })?;
-        directory.join(heartbeat)
+        std::env::current_dir()?.join(heartbeat)
     } else {
         heartbeat
     };
+    let _ = append_lifecycle_trace("fixture-entry", &heartbeat);
     let mut command = Command::new(std::env::current_exe()?);
     command
         .env_clear()
         .env(ACTIVATION_ENV, ACTIVATION_TOKEN)
         .env(MODE_ENV, "heartbeat")
         .env(HEARTBEAT_ENV, &heartbeat);
+    if let Some(trace) = std::env::var_os(TRACE_ENV) {
+        command.env(TRACE_ENV, trace);
+    }
     if inherit_stdio {
         command
             .stdin(Stdio::inherit())
@@ -274,19 +272,66 @@ fn wait_for_heartbeat_path(heartbeat: &std::path::Path) -> io::Result<()> {
 }
 
 fn run_heartbeat() -> io::Result<()> {
-    let path = std::env::var_os(HEARTBEAT_ENV).ok_or_else(|| {
+    let path = std::path::PathBuf::from(std::env::var_os(HEARTBEAT_ENV).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "internal MCP lifecycle heartbeat path is missing",
         )
-    })?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    for _ in 0..2_400 {
+    })?);
+    let _ = append_lifecycle_trace("child-entry", &path);
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    for index in 0..2_400 {
         file.write_all(b".")?;
         file.flush()?;
+        if index == 0 {
+            let _ = append_lifecycle_trace("first-flush", &path);
+        }
         thread::sleep(Duration::from_millis(25));
     }
     Ok(())
+}
+
+fn append_lifecycle_trace(stage: &str, resolved_heartbeat: &std::path::Path) -> io::Result<()> {
+    let Some(trace) = std::env::var_os(TRACE_ENV) else {
+        return Ok(());
+    };
+    let trace = std::path::PathBuf::from(trace);
+    let trace = if trace.is_relative() {
+        let executable = std::env::current_exe()?;
+        let directory = executable.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "internal MCP lifecycle fixture executable has no parent directory",
+            )
+        })?;
+        directory.join(trace)
+    } else {
+        trace
+    };
+    let current_exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|error| format!("<error: {error}>"));
+    let current_dir = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|error| format!("<error: {error}>"));
+    let raw_heartbeat =
+        std::env::var_os(HEARTBEAT_ENV).map(|path| path.to_string_lossy().into_owned());
+    let mut file = OpenOptions::new().create(true).append(true).open(&trace)?;
+    serde_json::to_writer(
+        &mut file,
+        &json!({
+            "stage": stage,
+            "process_id": std::process::id(),
+            "current_exe": current_exe,
+            "current_dir": current_dir,
+            "raw_heartbeat": raw_heartbeat,
+            "resolved_heartbeat": resolved_heartbeat.to_string_lossy(),
+            "trace_path": trace.to_string_lossy(),
+        }),
+    )
+    .map_err(io::Error::other)?;
+    file.write_all(b"\n")?;
+    file.flush()
 }
 
 fn read_frame(reader: &mut impl BufRead) -> io::Result<Value> {
