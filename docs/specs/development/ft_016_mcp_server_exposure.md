@@ -231,6 +231,61 @@ An additional 32-iteration barrier race proves explicit cancellation and the Dro
 cannot both claim audit ownership; dropping an armed guard after an explicit claim retains
 the explicit event details.
 
+## Hosted Windows Native-Fixture Follow-up (2026-07-21)
+
+### Scope
+
+Make the Windows MCP terminal-tree fixture observe its native descendant through a
+test-owned absolute heartbeat path. The command crosses Git-for-Windows' POSIX shell
+boundary before launching a native executable, so the cancellation test must not also
+depend on that native descendant resolving a relative path inside the shell's worktree.
+Keep the Linux and macOS heartbeat worktree-relative; Linux containment exposes only the
+session worktree as writable. Do not change production shell selection, command syntax,
+or Job Object ownership.
+
+### Acceptance Criteria
+
+- [x] Windows terminal-tree fixtures pass an absolute heartbeat path to the native
+  executable and poll that exact path, without increasing the startup timeout.
+- [x] Linux and macOS retain the relative session-worktree heartbeat path and lookup.
+- [ ] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
+  regressions start the native fixture, stop its descendant, and retain cancellation
+  audit evidence on Windows.
+- [x] Fixture startup failures identify the exact requested heartbeat path alongside the
+  bounded session audit rather than reporting only an ambiguous publication timeout.
+- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+
+### Affected Areas
+
+`tests/mcp_integration.rs`, FT-016 hosted Windows evidence, and the native CI matrix.
+
+### Validation Gates
+
+The four portable MCP terminal-descendant regressions, `task test`, `task check`,
+`task docs:check`, Windows-target `task check:all-targets`, and the exact-revision hosted
+CI matrix.
+
+### Reproduction Evidence
+
+Hosted run `29800752453` passed the repaired native Windows supervisor regression and
+all outbound MCP lifecycle tests. Four later inbound MCP cancellation tests timed out
+while looking only below `.nib/worktrees/sessions/*` for a relative heartbeat; their
+session audit showed the admitted terminal call but no terminal result. The fixture's
+`process_tree` mode remains active only after its child has observed a nonempty heartbeat,
+and the Windows lifecycle fixtures that use absolute heartbeat paths passed. This makes
+the cross-runtime relative-path observation the narrow fixture boundary to remove; the
+run does not show a production Job cleanup failure because none of the four tests reached
+its cancellation assertion.
+
+### Local Validation Evidence
+
+The final implementation tree passed `task fix`, `task test`, `task check`,
+`task docs:check`, and
+`task check:all-targets TARGET=x86_64-pc-windows-msvc`. The 25-test Linux MCP process
+suite passed with all four portable terminal-descendant regressions retaining their
+relative worktree heartbeat. Native Windows execution and the exact hosted CI matrix
+remain open until the pushed revision completes on GitHub.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured

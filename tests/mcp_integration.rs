@@ -257,7 +257,12 @@ async fn start_portable_terminal_tree(
     executable: &Path,
     heartbeat_name: &str,
 ) -> std::path::PathBuf {
-    let command = terminal_process_tree_command(executable, Path::new(heartbeat_name));
+    let requested_heartbeat = if cfg!(windows) {
+        root.join(heartbeat_name)
+    } else {
+        std::path::PathBuf::from(heartbeat_name)
+    };
+    let command = terminal_process_tree_command(executable, &requested_heartbeat);
     write_request(
         stdin,
         json!({
@@ -273,12 +278,19 @@ async fn start_portable_terminal_tree(
     .await;
     let started = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let sessions = root.join(".nib/worktrees/sessions");
-            if let Ok(entries) = std::fs::read_dir(sessions) {
-                for entry in entries.flatten() {
-                    let heartbeat = entry.path().join(heartbeat_name);
-                    if std::fs::metadata(&heartbeat).is_ok_and(|metadata| metadata.len() > 0) {
-                        return heartbeat;
+            if requested_heartbeat.is_absolute() {
+                if std::fs::metadata(&requested_heartbeat).is_ok_and(|metadata| metadata.len() > 0)
+                {
+                    return requested_heartbeat.clone();
+                }
+            } else {
+                let sessions = root.join(".nib/worktrees/sessions");
+                if let Ok(entries) = std::fs::read_dir(sessions) {
+                    for entry in entries.flatten() {
+                        let heartbeat = entry.path().join(heartbeat_name);
+                        if std::fs::metadata(&heartbeat).is_ok_and(|metadata| metadata.len() > 0) {
+                            return heartbeat;
+                        }
                     }
                 }
             }
@@ -294,7 +306,7 @@ async fn start_portable_terminal_tree(
             .filter_map(|id| store.load(&id))
             .collect::<Vec<_>>();
         panic!(
-            "portable terminal fixture did not start; command={command:?}; sessions={sessions:#?}"
+            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; command={command:?}; sessions={sessions:#?}"
         );
     });
     wait_for_audit_attempt(root, heartbeat_name).await;
