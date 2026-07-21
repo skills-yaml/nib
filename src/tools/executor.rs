@@ -1065,6 +1065,7 @@ impl ToolExecutor {
         let verification_target = crate::tools::delegation::prepare_subagent_verification_target(
             project_root,
             subagent_id,
+            self.cancellation.as_ref(),
         )
         .await?;
         let worktree = verification_target.worktree_path;
@@ -1126,6 +1127,7 @@ impl ToolExecutor {
             arguments,
             project_root,
             evidence,
+            self.cancellation.as_ref(),
         )
         .await
     }

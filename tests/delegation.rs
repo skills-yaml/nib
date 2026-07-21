@@ -1,4 +1,5 @@
 use chrono::Utc;
+use nib::agent::CancellationSignal;
 use nib::config::{ExecutionConfig, TerminalConfig};
 use nib::sandbox::worktree::Worktree;
 use nib::session::SessionStore;
@@ -1346,9 +1347,15 @@ async fn merges_for_different_subagent_ids_share_one_repository_lock() {
     assert!(!root.path().join("lock-b.txt").exists());
 
     drop(merge_lock);
-    let (first, second) = merges.await;
+    let (first, second) = tokio::time::timeout(Duration::from_secs(90), merges)
+        .await
+        .expect("serialized merges must remain bounded");
     assert!(first.success, "{:?}", first.error);
     assert!(second.success, "{:?}", second.error);
+    for id in ["sub-lock-a", "sub-lock-b"] {
+        let record = get_subagent_record(root.path(), id).expect("merged record");
+        assert_eq!(record.status, "merged", "unexpected record for {id}");
+    }
     assert_eq!(
         std::fs::read_to_string(root.path().join("lock-a.txt")).unwrap(),
         "first\n"
@@ -1357,6 +1364,84 @@ async fn merges_for_different_subagent_ids_share_one_repository_lock() {
         std::fs::read_to_string(root.path().join("lock-b.txt")).unwrap(),
         "second\n"
     );
+}
+
+#[tokio::test]
+async fn cancelled_repository_lock_wait_is_prompt_and_preserves_record() {
+    let root = git_repository();
+    let worktree =
+        Worktree::create(root.path(), "sub-lock-cancel").expect("cancelled lock worktree");
+    std::fs::write(worktree.path.join("cancelled.txt"), "child\n").expect("child result");
+    completed_record(root.path(), "sub-lock-cancel", &worktree);
+    let record_path = root.path().join(".nib/subagents/sub-lock-cancel.json");
+    let record_before = std::fs::read(&record_path).expect("record before cancellation");
+
+    let merge_lock_path = root.path().join(".nib/subagents/.merge.lock");
+    let merge_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(merge_lock_path)
+        .expect("repository merge lock");
+    merge_lock.lock().expect("hold repository merge lock");
+
+    let store = SessionStore::for_project(root.path()).expect("session store");
+    store.create_session_with_id("parent-lock-cancel");
+    let cancellation = CancellationSignal::new();
+    let mut executor = merge_executor(root.path(), store).with_cancellation(cancellation.clone());
+    let mut pending_merge = Box::pin(execute_merge(
+        &mut executor,
+        root.path(),
+        "parent-lock-cancel",
+        "sub-lock-cancel",
+        "test -f cancelled.txt",
+    ));
+
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        result = &mut pending_merge => panic!("merge bypassed held lock: {result:?}"),
+    }
+    assert!(cancellation.cancel());
+    let result = tokio::time::timeout(Duration::from_secs(5), pending_merge)
+        .await
+        .expect("cancelled lock wait must return promptly");
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("repository merge lock acquisition was cancelled")),
+        "{:?}",
+        result.error
+    );
+    assert_eq!(
+        std::fs::read(&record_path).expect("record after cancellation"),
+        record_before,
+        "cancelled lock acquisition mutated the authoritative record"
+    );
+    assert!(worktree.path.exists());
+    assert!(!root.path().join("cancelled.txt").exists());
+
+    drop(merge_lock);
+    let retry_store = SessionStore::for_project(root.path()).expect("retry session store");
+    retry_store.create_session_with_id("parent-lock-cancel-retry");
+    let mut retry_executor = merge_executor(root.path(), retry_store);
+    let retried = execute_merge(
+        &mut retry_executor,
+        root.path(),
+        "parent-lock-cancel-retry",
+        "sub-lock-cancel",
+        "test -f cancelled.txt",
+    )
+    .await;
+    assert!(retried.success, "{:?}", retried.error);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("cancelled.txt")).expect("merged artifact"),
+        "child\n"
+    );
+    let record = get_subagent_record(root.path(), "sub-lock-cancel").expect("merged record");
+    assert_eq!(record.status, "merged");
 }
 
 #[cfg(all(unix, debug_assertions))]

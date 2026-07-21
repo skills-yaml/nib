@@ -30,7 +30,7 @@ const MERGE_PENDING_STATUS: &str = "merge_pending";
 const MERGE_FAILED_STATUS: &str = "merge_failed";
 const NIB_EXCLUDE_PATHSPEC: &str = ":(exclude).nib";
 const NIB_DESCENDANTS_EXCLUDE_PATHSPEC: &str = ":(exclude).nib/**";
-const REPOSITORY_MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const REPOSITORY_MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const SUBAGENT_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNER_LEASE_NAMESPACE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -729,11 +729,29 @@ struct RepositoryMergeLock {
 }
 
 impl RepositoryMergeLock {
-    async fn acquire(project_root: &Path) -> Result<Self, String> {
-        Self::acquire_with_timeout(project_root, REPOSITORY_MERGE_LOCK_TIMEOUT).await
+    async fn acquire(
+        project_root: &Path,
+        cancellation: Option<&crate::agent::CancellationSignal>,
+    ) -> Result<Self, String> {
+        Self::acquire_with_timeout_and_cancellation(
+            project_root,
+            REPOSITORY_MERGE_LOCK_TIMEOUT,
+            cancellation,
+        )
+        .await
     }
 
+    #[cfg(test)]
     async fn acquire_with_timeout(project_root: &Path, timeout: Duration) -> Result<Self, String> {
+        Self::acquire_with_timeout_and_cancellation(project_root, timeout, None).await
+    }
+
+    async fn acquire_with_timeout_and_cancellation(
+        project_root: &Path,
+        timeout: Duration,
+        cancellation: Option<&crate::agent::CancellationSignal>,
+    ) -> Result<Self, String> {
+        ensure_repository_merge_lock_not_cancelled(cancellation)?;
         let directory = ensure_records_directory(project_root)?;
         let path = directory.join(".merge.lock");
         let anchor_path = repository_merge_lock_anchor_path(project_root);
@@ -750,6 +768,7 @@ impl RepositoryMergeLock {
         let locked_identity = repository_lock_identity(&anchor_file, &anchor_path)?;
         let deadline = Instant::now() + timeout;
         loop {
+            ensure_repository_merge_lock_not_cancelled(cancellation)?;
             if Instant::now() >= deadline {
                 return Err(repository_merge_lock_timeout(&path, timeout));
             }
@@ -766,8 +785,19 @@ impl RepositoryMergeLock {
             if now >= deadline {
                 return Err(repository_merge_lock_timeout(&path, timeout));
             }
-            tokio::time::sleep(Duration::from_millis(25).min(deadline - now)).await;
+            let delay = Duration::from_millis(25).min(deadline - now);
+            if let Some(cancellation) = cancellation {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancellation.cancelled() => {
+                        return Err(repository_merge_lock_cancelled());
+                    }
+                }
+            } else {
+                tokio::time::sleep(delay).await;
+            }
         }
+        ensure_repository_merge_lock_not_cancelled(cancellation)?;
         crate::fs_security::verify_directory_without_symlinks(&directory)
             .map_err(|error| format!("repository merge lock directory changed: {error}"))?;
         crate::fs_security::verify_directory_without_symlinks(anchor_directory)
@@ -785,6 +815,19 @@ impl RepositoryMergeLock {
             _anchor_file: anchor_file,
         })
     }
+}
+
+fn ensure_repository_merge_lock_not_cancelled(
+    cancellation: Option<&crate::agent::CancellationSignal>,
+) -> Result<(), String> {
+    if cancellation.is_some_and(crate::agent::CancellationSignal::is_cancelled) {
+        return Err(repository_merge_lock_cancelled());
+    }
+    Ok(())
+}
+
+fn repository_merge_lock_cancelled() -> String {
+    "repository merge lock acquisition was cancelled".to_string()
 }
 
 fn with_bounded_delegation_lock_in<T>(
@@ -2970,6 +3013,7 @@ pub(crate) async fn merge_verified_subagent_worktree(
     args: &Value,
     project_root: &Path,
     evidence: VerificationEvidence,
+    cancellation: Option<&crate::agent::CancellationSignal>,
 ) -> Result<Value, String> {
     let project_root = canonical_project_root(project_root)?;
     let subagent_id = args
@@ -2987,7 +3031,7 @@ pub(crate) async fn merge_verified_subagent_worktree(
         .filter(|commit| valid_git_object_id(commit))
         .ok_or("verification evidence is missing a valid immutable snapshot commit")?
         .to_string();
-    let _merge_lock = RepositoryMergeLock::acquire(&project_root).await?;
+    let _merge_lock = RepositoryMergeLock::acquire(&project_root, cancellation).await?;
     let OpenedSubagentRecord {
         mut record,
         file: mut record_file,
@@ -3855,9 +3899,10 @@ fn record_subagent_ownership_reconciliation_event(
 pub(crate) async fn prepare_subagent_verification_target(
     project_root: &Path,
     id: &str,
+    cancellation: Option<&crate::agent::CancellationSignal>,
 ) -> Result<VerificationTarget, String> {
     let project_root = canonical_project_root(project_root)?;
-    let _merge_lock = RepositoryMergeLock::acquire(&project_root).await?;
+    let _merge_lock = RepositoryMergeLock::acquire(&project_root, cancellation).await?;
     let OpenedSubagentRecord {
         mut record,
         file: mut record_file,
@@ -7609,6 +7654,11 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    #[test]
+    fn repository_merge_lock_default_timeout_is_thirty_seconds() {
+        assert_eq!(REPOSITORY_MERGE_LOCK_TIMEOUT, Duration::from_secs(30));
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn record_and_owner_namespace_locks_have_absolute_deadlines() {
@@ -7803,7 +7853,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         write_subagent_record(root.path(), &record).expect("record");
-        let target = prepare_subagent_verification_target(root.path(), &record.id)
+        let target = prepare_subagent_verification_target(root.path(), &record.id, None)
             .await
             .expect("immutable verification target");
         let verified_commit = target.snapshot_commit.clone();
@@ -7849,6 +7899,7 @@ mod tests {
             }),
             root.path(),
             evidence,
+            None,
         )
         .await
         .expect_err("post-verification edit must fail closed");

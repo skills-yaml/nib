@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCELLED_CREATE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
+const SYNC_CREATE_CLEANUP_TIMEOUT: Duration = GIT_COMMAND_TIMEOUT;
 const MAX_GIT_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_PACKED_REFS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WORKTREE_REGISTRATIONS: usize = 4096;
@@ -4488,7 +4489,7 @@ fn compensate_failed_create_sync(
     ownership: Option<&ManagedWorktreeReceipt>,
     error: String,
 ) -> String {
-    let deadline = Instant::now() + CANCELLED_CREATE_CLEANUP_TIMEOUT;
+    let deadline = Instant::now() + SYNC_CREATE_CLEANUP_TIMEOUT;
     match cleanup_partial_create_sync(
         project_root,
         id,
@@ -4496,7 +4497,7 @@ fn compensate_failed_create_sync(
         path_receipt,
         ownership,
         deadline,
-        CANCELLED_CREATE_CLEANUP_TIMEOUT,
+        SYNC_CREATE_CLEANUP_TIMEOUT,
     ) {
         Ok(()) => error,
         Err(cleanup) => format!("{error}; partial worktree cleanup failed: {cleanup}"),
@@ -9581,15 +9582,20 @@ mod tests {
             .expect_err("injected post-add validation must fail");
 
         assert!(error.contains("injected post-add"), "{error}");
+        assert!(
+            !error.contains("partial worktree cleanup failed"),
+            "post-add compensation did not finish: {error}"
+        );
         let path = repository.path().join(".nib/worktrees/subagents").join(id);
-        assert!(!path.exists(), "partial worktree path remains");
+        assert!(!path.exists(), "partial worktree path remains: {error}");
         let registered = Command::new("git")
             .current_dir(repository.path())
             .args(["worktree", "list", "--porcelain"])
             .output()
             .expect("worktree list");
         assert!(
-            !String::from_utf8_lossy(&registered.stdout).contains(path.to_string_lossy().as_ref())
+            !String::from_utf8_lossy(&registered.stdout).contains(path.to_string_lossy().as_ref()),
+            "partial worktree registration remains: {error}"
         );
         let branch = Command::new("git")
             .current_dir(repository.path())
@@ -9601,7 +9607,11 @@ mod tests {
             ])
             .status()
             .expect("branch lookup");
-        assert_eq!(branch.code(), Some(1), "partial branch remains");
+        assert_eq!(
+            branch.code(),
+            Some(1),
+            "partial worktree branch remains: {error}"
+        );
     }
 
     #[test]

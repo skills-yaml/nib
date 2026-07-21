@@ -513,6 +513,108 @@ assertion now derives the expected canonical root. A fresh hostile-config `task 
 canonical `task check`, documentation integrity gate, and Windows all-target cross-check
 pass; an independent path-assertion audit found no related mixed-representation equality.
 
+## Hosted Windows Bounded Cleanup and Merge Contention Follow-up (2026-07-21)
+
+### Scope
+
+Make all non-cancellable synchronous worktree-creation compensation routed through
+`compensate_failed_create_sync` use the normal bounded Git cleanup window instead of
+the shorter cancellation-response window. This applies the same bounded budget to its
+pre-add and post-add helper calls, while cancellable creation cleanup remains
+independently bounded at three seconds. Make legitimate
+repository-wide contention between two different subagent merge workflows wait through
+a healthy Windows Git critical section without weakening the persistent lock identity,
+replacement checks, cancellation behavior, or explicit short-timeout failure path.
+Thread the executor cancellation signal through verification preparation and final
+merge-lock acquisition so the longer healthy-contention budget does not delay a
+cancelled request or mutate its authoritative subagent record.
+Improve the post-add regression so any returned composite cleanup error is surfaced
+before the residual-artifact assertions and included in their failure diagnostics.
+
+### Acceptance Criteria
+
+- [x] Every non-cancellable synchronous creation-failure call routed through
+  `compensate_failed_create_sync` uses the normal 30-second Git cleanup budget to
+  remove the provably exact-owned path, reciprocal registration, and owned branch
+  available at that phase.
+- [x] Cancellable worktree creation retains its independent three-second cleanup bound.
+- [x] `sync_create_compensates_a_failure_after_worktree_add` surfaces any returned
+  composite compensation error before artifact assertions, includes the creation error
+  in each residual-artifact diagnostic, and requires successful compensation to leave no
+  visible path, registration, or branch.
+- [x] The default repository merge-lock wait is a bounded 30 seconds, allowing a healthy
+  Windows contender to span the other workflow's preparation or integration critical
+  section without entering the repository concurrently.
+- [x] Explicit short-timeout repository-lock tests still prove deterministic timeout,
+  persistent-anchor identity, and replacement-domain rejection.
+- [x] A merge cancelled while waiting behind a held repository lock returns promptly,
+  releases its acquisition attempt, and leaves the authoritative subagent record
+  unchanged.
+- [x] The cross-ID merge regression remains deadlock-bounded and requires both merge
+  records and artifacts to reach their successful terminal state.
+- [ ] Focused regressions pass repeatedly and the exact implementation revision passes
+  the hosted Linux, macOS, and Windows matrix.
+
+### Affected Areas
+
+`src/sandbox/worktree.rs`, `src/tools/delegation.rs`, `src/tools/executor.rs`,
+`tests/delegation.rs`, focused worktree and repository-lock tests, this FT-015 evidence,
+and the hosted CI matrix.
+
+### Validation Gates
+
+Focused post-add compensation, repository-lock timeout/identity/cancellation, and
+cross-ID merge tests; `task fix`, `task test`, `task check`, `task docs:check`, Windows-target
+`task check:all-targets`, `git diff --check`, two-stage review, and the exact-revision
+hosted matrix.
+
+### Local Validation Evidence
+
+`SYNC_CREATE_CLEANUP_TIMEOUT` now follows the existing 30-second Git command budget for
+every non-cancellable synchronous creation-failure call through
+`compensate_failed_create_sync`, while
+`CANCELLED_CREATE_CLEANUP_TIMEOUT` remains three seconds. The post-add regression
+rejects and prints any returned composite cleanup failure before checking path,
+registration, and branch absence, and every artifact assertion carries the original
+creation error. Repository merge-lock acquisition remains an absolute polling deadline,
+but its production contention budget is 30 seconds; a direct contract test fixes that
+default while the existing injected 75-millisecond and one-second timeout tests remain
+unchanged. The held-lock cancellation regression proves prompt failure, byte-identical
+authoritative state, and successful reuse by a fresh uncancelled merge. The cross-ID
+integration test also has a 90-second outer deadlock bound while still requiring both
+real merges and both durable records to reach `merged`.
+
+The affected post-add, repository-lock timeout/identity, persistent-anchor, and
+lock-cancellation, and cross-ID merge tests passed in two serialized final-patch
+executions across `task test` and `task check`. Each execution passed all 620 library
+tests, 62 CLI tests, 22 delegation tests, every integration suite, and all nine runtime
+E2Es. An earlier pre-contract-test execution continued past every then-affected test and
+hit the pre-existing intermittent Linux namespace-recovery timing assertion; its
+immediate canonical rerun was green. `task fix`, `task check`, `task docs:check`,
+Windows-target `task check:all-targets`, and `git diff --check` pass.
+
+### Reproduction Evidence
+
+Hosted run `29851652973` on revision
+`8eaf77a1ab2d82183b3f6629f7ccd0744d8be516` passed Validate and macOS. Windows attempt
+one, job `88705766329`, passed 546 of 547 library tests, then
+`sync_create_compensates_a_failure_after_worktree_add` reported that its partial
+worktree path remained. The test took 12.70 seconds where the same source had passed in
+roughly two seconds on each of the five preceding Windows runs; its assertion omitted
+the returned cleanup error, so the log could not distinguish deadline exhaustion from a
+transient sharing violation.
+
+Windows attempt two, job `88710321275`, passed all 547 library tests, proving that the
+first failure was intermittent. It then passed 13 of 14 delegation integration tests;
+`merges_for_different_subagent_ids_share_one_repository_lock` failed because one healthy
+contender exhausted the default five-second repository-lock wait while the other merge
+workflow held the shared persistent lock. The test releases its independent exclusion
+fixture after 100 milliseconds, and both workflows acquire the same lock during
+verification preparation and final integration. The five-second budget therefore
+measured legitimate serialized Git work rather than a stale holder. Neither failure was
+caused by the workflow-only smoke change from `7ff72c857739be273531bd914ba5f50c66c82670`
+to `8eaf77a1ab2d82183b3f6629f7ccd0744d8be516`.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows/macOS runtime gates for worktree identity/deletion and the FT-017
