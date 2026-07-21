@@ -100,13 +100,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "nib version failed" }
 
           $fixture = Join-Path $env:RUNNER_TEMP "nib-smoke-$([guid]::NewGuid().ToString('N'))"
-          $home = Join-Path $fixture "home"
-          New-Item -ItemType Directory -Force -Path $fixture, $home | Out-Null
+          $smokeHome = Join-Path $fixture "home"
+          New-Item -ItemType Directory -Force -Path $fixture, $smokeHome | Out-Null
           git -C $fixture init --quiet
           if ($LASTEXITCODE -ne 0) { throw "git init failed" }
 
           $previousHome = $env:HOME
-          $env:HOME = $home
+          $env:HOME = $smokeHome
           Push-Location $fixture
           try {
             & $binary doctor | Out-Null

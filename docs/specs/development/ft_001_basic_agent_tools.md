@@ -369,9 +369,9 @@ verbatim-prefix regressions.
 
 ## Remaining Implementation Plan
 
-1. Normalize only the probe's rustc-rendered linker path for repeated separators while
-   preserving the positive absolute-MSVC and negative `/usr/bin/link.exe` checks, then
-   pass the original Cargo E2E and the exact revision's full CI matrix.
+1. Rename the Windows PowerShell smoke fixture-home local without changing the isolated
+   `HOME` override, restoration, cleanup, or three release-binary checks, then pass the
+   exact revision's full CI matrix.
 2. Keep the native file-identity, reparse-point, verbatim-path, and DOS short-alias
    regressions mandatory for future filesystem changes.
 3. Rerun the canonical Task gates and two-stage review before moving FT-001 to `done/`.
@@ -380,9 +380,9 @@ verbatim-prefix regressions.
 
 - A future path-normalization change could weaken component-level link rejection unless
   the passing native Windows replacement and reparse regressions remain mandatory.
-- The sanitized Git Bash direct-rustc probe now proves MSVC discovery and linking. A
-  probe-only path-rendering mismatch still blocks the suite before the real Cargo E2E,
-  so Cargo integration and the exact-revision full matrix remain open.
+- Hosted Windows tests now prove both direct-rustc MSVC discovery and the real Cargo E2E.
+  Only the PowerShell release-smoke harness and exact-revision full matrix remain open;
+  the local Linux host cannot execute that native Windows validation.
 
 ## Hosted Windows Core-Tool Portability Follow-up (2026-07-21)
 
@@ -399,6 +399,10 @@ of falling through to Git's GNU `link.exe`. Keep the POSIX shell selection and r
 Cargo-test verification unchanged. Accept repeated separators produced by rustc's
 escaped diagnostic rendering of the absolute linker path without weakening the
 successful-link artifact check or accepting Git's `/usr/bin/link.exe` as rustc's linker.
+Repair only the Windows PowerShell smoke harness's case-insensitive automatic-variable
+collision by giving the fixture-home path a non-reserved local name. Preserve the
+`HOME` environment override and restoration, location and fixture cleanup, and real
+release-binary `--help`, `version`, and `doctor` execution.
 
 ### Acceptance Criteria
 
@@ -411,20 +415,24 @@ successful-link artifact check or accepting Git's `/usr/bin/link.exe` as rustc's
   remain excluded.
 - [x] POSIX shell selection and the existing environment redaction boundary remain
   otherwise unchanged.
-- [ ] The coding E2E still applies its patch only in the session worktree, runs the real
+- [x] The coding E2E still applies its patch only in the session worktree, runs the real
   fixture `cargo test`, and persists a successful terminal result on Windows.
-- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+- [ ] The Windows release-binary smoke executes `nib --help`, `nib version`, and
+  `nib doctor` with an isolated home without colliding with PowerShell automatic variables.
+- [ ] The exact implementation revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
 
 `src/sandbox/mod.rs`, `src/tools/core.rs`, `tests/test_runtime_e2e.rs`, focused sandbox
-environment tests, this FT-001 evidence, and the hosted Windows job.
+environment tests, `.github/workflows/ci.yml`, this FT-001 evidence, and the hosted
+Windows job.
 
 ### Validation Gates
 
 Focused sandbox and runtime E2E tests, `task fix`, `task test`, `task check`,
 `task docs:check`, Windows-target `task check:all-targets`, `git diff --check`, and the
-exact-revision hosted Linux/macOS/Windows matrix.
+exact-revision hosted Linux/macOS/Windows matrix including the Windows release-binary
+smoke.
 
 ### Reproduction Evidence
 
@@ -487,3 +495,17 @@ successfully with the absolute Visual Studio linker rendered as
 because it required the single-separator substring `/vc/tools/msvc/`. This confirms the
 environment and direct-rustc remediation, but the original coding E2E did not run and
 the Windows job and full matrix remain open.
+
+### Fourth Hosted Remediation Evidence
+
+Hosted run `29848582550` on revision `7ff72c857739be273531bd914ba5f50c66c82670`
+passed Validate and macOS, including coverage, release builds, and smokes. Windows passed
+the all-targets check, all 547 library tests including
+`sanitized_git_shell_discovers_the_absolute_msvc_linker`, all nine runtime E2Es including
+`full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_worktree`, and the
+release build. The smoke's `nib --help` and `nib version` invocations passed, then its
+PowerShell harness failed before `nib doctor` at `$home = Join-Path ...`: PowerShell
+variable names are case-insensitive, so `$home` attempted to overwrite the read-only
+automatic `$HOME` variable. This is a CI-harness failure rather than a release-binary,
+linker, or Cargo failure. The next revision must use a non-reserved fixture-home local
+while retaining the environment restoration, cleanup, doctor smoke, and full matrix.
