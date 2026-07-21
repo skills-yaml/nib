@@ -237,12 +237,18 @@ the explicit event details.
 
 Make the MCP terminal-tree fixture observe its native descendant at a test-owned
 heartbeat path without transporting a native Windows path through Git-for-Windows'
-POSIX shell. Pass only the heartbeat basename through the shell and keep the Windows
-native fixture's `current_exe().parent()` resolution. Present the four process-lifecycle
-repositories as valid Git-file worktrees so these tests do not spend their fixed startup
-deadline creating an unrelated nested session worktree before terminal dispatch. Poll
-the heartbeat at the fixture root on every platform. Do not change production shell
-selection, command syntax, timeout, sandbox dispatch, or Job Object ownership.
+POSIX shell. Pass only the heartbeat basename through the shell and resolve it against
+the fixture executable's directory inside the Windows native fixture. Present the four
+process-lifecycle repositories as valid Git-file worktrees so these tests do not spend
+their fixed startup deadline creating an unrelated nested session worktree before terminal
+dispatch. On Windows, create those temporary repositories beside `CARGO_BIN_EXE_nib` and
+hard-link that already-built image into each repository instead of copying the roughly
+254 MB debug executable to a fresh path. Invoke the co-located hard link by its relative
+path without an explicit MSYS `exec` overlay. Job assignment and inheritance retain the
+native tree whether the noninteractive shell remains its parent or optimizes its final
+external command. Poll the heartbeat at the fixture root on every platform. Keep the Unix
+copied-fixture and `exec` path unchanged, and do not change production shell selection,
+timeout, sandbox dispatch, or Job Object ownership.
 
 The same hosted run exposed a separate session-enumeration race while an MCP audit was
 being atomically replaced. T003 owns the production fix: public strict enumeration must
@@ -252,8 +258,9 @@ detachment failures.
 ### Acceptance Criteria
 
 - [x] Windows terminal-tree commands pass only the heartbeat basename across the POSIX
-  shell and poll the matching absolute path below the fixture executable's directory,
-  without increasing the startup timeout.
+  shell, invoke a same-volume hard link of the already-built native image by its relative
+  path without using MSYS `exec`, and poll below the fixture root without increasing the
+  timeout.
 - [x] The native fixture resolves a relative Windows heartbeat against
   `current_exe().parent()` before spawning its child and passes that child the resolved
   path; existing absolute heartbeat inputs remain unchanged.
@@ -313,6 +320,16 @@ observed `SessionStore::list_result` enumerate an audit JSON just as atomic publ
 evacuated the prior generation, producing a transient `NotFound` that strict enumeration
 misclassified as corruption.
 
+Hosted run `29808737976` proved the enumeration repair: the Windows
+`stdout_backpressure_does_not_block_eof_cleanup_on_windows` regression passed. Linux and
+macOS also remained green. The four inbound lifecycle tests still timed out, but their
+audit attempts were durable in under 100 milliseconds, consistent with the Git-file
+fixture removing worktree provisioning from the startup window. Their common remaining
+test-owned launch boundaries were a fresh temporary copy of the roughly 254 MB debug PE
+and the absolute path passed to Git-for-Windows `exec`. The next revision replaces the
+copy with a same-volume hard link and invokes that link relatively without `exec`, while
+retaining the production shell and Job Object containment path.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -336,6 +353,13 @@ a nested session worktree, and the deterministic session regression proved that 
 enumeration joins the mutation lock domain. Native Windows behavior and the exact hosted
 matrix remain open.
 
+The same-volume hard-link revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. The full 25-test Linux MCP suite again passed all four portable
+lifecycle regressions, and the Windows-target build compiled the same-volume temporary
+project, hard-link, relative launch, and no-`exec` branches. Native Windows execution and
+the exact hosted matrix remain open.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured
@@ -350,3 +374,5 @@ matrix remain open.
 - Cancellation protocol publication depends on durable audit persistence; persistence
   failure must continue to fail closed rather than emit an unaudited cancellation.
 - Windows Job Object runtime behavior has not been executed on this Linux host.
+- The Windows lifecycle fixture requires same-volume hard-link support and intentionally
+  fails during setup instead of falling back to a fresh executable copy.

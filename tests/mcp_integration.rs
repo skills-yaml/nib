@@ -113,15 +113,48 @@ fn shell_path(path: &Path) -> String {
 
 #[cfg(debug_assertions)]
 fn terminal_process_tree_command(executable: &Path, heartbeat: &Path) -> String {
+    #[cfg(windows)]
+    let nib = format!(
+        "./{}",
+        executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("terminal lifecycle fixture filename")
+    );
+    #[cfg(not(windows))]
+    let nib = shell_path(executable);
+    #[cfg(windows)]
+    let launch = shell_quote(&nib);
+    #[cfg(not(windows))]
+    let launch = format!("exec {}", shell_quote(&nib));
     format!(
-        "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} exec {nib}",
+        "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {launch}",
         activation = MCP_FIXTURE_ACTIVATION_ENV,
         token = shell_quote(MCP_FIXTURE_TOKEN),
         mode = MCP_FIXTURE_MODE_ENV,
         heartbeat_env = MCP_FIXTURE_HEARTBEAT_ENV,
         heartbeat = shell_quote(&shell_path(heartbeat)),
-        nib = shell_quote(&shell_path(executable)),
     )
+}
+
+#[cfg(debug_assertions)]
+fn terminal_tree_project() -> tempfile::TempDir {
+    #[cfg(windows)]
+    {
+        let executable = Path::new(env!("CARGO_BIN_EXE_nib"));
+        tempfile::Builder::new()
+            .prefix("nib-mcp-terminal-")
+            .tempdir_in(
+                executable
+                    .parent()
+                    .expect("terminal lifecycle fixture executable directory"),
+            )
+            .expect("same-volume portable MCP terminal fixture")
+    }
+    #[cfg(not(windows))]
+    {
+        tempfile::tempdir().expect("portable MCP terminal fixture")
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -131,10 +164,14 @@ fn install_terminal_tree_fixture(root: &Path) -> std::path::PathBuf {
     } else {
         "mcp-lifecycle-fixture"
     });
-    std::fs::copy(env!("CARGO_BIN_EXE_nib"), &executable)
-        .expect("copy terminal lifecycle fixture executable");
-    #[cfg(unix)]
+    #[cfg(windows)]
+    std::fs::hard_link(env!("CARGO_BIN_EXE_nib"), &executable)
+        .expect("hard-link terminal lifecycle fixture executable");
+    #[cfg(not(windows))]
     {
+        std::fs::copy(env!("CARGO_BIN_EXE_nib"), &executable)
+            .expect("copy terminal lifecycle fixture executable");
+
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = std::fs::metadata(&executable)
             .expect("terminal lifecycle fixture metadata")
@@ -280,6 +317,17 @@ async fn start_portable_terminal_tree(
     let requested_heartbeat = root.join(heartbeat_name);
     let fixture_heartbeat = std::path::PathBuf::from(heartbeat_name);
     let command = terminal_process_tree_command(executable, &fixture_heartbeat);
+    #[cfg(windows)]
+    {
+        assert!(
+            command.ends_with("'./mcp-lifecycle-fixture.exe'"),
+            "Windows lifecycle fixture must use its project-relative hard link: {command}"
+        );
+        assert!(
+            !command.contains(" exec "),
+            "Windows lifecycle fixture must avoid an explicit MSYS exec overlay: {command}"
+        );
+    }
     write_request(
         stdin,
         json!({
@@ -1300,7 +1348,7 @@ async fn final_audit_lock_stall_is_responsive_and_bounded() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
-    let project = tempfile::tempdir().expect("portable MCP cancellation fixture");
+    let project = terminal_tree_project();
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
@@ -1339,7 +1387,7 @@ async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
-    let project = tempfile::tempdir().expect("portable MCP disconnect fixture");
+    let project = terminal_tree_project();
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
@@ -1365,7 +1413,7 @@ async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
-    let project = tempfile::tempdir().expect("portable MCP fatal-input fixture");
+    let project = terminal_tree_project();
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     let (mut server, mut stdin, _stdout) = spawn_server(project.path());
@@ -1398,7 +1446,7 @@ async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform() {
-    let project = tempfile::tempdir().expect("portable MCP backpressure fixture");
+    let project = terminal_tree_project();
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = install_terminal_tree_fixture(project.path());
     std::fs::write(project.path().join("large.txt"), vec![b'x'; 220_000])
