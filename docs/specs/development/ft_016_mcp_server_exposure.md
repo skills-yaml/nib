@@ -243,14 +243,16 @@ four process-lifecycle repositories as valid Git-file worktrees so these tests d
 spend their fixed startup deadline creating an unrelated nested session worktree before
 terminal dispatch. On Windows, invoke the already-built `CARGO_BIN_EXE_nib` image instead
 of making a fresh copy or hard-link alias, and do so without an explicit MSYS `exec`
-overlay. Job assignment and inheritance retain the native tree whether the noninteractive
-shell remains its parent or optimizes its final external command. Poll the heartbeat at
-the fixture root on every platform and persist a test-only native trace beside the fixture
-image with the executable, working directory, raw and resolved heartbeat, child entry, and
-first flush. Keep trace writes non-fatal to the lifecycle processes, but require the
-success path to parse and verify all trace stages within a separate bounded deadline. Keep
-the Unix copied-fixture and `exec` path unchanged, and do not change production shell
-selection, timeout, sandbox dispatch, or Job Object ownership.
+overlay. Publish a shell-entry marker before the native launch and follow the fixture with
+a status-preserving shell builtin so Git Bash cannot implicitly tail-overlay its final
+external command. Job assignment and inheritance then retain both the shell parent and its
+native descendant. Poll the heartbeat at the fixture root on every platform and persist a
+test-only native trace beside the fixture image with the executable, working directory,
+raw and resolved heartbeat, child entry, and first flush. Keep trace writes non-fatal to
+the lifecycle processes, but require the success path to parse and verify all trace stages
+within a separate bounded deadline. Keep the Unix copied-fixture and `exec` path unchanged,
+and do not change production shell selection, timeout, sandbox dispatch, or Job Object
+ownership.
 
 The same hosted run exposed a separate session-enumeration race while an MCP audit was
 being atomically replaced. T003 owns the production fix: public strict enumeration must
@@ -262,6 +264,9 @@ detachment failures.
 - [x] Windows terminal-tree commands pass only the heartbeat basename across the POSIX
   shell, invoke the already-built native image without a copy, hard link, or MSYS `exec`,
   and poll below the fixture root without increasing the timeout.
+- [x] Windows publishes a shell-entry marker before the native launch and retains a
+  status-preserving shell continuation after it, preventing implicit tail-overlay while
+  preserving the fixture exit status.
 - [x] The native fixture resolves a relative Windows heartbeat against
   `current_dir()` before spawning its child and passes that child the resolved path;
   existing absolute heartbeat inputs remain unchanged.
@@ -346,6 +351,18 @@ log cannot prove that path. The next revision removes both executable aliases an
 `current_exe()`-relative test state, while adding a native trace that exposes every path if
 startup still fails.
 
+Hosted run `29816279256` passed Linux and macOS completely and again passed the native
+Windows Job supervisor, all outbound lifecycle tests, and strict session enumeration. The
+four inbound lifecycle commands still remained active for their ten-second startup window,
+but neither the fixture-root heartbeat nor the precreated fixture-image trace changed. The
+same original image starts directly in the passing outbound tests, while copy, hard-link,
+and original-image variants all fail only behind Git Bash. This localizes the remaining
+boundary to the shell's native launch before observable fixture entry. Because the command
+still ended with the PE, the evidence is consistent with Bash selecting an implicit
+tail-overlay path despite removal of explicit `exec`; the empty trace does not prove that
+selection directly. The next revision publishes shell entry and forces a status-preserving
+continuation after the fixture.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -383,6 +400,14 @@ The direct-image and project-working-directory revision passed `task fix`, `task
 fixture-entry, child-entry, and first-flush trace. The Windows target compiled the
 original-image launch, `current_dir()` heartbeat resolution, and fixture-image-relative
 trace branches. Native Windows execution and the exact hosted matrix remain open.
+
+The forced-shell-continuation revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. The full 25-test Linux MCP suite again passed all four portable
+lifecycle regressions and preserved the Unix copied-fixture `exec` path. The Windows target
+compiled the shell-entry marker, original-image launch, and status-preserving continuation
+that prevents the native fixture from remaining Bash's final external command. Native
+Windows execution and the exact hosted matrix remain open.
 
 ## Remaining Implementation Plan
 
