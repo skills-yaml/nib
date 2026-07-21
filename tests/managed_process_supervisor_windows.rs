@@ -130,9 +130,11 @@ fn supervisor_helper() {
             std::fs::write(root.join("supervisor.ready"), b"ready")
                 .map_err(|error| format!("failed to publish readiness: {error}"))
         },
-    )
-    .expect("supervised fixture output");
-    publish_terminal(&root, &output.cleanup_proof.cleanup_lease_id);
+    );
+    match output {
+        Ok(output) => publish_terminal(&root, &output.cleanup_proof.cleanup_lease_id),
+        Err(error) => publish_supervisor_failure(&root, &error),
+    }
 }
 
 fn worker_helper() {
@@ -169,14 +171,27 @@ fn publish_terminal(root: &Path, cleanup_lease_id: &str) {
     terminal.sync_all().expect("durable terminal publication");
 }
 
+fn publish_supervisor_failure(root: &Path, error: &str) {
+    let pending = root.join("supervisor.failed.pending");
+    let published = root.join("supervisor.failed");
+    let mut failure = std::fs::File::create(&pending).expect("supervisor failure staging");
+    failure
+        .write_all(error.as_bytes())
+        .expect("write supervisor failure");
+    failure.sync_all().expect("durable supervisor failure");
+    drop(failure);
+    std::fs::rename(&pending, &published).expect("supervisor failure publication");
+}
+
 fn assert_terminal_after_cleanup(root: &Path) {
-    wait_for_file(&root.join("terminal.published"), Duration::from_secs(10));
+    wait_for_terminal_or_failure(root, Duration::from_secs(30));
     let store = ProcessScopeStore::open(root).expect("scope store");
     let scope = store.load(SCOPE_ID).expect("completed scope");
     assert_eq!(scope.status, ProcessScopeStatus::Complete);
     assert_eq!(scope.backend, ProcessScopeBackend::WindowsJobObject);
     let proof = scope.cleanup_proof.as_ref().expect("cleanup proof");
     assert!(proof.descendants_reaped);
+    assert_eq!(proof.outcome, "owner_eof");
     assert_eq!(
         store.cleanup_lease_state(&scope).expect("cleanup lease"),
         CleanupLeaseState::Missing
@@ -188,6 +203,24 @@ fn assert_terminal_after_cleanup(root: &Path) {
     assert_eq!(publication["cleanup_lease_id"], proof.cleanup_lease_id);
     std::thread::sleep(Duration::from_millis(2200));
     assert!(!root.join("descendant.survived").exists());
+}
+
+fn wait_for_terminal_or_failure(root: &Path, timeout: Duration) {
+    let terminal = root.join("terminal.published");
+    let failure = root.join("supervisor.failed");
+    let deadline = Instant::now() + timeout;
+    while !terminal.is_file() && !failure.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if failure.is_file() {
+        let error = std::fs::read_to_string(&failure).expect("supervisor failure");
+        panic!("managed-process supervisor failed: {error}");
+    }
+    assert!(
+        terminal.is_file(),
+        "timed out waiting for {}",
+        terminal.display()
+    );
 }
 
 fn fixture_root() -> PathBuf {

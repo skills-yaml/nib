@@ -193,8 +193,9 @@ impl WindowsJob {
 
     /// Terminates the complete job and waits until no assigned process remains.
     ///
-    /// This is public only for the `nib` binary's synchronous bounded-command
-    /// launcher. Callers must retain this handle until the result is known.
+    /// This is public for the `nib` binary's synchronous bounded-command launcher;
+    /// the library supervisor uses the same proof internally. Callers must retain
+    /// this handle until the result is known.
     #[doc(hidden)]
     pub fn terminate_and_wait(&mut self, timeout: Duration) -> io::Result<()> {
         let deadline = Instant::now() + timeout;

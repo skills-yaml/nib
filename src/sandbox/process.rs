@@ -1387,6 +1387,8 @@ struct SupervisedChild {
     backend: SupervisedBackendHandle,
     scope_root: ProcessIdentity,
     backend_cleanup_started: bool,
+    #[cfg(windows)]
+    windows_job_cleanup_verified: bool,
     direct_reaped: bool,
     cleanup_complete: bool,
 }
@@ -1445,7 +1447,16 @@ impl SupervisedChild {
                     }
                 }
                 #[cfg(windows)]
-                SupervisedBackendHandle::WindowsJob(job) => job.terminate(),
+                SupervisedBackendHandle::WindowsJob(job) => {
+                    match job.terminate_and_wait(SUPERVISOR_CLEANUP_TIMEOUT) {
+                        Ok(()) => self.windows_job_cleanup_verified = true,
+                        Err(error) => {
+                            first_error = Some(format!(
+                                "failed to terminate and verify Windows Job cleanup: {error}"
+                            ));
+                        }
+                    }
+                }
             }
             if !self.direct_reaped {
                 match self.child.kill() {
@@ -1533,7 +1544,7 @@ impl SupervisedChild {
         #[cfg(target_os = "linux")]
         let verified =
             wait_for_linux_identity_absent(&self.scope_root, SUPERVISOR_CLEANUP_TIMEOUT)?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
             if self.scope_root.still_matches() {
                 return Ok(false);
@@ -1546,6 +1557,9 @@ impl SupervisedChild {
         };
         #[cfg(windows)]
         let verified = {
+            if !self.direct_reaped || !self.windows_job_cleanup_verified {
+                return Ok(false);
+            }
             let SupervisedBackendHandle::WindowsJob(job) = &mut self.backend;
             job.wait_until_empty(SUPERVISOR_CLEANUP_TIMEOUT)
                 .map_err(|error| format!("failed to verify Windows Job cleanup: {error}"))?
@@ -1841,6 +1855,7 @@ fn spawn_supervised_command_inner(
             backend: SupervisedBackendHandle::WindowsJob(job),
             scope_root,
             backend_cleanup_started: false,
+            windows_job_cleanup_verified: false,
             direct_reaped: false,
             cleanup_complete: false,
         })

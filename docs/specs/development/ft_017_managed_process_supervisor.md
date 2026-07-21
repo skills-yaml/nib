@@ -512,6 +512,59 @@ exact containment probe, checks, tests, coverage, release build, and owner-loss 
 revision `3d0cc9b82bc2`. The Windows all-target graph cross-compiles; native hosted macOS
 evidence remains open.
 
+## Hosted Windows Cleanup-Proof Follow-up III (2026-07-21)
+
+### Scope
+
+Make Windows foreground cleanup proof use the authorities retained by the supervisor.
+Use the Job Object's bounded terminate-and-wait fence, then require the exact
+direct-child handle wait to have completed and the retained Job Object to report zero
+active processes. Do not require reopening the terminated child's PID to fail before
+accepting those stronger authorities. Keep the macOS process-identity check and Linux
+namespace proof unchanged, and do not enable production subagent delegation on Windows.
+
+### Acceptance Criteria
+
+- [x] Windows cleanup completes only after the owned direct-child handle is signalled,
+  its wait completes, and the retained Job Object has terminated and verified its stable
+  process generation.
+- [x] Windows cleanup proof does not depend on reopening a terminated PID failing while
+  the supervisor retains stronger direct-child and Job Object authorities.
+- [ ] The native Windows owner-loss regression publishes its terminal result only after
+  the Job-contained descendant is gone; the explicit production rejection remains.
+- [x] A native supervisor error is reported directly by the fixture instead of being
+  masked as a terminal-publication timeout.
+- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+
+### Affected Areas
+
+`src/sandbox/process.rs`, `src/sandbox/windows_job.rs`,
+`tests/managed_process_supervisor_windows.rs`, FT-017 cleanup proof evidence, and the
+hosted Windows job.
+
+### Validation Gates
+
+The native Windows supervisor regression, `task test`, `task check`, `task docs:check`,
+Windows-target `task check:all-targets`, and the exact-revision hosted CI matrix.
+
+### Reproduction Evidence
+
+Hosted run `29798671325` passed the repaired Windows installer fixtures and reached the
+native owner-loss regression for the first time. The owner, supervisor, worker, and
+descendant all launched, but terminal publication was still absent ten seconds after the
+owner was killed; redirected supervisor stderr masked the returned error. Code-path
+inspection identified the non-Linux verifier reopening the terminated direct child's PID
+before Windows Job Object accounting, even though the supervisor still retained the
+exact process handle. The same revision passed the complete Linux Validate and macOS
+jobs.
+
+### Local Validation Evidence
+
+The final implementation tree passed `task fix`, `task test`, `task check`,
+`task docs:check`, and
+`task check:all-targets TARGET=x86_64-pc-windows-msvc`. Native Windows execution and
+the exact hosted CI matrix remain open until the pushed revision completes on GitHub.
+
 ## Remaining Implementation Plan
 
 1. Execute the native Windows Job Object and macOS group-contained tests on hosted
