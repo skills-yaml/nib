@@ -78,6 +78,7 @@ fn git_repository() -> TempDir {
         &["config", "user.email", "nib-e2e@example.invalid"],
     );
     git(directory.path(), &["config", "user.name", "nib e2e"]);
+    git(directory.path(), &["config", "core.autocrlf", "false"]);
     std::fs::write(directory.path().join(".gitignore"), ".nib/\n").expect("gitignore");
     std::fs::write(
         directory.path().join("AGENTS.md"),

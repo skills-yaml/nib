@@ -463,6 +463,47 @@ not run the unrelated Git availability diagnostic before entering cancellable wo
 creation; the portable MCP regression that stalls every Git invocation passes 10/10 and
 returns a reconciled cancellation response without publishing subagent state.
 
+## Hosted Windows Git Fixture Follow-up (2026-07-21)
+
+### Scope
+
+Make Git-backed integration repositories deterministic when the host Git installation
+enables line-ending conversion through system or global configuration. Recovery
+fixtures that manually establish an already-integrated commit and executor/end-to-end
+fixtures that inspect patched worktree bytes must use the same repository-local
+conversion policy seen by nib's managed Git, which deliberately disables ambient
+configuration sources.
+
+### Acceptance Criteria
+
+- [x] Git-backed delegation, executor, and end-to-end integration repositories pin
+  `core.autocrlf=false` before their first commit, so fixture setup and managed Git
+  interpret worktree bytes consistently.
+- [ ] Already-integrated merge recovery remains clean and succeeds on Windows when the
+  host Git installation enables `core.autocrlf` outside the repository.
+- [ ] Worktree patch assertions remain byte-stable when Windows enables ambient
+  line-ending conversion.
+- [ ] The exact PR revision passes the hosted Windows integration suites and full CI
+  matrix without weakening managed Git's ambient-configuration isolation.
+
+### Affected Areas
+
+`tests/delegation.rs`, `tests/executor.rs`, `tests/test_runtime_e2e.rs`, FT-015 validation
+evidence, and the hosted CI matrix.
+
+### Validation Gates
+
+`task test`, `task check`, Windows-target `task check:all-targets`, and the exact-revision
+hosted Linux, macOS, and Windows jobs.
+
+### Local Validation Evidence
+
+With an isolated global Git configuration setting `core.autocrlf=true`, `task test`
+passes 617 library tests, 62 binary tests, and every integration and documentation suite.
+This includes 21 delegation tests, 15 executor tests, and 9 end-to-end runtime tests.
+The canonical `task check` gate passes, and the all-target/all-feature graph cross-checks
+for `x86_64-pc-windows-msvc`.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows/macOS runtime gates for worktree identity/deletion and the FT-017
@@ -476,4 +517,7 @@ returns a reconciled cancellation response without publishing subagent state.
   guessing ownership would be destructive.
 - Residual physical cleanup is reported when exact namespace ownership cannot be carried
   through unlink; hostile same-UID peers require an external isolation boundary.
+- A real Windows repository whose checkout semantics exist only in ambient Git
+  configuration can appear dirty to isolated managed Git. Supporting that case while
+  retaining FT-015 configuration isolation requires a separate policy design.
 - Windows and macOS runtime behavior remains unexecuted on the local Linux host.

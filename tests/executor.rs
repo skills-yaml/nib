@@ -212,6 +212,7 @@ fn git_repository() -> TempDir {
         &["config", "user.email", "nib-tests@example.invalid"],
     );
     git(directory.path(), &["config", "user.name", "nib tests"]);
+    git(directory.path(), &["config", "core.autocrlf", "false"]);
     std::fs::write(directory.path().join("note.txt"), "old\n").expect("fixture");
     git(directory.path(), &["add", "note.txt"]);
     git(directory.path(), &["commit", "-qm", "initial"]);
