@@ -639,9 +639,6 @@ impl ToolExecutor {
                     }
                 }
             }
-            if call.tool_name == "run_terminal" {
-                crate::sandbox::trace_terminal_startup("executor.attempt.start");
-            }
             if let Err(error) = self.record_attempt(&call, session_id) {
                 return ToolResult {
                     tool_name: call.tool_name.clone(),
@@ -652,9 +649,6 @@ impl ToolExecutor {
                     approval_granted: false,
                     approval_source: Some("audit".to_string()),
                 };
-            }
-            if call.tool_name == "run_terminal" {
-                crate::sandbox::trace_terminal_startup("executor.attempt_recorded");
             }
         }
         let metadata = get_tool_metadata(&call.tool_name);
@@ -688,13 +682,7 @@ impl ToolExecutor {
             classify_tool_call(&call)
         };
         let effective_execution_config = self.effective_execution_config(level, risk);
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.plan_lookup.start");
-        }
         let plan_id = self.resolve_plan_id(effective_session);
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.plan_lookup.complete");
-        }
 
         let input_schema = if let Some(metadata) = metadata {
             Ok(metadata.input_schema.clone())
@@ -753,10 +741,6 @@ impl ToolExecutor {
                 plan_id,
             );
         }
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.schema.complete");
-            crate::sandbox::trace_terminal_startup("executor.scope.start");
-        }
 
         let effective_root = match self.resolve_scope(&call) {
             Ok(root) => root,
@@ -774,9 +758,6 @@ impl ToolExecutor {
                 )
             }
         };
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.scope.complete");
-        }
 
         if (matches!(level, PermissionLevel::Network) || risk == ToolRisk::Network)
             && effective_execution_config.boundaries.network == "disabled"
@@ -820,15 +801,9 @@ impl ToolExecutor {
             }
         }
 
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.approval.start");
-        }
         let approval = self
             .handle_approval(&call, level, risk, requires_approval, &effective_root)
             .await;
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.approval.complete");
-        }
         if !approval.granted {
             return self.finish_failure(
                 &call,
@@ -843,9 +818,6 @@ impl ToolExecutor {
             );
         }
 
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.worktree.start");
-        }
         let worktree = match self
             .ensure_worktree(requires_worktree, &effective_root, effective_session)
             .await
@@ -865,9 +837,6 @@ impl ToolExecutor {
                 )
             }
         };
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.worktree.complete");
-        }
 
         let execution_root = worktree.as_deref().unwrap_or(&effective_root);
         let mut dispatch_arguments = call.arguments.clone();
@@ -915,9 +884,6 @@ impl ToolExecutor {
         }
 
         let terminal_output_callback = self.redacted_terminal_output_callback();
-        if call.tool_name == "run_terminal" {
-            crate::sandbox::trace_terminal_startup("executor.dispatch.start");
-        }
         let outcome = if call.tool_name == "merge_subagent_worktree" {
             self.execute_subagent_merge(&dispatch_arguments, &effective_root, effective_session)
                 .await

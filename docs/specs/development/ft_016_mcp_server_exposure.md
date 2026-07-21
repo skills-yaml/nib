@@ -394,7 +394,7 @@ execution policy, timeouts, shell selection, or containment semantics.
   resolution, process creation, Job assignment, and primary-thread resume.
 - [x] All four portable lifecycle startup failures include the test-owned trace in their
   diagnostic output.
-- [ ] The exact hosted Windows run identifies the final completed startup stage before the
+- [x] The exact hosted Windows run identifies the final completed startup stage before the
   shell-entry marker.
 
 ### Affected Areas
@@ -468,7 +468,65 @@ sandbox, and child-spawn stages under a bounded success-path poll. The trace req
 an internal token and an absolute precreated regular file, caps output, ignores write
 failures, records only static stage names, and is a no-op in release builds. Fresh spec-
 compliance and code-quality reviews found no remaining issues after the success-path trace
-race was removed. Native Windows trace evidence and the exact hosted matrix remain open.
+race was removed.
+
+Hosted run `29826648309` passed Validate and macOS completely. Its Windows job again failed
+only the four inbound MCP lifecycle tests. Every failure recorded successful executor
+admission, approval, worktree resolution, sandbox capability probing, shell resolution,
+Windows process creation, Job assignment, primary-thread resume, and
+`sandbox.child_spawn.complete`, but neither the absolute shell-entry marker nor the
+heartbeat appeared. The command therefore resumed successfully but did not execute its
+first shell builtin. The remaining MCP-specific startup difference is inherited stdin:
+the noninteractive terminal child inherits the server's live JSON-RPC pipe while the
+server concurrently reads requests from that pipe.
+
+## Noninteractive Terminal Stdin Remediation (2026-07-21)
+
+### Scope
+
+Make the existing noninteractive `run_terminal` contract explicit at the sandbox process
+boundary. Attach a null stdin handle to direct-shell and bubblewrap commands in both
+streaming and collected-output paths so terminal workloads receive immediate EOF and
+cannot read MCP protocol or approval input. Require each portable MCP lifecycle fixture to
+observe EOF before creating its startup marker. Remove the temporary pre-shell trace hooks
+after retaining their hosted evidence here. Preserve stdout and stderr streaming,
+cancellation behavior, sandbox policy, Windows Job containment, and the public tool schema.
+
+### Acceptance Criteria
+
+- [x] Direct-shell and bubblewrap terminal commands receive a null stdin handle in both
+  streaming and collected-output paths.
+- [x] The four portable MCP lifecycle fixtures require immediate stdin EOF before starting
+  their descendant workload.
+- [x] Temporary pre-shell trace hooks and fixture plumbing are removed after their hosted
+  diagnostic evidence is recorded.
+- [x] Canonical local, documentation, and Windows-target validation gates pass.
+- [ ] The exact hosted Windows revision passes all four portable MCP lifecycle tests.
+- [ ] The exact hosted Linux, macOS, and Windows matrix is green.
+
+### Affected Areas
+
+`src/sandbox/mod.rs`, `src/tools/executor.rs`, `src/tools/core.rs`,
+`src/sandbox/windows_job.rs`, `tests/mcp_integration.rs`, and FT-016 validation evidence.
+
+### Validation Gates
+
+The four portable lifecycle tests, `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`,
+`git diff --check`, fresh spec-compliance and code-quality reviews, and exact-revision
+hosted CI.
+
+### Local Validation Evidence
+
+The noninteractive-stdin revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. Both the standalone test gate and the complete test rerun inside
+`task check` passed all 25 MCP integration tests, including the four portable lifecycle
+regressions with their new EOF prerequisite. The first `task test` attempt encountered the
+pre-existing Linux `crashed_supervisor_is_recovered_only_after_pid_namespace_exit` race;
+that unrelated test passed on both subsequent canonical runs and does not execute the
+modified terminal sandbox path. Native Windows behavior and the exact hosted matrix remain
+open.
 
 ## Remaining Implementation Plan
 

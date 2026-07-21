@@ -8,10 +8,6 @@ pub mod worktree;
 
 use crate::config::BoundaryConfig;
 use std::collections::{HashMap, VecDeque};
-#[cfg(debug_assertions)]
-use std::fs::OpenOptions;
-#[cfg(debug_assertions)]
-use std::io::Write;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -23,42 +19,6 @@ use tokio::process::Child;
 
 const POSIX_SHELL_ENV: &str = "NIB_POSIX_SHELL";
 pub(crate) const MANAGED_PROCESS_SCOPE_ENV: &str = "NIB_MANAGED_PROCESS_SCOPE";
-#[cfg(debug_assertions)]
-const TERMINAL_STAGE_TRACE_ENV: &str = "NIB_INTERNAL_TERMINAL_STAGE_TRACE";
-#[cfg(debug_assertions)]
-const TERMINAL_STAGE_TRACE_TOKEN_ENV: &str = "NIB_INTERNAL_TERMINAL_STAGE_TRACE_TOKEN";
-#[cfg(debug_assertions)]
-const TERMINAL_STAGE_TRACE_TOKEN: &str = "nib-mcp-terminal-stage-trace-v1";
-#[cfg(debug_assertions)]
-const TERMINAL_STAGE_TRACE_MAX_BYTES: u64 = 64 * 1024;
-
-#[cfg(debug_assertions)]
-pub(crate) fn trace_terminal_startup(stage: &'static str) {
-    if std::env::var(TERMINAL_STAGE_TRACE_TOKEN_ENV).as_deref() != Ok(TERMINAL_STAGE_TRACE_TOKEN) {
-        return;
-    }
-    let Some(path) = std::env::var_os(TERMINAL_STAGE_TRACE_ENV) else {
-        return;
-    };
-    let path = PathBuf::from(path);
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-        return;
-    };
-    if !path.is_absolute()
-        || !metadata.file_type().is_file()
-        || metadata.len() >= TERMINAL_STAGE_TRACE_MAX_BYTES
-    {
-        return;
-    }
-    let Ok(mut trace) = OpenOptions::new().create(false).append(true).open(path) else {
-        return;
-    };
-    let _ = writeln!(trace, "{stage}");
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-pub(crate) fn trace_terminal_startup(_stage: &'static str) {}
 
 const INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[
     "PATH",
@@ -424,20 +384,13 @@ impl BoundedOutput {
 }
 
 pub fn detect_capabilities() -> SandboxCapabilities {
-    trace_terminal_startup("capabilities.bwrap.start");
     let bwrap_installed = command_succeeds("bwrap", &["--version"]);
     let (bwrap_available, bwrap_error) = if bwrap_installed {
         probe_bwrap()
     } else {
         (false, Some("bwrap executable not found".to_string()))
     };
-    trace_terminal_startup("capabilities.bwrap.complete");
-    trace_terminal_startup("capabilities.managed.start");
     let (managed_process_available, managed_process_error) = managed_process_availability();
-    trace_terminal_startup("capabilities.managed.complete");
-    trace_terminal_startup("capabilities.git.start");
-    let git_available = command_succeeds("git", &["--version"]);
-    trace_terminal_startup("capabilities.git.complete");
 
     SandboxCapabilities {
         bwrap_installed,
@@ -445,7 +398,7 @@ pub fn detect_capabilities() -> SandboxCapabilities {
         bwrap_error,
         managed_process_available,
         managed_process_error,
-        git_available,
+        git_available: command_succeeds("git", &["--version"]),
     }
 }
 
@@ -601,15 +554,11 @@ pub async fn run_sandboxed_streaming_with_environment(
     max_output_bytes: usize,
     callback: Option<OutputCallback>,
 ) -> Result<(BoundedOutput, Option<Vec<String>>), String> {
-    trace_terminal_startup("sandbox.streaming.enter");
     if max_output_bytes == 0 {
         return Err("sandbox output limit must be greater than zero".to_string());
     }
     let cwd = canonical_directory(cwd)?;
-    trace_terminal_startup("sandbox.cwd.complete");
-    trace_terminal_startup("sandbox.capabilities.start");
     let capabilities = detect_capabilities();
-    trace_terminal_startup("sandbox.capabilities.complete");
     if provider == "internal" || profile == "internal" {
         ensure_direct_execution_allowed(boundaries)?;
         let mut process = direct_shell_process(command, &cwd)?;
@@ -630,6 +579,7 @@ pub async fn run_sandboxed_streaming_with_environment(
         let mut process = tokio::process::Command::new("bwrap");
         process
             .args(&args)
+            .stdin(Stdio::null())
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -662,10 +612,8 @@ async fn capture_bounded(
     callback: Option<OutputCallback>,
     isolate_process_group: bool,
 ) -> Result<BoundedOutput, String> {
-    trace_terminal_startup("sandbox.child_spawn.start");
     let mut child = spawn_child(&mut command, isolate_process_group)
         .map_err(|error| format!("sandbox command failed to start: {error}"))?;
-    trace_terminal_startup("sandbox.child_spawn.complete");
     let stdout = child
         .stdout
         .take()
@@ -773,11 +721,13 @@ async fn run_direct(
 }
 
 fn direct_shell_process(command: &str, cwd: &Path) -> Result<tokio::process::Command, String> {
-    trace_terminal_startup("sandbox.shell_resolution.start");
     let shell = command_shell_path()?;
-    trace_terminal_startup("sandbox.shell_resolution.complete");
     let mut process = tokio::process::Command::new(shell);
-    process.arg("-c").arg(command).current_dir(cwd);
+    process
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null());
     Ok(process)
 }
 
@@ -1164,6 +1114,7 @@ async fn run_bwrap(
     let mut process = tokio::process::Command::new("bwrap");
     process
         .args(&args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_child_environment(&mut process, environment);

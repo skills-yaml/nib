@@ -108,13 +108,11 @@ impl WindowsJob {
             .map(raw_handle)
             .ok_or_else(|| io::Error::other("Windows Job Object is already closed"))?;
 
-        super::trace_terminal_startup("windows.job_assign.start");
         if unsafe { AssignProcessToJobObject(job_handle, process_handle) } == 0 {
             return Err(last_os_error(
                 "cannot assign suspended child to Windows Job Object",
             ));
         }
-        super::trace_terminal_startup("windows.job_assign.complete");
 
         resume_only_thread(process_id)
     }
@@ -580,16 +578,11 @@ impl Drop for WindowsJob {
 /// for Windows argument quoting, environment blocks, stdio handles, and async wait.
 /// The primary thread is resumed only after successful job assignment.
 pub(super) fn spawn_contained(command: &mut Command) -> io::Result<(Child, WindowsJob)> {
-    super::trace_terminal_startup("windows.job_create.start");
     let mut job = WindowsJob::create()?;
-    super::trace_terminal_startup("windows.job_create.complete");
     configure_suspended_spawn(command);
 
-    super::trace_terminal_startup("windows.child_spawn.start");
     let mut child = command.spawn()?;
-    super::trace_terminal_startup("windows.child_spawn.complete");
     job.attach_and_resume(&mut child)?;
-    super::trace_terminal_startup("windows.attach.complete");
     Ok((child, job))
 }
 
@@ -609,10 +602,7 @@ fn configure_suspended_spawn(command: &mut Command) {
 }
 
 fn resume_only_thread(process_id: u32) -> io::Result<()> {
-    super::trace_terminal_startup("windows.thread_snapshot.start");
     let thread_id = only_thread_id(process_id)?;
-    super::trace_terminal_startup("windows.thread_snapshot.complete");
-    super::trace_terminal_startup("windows.thread_open.start");
     let thread_handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
     if thread_handle.is_null() {
         return Err(last_os_error(
@@ -620,9 +610,7 @@ fn resume_only_thread(process_id: u32) -> io::Result<()> {
         ));
     }
     let thread_handle = owned_handle(thread_handle);
-    super::trace_terminal_startup("windows.thread_open.complete");
 
-    super::trace_terminal_startup("windows.thread_resume.start");
     let previous_suspend_count = unsafe { ResumeThread(raw_handle(&thread_handle)) };
     if previous_suspend_count == u32::MAX {
         return Err(last_os_error(
@@ -634,7 +622,6 @@ fn resume_only_thread(process_id: u32) -> io::Result<()> {
             "suspended Windows child had unexpected primary-thread suspend count {previous_suspend_count}"
         )));
     }
-    super::trace_terminal_startup("windows.thread_resume.complete");
 
     Ok(())
 }

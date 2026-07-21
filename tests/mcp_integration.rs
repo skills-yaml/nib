@@ -25,10 +25,6 @@ const MCP_FIXTURE_MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 const MCP_FIXTURE_HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
 #[cfg(all(debug_assertions, not(windows)))]
 const MCP_FIXTURE_TRACE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_TRACE";
-const TERMINAL_STAGE_TRACE_ENV: &str = "NIB_INTERNAL_TERMINAL_STAGE_TRACE";
-const TERMINAL_STAGE_TRACE_TOKEN_ENV: &str = "NIB_INTERNAL_TERMINAL_STAGE_TRACE_TOKEN";
-const TERMINAL_STAGE_TRACE_TOKEN: &str = "nib-mcp-terminal-stage-trace-v1";
-const TERMINAL_STAGE_TRACE_NAME: &str = "terminal-startup.trace";
 const MCP_SESSION_OBSERVATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(all(debug_assertions, target_os = "linux"))]
 const MCP_GIT_FIXTURE_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
@@ -127,7 +123,7 @@ fn terminal_process_tree_command(
 ) -> String {
     let _ = (executable, trace);
     format!(
-        "printf . > {shell_entry} || exit 97; (while :; do printf . >> {heartbeat} || exit 98; sleep 0.025; done) & wait",
+        "if IFS= read -r _; then exit 96; fi; printf . > {shell_entry} || exit 97; (while :; do printf . >> {heartbeat} || exit 98; sleep 0.025; done) & wait",
         heartbeat = shell_quote(&shell_path(heartbeat)),
         shell_entry = shell_quote(&shell_path(shell_entry)),
     )
@@ -145,7 +141,7 @@ fn terminal_process_tree_command(
     let nib = shell_path(executable);
     let launch = format!("exec {}", shell_quote(&nib));
     format!(
-        "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {trace_env}={trace} {launch}",
+        "if IFS= read -r _; then exit 96; fi; {activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {trace_env}={trace} {launch}",
         activation = MCP_FIXTURE_ACTIVATION_ENV,
         token = shell_quote(MCP_FIXTURE_TOKEN),
         mode = MCP_FIXTURE_MODE_ENV,
@@ -419,7 +415,7 @@ fn spawn_server(
     tokio::process::ChildStdin,
     BufReader<tokio::process::ChildStdout>,
 ) {
-    spawn_server_with_options(root, None, None)
+    spawn_server_with_path(root, None)
 }
 
 fn spawn_server_with_path(
@@ -430,49 +426,17 @@ fn spawn_server_with_path(
     tokio::process::ChildStdin,
     BufReader<tokio::process::ChildStdout>,
 ) {
-    spawn_server_with_options(root, path, None)
-}
-
-#[cfg(debug_assertions)]
-fn spawn_terminal_tree_server(
-    root: &Path,
-) -> (
-    tokio::process::Child,
-    tokio::process::ChildStdin,
-    BufReader<tokio::process::ChildStdout>,
-) {
-    let trace = root.join(TERMINAL_STAGE_TRACE_NAME);
-    std::fs::write(&trace, "test.trace_ready\n").expect("initialize terminal stage trace");
-    spawn_server_with_options(root, None, Some(&trace))
-}
-
-fn spawn_server_with_options(
-    root: &Path,
-    path: Option<&std::ffi::OsStr>,
-    stage_trace: Option<&Path>,
-) -> (
-    tokio::process::Child,
-    tokio::process::ChildStdin,
-    BufReader<tokio::process::ChildStdout>,
-) {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nib"));
     command
         .arg("mcp-server")
         .current_dir(root)
         .env("TOKIO_WORKER_THREADS", "1")
-        .env_remove(TERMINAL_STAGE_TRACE_ENV)
-        .env_remove(TERMINAL_STAGE_TRACE_TOKEN_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
     if let Some(path) = path {
         command.env("PATH", path);
-    }
-    if let Some(stage_trace) = stage_trace {
-        command
-            .env(TERMINAL_STAGE_TRACE_ENV, stage_trace)
-            .env(TERMINAL_STAGE_TRACE_TOKEN_ENV, TERMINAL_STAGE_TRACE_TOKEN);
     }
     let mut child = command.spawn().expect("MCP server starts");
     let stdin = child.stdin.take().expect("MCP server stdin");
@@ -578,17 +542,15 @@ async fn start_portable_terminal_tree(
             .as_ref()
             .map(std::fs::read_to_string);
         let shell_entry = std::fs::read_to_string(&requested_shell_entry);
-        let stage_trace = std::fs::read_to_string(root.join(TERMINAL_STAGE_TRACE_NAME));
         let git_file = std::fs::read_to_string(root.join(".git"));
         let root_entries = diagnostic_directory_entries(root);
         let session_worktree_entries = diagnostic_directory_entries(
             &root.join(".nib/worktrees/sessions"),
         );
         panic!(
-            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_shell_entry={requested_shell_entry:?}; shell_entry={shell_entry:#?}; stage_trace={stage_trace:#?}; requested_trace={requested_trace:?}; trace={trace:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
+            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_shell_entry={requested_shell_entry:?}; shell_entry={shell_entry:#?}; requested_trace={requested_trace:?}; trace={trace:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
         );
     });
-    verify_terminal_stage_trace(root).await;
     #[cfg(windows)]
     assert!(
         std::fs::metadata(&requested_shell_entry).is_ok_and(|metadata| metadata.len() > 0),
@@ -614,96 +576,6 @@ async fn start_portable_terminal_tree(
     );
     wait_for_audit_attempt(root, heartbeat_name).await;
     heartbeat
-}
-
-#[cfg(debug_assertions)]
-async fn verify_terminal_stage_trace(root: &Path) {
-    let trace_path = root.join(TERMINAL_STAGE_TRACE_NAME);
-    let complete = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
-            if terminal_stage_trace_is_complete(&trace) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    if complete.is_err() {
-        let trace = std::fs::read_to_string(&trace_path);
-        panic!("terminal stage trace did not complete: {trace:#?}");
-    }
-}
-
-#[cfg(debug_assertions)]
-fn terminal_stage_trace_is_complete(trace: &str) -> bool {
-    let stages = trace.lines().collect::<Vec<_>>();
-    let Some(start) = stages
-        .iter()
-        .position(|stage| *stage == "executor.attempt.start")
-    else {
-        return false;
-    };
-    let mut cursor = start;
-    let mut expected = vec![
-        "executor.attempt.start",
-        "executor.attempt_recorded",
-        "executor.plan_lookup.start",
-        "executor.plan_lookup.complete",
-        "executor.schema.complete",
-        "executor.scope.start",
-        "executor.scope.complete",
-        "executor.approval.start",
-        "executor.approval.complete",
-        "executor.worktree.start",
-        "executor.worktree.complete",
-        "executor.dispatch.start",
-        "core.run_terminal.enter",
-        "core.sandbox.enter",
-        "sandbox.streaming.enter",
-        "sandbox.cwd.complete",
-        "sandbox.capabilities.start",
-        "capabilities.bwrap.start",
-        "capabilities.bwrap.complete",
-        "capabilities.managed.start",
-        "capabilities.managed.complete",
-        "capabilities.git.start",
-        "capabilities.git.complete",
-        "sandbox.capabilities.complete",
-    ];
-    #[cfg(windows)]
-    expected.extend([
-        "sandbox.shell_resolution.start",
-        "sandbox.shell_resolution.complete",
-        "sandbox.child_spawn.start",
-        "windows.job_create.start",
-        "windows.job_create.complete",
-        "windows.child_spawn.start",
-        "windows.child_spawn.complete",
-        "windows.job_assign.start",
-        "windows.job_assign.complete",
-        "windows.thread_snapshot.start",
-        "windows.thread_snapshot.complete",
-        "windows.thread_open.start",
-        "windows.thread_open.complete",
-        "windows.thread_resume.start",
-        "windows.thread_resume.complete",
-        "windows.attach.complete",
-    ]);
-    #[cfg(not(windows))]
-    expected.push("sandbox.child_spawn.start");
-    expected.push("sandbox.child_spawn.complete");
-
-    for expected_stage in expected {
-        let Some(relative) = stages[cursor..]
-            .iter()
-            .position(|stage| *stage == expected_stage)
-        else {
-            return false;
-        };
-        cursor += relative + 1;
-    }
-    true
 }
 
 async fn read_response(stdout: &mut BufReader<tokio::process::ChildStdout>) -> serde_json::Value {
@@ -1681,7 +1553,7 @@ async fn targeted_cancellation_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP cancellation fixture");
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = terminal_tree_fixture(project.path());
-    let (mut server, mut stdin, mut stdout) = spawn_terminal_tree_server(project.path());
+    let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
         &mut stdin,
@@ -1720,7 +1592,7 @@ async fn stdin_disconnect_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP disconnect fixture");
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = terminal_tree_fixture(project.path());
-    let (mut server, mut stdin, _stdout) = spawn_terminal_tree_server(project.path());
+    let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
         &mut stdin,
@@ -1746,7 +1618,7 @@ async fn fatal_input_reaps_terminal_descendants_on_every_platform() {
     let project = tempfile::tempdir().expect("portable MCP fatal-input fixture");
     initialize_terminal_tree_server_fixture(project.path());
     let fixture = terminal_tree_fixture(project.path());
-    let (mut server, mut stdin, _stdout) = spawn_terminal_tree_server(project.path());
+    let (mut server, mut stdin, _stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
         &mut stdin,
@@ -1781,7 +1653,7 @@ async fn blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform(
     let fixture = terminal_tree_fixture(project.path());
     std::fs::write(project.path().join("large.txt"), vec![b'x'; 220_000])
         .expect("large MCP response fixture");
-    let (mut server, mut stdin, _unread_stdout) = spawn_terminal_tree_server(project.path());
+    let (mut server, mut stdin, _unread_stdout) = spawn_server(project.path());
     let heartbeat = start_portable_terminal_tree(
         project.path(),
         &mut stdin,
