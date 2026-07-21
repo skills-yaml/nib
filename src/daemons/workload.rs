@@ -15,10 +15,15 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(all(test, windows))]
+use std::process::Command;
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+#[cfg(not(windows))]
 use std::sync::{
     mpsc::{self, Receiver, RecvTimeoutError, Sender},
-    Arc, OnceLock,
+    OnceLock,
 };
 use std::time::{Duration, Instant};
 use tokio::time::{sleep, timeout};
@@ -481,6 +486,7 @@ impl DurableTaskStore {
 
     pub fn start(&self, id: &str) -> Result<DurableTaskRecord, String> {
         let executable = worker_executable()?;
+        #[cfg(not(windows))]
         let worker_reaper = worker_reaper_sender()?.clone();
         let lease_token = uuid::Uuid::new_v4().to_string();
         let current = self.update(id, |task| {
@@ -500,31 +506,49 @@ impl DurableTaskStore {
         })?;
         let current = self.get_file(&current.id)?;
 
-        let mut command = Command::new(executable);
-        command
-            .arg("task-worker")
-            .arg("--daemon-dir")
-            .arg(&self.daemon_dir)
-            .arg("--task-id")
-            .arg(id)
-            .arg("--lease-token")
-            .arg(&lease_token)
-            .current_dir(job_project_root(&current.job))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        configure_worker_process(&mut command);
-        let child = match command.spawn() {
-            Ok(child) => child,
+        #[cfg(windows)]
+        let pid = match crate::daemons::windows_worker::spawn_detached_worker(
+            &executable,
+            &self.daemon_dir,
+            id,
+            &lease_token,
+            job_project_root(&current.job),
+        ) {
+            Ok(pid) => pid,
             Err(error) => {
                 let error = format!("failed to launch durable task worker: {error}");
                 return Err(self.finish_worker_launch_failure(id, &lease_token, error));
             }
         };
-        let pid = child.id();
-        if let Err(error) = hand_off_worker(&worker_reaper, child) {
-            return Err(self.finish_worker_launch_failure(id, &lease_token, error));
-        }
+        #[cfg(not(windows))]
+        let pid = {
+            let mut command = Command::new(executable);
+            command
+                .arg("task-worker")
+                .arg("--daemon-dir")
+                .arg(&self.daemon_dir)
+                .arg("--task-id")
+                .arg(id)
+                .arg("--lease-token")
+                .arg(&lease_token)
+                .current_dir(job_project_root(&current.job))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            configure_worker_process(&mut command);
+            let child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let error = format!("failed to launch durable task worker: {error}");
+                    return Err(self.finish_worker_launch_failure(id, &lease_token, error));
+                }
+            };
+            let pid = child.id();
+            if let Err(error) = hand_off_worker(&worker_reaper, child) {
+                return Err(self.finish_worker_launch_failure(id, &lease_token, error));
+            }
+            pid
+        };
 
         match self.bind_worker(id, &lease_token, pid) {
             Ok(record) => Ok(record),
@@ -3259,8 +3283,10 @@ fn worker_executable() -> Result<PathBuf, String> {
     ))
 }
 
+#[cfg(not(windows))]
 static WORKER_REAPER: OnceLock<Result<Sender<Child>, String>> = OnceLock::new();
 
+#[cfg(not(windows))]
 fn worker_reaper_sender() -> Result<&'static Sender<Child>, String> {
     WORKER_REAPER
         .get_or_init(|| {
@@ -3275,6 +3301,7 @@ fn worker_reaper_sender() -> Result<&'static Sender<Child>, String> {
         .map_err(Clone::clone)
 }
 
+#[cfg(not(windows))]
 fn reap_worker_children(receiver: Receiver<Child>) {
     let mut children: Vec<Child> = Vec::new();
     loop {
@@ -3293,6 +3320,7 @@ fn reap_worker_children(receiver: Receiver<Child>) {
     }
 }
 
+#[cfg(not(windows))]
 fn reap_worker_children_once(
     children: &mut Vec<Child>,
     mut poll: impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
@@ -3314,6 +3342,7 @@ fn reap_worker_children_once(
     }
 }
 
+#[cfg(not(windows))]
 fn hand_off_worker(sender: &Sender<Child>, child: Child) -> Result<(), String> {
     sender.send(child).map_err(|error| {
         let mut child = error.0;
@@ -3329,16 +3358,12 @@ fn hand_off_worker(sender: &Sender<Child>, child: Child) -> Result<(), String> {
     })
 }
 
+#[cfg(not(windows))]
 fn configure_worker_process(command: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0000_0008 | 0x0800_0000);
     }
 }
 

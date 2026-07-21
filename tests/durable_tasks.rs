@@ -58,7 +58,7 @@ fn fixture() -> TempDir {
 fn nib(root: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
     command.current_dir(root).args(args);
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
 

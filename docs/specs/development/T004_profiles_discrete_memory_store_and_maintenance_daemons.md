@@ -678,8 +678,12 @@ Keep the large agent-loop state machine off the platform-limited caller stack fo
 cancellable and ordinary runs. The shared runtime wrapper must heap-pin the inner loop
 before either branch awaits it, so CLI entrypoints do not depend on the operating
 system's main-thread stack reservation. Exercise the existing durable CLI workflows
-under a deterministic 1 MiB child-process stack budget on Unix while retaining native
-Windows execution as the final platform gate.
+under a deterministic 1 MiB child-process stack budget on Linux while retaining native
+Windows execution as the final platform gate. macOS retains its native stack limit because
+Darwin rejects the synthetic 1 MiB `RLIMIT_STACK` during child setup. On Windows, launch
+detached durable workers without inheriting ambient caller handles, so a caller waiting
+for captured CLI output observes EOF when the CLI exits rather than when background work
+finishes.
 
 ### Acceptance Criteria
 
@@ -688,12 +692,16 @@ Windows execution as the final platform gate.
 - [x] All four durable CLI integration workflows complete under a 1 MiB main-thread
   stack budget instead of aborting before their first tool result.
 - [x] The canonical Task gates and Windows all-target graph remain green.
+- [ ] Windows durable-worker creation inherits no ambient capture handles while preserving
+  its environment, working directory, detached execution, and durable PID publication.
+- [ ] A captured `nib run` invocation returns before its long-running durable terminal job,
+  allowing a later `nib task cancel` process to cancel and reconcile that job.
 - [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
 
 ### Affected Areas
 
-`src/agent/loop.rs`, `tests/durable_tasks.rs`, durable task validation evidence, and the
-hosted CI matrix.
+`src/agent/loop.rs`, `src/daemons/workload.rs`, Windows durable-worker process creation,
+`tests/durable_tasks.rs`, durable task validation evidence, and the hosted CI matrix.
 
 ### Validation Gates
 
@@ -709,11 +717,22 @@ aborted with a main-thread stack overflow. The same four failures reproduce loca
 with a 1 MiB stack limit, while all four pass with a 2 MiB limit. The ordinary CLI path
 previously awaited `run_agent_loop_inner` directly; it now heap-pins that future like the
 cancellation-configured branch. The constrained regression applies the 1 MiB limit to
-every Unix `nib` child and its inherited detached worker, and passes all four workflows.
+every Linux `nib` child and its inherited detached worker, and passes all four workflows.
+Hosted macOS run `29793559369` rejected that synthetic limit with `EINVAL` during
+`pre_exec`, so macOS retains its native limit while hosted Windows provides the native
+1 MiB platform gate. That run confirms the stack repair: three Windows durable workflows
+pass and the cancellable workflow reaches `nib task cancel`. Its remaining failure occurs
+because the standard Windows `Command` spawn inherits the captured parent pipe handles;
+the caller therefore waits for the fixture's 30-second worker before observing CLI EOF,
+then finds the task already completed. The Windows worker launcher now uses
+`STARTUPINFOEXW` with an explicit inheritable-handle allowlist containing only separate
+`NUL` handles for stdin, stdout, and stderr. Ambient caller handles are excluded while the
+child still inherits its environment, receives the intended working directory, and remains
+detached; the captured-output regression remains unchanged for hosted verification.
 Compiler type-size inspection measures the inner future at 26,440 bytes while the patched
 runtime wrapper is 3,584 bytes and the public loop future is 4,856 bytes. `task check`,
 `task test:durable`, documentation integrity, and the Windows all-target graph pass.
-Independent diagnosis and quality review report no remaining findings.
+Independent diagnosis and final code-quality review report no remaining blocking findings.
 
 ## Remaining Implementation Plan
 
