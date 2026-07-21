@@ -379,3 +379,60 @@ and canonical-prefix tests remain unchecked until that remote job executes.
 - Windows file identity and reparse behavior is compiled but has not been executed.
 - A path-normalization fix could weaken component-level link rejection unless the same
   replacement and reparse regressions remain mandatory.
+
+## Hosted Windows Core-Tool Portability Follow-up (2026-07-21)
+
+### Scope
+
+Repair the native Windows failures exposed after the MCP lifecycle and session-lock
+suites completed. Keep `list_directory` and `grep` path values in their existing native
+filesystem syntax, but make the E2E assertions compare them as paths instead of Unix
+strings and normalize only relative glob candidates to slash syntax. Preserve the
+`ProgramFiles(x86)` and `ProgramFiles` discovery roots across the sanitized terminal
+environment so rustc can locate `vswhere`, select the absolute MSVC linker, and build
+its SDK environment instead of falling through to Git's GNU `link.exe`. Keep the POSIX
+shell selection and real Cargo-test verification unchanged.
+
+### Acceptance Criteria
+
+- [ ] Core-tool E2E path assertions accept native Windows separators without weakening
+  the recursive listing, hidden-entry, glob, or concrete artifact checks.
+- [ ] Slash-based grep globs match native Windows relative paths while returned file
+  paths remain native and usable as filesystem inputs.
+- [ ] Sanitized Windows terminal children inherit only the safe Visual Studio discovery
+  roots needed by rustc, while unrelated host variables remain excluded.
+- [x] POSIX shell selection and the existing environment redaction boundary remain
+  otherwise unchanged.
+- [ ] The coding E2E still applies its patch only in the session worktree, runs the real
+  fixture `cargo test`, and persists a successful terminal result on Windows.
+- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+
+### Affected Areas
+
+`src/sandbox/mod.rs`, `src/tools/core.rs`, `tests/test_runtime_e2e.rs`, focused sandbox
+environment tests, this FT-001 evidence, and the hosted Windows job.
+
+### Validation Gates
+
+Focused sandbox and runtime E2E tests, `task fix`, `task test`, `task check`,
+`task docs:check`, Windows-target `task check:all-targets`, `git diff --check`, and the
+exact-revision hosted Linux/macOS/Windows matrix.
+
+### Reproduction Evidence
+
+Hosted run `29832617613` on revision `2cf7e584b0ac71182d134582dfc875339376770c`
+passed Validate, macOS, every MCP integration test, and the Windows session-roundtrip
+suite. Windows then exposed two FT-001 failures in `tests/test_runtime_e2e.rs`:
+`list_directory` returned the native `nested\\lib.rs` path while the assertion required
+`nested/lib.rs`, and Git for Windows' GNU `link.exe` consumed rustc's MSVC response file
+during the real Cargo-test step. The latter exited 101 with `link: missing operand`, so
+the persisted terminal result correctly recorded failure.
+
+### Local Validation Evidence
+
+On 2026-07-21, the focused slash-glob regression and both formerly failing runtime E2E
+tests pass locally, including the nested fixture's real `cargo test`. `task fix`,
+`task test`, `task check`, `task docs:check`, `git diff --check`, and
+`task check:all-targets TARGET=x86_64-pc-windows-msvc` pass. The Windows-only
+environment regression compiles for MSVC and remains unchecked above until the hosted
+runner executes it together with the native path and terminal behavior.

@@ -39,6 +39,18 @@ const INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[
     "TMP",
 ];
 
+#[cfg(windows)]
+const PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &["ProgramFiles", "ProgramFiles(x86)"];
+#[cfg(not(windows))]
+const PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[];
+
+fn inherited_environment_keys() -> impl Iterator<Item = &'static str> {
+    INHERITED_ENVIRONMENT_ALLOWLIST
+        .iter()
+        .chain(PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST)
+        .copied()
+}
+
 /// Resolves the POSIX shell used by terminal tools and skill hooks.
 ///
 /// Windows installations normally receive this shell from Git for Windows. An
@@ -806,7 +818,7 @@ pub(crate) fn apply_child_environment(
     configured: &HashMap<String, String>,
 ) {
     process.env_clear();
-    for key in INHERITED_ENVIRONMENT_ALLOWLIST {
+    for key in inherited_environment_keys() {
         if let Some(value) = std::env::var_os(key) {
             process.env(key, value);
         }
@@ -831,7 +843,7 @@ pub(crate) fn apply_std_child_environment(
     configured: &HashMap<String, String>,
 ) {
     process.env_clear();
-    for key in INHERITED_ENVIRONMENT_ALLOWLIST {
+    for key in inherited_environment_keys() {
         if let Some(value) = std::env::var_os(key) {
             process.env(key, value);
         }
@@ -1353,6 +1365,44 @@ mod tests {
             })
             .flatten();
         assert_eq!(inherited_scope, Some(OsStr::new("scope-fixture")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_child_environment_preserves_msvc_discovery_roots_only() {
+        const SENTINEL: &str = "NIB_TEST_UNRELATED_HOST_VARIABLE";
+        let _program_files =
+            EnvironmentVariableGuard::set("ProgramFiles", OsStr::new(r"C:\Program Files"));
+        let _program_files_x86 = EnvironmentVariableGuard::set(
+            "ProgramFiles(x86)",
+            OsStr::new(r"C:\Program Files (x86)"),
+        );
+        let _sentinel = EnvironmentVariableGuard::set(SENTINEL, OsStr::new("must-not-reach-child"));
+        let mut command = std::process::Command::new("git");
+
+        apply_std_child_environment(&mut command, &HashMap::new());
+
+        let environment = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            environment.get("ProgramFiles").map(String::as_str),
+            Some(r"C:\Program Files")
+        );
+        assert_eq!(
+            environment.get("ProgramFiles(x86)").map(String::as_str),
+            Some(r"C:\Program Files (x86)")
+        );
+        assert!(!environment.contains_key(SENTINEL));
     }
 
     #[tokio::test]

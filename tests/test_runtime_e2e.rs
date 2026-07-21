@@ -977,7 +977,10 @@ Use bounded reads and report the concrete artifact path.
         .filter_map(|entry| entry["path"].as_str())
         .collect::<Vec<_>>();
     assert!(listed_paths.contains(&"main.rs"));
-    assert!(listed_paths.contains(&"nested/lib.rs"));
+    let nested_source = Path::new("nested").join("lib.rs");
+    assert!(listed_paths
+        .iter()
+        .any(|listed| Path::new(listed) == nested_source));
     assert!(!listed_paths.contains(&".hidden"));
 
     let hidden = executor
@@ -1034,10 +1037,8 @@ Use bounded reads and report the concrete artifact path.
         .as_array()
         .unwrap();
     assert_eq!(matches.len(), 1);
-    assert!(matches[0]["file"]
-        .as_str()
-        .unwrap()
-        .ends_with("src/nested/lib.rs"));
+    let nested_source = Path::new("src").join("nested").join("lib.rs");
+    assert!(Path::new(matches[0]["file"].as_str().unwrap()).ends_with(nested_source));
     assert_eq!(matches[0]["line"], 1);
     assert_eq!(searched.output.as_ref().unwrap()["truncated"], true);
 

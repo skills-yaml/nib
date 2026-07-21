@@ -451,7 +451,8 @@ async fn grep_with_limits(
         } else {
             file.strip_prefix(&path).unwrap_or(&file)
         };
-        if glob.is_some_and(|pattern| !glob_matches(pattern, &relative.to_string_lossy())) {
+        let glob_candidate = path_for_glob(relative);
+        if glob.is_some_and(|pattern| !glob_matches(pattern, &glob_candidate)) {
             continue;
         }
         let remaining = max_total_scan_bytes.saturating_sub(bytes_scanned);
@@ -840,6 +841,11 @@ fn resolve_existing_path(root: &Path, requested: &str) -> Result<PathBuf, String
         ));
     }
     Ok(candidate)
+}
+
+fn path_for_glob(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 fn glob_matches(pattern: &str, candidate: &str) -> bool {
@@ -2044,6 +2050,15 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("missing fixture resolution for {host}"))
         }
+    }
+
+    #[test]
+    fn glob_candidates_use_slash_separators() {
+        let candidate = Path::new("src").join("nested").join("lib.rs");
+        let normalized = path_for_glob(&candidate);
+
+        assert_eq!(normalized, "src/nested/lib.rs");
+        assert!(glob_matches("**/*.rs", &normalized));
     }
 
     #[tokio::test]
