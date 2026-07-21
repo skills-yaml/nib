@@ -23,7 +23,7 @@ const MCP_FIXTURE_ACTIVATION_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_FIXTURE";
 const MCP_FIXTURE_MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 #[cfg(debug_assertions)]
 const MCP_FIXTURE_HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(windows)))]
 const MCP_FIXTURE_TRACE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_TRACE";
 const MCP_SESSION_OBSERVATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(all(debug_assertions, target_os = "linux"))]
@@ -114,18 +114,33 @@ fn shell_path(path: &Path) -> String {
 }
 
 #[cfg(debug_assertions)]
+#[cfg(windows)]
 fn terminal_process_tree_command(
     executable: &Path,
     heartbeat: &Path,
     trace: &Path,
     shell_entry: &Path,
 ) -> String {
+    let _ = (executable, trace);
+    format!(
+        "printf . > {shell_entry} || exit 97; (while :; do printf . >> {heartbeat} || exit 98; sleep 0.025; done) & wait",
+        heartbeat = shell_quote(&shell_path(heartbeat)),
+        shell_entry = shell_quote(&shell_path(shell_entry)),
+    )
+}
+
+#[cfg(debug_assertions)]
+#[cfg(not(windows))]
+fn terminal_process_tree_command(
+    executable: &Path,
+    heartbeat: &Path,
+    trace: &Path,
+    shell_entry: &Path,
+) -> String {
+    let _ = shell_entry;
     let nib = shell_path(executable);
-    #[cfg(windows)]
-    let launch = shell_quote(&nib);
-    #[cfg(not(windows))]
     let launch = format!("exec {}", shell_quote(&nib));
-    let fixture = format!(
+    format!(
         "{activation}={token} {mode}=process_tree {heartbeat_env}={heartbeat} {trace_env}={trace} {launch}",
         activation = MCP_FIXTURE_ACTIVATION_ENV,
         token = shell_quote(MCP_FIXTURE_TOKEN),
@@ -134,19 +149,7 @@ fn terminal_process_tree_command(
         heartbeat = shell_quote(&shell_path(heartbeat)),
         trace_env = MCP_FIXTURE_TRACE_ENV,
         trace = shell_quote(&shell_path(trace)),
-    );
-    #[cfg(windows)]
-    {
-        format!(
-            "printf . > {shell_entry}; {fixture}; __nib_fixture_status=$?; exit \"$__nib_fixture_status\"",
-            shell_entry = shell_quote(&shell_path(shell_entry)),
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = shell_entry;
-        fixture
-    }
+    )
 }
 
 #[cfg(debug_assertions)]
@@ -185,7 +188,7 @@ fn diagnostic_directory_entries(path: &Path) -> Result<Vec<std::path::PathBuf>, 
         .collect()
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(windows)))]
 fn create_lifecycle_trace(executable: &Path, heartbeat_name: &str) -> std::path::PathBuf {
     let directory = executable
         .parent()
@@ -202,7 +205,7 @@ fn create_lifecycle_trace(executable: &Path, heartbeat_name: &str) -> std::path:
     path
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(windows)))]
 fn complete_lifecycle_trace(path: &Path) -> Option<Vec<serde_json::Value>> {
     let encoded = std::fs::read_to_string(path).ok()?;
     let records = encoded
@@ -220,7 +223,7 @@ fn complete_lifecycle_trace(path: &Path) -> Option<Vec<serde_json::Value>> {
         .then_some(records)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(windows)))]
 async fn verify_lifecycle_trace(trace: &Path, root: &Path, heartbeat_name: &str) {
     let records = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -457,16 +460,30 @@ async fn start_portable_terminal_tree(
     heartbeat_name: &str,
 ) -> std::path::PathBuf {
     let requested_heartbeat = root.join(heartbeat_name);
+    #[cfg(windows)]
+    let fixture_heartbeat = requested_heartbeat.clone();
+    #[cfg(not(windows))]
     let fixture_heartbeat = std::path::PathBuf::from(heartbeat_name);
     let shell_entry_name = format!("{heartbeat_name}.shell-entry");
     let requested_shell_entry = root.join(&shell_entry_name);
+    #[cfg(windows)]
+    let fixture_shell_entry = requested_shell_entry.clone();
+    #[cfg(not(windows))]
     let fixture_shell_entry = std::path::PathBuf::from(&shell_entry_name);
-    let requested_trace = create_lifecycle_trace(executable, heartbeat_name);
-    let fixture_trace = std::path::PathBuf::from(
-        requested_trace
-            .file_name()
-            .expect("terminal lifecycle trace filename"),
-    );
+    #[cfg(windows)]
+    let requested_trace: Option<std::path::PathBuf> = None;
+    #[cfg(not(windows))]
+    let requested_trace = Some(create_lifecycle_trace(executable, heartbeat_name));
+    let fixture_trace = requested_trace
+        .as_ref()
+        .map(|trace| {
+            std::path::PathBuf::from(
+                trace
+                    .file_name()
+                    .expect("terminal lifecycle trace filename"),
+            )
+        })
+        .unwrap_or_default();
     let command = terminal_process_tree_command(
         executable,
         &fixture_heartbeat,
@@ -475,18 +492,19 @@ async fn start_portable_terminal_tree(
     );
     #[cfg(windows)]
     {
-        let expected_fixture = shell_quote(&shell_path(Path::new(env!("CARGO_BIN_EXE_nib"))));
+        let expected_heartbeat = shell_quote(&shell_path(&requested_heartbeat));
+        let expected_shell_entry = shell_quote(&shell_path(&requested_shell_entry));
         assert!(
-            command.contains(&expected_fixture),
-            "Windows lifecycle fixture must use the already-built native image: {command}"
+            command.contains(&expected_heartbeat) && command.contains(&expected_shell_entry),
+            "Windows lifecycle fixture must use absolute test-owned markers: {command}"
         );
         assert!(
-            !command.contains(" exec "),
-            "Windows lifecycle fixture must avoid an explicit MSYS exec overlay: {command}"
+            command.contains("(while :;") && command.ends_with(") & wait"),
+            "Windows lifecycle fixture must launch and wait for a shell descendant: {command}"
         );
         assert!(
-            command.ends_with("exit \"$__nib_fixture_status\""),
-            "Windows lifecycle fixture must prevent an implicit MSYS tail overlay: {command}"
+            !command.contains(MCP_FIXTURE_ACTIVATION_ENV),
+            "Windows lifecycle fixture must not route through the native PE fixture: {command}"
         );
     }
     write_request(
@@ -520,23 +538,17 @@ async fn start_portable_terminal_tree(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(sessions.into_iter().flatten().collect::<Vec<_>>())
         });
-        let trace = std::fs::read_to_string(&requested_trace);
+        let trace = requested_trace
+            .as_ref()
+            .map(std::fs::read_to_string);
         let shell_entry = std::fs::read_to_string(&requested_shell_entry);
         let git_file = std::fs::read_to_string(root.join(".git"));
         let root_entries = diagnostic_directory_entries(root);
         let session_worktree_entries = diagnostic_directory_entries(
             &root.join(".nib/worktrees/sessions"),
         );
-        let original_image_heartbeat = Path::new(env!("CARGO_BIN_EXE_nib"))
-            .parent()
-            .map(|parent| parent.join(heartbeat_name));
-        let original_image_heartbeat_length = original_image_heartbeat.as_ref().map(|path| {
-            std::fs::metadata(path)
-                .map(|metadata| metadata.len())
-                .map_err(|error| error.to_string())
-        });
         panic!(
-            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_shell_entry={requested_shell_entry:?}; shell_entry={shell_entry:#?}; requested_trace={requested_trace:?}; trace={trace:#?}; original_image_heartbeat={original_image_heartbeat:?}; original_image_heartbeat_length={original_image_heartbeat_length:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
+            "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_shell_entry={requested_shell_entry:?}; shell_entry={shell_entry:#?}; requested_trace={requested_trace:?}; trace={trace:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
         );
     });
     #[cfg(windows)]
@@ -544,7 +556,15 @@ async fn start_portable_terminal_tree(
         std::fs::metadata(&requested_shell_entry).is_ok_and(|metadata| metadata.len() > 0),
         "terminal lifecycle shell did not publish its entry marker"
     );
-    verify_lifecycle_trace(&requested_trace, root, heartbeat_name).await;
+    #[cfg(not(windows))]
+    verify_lifecycle_trace(
+        requested_trace
+            .as_deref()
+            .expect("Unix terminal lifecycle trace"),
+        root,
+        heartbeat_name,
+    )
+    .await;
     let session_worktrees = root.join(".nib/worktrees/sessions");
     assert!(
         !session_worktrees.exists()

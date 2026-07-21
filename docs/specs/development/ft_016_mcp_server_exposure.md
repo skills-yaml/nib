@@ -231,28 +231,21 @@ An additional 32-iteration barrier race proves explicit cancellation and the Dro
 cannot both claim audit ownership; dropping an armed guard after an explicit claim retains
 the explicit event details.
 
-## Hosted Windows Native-Fixture Follow-up (2026-07-21)
+## Hosted Windows Terminal-Tree Follow-up (2026-07-21)
 
 ### Scope
 
-Make the MCP terminal-tree fixture observe its native descendant at a test-owned
-heartbeat path without transporting a native Windows path through Git-for-Windows'
-POSIX shell. Pass only the heartbeat basename through the shell and resolve it against
-the inherited project working directory inside the Windows native fixture. Present the
-four process-lifecycle repositories as valid Git-file worktrees so these tests do not
-spend their fixed startup deadline creating an unrelated nested session worktree before
-terminal dispatch. On Windows, invoke the already-built `CARGO_BIN_EXE_nib` image instead
-of making a fresh copy or hard-link alias, and do so without an explicit MSYS `exec`
-overlay. Publish a shell-entry marker before the native launch and follow the fixture with
-a status-preserving shell builtin so Git Bash cannot implicitly tail-overlay its final
-external command. Job assignment and inheritance then retain both the shell parent and its
-native descendant. Poll the heartbeat at the fixture root on every platform and persist a
-test-only native trace beside the fixture image with the executable, working directory,
-raw and resolved heartbeat, child entry, and first flush. Keep trace writes non-fatal to
-the lifecycle processes, but require the success path to parse and verify all trace stages
-within a separate bounded deadline. Keep the Unix copied-fixture and `exec` path unchanged,
-and do not change production shell selection, timeout, sandbox dispatch, or Job Object
-ownership.
+Make the MCP terminal-tree fixture observe a real descendant at a test-owned heartbeat
+path without transporting a native Windows executable through Git-for-Windows' POSIX
+shell. Present the four process-lifecycle repositories as valid Git-file worktrees so
+these tests do not spend their fixed startup deadline creating an unrelated nested session
+worktree before terminal dispatch. On Windows, publish an absolute fail-fast shell-entry
+marker, launch a shell-native background descendant that appends to an absolute heartbeat,
+and retain the parent shell in `wait`. Job assignment and inheritance then retain both the
+shell parent and its MSYS descendant while avoiding the non-contract, large-debug-PE launch
+that obscured the cleanup behavior under test. Keep the Unix copied native fixture, relative
+heartbeat, `exec` path, and verified native trace unchanged. Do not change production shell
+selection, timeout, sandbox dispatch, or Job Object ownership.
 
 The same hosted run exposed a separate session-enumeration race while an MCP audit was
 being atomically replaced. T003 owns the production fix: public strict enumeration must
@@ -261,28 +254,24 @@ detachment failures.
 
 ### Acceptance Criteria
 
-- [x] Windows terminal-tree commands pass only the heartbeat basename across the POSIX
-  shell, invoke the already-built native image without a copy, hard link, or MSYS `exec`,
-  and poll below the fixture root without increasing the timeout.
-- [x] Windows publishes a shell-entry marker before the native launch and retains a
-  status-preserving shell continuation after it, preventing implicit tail-overlay while
-  preserving the fixture exit status.
-- [x] The native fixture resolves a relative Windows heartbeat against
-  `current_dir()` before spawning its child and passes that child the resolved path;
-  existing absolute heartbeat inputs remain unchanged.
+- [x] Windows terminal-tree commands publish an absolute fail-fast shell-entry marker,
+  launch a shell-native background descendant that appends to an absolute test-owned
+  heartbeat, and retain the parent in `wait` without increasing the startup timeout.
+- [x] Windows lifecycle cleanup does not depend on copying, hard-linking, or launching the
+  large native debug fixture through Git Bash; Unix retains its copied native fixture,
+  relative heartbeat, `exec` launch, and trace verification.
 - [x] The four portable process-lifecycle repositories use a valid Git-file worktree,
   poll their fixture-root heartbeat, and do not create a nested session worktree.
 - [x] Public session enumeration is serialized with audit mutation while retaining
   strict persistence errors and the curator's non-recursive locked enumeration path.
 - [ ] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
-  regressions start the native fixture, stop its descendant, and retain cancellation
+  regressions start the shell descendant, stop its heartbeat, and retain cancellation
   audit evidence on Windows.
 - [x] Fixture startup failures identify the exact requested heartbeat path alongside the
   bounded session audit rather than reporting only an ambiguous publication timeout.
-- [x] The fixture-image-relative native lifecycle trace records fixture entry, child entry,
-  first flush, `current_exe()`, `current_dir()`, and raw and resolved heartbeat paths;
-  success verifies those records without making trace I/O lifecycle-fatal, while timeout
-  output includes that trace and the project/worktree state.
+- [x] The Unix fixture-image-relative native lifecycle trace records fixture entry, child
+  entry, first flush, `current_exe()`, `current_dir()`, and raw and resolved heartbeat
+  paths; success verifies those records without making trace I/O lifecycle-fatal.
 - [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
@@ -363,6 +352,17 @@ tail-overlay path despite removal of explicit `exec`; the empty trace does not p
 selection directly. The next revision publishes shell entry and forces a status-preserving
 continuation after the fixture.
 
+Hosted run `29819713505` passed Linux and macOS completely and again passed the native
+Windows Job supervisor, direct Git Bash sandbox tests, outbound lifecycle tests, and strict
+session enumeration. All four inbound lifecycle requests still remained at the durable
+`tool_attempted` event for their ten-second startup window. Neither the project-root
+shell-entry marker nor the fixture-image trace changed, so the run did not validate the
+implicit tail-overlay hypothesis. Because the hosted unit suite already proves Git Bash
+execution under the same direct Job path, the next revision removes the unrelated
+Git-Bash-to-large-debug-PE hop from these cleanup regressions. Windows instead uses an
+absolute fail-fast entry marker and a shell-native background descendant; Unix retains the
+native fixture and trace.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -408,6 +408,14 @@ lifecycle regressions and preserved the Unix copied-fixture `exec` path. The Win
 compiled the shell-entry marker, original-image launch, and status-preserving continuation
 that prevents the native fixture from remaining Bash's final external command. Native
 Windows execution and the exact hosted matrix remain open.
+
+The shell-native Windows descendant revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. The full 25-test Linux MCP suite again passed all four portable
+lifecycle regressions with the Unix native fixture and trace unchanged. The Windows target
+compiled the absolute fail-fast entry marker, background shell heartbeat, parent `wait`,
+and Windows-only omission of native trace setup. Native Windows execution and the exact
+hosted matrix remain open.
 
 ## Remaining Implementation Plan
 
