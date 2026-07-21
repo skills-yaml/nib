@@ -40,7 +40,8 @@ const INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[
 ];
 
 #[cfg(windows)]
-const PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &["ProgramFiles", "ProgramFiles(x86)"];
+const PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] =
+    &["ProgramData", "ProgramFiles", "ProgramFiles(x86)"];
 #[cfg(not(windows))]
 const PLATFORM_INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[];
 
@@ -1372,6 +1373,8 @@ mod tests {
     #[serial]
     fn windows_child_environment_preserves_msvc_discovery_roots_only() {
         const SENTINEL: &str = "NIB_TEST_UNRELATED_HOST_VARIABLE";
+        let _program_data =
+            EnvironmentVariableGuard::set("ProgramData", OsStr::new(r"C:\ProgramData"));
         let _program_files =
             EnvironmentVariableGuard::set("ProgramFiles", OsStr::new(r"C:\Program Files"));
         let _program_files_x86 = EnvironmentVariableGuard::set(
@@ -1395,6 +1398,10 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
         assert_eq!(
+            environment.get("ProgramData").map(String::as_str),
+            Some(r"C:\ProgramData")
+        );
+        assert_eq!(
             environment.get("ProgramFiles").map(String::as_str),
             Some(r"C:\Program Files")
         );
@@ -1403,6 +1410,62 @@ mod tests {
             Some(r"C:\Program Files (x86)")
         );
         assert!(!environment.contains_key(SENTINEL));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial]
+    async fn sanitized_git_shell_discovers_the_absolute_msvc_linker() {
+        const SENTINEL: &str = "NIB_TEST_UNRELATED_HOST_VARIABLE";
+        let git_shell = git_for_windows_shell().expect("Git for Windows shell");
+        let _shell_override = EnvironmentVariableGuard::set(POSIX_SHELL_ENV, git_shell.as_os_str());
+        let _sentinel = EnvironmentVariableGuard::set(SENTINEL, OsStr::new("must-not-reach-child"));
+        let directory = tempdir().expect("MSVC linker probe directory");
+        std::fs::write(directory.path().join("probe.rs"), b"fn main() {}\n")
+            .expect("MSVC linker probe source");
+
+        let (output, arguments) = run_sandboxed_with_environment(
+            "test -n \"${ProgramData-}\" && test -n \"${ProgramFiles-}\" && test -n \"$(printenv 'ProgramFiles(x86)')\" && test -z \"${NIB_TEST_UNRELATED_HOST_VARIABLE-}\" && command -v link.exe && rustc --print link-args probe.rs -o probe.exe",
+            directory.path(),
+            "internal",
+            "internal",
+            &BoundaryConfig::default(),
+            &HashMap::new(),
+        )
+        .await
+        .expect("run rustc through the sanitized Git shell");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "rustc linker probe failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(arguments.is_none());
+        assert!(directory.path().join("probe.exe").is_file());
+
+        let mut lines = stdout.lines();
+        let path_linker = lines
+            .next()
+            .expect("Git shell should report its PATH linker")
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        assert!(
+            path_linker.ends_with("/usr/bin/link.exe"),
+            "expected the Git linker collision, got {path_linker}"
+        );
+        let link_arguments = lines.collect::<Vec<_>>().join("\n").replace('\\', "/");
+        assert!(
+            link_arguments
+                .to_ascii_lowercase()
+                .contains("/vc/tools/msvc/"),
+            "rustc did not select an absolute MSVC linker:\n{link_arguments}"
+        );
+        assert!(
+            !link_arguments
+                .to_ascii_lowercase()
+                .contains("/usr/bin/link.exe"),
+            "rustc selected Git's GNU linker:\n{link_arguments}"
+        );
     }
 
     #[tokio::test]

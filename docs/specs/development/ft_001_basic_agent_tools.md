@@ -388,19 +388,22 @@ Repair the native Windows failures exposed after the MCP lifecycle and session-l
 suites completed. Keep `list_directory` and `grep` path values in their existing native
 filesystem syntax, but make the E2E assertions compare them as paths instead of Unix
 strings and normalize only relative glob candidates to slash syntax. Preserve the
-`ProgramFiles(x86)` and `ProgramFiles` discovery roots across the sanitized terminal
-environment so rustc can locate `vswhere`, select the absolute MSVC linker, and build
-its SDK environment instead of falling through to Git's GNU `link.exe`. Keep the POSIX
-shell selection and real Cargo-test verification unchanged.
+machine-wide `ProgramData`, `ProgramFiles(x86)`, and `ProgramFiles` discovery roots
+across the sanitized terminal environment so rustc can inspect Visual Studio Setup
+Configuration state, fall back to the fixed `vswhere` location when necessary, select
+the absolute MSVC linker, and build its SDK environment instead of falling through to
+Git's GNU `link.exe`. Keep the POSIX shell selection and real Cargo-test verification
+unchanged.
 
 ### Acceptance Criteria
 
-- [ ] Core-tool E2E path assertions accept native Windows separators without weakening
+- [x] Core-tool E2E path assertions accept native Windows separators without weakening
   the recursive listing, hidden-entry, glob, or concrete artifact checks.
-- [ ] Slash-based grep globs match native Windows relative paths while returned file
+- [x] Slash-based grep globs match native Windows relative paths while returned file
   paths remain native and usable as filesystem inputs.
-- [ ] Sanitized Windows terminal children inherit only the safe Visual Studio discovery
-  roots needed by rustc, while unrelated host variables remain excluded.
+- [ ] Sanitized Windows terminal children retain the three machine-wide Visual Studio
+  discovery roots needed by rustc through Git Bash, while unrelated host variables
+  remain excluded.
 - [x] POSIX shell selection and the existing environment redaction boundary remain
   otherwise unchanged.
 - [ ] The coding E2E still applies its patch only in the session worktree, runs the real
@@ -436,3 +439,19 @@ tests pass locally, including the nested fixture's real `cargo test`. `task fix`
 `task check:all-targets TARGET=x86_64-pc-windows-msvc` pass. The Windows-only
 environment regression compiles for MSVC and remains unchecked above until the hosted
 runner executes it together with the native path and terminal behavior.
+
+### First Hosted Remediation Evidence
+
+Hosted run `29836694411` on revision `29dc8af8c83b6dd9c72379e8b7377adf1ae5e009`
+passed Validate and macOS. Windows passed the focused environment unit test and eight
+of nine runtime E2Es, including the complete native path, hidden-entry, and slash-glob
+artifact assertions. The unchanged real Cargo-test E2E still invoked logical
+`link.exe`, which Git Bash resolved to Git's GNU linker, and exited 101.
+
+That run disproves the earlier assumption that retaining only `ProgramFiles(x86)` and
+`ProgramFiles` was sufficient. Rust's MSVC discovery first enumerates Visual Studio
+Setup Configuration state, whose machine-wide implementation and instance records are
+under `ProgramData`; merely making the `vswhere` executable reachable does not prove
+that enumeration reaches its fallback. The next hosted gate must exercise a real rustc
+link through the sanitized Git Bash process chain before the environment criterion can
+be checked.
