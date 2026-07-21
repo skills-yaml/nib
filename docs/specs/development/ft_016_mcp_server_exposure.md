@@ -363,6 +363,50 @@ Git-Bash-to-large-debug-PE hop from these cleanup regressions. Windows instead u
 absolute fail-fast entry marker and a shell-native background descendant; Unix retains the
 native fixture and trace.
 
+Hosted run `29822780187` passed macOS completely. Its Windows job again passed the native
+Job supervisor, direct shell sandbox, outbound lifecycle, and strict enumeration tests,
+but the same four inbound lifecycle requests remained at `tool_attempted`. Neither the
+absolute fail-fast shell-entry marker nor a heartbeat was created, even though the Windows
+command now contains only shell builtins. This rules out native fixture launch, path
+conversion, and tail-overlay behavior: the request is stalling between audited admission
+and execution of the shell command body. The Validate job separately hit the previously
+nonreproducing `detached_terminal_redacts_profile_and_config_secrets_before_persistence`
+session-role race; that test passed twice locally and remains a separate flake unless a
+later hosted run reproduces it.
+
+## Hosted Pre-Shell Stage Trace (2026-07-21)
+
+### Scope
+
+Add a debug-build-only, explicitly environment-gated stage trace to the inbound MCP
+terminal startup path. Record bounded stage names from audited executor admission through
+approval, worktree resolution, sandbox capability probing, shell resolution, child spawn,
+Windows Job assignment, and primary-thread resume. The portable lifecycle fixture owns the
+trace path and includes its contents in startup-timeout diagnostics. Do not record command
+text, arguments, environment values, or other user data, and do not change release behavior,
+execution policy, timeouts, shell selection, or containment semantics.
+
+### Acceptance Criteria
+
+- [x] The internal stage trace is absent unless a debug build receives the dedicated test
+  environment variable, and trace write failures do not affect execution.
+- [x] Trace records contain stage names only and distinguish capability probing, shell
+  resolution, process creation, Job assignment, and primary-thread resume.
+- [x] All four portable lifecycle startup failures include the test-owned trace in their
+  diagnostic output.
+- [ ] The exact hosted Windows run identifies the final completed startup stage before the
+  shell-entry marker.
+
+### Affected Areas
+
+`src/tools/executor.rs`, `src/tools/core.rs`, `src/sandbox/mod.rs`,
+`src/sandbox/windows_job.rs`, `tests/mcp_integration.rs`, and FT-016 validation evidence.
+
+### Validation Gates
+
+The four portable lifecycle tests, `task test`, `task check`, `task docs:check`, Windows
+target `task check:all-targets`, `git diff --check`, and exact-revision hosted CI.
+
 ### Local Validation Evidence
 
 The absolute-path revision passed `task fix`, `task test`, `task check`,
@@ -416,6 +460,15 @@ lifecycle regressions with the Unix native fixture and trace unchanged. The Wind
 compiled the absolute fail-fast entry marker, background shell heartbeat, parent `wait`,
 and Windows-only omission of native trace setup. Native Windows execution and the exact
 hosted matrix remain open.
+
+The pre-shell stage-trace revision passed `task fix`, `task test`, `task check`,
+`task docs:check`, `task check:all-targets TARGET=x86_64-pc-windows-msvc`, and
+`git diff --check`. All four portable lifecycle tests validated the ordered executor,
+sandbox, and child-spawn stages under a bounded success-path poll. The trace requires both
+an internal token and an absolute precreated regular file, caps output, ignores write
+failures, records only static stage names, and is a no-op in release builds. Fresh spec-
+compliance and code-quality reviews found no remaining issues after the success-path trace
+race was removed. Native Windows trace evidence and the exact hosted matrix remain open.
 
 ## Remaining Implementation Plan
 

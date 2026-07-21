@@ -608,6 +608,7 @@ async fn run_terminal(
     environment: &HashMap<String, String>,
     terminal_output_callback: Option<&TerminalOutputCallback>,
 ) -> Result<Value, String> {
+    crate::sandbox::trace_terminal_startup("core.run_terminal.enter");
     if terminal_backend != "local" {
         return Err(format!(
             "terminal backend {terminal_backend:?} is not available in the local executor"
@@ -689,6 +690,7 @@ async fn run_terminal(
 
     let start = Instant::now();
     let output_callback = sandbox_output_callback(terminal_output_callback.cloned(), None);
+    crate::sandbox::trace_terminal_startup("core.sandbox.enter");
     let run = crate::sandbox::run_sandboxed_streaming_with_environment(
         command,
         &run_cwd,
