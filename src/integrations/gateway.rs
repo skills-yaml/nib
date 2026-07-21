@@ -608,6 +608,7 @@ mod tests {
     const LOCK_CHILD_SESSIONS_DIR: &str = "NIB_GATEWAY_LOCK_CHILD_SESSIONS_DIR";
     const LOCK_CHILD_SESSION_ID: &str = "NIB_GATEWAY_LOCK_CHILD_SESSION_ID";
     const LOCK_CHILD_EXPECTATION: &str = "NIB_GATEWAY_LOCK_CHILD_EXPECTATION";
+    const GATEWAY_TEST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn mock_loop_config() -> AgentLoopConfig {
         AgentLoopConfig {
@@ -1133,7 +1134,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, async {
             while first_capacity.capacity() != 0 || first.is_finished() {
                 assert!(
                     !first.is_finished(),
@@ -1175,7 +1176,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(5), distinct)
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, distinct)
             .await
             .expect("a distinct session progresses while the first run is blocked")
             .expect("distinct dispatch task")
@@ -1183,19 +1184,22 @@ mod tests {
 
         drop(first_capacity);
         let first_drain = tokio::spawn(async move { while first_rx.recv().await.is_some() {} });
-        tokio::time::timeout(Duration::from_secs(5), first)
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, first)
             .await
             .expect("first dispatch completes after its stream is drained")
             .expect("first dispatch task")
             .expect("first dispatch");
-        first_drain.await.expect("first stream drain");
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, first_drain)
+            .await
+            .expect("first stream drain completes")
+            .expect("first stream drain task");
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, async {
             while same_rx.recv().await.is_some() {}
         })
         .await
         .expect("serialized dispatch stream closes");
-        tokio::time::timeout(Duration::from_secs(5), same)
+        tokio::time::timeout(GATEWAY_TEST_PROGRESS_TIMEOUT, same)
             .await
             .expect("serialized dispatch completes after the first")
             .expect("serialized dispatch task")

@@ -734,6 +734,45 @@ runtime wrapper is 3,584 bytes and the public loop future is 4,856 bytes. `task 
 `task test:durable`, documentation integrity, and the Windows all-target graph pass.
 Independent diagnosis and final code-quality review report no remaining blocking findings.
 
+## Hosted Windows Gateway Timing Follow-up V (2026-07-21)
+
+### Scope
+
+Remove host-speed assumptions from the gateway serialization regression without weakening
+its concurrency contract. Successful mock gateway progress may use a bounded 30-second test
+budget, while the short negative probe must still prove that a second same-conversation
+dispatch cannot enter the agent loop before the first releases its durable session lock.
+Production gateway timeouts and locking behavior remain unchanged.
+
+### Acceptance Criteria
+
+- [x] The gateway serialization regression retains its same-conversation exclusion,
+  distinct-conversation progress, stream-backpressure, and final prompt-order assertions.
+- [x] Every positive-progress phase uses one explicit 30-second test budget while the
+  250 ms same-conversation no-entry probe remains unchanged.
+- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+
+### Affected Areas
+
+`src/integrations/gateway.rs`, hosted Windows timing evidence, and the CI matrix.
+
+### Validation Gates
+
+`task test`; `task check`; `task docs:check`; Windows-target `task check:all-targets`; and
+the exact-revision hosted Linux, macOS, and Windows jobs.
+
+### Reproduction Evidence
+
+Hosted Windows run `29795887116` finished its library suite with 542 passing tests and one
+failure: `same_conversation_runs_serialize_while_distinct_conversations_progress`
+exhausted only its five-second post-drain completion wait. Every preceding protocol
+assertion passed, and the same test passed in the immediately preceding Windows run. Across
+those two runs, the neighboring two-dispatch gateway test slowed from 4.23 to 7.37 seconds
+and the concurrency test moved from a 7.63-second pass to a 13.86-second failure.
+Independent reviews found no lost wake or lock-ownership defect. The regression now uses a
+30-second budget for bounded successful progress while preserving the 250 ms exclusion
+probe and all state assertions.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS
