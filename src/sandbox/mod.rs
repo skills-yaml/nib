@@ -1462,19 +1462,49 @@ mod tests {
             path_linker.ends_with("/usr/bin/link.exe"),
             "expected the Git linker collision, got {path_linker}"
         );
-        let link_arguments = lines.collect::<Vec<_>>().join("\n").replace('\\', "/");
+        let link_arguments = lines.collect::<Vec<_>>().join("\n");
+        let rendered = link_arguments.trim_start();
+        let linker = if let Some(quoted) = rendered.strip_prefix('"') {
+            quoted
+                .split_once('"')
+                .map(|(linker, _)| linker)
+                .expect("rustc quoted linker path should terminate")
+        } else {
+            rendered
+                .split_ascii_whitespace()
+                .next()
+                .expect("rustc should print its linker executable")
+        };
+        let linker_path = Path::new(linker);
+        let linker_components = linker_path
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         assert!(
-            link_arguments
-                .to_ascii_lowercase()
-                .contains("/vc/tools/msvc/"),
-            "rustc did not select an absolute MSVC linker:\n{link_arguments}"
+            linker_path.is_absolute(),
+            "rustc selected a non-absolute linker: {linker}"
         );
         assert!(
-            !link_arguments
-                .to_ascii_lowercase()
-                .contains("/usr/bin/link.exe"),
-            "rustc selected Git's GNU linker:\n{link_arguments}"
+            linker_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("link.exe")),
+            "rustc did not select link.exe: {linker}"
         );
+        assert!(
+            linker_components.windows(3).any(|parts| {
+                parts[0].eq_ignore_ascii_case("vc")
+                    && parts[1].eq_ignore_ascii_case("tools")
+                    && parts[2].eq_ignore_ascii_case("msvc")
+            }),
+            "rustc did not select the MSVC linker: {linker}"
+        );
+        let git_linker = linker_components.len() >= 3
+            && linker_components[linker_components.len() - 3..]
+                .iter()
+                .zip(["usr", "bin", "link.exe"])
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected));
+        assert!(!git_linker, "rustc selected Git's GNU linker: {linker}");
     }
 
     #[tokio::test]

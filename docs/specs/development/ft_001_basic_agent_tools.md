@@ -369,8 +369,9 @@ verbatim-prefix regressions.
 
 ## Remaining Implementation Plan
 
-1. Complete the hosted Windows core-tool portability follow-up below and pass the exact
-   revision's full CI matrix.
+1. Normalize only the probe's rustc-rendered linker path for repeated separators while
+   preserving the positive absolute-MSVC and negative `/usr/bin/link.exe` checks, then
+   pass the original Cargo E2E and the exact revision's full CI matrix.
 2. Keep the native file-identity, reparse-point, verbatim-path, and DOS short-alias
    regressions mandatory for future filesystem changes.
 3. Rerun the canonical Task gates and two-stage review before moving FT-001 to `done/`.
@@ -379,8 +380,9 @@ verbatim-prefix regressions.
 
 - A future path-normalization change could weaken component-level link rejection unless
   the passing native Windows replacement and reparse regressions remain mandatory.
-- The hosted terminal linker and full-matrix risks remain open in the portability
-  follow-up below.
+- The sanitized Git Bash direct-rustc probe now proves MSVC discovery and linking. A
+  probe-only path-rendering mismatch still blocks the suite before the real Cargo E2E,
+  so Cargo integration and the exact-revision full matrix remain open.
 
 ## Hosted Windows Core-Tool Portability Follow-up (2026-07-21)
 
@@ -391,11 +393,12 @@ suites completed. Keep `list_directory` and `grep` path values in their existing
 filesystem syntax, but make the E2E assertions compare them as paths instead of Unix
 strings and normalize only relative glob candidates to slash syntax. Preserve the
 machine-wide `ProgramData`, `ProgramFiles(x86)`, and `ProgramFiles` discovery roots
-across the sanitized terminal environment so rustc can inspect Visual Studio Setup
-Configuration state, fall back to the fixed `vswhere` location when necessary, select
-the absolute MSVC linker, and build its SDK environment instead of falling through to
-Git's GNU `link.exe`. Keep the POSIX shell selection and real Cargo-test verification
-unchanged.
+across the sanitized terminal environment so rustc can inspect installed Visual Studio
+toolchain state, select the absolute MSVC linker, and build its SDK environment instead
+of falling through to Git's GNU `link.exe`. Keep the POSIX shell selection and real
+Cargo-test verification unchanged. Accept repeated separators produced by rustc's
+escaped diagnostic rendering of the absolute linker path without weakening the
+successful-link artifact check or accepting Git's `/usr/bin/link.exe` as rustc's linker.
 
 ### Acceptance Criteria
 
@@ -403,7 +406,7 @@ unchanged.
   the recursive listing, hidden-entry, glob, or concrete artifact checks.
 - [x] Slash-based grep globs match native Windows relative paths while returned file
   paths remain native and usable as filesystem inputs.
-- [ ] Sanitized Windows terminal children retain the three machine-wide Visual Studio
+- [x] Sanitized Windows terminal children retain the three machine-wide Visual Studio
   discovery roots needed by rustc through Git Bash, while unrelated host variables
   remain excluded.
 - [x] POSIX shell selection and the existing environment redaction boundary remain
@@ -439,8 +442,7 @@ On 2026-07-21, the focused slash-glob regression and both formerly failing runti
 tests pass locally, including the nested fixture's real `cargo test`. `task fix`,
 `task test`, `task check`, `task docs:check`, `git diff --check`, and
 `task check:all-targets TARGET=x86_64-pc-windows-msvc` pass. The Windows-only
-environment regression compiles for MSVC and remains unchecked above until the hosted
-runner executes it together with the native path and terminal behavior.
+environment regression compiles for MSVC; native execution evidence is recorded below.
 
 ### First Hosted Remediation Evidence
 
@@ -471,3 +473,17 @@ importing it into the case-sensitive POSIX shell. The probe incorrectly checked 
 mixed-case spelling in a silent `&&` chain. The next revision must use the shell-visible
 spelling, emit a named error for every environment precondition, include the process
 status in assertion output, and retain the real rustc plus Cargo linking gates.
+
+### Third Hosted Remediation Evidence
+
+Hosted run `29846066576` on revision `31a1f36de23b4df154ca03b5cd3da9bbf7bff606`
+passed Validate and macOS, including coverage, release builds, and smokes, plus the
+Windows all-targets check and 546 of 547 Windows library tests. The named Git Bash
+preconditions proved that `ProgramData`, shell-visible `PROGRAMFILES`, and
+`ProgramFiles(x86)` survived sanitization while the unrelated sentinel remained absent;
+Git's `/usr/bin/link.exe` collision was present. `rustc` nevertheless linked `probe.exe`
+successfully with the absolute Visual Studio linker rendered as
+`C://...//VC//Tools//MSVC//...//link.exe`. The probe then rejected that valid evidence
+because it required the single-separator substring `/vc/tools/msvc/`. This confirms the
+environment and direct-rustc remediation, but the original coding E2E did not run and
+the Windows job and full matrix remain open.
