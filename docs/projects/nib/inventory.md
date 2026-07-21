@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@1.2.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-07-16
+- Last reviewed: 2026-07-21
 
 ## Adopted Files
 
@@ -33,10 +33,10 @@ Metadata:
 - T003, T004, and T007 remain in `development/`: namespace quarantine and identity
   verification do not prove exact physical unlink on Unix, and their platform gates
   remain open.
-- FT-001 and T006 remain in `development/` until the configured Windows CI job
-  executes successfully. T010 remains there pending both an exact-current committed
-  development-channel run; rolling Releases now use the documented exclusive-writer
-  operating contract.
+- T006 remains in `development/` pending its own hosted Windows evidence reconciliation.
+  T010 remains there pending an exact-current committed development-channel run and
+  inspection of its published artifacts; rolling Releases now use the documented
+  exclusive-writer operating contract.
 - FT-015 remains in `development/` for Windows/macOS worktree runtime validation and
   the inherited FT-017 authority boundary.
 - T020 and FT-016 have complete local stdio MCP lifecycle, cancellation, redaction, and
@@ -108,8 +108,8 @@ Local cross-target compilation is also blocked before nib code by the missing MS
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 18 audited specs are in `done/`; T003, T004, T006, T007, T010, T020,
-  FT-001, FT-015, FT-016, and FT-017 are in `development/`; no spec is in `backlog/`.
+- Lifecycle: 19 audited specs are in `done/`; T003, T004, T006, T007, T010, T020,
+  FT-015, FT-016, and FT-017 are in `development/`; no spec is in `backlog/`.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate
   model-context accounting.

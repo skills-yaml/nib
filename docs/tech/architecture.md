@@ -9,7 +9,7 @@ See also:
 - [Backend Rust](backend_rust.md)
 - [Permissions](permissions.md) (defense-in-depth model)
 - [Ecosystem Integration](ecosystem_integration.md) (MCP, Skills, AGENTS.md)
-- [FT-001: Basic Agent Tools](../specs/development/ft_001_basic_agent_tools.md)
+- [FT-001: Basic Agent Tools](../specs/done/ft_001_basic_agent_tools.md)
 - [FT-003: Hybrid Sandboxing](../specs/done/ft_003_adopt_codex_sandboxing.md) (implemented in Rust with reconciled audit evidence)
 - [FT-004: LLM Integration and Agent Loop](../specs/done/ft_004_llm_integration_and_agent_loop.md) (reasoning + tool loop)
 

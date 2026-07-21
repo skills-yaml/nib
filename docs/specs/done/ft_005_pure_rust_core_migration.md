@@ -2,7 +2,7 @@
 
 **Status:** Done
 **Decision:** Replace the hybrid Rust CLI + Python core with a **single Rust binary**. No Python/uv runtime at cutover.  
-**Related:** [FT-001](../development/ft_001_basic_agent_tools.md), [FT-002](ft_002_base_architecture.md), [FT-003](ft_003_adopt_codex_sandboxing.md), [FT-004](ft_004_llm_integration_and_agent_loop.md), [T009](../done/T009_rust_module_layout_and_toml_config.md), [architecture.md](../../tech/architecture.md), [project_structure.md](../../tech/project_structure.md)
+**Related:** [FT-001](ft_001_basic_agent_tools.md), [FT-002](ft_002_base_architecture.md), [FT-003](ft_003_adopt_codex_sandboxing.md), [FT-004](ft_004_llm_integration_and_agent_loop.md), [T009](../done/T009_rust_module_layout_and_toml_config.md), [architecture.md](../../tech/architecture.md), [project_structure.md](../../tech/project_structure.md)
 
 ## Summary
 

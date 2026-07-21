@@ -1,6 +1,6 @@
 # FT-001: Basic Agent Tools Implementation
 
-**Status:** Development
+**Status:** Done
 **Owner:** nib team  
 **Related:** [Product Foundation](../foundation/product.md), [Ecosystem Integration](../../tech/ecosystem_integration.md), [Permissions & Safety](../../tech/permissions.md), [Base Architecture](../../tech/architecture.md)
 
@@ -270,7 +270,7 @@ session audit, worktree sandbox, context policy, and stdio MCP exposure describe
 - [x] Direct and stdio MCP invocation paths use the same executor.
 - [x] A verified E2E patch changes only the session worktree.
 - [x] Fresh local aggregate gates are green.
-- [ ] Windows runtime gates are green.
+- [x] Windows runtime gates are green.
 
 ### Affected Areas
 
@@ -367,22 +367,21 @@ passes `windows_file_replacement_cannot_bypass_opened_identity_check`, the direc
 nested-junction reparse regressions, the real DOS short-alias regression, and both
 verbatim-prefix regressions.
 
-## Remaining Implementation Plan
+## Completion State
 
-1. Rename the Windows PowerShell smoke fixture-home local without changing the isolated
-   `HOME` override, restoration, cleanup, or three release-binary checks, then pass the
-   exact revision's full CI matrix.
-2. Keep the native file-identity, reparse-point, verbatim-path, and DOS short-alias
-   regressions mandatory for future filesystem changes.
-3. Rerun the canonical Task gates and two-stage review before moving FT-001 to `done/`.
+The implementation plan is complete. The normalized linker probe, original Cargo E2E,
+canonical local Task gates, two-stage review, Windows release-binary smoke, and exact
+implementation-revision matrix all pass. The native file-identity, reparse-point,
+verbatim-path, and DOS short-alias regressions remain mandatory for future filesystem
+changes.
 
-## Current Risks
+## Residual Risks
 
 - A future path-normalization change could weaken component-level link rejection unless
   the passing native Windows replacement and reparse regressions remain mandatory.
-- Hosted Windows tests now prove both direct-rustc MSVC discovery and the real Cargo E2E.
-  Only the PowerShell release-smoke harness and exact-revision full matrix remain open;
-  the local Linux host cannot execute that native Windows validation.
+- Git for Windows, Visual Studio discovery, or PowerShell runner behavior could regress
+  the hosted path; the direct-rustc probe, real Cargo E2E, and release-binary smoke
+  remain mandatory regression gates.
 
 ## Hosted Windows Core-Tool Portability Follow-up (2026-07-21)
 
@@ -417,9 +416,10 @@ release-binary `--help`, `version`, and `doctor` execution.
   otherwise unchanged.
 - [x] The coding E2E still applies its patch only in the session worktree, runs the real
   fixture `cargo test`, and persists a successful terminal result on Windows.
-- [ ] The Windows release-binary smoke executes `nib --help`, `nib version`, and
-  `nib doctor` with an isolated home without colliding with PowerShell automatic variables.
-- [ ] The exact implementation revision passes the hosted Windows job and full CI matrix.
+- [x] The Windows release-binary smoke executes `nib --help` and `nib version`, then
+  executes `nib doctor` with an isolated home without colliding with PowerShell
+  automatic variables.
+- [x] The exact implementation revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
 
@@ -431,8 +431,8 @@ Windows job.
 
 Focused sandbox and runtime E2E tests, `task fix`, `task test`, `task check`,
 `task docs:check`, Windows-target `task check:all-targets`, `git diff --check`, and the
-exact-revision hosted Linux/macOS/Windows matrix including the Windows release-binary
-smoke.
+exact implementation-revision hosted Linux/macOS/Windows matrix including the Windows
+release-binary smoke.
 
 ### Reproduction Evidence
 
@@ -509,3 +509,15 @@ variable names are case-insensitive, so `$home` attempted to overwrite the read-
 automatic `$HOME` variable. This is a CI-harness failure rather than a release-binary,
 linker, or Cargo failure. The next revision must use a non-reserved fixture-home local
 while retaining the environment restoration, cleanup, doctor smoke, and full matrix.
+
+### Final Hosted Implementation Evidence
+
+Hosted run `29859138441` on exact implementation revision
+`769f67b200af70531129f7578cead29862d24c8c` passed Validate, macOS Tests, and Windows
+Tests. Windows job `88731054375` passed the all-target/all-feature check, all 548 library
+tests, all 15 delegation tests, all nine runtime E2Es, and the release build. Its native
+suite passed `sanitized_git_shell_discovers_the_absolute_msvc_linker`, every file-identity,
+reparse, verbatim-path, and short-alias regression, and the original real-Cargo coding
+E2E. The release binary then passed `nib --help` and `nib version`; `nib doctor` passed
+after the workflow installed the isolated `HOME` fixture. The later
+documentation-transition revision is separate from this exact implementation evidence.

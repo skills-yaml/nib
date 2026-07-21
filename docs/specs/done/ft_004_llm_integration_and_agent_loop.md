@@ -1,7 +1,7 @@
 # FT-004: LLM Integration and Agent Loop
 
 **Status:** Done
-**Related:** [FT-001: Basic Agent Tools](../development/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](ft_002_base_architecture.md), [FT-003: Hybrid Sandboxing](ft_003_adopt_codex_sandboxing.md), [docs/tech/architecture.md](../../tech/architecture.md), [docs/tech/ecosystem_integration.md](../../tech/ecosystem_integration.md)
+**Related:** [FT-001: Basic Agent Tools](ft_001_basic_agent_tools.md), [FT-002: Base Architecture](ft_002_base_architecture.md), [FT-003: Hybrid Sandboxing](ft_003_adopt_codex_sandboxing.md), [docs/tech/architecture.md](../../tech/architecture.md), [docs/tech/ecosystem_integration.md](../../tech/ecosystem_integration.md)
 
 ## Summary
 

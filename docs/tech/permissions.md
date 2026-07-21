@@ -253,7 +253,7 @@ This multi-layer approach, combined with nib's workload ownership and explicit c
 
 **Related Documents**
 - `docs/tech/ecosystem_integration.md`
-- [FT-001: Basic Agent Tools](../specs/development/ft_001_basic_agent_tools.md)
+- [FT-001: Basic Agent Tools](../specs/done/ft_001_basic_agent_tools.md)
 - [T001: Core Agent Tools](../specs/done/T001_implement_core_agent_tools.md)
 - Workspace references for permission patterns in advanced agent tools (approvals, yolo modes, worktree isolation, redaction, shell-hook allowlists)
 

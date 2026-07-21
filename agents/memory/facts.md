@@ -199,3 +199,23 @@ Strict skill inventory fails closed on incomplete traversal, count truncation, m
 manifests, and non-regular `SKILL.md` entries. Run and chat share one serialized console
 input source for approvals and questions; closed input reconciles the active session
 without introducing an invalid message-role transition.
+
+## 2026-07-21 - FT-001 native Windows completion
+
+- Type: fact
+- Source: FT-001 exact implementation-revision hosted validation
+- Confidence: high
+- Review: independent spec-compliance and code-quality audits
+- Supersedes: 2026-07-15 lifecycle count and FT-001 status only
+
+Content:
+
+FT-001 is complete at implementation revision
+`769f67b200af70531129f7578cead29862d24c8c`. Hosted CI run `29859138441` passed
+Validate, macOS Tests, and Windows Tests. The Windows job passed all 548 library tests,
+15 delegation tests, nine runtime E2Es, absolute MSVC linker discovery, the real Cargo
+coding E2E, release build, and release-binary help, version, and doctor smoke.
+
+The canonical lifecycle is 19 specs in `done/`, 9 in `development/`, and none in
+`backlog/`. FT-001 moved to `done/`; T006 retains its separate hosted Windows evidence
+gate. Historical lifecycle entries remain historical evidence.

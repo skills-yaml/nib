@@ -1,7 +1,7 @@
 # FT-002: Base Architecture of the Agent
 
 **Status:** Done
-**Related:** [Product Foundation](../foundation/product.md), [FT-001: Basic Agent Tools](../development/ft_001_basic_agent_tools.md), [T001](T001_implement_core_agent_tools.md)
+**Related:** [Product Foundation](../foundation/product.md), [FT-001: Basic Agent Tools](ft_001_basic_agent_tools.md), [T001](T001_implement_core_agent_tools.md)
 
 ## Overview
 

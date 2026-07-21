@@ -481,14 +481,14 @@ DOS-short spelling of the same temporary directory.
 - [x] Git-backed delegation, executor, and end-to-end integration repositories pin
   `core.autocrlf=false` before their first commit, so fixture setup and managed Git
   interpret worktree bytes consistently.
-- [ ] Already-integrated recovery records verification against the canonical parent
+- [x] Already-integrated recovery records verification against the canonical parent
   worktree even when the test runner supplies an equivalent DOS-short project path.
-- [ ] Already-integrated merge recovery remains clean and succeeds on Windows when the
+- [x] Already-integrated merge recovery remains clean and succeeds on Windows when the
   host Git installation enables `core.autocrlf` outside the repository.
-- [ ] Worktree patch assertions remain byte-stable when Windows enables ambient
+- [x] Worktree patch assertions remain byte-stable when Windows enables ambient
   line-ending conversion.
-- [ ] The exact PR revision passes the hosted Windows integration suites and full CI
-  matrix without weakening managed Git's ambient-configuration isolation.
+- [x] The exact implementation revision passes the hosted Windows integration suites
+  and full CI matrix without weakening managed Git's ambient-configuration isolation.
 
 ### Affected Areas
 
@@ -512,6 +512,17 @@ only a lexical assertion against the runner's equivalent DOS-short temporary pat
 assertion now derives the expected canonical root. A fresh hostile-config `task test`,
 canonical `task check`, documentation integrity gate, and Windows all-target cross-check
 pass; an independent path-assertion audit found no related mixed-representation equality.
+
+### Final Hosted Fixture Evidence
+
+Hosted run `29859138441` on exact implementation revision
+`769f67b200af70531129f7578cead29862d24c8c` passed Validate, macOS Tests, and Windows
+Tests. Windows passed `integrated_pending_commit_ignores_stale_worktree_for_verification_then_cleans_it`,
+`pending_merge_recovers_after_commit_and_cleanup_preceded_final_write`,
+`approved_patch_physically_changes_only_the_session_worktree_and_is_verified`, and
+`full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_worktree`, plus the
+complete 548-test library suite and hosted matrix. This closes the Git-fixture follow-up
+without weakening managed Git's ambient-configuration isolation.
 
 ## Hosted Windows Bounded Cleanup and Merge Contention Follow-up (2026-07-21)
 
@@ -552,7 +563,7 @@ before the residual-artifact assertions and included in their failure diagnostic
   unchanged.
 - [x] The cross-ID merge regression remains deadlock-bounded and requires both merge
   records and artifacts to reach their successful terminal state.
-- [ ] Focused regressions pass repeatedly and the exact implementation revision passes
+- [x] Focused regressions pass repeatedly and the exact implementation revision passes
   the hosted Linux, macOS, and Windows matrix.
 
 ### Affected Areas
@@ -584,7 +595,7 @@ authoritative state, and successful reuse by a fresh uncancelled merge. The cros
 integration test also has a 90-second outer deadlock bound while still requiring both
 real merges and both durable records to reach `merged`.
 
-The affected post-add, repository-lock timeout/identity, persistent-anchor, and
+The affected post-add, repository-lock timeout/identity, persistent-anchor,
 lock-cancellation, and cross-ID merge tests passed in two serialized final-patch
 executions across `task test` and `task check`. Each execution passed all 620 library
 tests, 62 CLI tests, 22 delegation tests, every integration suite, and all nine runtime
@@ -614,6 +625,17 @@ verification preparation and final integration. The five-second budget therefore
 measured legitimate serialized Git work rather than a stale holder. Neither failure was
 caused by the workflow-only smoke change from `7ff72c857739be273531bd914ba5f50c66c82670`
 to `8eaf77a1ab2d82183b3f6629f7ccd0744d8be516`.
+
+### Final Hosted Remediation Evidence
+
+Hosted run `29859138441` on exact implementation revision
+`769f67b200af70531129f7578cead29862d24c8c` passed Validate, macOS Tests, and Windows
+Tests. Windows job `88731054375` passed all 548 library tests, including
+`sync_create_compensates_a_failure_after_worktree_add`; all 15 delegation tests,
+including the held-lock cancellation/reuse regression and the cross-ID serialized merge
+regression; all nine runtime E2Es; the release build; and the release-binary `--help`,
+`version`, and `doctor` smoke. The exact hosted run therefore closes this bounded-cleanup
+and contention follow-up while FT-015 retains its separate platform-authority work.
 
 ## Remaining Implementation Plan
 

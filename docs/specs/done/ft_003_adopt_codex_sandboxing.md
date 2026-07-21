@@ -2,7 +2,7 @@
 
 **Status:** Done
 **Implementation track:** Rust only, delivered through [FT-005 Phase 5](ft_005_pure_rust_core_migration.md) and the reconciliation below.
-**Related:** [FT-001: Basic Agent Tools](../development/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](ft_002_base_architecture.md), [FT-005: Pure Rust Core Migration](ft_005_pure_rust_core_migration.md), [T001](T001_implement_core_agent_tools.md), `docs/tech/permissions.md`, `docs/tech/architecture.md`, `docs/specs/foundation/product.md`
+**Related:** [FT-001: Basic Agent Tools](ft_001_basic_agent_tools.md), [FT-002: Base Architecture](ft_002_base_architecture.md), [FT-005: Pure Rust Core Migration](ft_005_pure_rust_core_migration.md), [T001](T001_implement_core_agent_tools.md), `docs/tech/permissions.md`, `docs/tech/architecture.md`, `docs/specs/foundation/product.md`
 
 ## Historical Reopen Rationale
 

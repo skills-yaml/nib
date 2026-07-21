@@ -210,3 +210,21 @@ The reconciled Linux tree passed `task check` and independent `task test` with 7
 (55,083/65,656). Final documentation, optimized-build, managed-process release smoke,
 strict all-target/all-feature, formatting, and diff checks are recorded by the current
 validation run.
+
+## 2026-07-21 - FT-001 transitioned to done
+
+- Type: documentation / validation
+- Source: exact implementation-revision hosted CI and lifecycle reconciliation
+- Confidence: high
+- Review: independent spec-compliance and code-quality audits
+- Supersedes: current FT-001 development status and 18/10/0 lifecycle count
+
+Content:
+
+Moved FT-001 from `development/` to `done/` after hosted run `29859138441` passed the
+exact implementation revision `769f67b200af70531129f7578cead29862d24c8c` on Linux,
+macOS, and Windows. Updated inbound links, lifecycle inventory, final native Windows
+evidence, and FT-015's bounded-cleanup follow-up evidence.
+
+The reconciled lifecycle is now 19 specs in `done/`, 9 in `development/`, and none in
+`backlog/`. T006 remains pending its independent hosted Windows evidence reconciliation.

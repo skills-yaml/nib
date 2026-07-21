@@ -23,13 +23,14 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **18 done, 10 development, and 0 backlog**.
+The current lifecycle is **19 done, 9 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
-cleanup within the documented non-malicious-same-UID boundary. FT-001 and T006 retain
-their Windows runtime gates. T010 retains its exact-current remote release run. FT-015
-retains Windows worktree cleanup/runtime validation and the FT-017 platform authority boundary;
+cleanup within the documented non-malicious-same-UID boundary. T006 remains pending
+separate hosted Windows evidence reconciliation. T010 retains its exact-current remote
+release run. FT-015 retains Windows worktree cleanup/runtime validation and the FT-017
+platform authority boundary;
 managed Git preflight and Unix namespace-detachment criteria are locally complete under
 the same threat boundary. T020 and FT-016 have complete local stdio MCP lifecycle,
 cancellation, redaction, and metadata coverage; T020 retains Windows Job Object and
@@ -63,7 +64,7 @@ work or narrower guarantees.
 
 ### Feature specs
 
-- [FT-001: Basic Agent Tools](development/ft_001_basic_agent_tools.md)
+- [FT-001: Basic Agent Tools](done/ft_001_basic_agent_tools.md)
 - [FT-002: Base Architecture](done/ft_002_base_architecture.md)
 - [FT-003: Hybrid Sandboxing](done/ft_003_adopt_codex_sandboxing.md)
 - [FT-004: LLM Integration and Agent Loop](done/ft_004_llm_integration_and_agent_loop.md)

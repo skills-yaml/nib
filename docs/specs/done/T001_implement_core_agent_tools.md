@@ -2,7 +2,7 @@
 
 **Status:** Done
 
-**Related Feature:** [FT-001: Basic Agent Tools Implementation](../development/ft_001_basic_agent_tools.md)
+**Related Feature:** [FT-001: Basic Agent Tools Implementation](ft_001_basic_agent_tools.md)
 
 > Historical proposal note: sections before the 2026-07-15 reconciliation preserve
 > the original Python/global-Task design and delivery sequence. The Rust,
