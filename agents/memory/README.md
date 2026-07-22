@@ -2,7 +2,8 @@
 
 This directory stores durable project memory for the `nib` repository.
 
-It follows `workspace-docs@1.0.0` from `/home/e/work/projects/agents/docs/standards/workspace-docs/v1.0.0/`.
+It follows the repository-pinned `workspace-docs@1.2.0` standard under
+`docs/standards/workspace-docs/`.
 
 - Do not store secrets, credentials, tokens, or transient scratch notes.
 - Prefer append-only updates.

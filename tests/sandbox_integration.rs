@@ -5,11 +5,6 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn test_sandbox_write_restrictions() {
     let caps = detect_capabilities();
-    if !caps.bwrap_available {
-        println!("Skipping bwrap test: bwrap not available");
-        return;
-    }
-
     let project_dir = tempdir().expect("Failed to create temp project dir");
     let external_dir = tempdir().expect("Failed to create temp external dir");
 
@@ -27,6 +22,12 @@ async fn test_sandbox_write_restrictions() {
         .expect("Failed to run sandbox");
     assert!(res1.0.status.success());
     assert!(cwd.join("test_cwd.txt").exists());
+
+    if !caps.bwrap_available {
+        assert!(res1.1.is_none(), "unusable bwrap must use direct fallback");
+        return;
+    }
+    assert!(res1.1.is_some(), "executable bwrap must be selected");
 
     // 2. Should be able to write to external_path (explicitly allowed)
     let res2 = run_sandboxed(
@@ -54,4 +55,14 @@ async fn test_sandbox_write_restrictions() {
     // Should fail
     assert!(!res3.0.status.success());
     assert!(!unauth_dir.path().join("test_unauth.txt").exists());
+}
+
+#[tokio::test]
+async fn sandbox_rejects_an_unavailable_working_directory() {
+    let directory = tempdir().expect("tempdir");
+    let missing = directory.path().join("missing");
+    let error = run_sandboxed("true", &missing, "restricted", &BoundaryConfig::default())
+        .await
+        .expect_err("missing cwd must fail closed");
+    assert!(error.contains("invalid sandbox working directory"));
 }

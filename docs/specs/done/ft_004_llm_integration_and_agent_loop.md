@@ -1,19 +1,26 @@
 # FT-004: LLM Integration and Agent Loop
 
-**Status:** Done (merged 2026-06-20 via PR #1)  
-**Related:** [FT-001: Basic Agent Tools](../feature/ft_001_basic_agent_tools.md), [FT-002: Base Architecture](../feature/ft_002_base_architecture.md), [FT-003: Hybrid Sandboxing](../development/ft_003_adopt_codex_sandboxing.md) (reopened), [docs/tech/architecture.md](../../tech/architecture.md), [docs/tech/ecosystem_integration.md](../../tech/ecosystem_integration.md)
+**Status:** Done
+**Related:** [FT-001: Basic Agent Tools](ft_001_basic_agent_tools.md), [FT-002: Base Architecture](ft_002_base_architecture.md), [FT-003: Hybrid Sandboxing](ft_003_adopt_codex_sandboxing.md), [docs/tech/architecture.md](../../tech/architecture.md), [docs/tech/ecosystem_integration.md](../../tech/ecosystem_integration.md)
 
 ## Summary
 
-Add first-class support for driving nib via LLMs, including a pluggable LLM client, structured prompt assembly from sessions + context, a core agent loop (reason → tool selection → execution via ToolExecutor → observation), and tight integration with the new per-project `.nib/sessions/` persistence for conversation history and tool call records.
+Add first-class support for driving nib via LLMs, including a pluggable LLM client,
+structured prompt assembly from sessions + context, a core agent loop (reason → tool
+selection → execution via ToolExecutor → observation), and profile-scoped session
+persistence for conversation history and tool call records.
 
 This enables nib to act as a full autonomous coding agent while preserving all safety, audit, and human-steerability guarantees.
 
-## Problem Statement
+> Historical baseline: The sections from Historical Problem Statement through
+> Historical Open Questions record the pre-Rust proposal. The shipped Rust loop and
+> authoritative completion evidence are in the 2026-07-15 reconciliation.
 
-nib currently has:
+## Historical Problem Statement
+
+At the original implementation baseline, nib had:
 - Excellent low-level execution (ToolExecutor + hybrid bwrap sandbox + worktrees + permissions).
-- Session-based persistence (conversations + tool calls stored in project-local `.nib/sessions/*.json`).
+- Session-based persistence in the then-current project-local `.nib/sessions/*.json` path.
 - Context loading (AGENTS.md, skills, MCP tools).
 - No LLM driving the reasoning or agentic loop.
 
@@ -30,9 +37,10 @@ The loop must:
 
 ## Goals
 
-- Provide a pluggable `LLMClient` abstraction supporting OpenRouter, OpenAI, Anthropic, Google Gemini, Grok (via LiteLLM), plus a Mock for development.
+- Provide a pluggable `LLMClient` abstraction supporting OpenRouter, OpenAI, Anthropic,
+  Google Gemini, Grok through the OpenAI-compatible client, plus a Mock for development.
 - Build a core `AgentLoop` that:
-  - Loads/resumes sessions from `.nib/sessions/`.
+  - Loads/resumes sessions from the selected profile's session directory.
   - Assembles rich prompts (AGENTS.md + skills + session history + tool schemas + current workload snapshot).
   - Drives ReAct / tool-calling style reasoning.
   - Executes tools exclusively via `ToolExecutor` (so sandbox, approvals, and recording are automatic).
@@ -50,9 +58,9 @@ The loop must:
 - Web UI or multi-user concerns.
 - Full support for every possible LLM feature (vision, etc.) in v1.
 
-## Proposed Design
+## Historical Proposed Design (Python)
 
-### 1. LLM Client Abstraction
+### 1. Historical LLM Client Abstraction
 
 ```python
 # src/nib/llm/base.py
@@ -84,7 +92,7 @@ Implementations (via LiteLLM for unified support):
 
 Configuration via `.nib/config.toml` or env (model, api_key, base_url).
 
-### 2. Prompt Construction
+### 2. Historical Prompt Construction
 
 Extend `context/loader.py` → `assemble_agent_prompt(session: Session, goal: str, mode: str) -> str`
 
@@ -97,7 +105,7 @@ Components:
 
 Tool schemas are auto-generated from `ToolMetadata`.
 
-### 3. Core Agent Loop
+### 3. Historical Core Agent Loop
 
 ```python
 # src/nib/agent/loop.py
@@ -138,9 +146,10 @@ The loop lives in `src/nib/agent/loop.py`.
 
 ### 4. Integration with Existing Components
 
-- **SessionStore** (`.nib/sessions/`): Primary memory for the loop. Every LLM message and tool result is appended.
+- **SessionStore** (`.nib/profiles/<id>/sessions/` by default): Primary audit memory
+  for the loop. Every LLM message and tool result is appended.
 - **ToolExecutor**: Single point of execution. The loop never calls tools directly.
-- **ContextLoader**: Supplies AGENTS.md, skills, and (future) lightweight project snapshot.
+- **ContextLoader**: Supplies AGENTS.md, skills, and a bounded project/workload snapshot.
 - **Worktree + Hybrid Sandbox** (FT-003): Automatically applied on any mutating tool call.
 - **MCP / Sub-agents**: The loop itself can be exposed. Can delegate steps to fresh Grok sub-agents (recording their output into the parent session).
 - **CLI/TUI**: New commands `nib run "goal"` and interactive mode. TUI shows live session + loop steps.
@@ -161,7 +170,7 @@ This mirrors the Grok-style safety we want.
 - `ToolCallRecord` already captures everything the loop needs.
 - No changes to the file-based storage format (JSON per session).
 
-### 7. Updates to Core Components
+### 7. Historical Python Module Plan
 
 - `src/nib/llm/` – new package.
 - `src/nib/agent/` – loop + prompt builder.
@@ -180,7 +189,7 @@ This mirrors the Grok-style safety we want.
 | Pure prompt chaining (no loop) | Simple | No multi-step autonomy | Insufficient for vision |
 | Make the loop itself an MCP tool | Great for delegation | Circular if nib calls itself | Supported as secondary |
 
-## Rollout Plan
+## Historical Rollout Plan (completed)
 
 1. **Phase 1**: LLMClient + basic AgentLoop (single turn + tool execution). Update demo to use the loop.
 2. **Phase 2**: Full multi-step loop + session history feeding. Wire Plan Mode.
@@ -190,18 +199,18 @@ This mirrors the Grok-style safety we want.
 
 Backward compatible: old direct tool use still works; the loop is additive.
 
-## Validation and Acceptance Criteria
+## Historical Validation and Acceptance Criteria
 
-- [ ] `nib run "fix the bug in foo.py"` creates a session, runs the loop, records all messages + tool calls in `.nib/sessions/`.
-- [ ] Every tool action goes through `ToolExecutor` (sandbox, approval, audit).
-- [ ] Plan Mode produces a structured plan with no side effects until approved.
-- [ ] Session history is used for context in subsequent turns (demonstrated by multi-step task).
-- [ ] AGENTS.md and skills influence tool selection and behavior.
-- [ ] `task check` and `task test` pass (add loop tests).
-- [ ] End-to-end demo in the repo root succeeds and leaves clean session artifact.
-- [ ] Architecture.md and this spec are updated and cross-referenced.
+- [x] `nib run "fix the bug in foo.py"` creates a profile session, runs the loop, and records all messages + tool calls.
+- [x] Every tool action goes through `ToolExecutor` (sandbox, approval, audit).
+- [x] Plan Mode produces a structured plan with no side effects until approved.
+- [x] Session history is used for context in subsequent turns (demonstrated by multi-step task).
+- [x] AGENTS.md and skills influence tool selection and behavior.
+- [x] `task check` and `task test` pass (add loop tests).
+- [x] End-to-end demo in the repo root succeeds and leaves a clean session artifact.
+- [x] Architecture.md and this spec are updated and cross-referenced.
 
-## Open Questions
+## Historical Open Questions
 
 - Exact prompt template format (system + history + tools + scratchpad).
 - How much of the prior tool output to include vs summarize in history.
@@ -212,6 +221,109 @@ Backward compatible: old direct tool use still works; the loop is additive.
 
 ---
 
-**Next steps after this spec**: Implement Phase 1 (LLM client + minimal loop) using the new session persistence. Prioritize Grok client and clean integration with `ToolExecutor`.
+**Implementation follow-through:** The four phases were completed in Rust. Provider,
+loop, persistence, and executor evidence is recorded below and in
+`agents/memory/decisions.md`.
 
-Update this spec and `agents/memory/decisions.md` as decisions are made during implementation.
+## Reopened Audit (2026-07-15)
+
+Scope: prove side-effect-free planning, multi-turn history, policy-influenced tool
+selection, complete tool routing/audit, and a clean real coding E2E.
+
+Affected areas: `src/agent/`, `src/llm/`, `src/context/`, `src/tools/`,
+`src/session/`, CLI entrypoints, and runtime tests.
+
+Validation gates: plan/history/policy tests, real E2E artifact verification,
+`task check`, and `task test`.
+
+## Implementation Reconciliation (2026-07-15)
+
+### Scope
+
+Use Rust LLM providers and streaming tool calls inside the bounded, persisted,
+plan-first agent loop; route all actions through `ToolExecutor` and reconcile outcomes.
+
+### Acceptance Criteria
+
+- [x] OpenAI-compatible, Anthropic, Gemini, xAI/OpenRouter-compatible, and Mock clients implement the shared trait.
+- [x] `nib run` and chat invoke the in-process Rust loop with profile sessions.
+- [x] Structured planning precedes execution and has an explicit approval state.
+- [x] Subsequent turns receive bounded AGENTS, skills, memory, workload, session history, and tools.
+- [x] Tool calls are approved, sandboxed, audited, observed, and reconciled.
+- [x] Provider HTTP/SSE protocols are exercised with local fixtures; live paid credentials are not a release gate.
+- [x] Final aggregate gates are green.
+
+### Affected Areas
+
+`src/llm/`, `src/agent/`, `src/context/`, `src/tools/`, `src/session/`,
+`src/run.rs`, `src/chat.rs`, and runtime/provider tests.
+
+### Implementation Evidence
+
+`src/llm/mod.rs` defines `LlmClient`; provider modules implement completion/streaming.
+`src/agent/loop.rs` implements the stateful loop and `src/agent/planner.rs` the structured planner.
+
+### Validation Evidence
+
+Provider modules contain HTTP fixture/parser/error/size tests. `tests/test_runtime_e2e.rs`
+exercises profile context, planning, tools, denial, bounds, persistence, and reconciliation.
+Manual release smoke on 2026-07-15 exercised `nib run` through the Mock provider for
+detached terminal and scheduled-agent workflows with persisted reconciliation.
+
+### Validation Gates
+
+- [x] Deterministic provider and runtime integration tests exist.
+- [x] Credential-free protocol fixtures cover providers; credentialed live smoke is explicitly optional.
+- [x] `task check`.
+- [x] `task test`.
+
+### Genuine Gaps
+
+The historical Python/LiteLLM snippets are superseded. CI intentionally does not make
+live paid-provider calls; local HTTP/SSE fixtures cover the provider contracts.
+
+## Reopened Audit (2026-07-16)
+
+### Scope
+
+Bind the in-process loop to an exact persisted plan revision and add a clean,
+credential-free coding E2E that edits and compiles through the loop itself.
+
+### Acceptance Criteria
+
+- [x] Generated plans persist a unique ID and exact goal.
+- [x] Resuming a session with a different goal always replans and requires fresh approval.
+- [x] The complete agent loop, not a direct executor helper, performs and audits a real
+  edit plus compile/test workflow.
+- [x] Compression and multi-turn history remain active in that workflow.
+
+### Affected Areas
+
+`src/agent/`, `src/session/`, `src/llm/mock.rs`, `src/tools/executor.rs`, and runtime
+E2E tests.
+
+### Implementation Plan
+
+1. Bind planner output to a generated ID and the exact normalized goal.
+2. Reject or invalidate unbound and mismatched plans before approval or execution.
+3. Extend the Mock provider with a credential-free coding sequence.
+4. Prove the complete loop preserves history while editing and compiling in one worktree.
+
+### Risks
+
+Provider-independent loop behavior must not depend on special production code for the
+Mock client. The scenario uses ordinary planner and tool-call contracts, with Mock-only
+fixtures limited to deterministic responses.
+
+### Completion Evidence
+
+The Mock provider's runtime-coding scenario uses the ordinary planner and tool-call
+contracts. The full-loop E2E proves plan approval, compressed multi-turn history,
+worktree patching, real Cargo tests, exact audit linkage, and final reconciliation.
+Concurrent same-session runs fail closed under a dedicated lease, and stale approval
+responses cannot approve a replacement plan.
+
+### Validation Gates
+
+Goal-binding regression tests, full-loop coding E2E, `task check`, `task test`, and
+`task coverage`.

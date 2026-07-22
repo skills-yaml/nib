@@ -16,10 +16,14 @@ on:
           - development
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CRATE_NAME: nib
+
+concurrency:
+  group: release-${{ inputs.channel || (github.ref_name == 'main' && 'prod' || 'development') }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -47,6 +51,14 @@ jobs:
             echo "Unsupported release branch: ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
+
+          case "$channel:${GITHUB_REF_NAME}" in
+            prod:main | development:development) ;;
+            *)
+              echo "Invalid release channel and source branch combination: $channel:${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
 
           if [ "$channel" = "prod" ]; then
             tag="prod-latest"
@@ -92,15 +104,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install Task
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -124,7 +136,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/pkg/nib"
           chmod +x "dist/pkg/nib"
           tar -C dist/pkg -czf "dist/${{ matrix.asset }}" nib
-          shasum -a 256 "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
+          cd dist
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
@@ -137,7 +150,7 @@ jobs:
           "$($hash.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "dist/${{ matrix.asset }}.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}
           path: |
@@ -151,6 +164,10 @@ jobs:
       - prepare
       - build
     runs-on: ubuntu-latest
+    environment:
+      name: release-${{ needs.prepare.outputs.channel }}
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -159,41 +176,16 @@ jobs:
       RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Download workflow artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Move release tag
+      - name: Publish staged release transaction
         shell: bash
-        run: |
-          set -euo pipefail
-
-          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
-          git push -f origin "refs/tags/$RELEASE_TAG"
-
-      - name: Publish release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          notes="Automated $RELEASE_CHANNEL build from branch $GITHUB_REF_NAME at commit $GITHUB_SHA."
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes "$notes"
-          else
-            args=(release create "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes "$notes")
-            if [ "$RELEASE_PRERELEASE" = "true" ]; then
-              args+=(--prerelease)
-            fi
-            gh "${args[@]}"
-          fi
-
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.sha256 --clobber
+        run: scripts/publish-release.sh

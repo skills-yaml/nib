@@ -1,18 +1,26 @@
 # FT-005: Pure Rust Core Migration
 
-**Status:** Done — Phases 0–6 core complete (2026-07-02); FT-003 hybrid acceptance partially met  
+**Status:** Done
 **Decision:** Replace the hybrid Rust CLI + Python core with a **single Rust binary**. No Python/uv runtime at cutover.  
-**Related:** [FT-001](../feature/ft_001_basic_agent_tools.md), [FT-002](../feature/ft_002_base_architecture.md), [FT-003](ft_003_adopt_codex_sandboxing.md), [FT-004](../done/ft_004_llm_integration_and_agent_loop.md), [T009](../task/T009_rust_module_layout_and_toml_config.md), [architecture.md](../../tech/architecture.md), [project_structure.md](../../tech/project_structure.md)
+**Related:** [FT-001](ft_001_basic_agent_tools.md), [FT-002](ft_002_base_architecture.md), [FT-003](ft_003_adopt_codex_sandboxing.md), [FT-004](ft_004_llm_integration_and_agent_loop.md), [T009](../done/T009_rust_module_layout_and_toml_config.md), [architecture.md](../../tech/architecture.md), [project_structure.md](../../tech/project_structure.md)
 
 ## Summary
 
-**Intended outcome:** Users install one `nib` binary. Agent execution, LLM calls, tools, sessions, and config all run in-process in Rust. Python (`src/nib/`, LiteLLM, `uv run python -c …`) is removed after Phase 6.
+**Outcome:** Users install one `nib` binary. Agent execution, LLM calls, tools,
+sessions, and config all run in-process in Rust. The former Python core (`src/nib/`,
+LiteLLM, `uv run python -c …`) was removed.
 
-Config canonical path: `.nib/config.toml` (auto-migrate from legacy JSON). Session files under `.nib/sessions/` stay backward compatible.
+Config canonical path: `.nib/config.toml` (auto-migrate from legacy JSON). Session files
+live under profile state, normally `.nib/profiles/<id>/sessions/`; legacy
+`.nib/sessions/` files migrate compatibly.
 
-## Problem statement
+> Historical baseline: The problem statement, dated current-state table, target design,
+> and rollout phases record the 2026-07-02 migration plan. Current completion truth is
+> the migration-complete criteria and 2026-07-15 reconciliation below.
 
-Today nib presents as a Rust CLI but **all agent work runs in Python**:
+## Historical Problem Statement (2026-07-02)
+
+At the 2026-07-02 audit, nib presented as a Rust CLI but **all agent work ran in Python**:
 
 - `nib chat` and `nib run` spawn `uv run python -c …` with inline snippets (`src/chat.rs`, `src/run.rs`).
 - ~27 Python modules own ToolExecutor, agent loop, LiteLLM, context/skills, and tool implementations.
@@ -22,7 +30,8 @@ Today nib presents as a Rust CLI but **all agent work runs in Python**:
 
 **Who is affected:** Contributors (dual maintenance), users (Python + uv install burden), and safety (spec/implementation gap on sandbox and write tools).
 
-**Cost today:** Fragile subprocess bridge, false confidence from done specs, and blocked progress on FT-003.
+**Cost at that baseline:** A fragile subprocess bridge, false confidence from done
+specs, and blocked progress on FT-003.
 
 ## Goals
 
@@ -40,11 +49,11 @@ Today nib presents as a Rust CLI but **all agent work runs in Python**:
 - Rewriting external agent ecosystems (Grok subagents, MCP servers, skills registry) — nib integrates.
 - Custom LLM training or hosting; web UI; microservices.
 - macOS/Windows sandbox parity in v1 (Linux bwrap first; document fallbacks).
-- T002–T008 orchestration engine (may land in Rust after port).
+- T002–T008 orchestration engine, which was sequenced after the initial port.
 - PyO3 embedding of Python; keeping LiteLLM as a dependency.
 - Phased LLM provider rollout (all six families ship together in Phase 3).
 
-## Current state (2026-07-02)
+## Historical State (2026-07-02)
 
 | Area | Rust | Python | Notes |
 |------|------|--------|-------|
@@ -60,7 +69,7 @@ Today nib presents as a Rust CLI but **all agent work runs in Python**:
 
 **Phase 0 progress:** T009 complete (module tree, TOML, session unification, `task check` green). T010–T011 (execution config schema, tool models/registry) not started.
 
-## Proposed design
+## Historical Target Design (implemented)
 
 ### Target architecture
 
@@ -70,7 +79,7 @@ Today nib presents as a Rust CLI but **all agent work runs in Python**:
 ├─────────────────────────────────────────────────────────┤
 │  cli/          auth, chat, run, context, doctor          │
 │  tui/          ratatui (sessions, approvals, status)     │
-│  session/      SessionStore (.nib/sessions/)             │
+│  session/      profile-scoped SessionStore               │
 │  config/       TOML load/save + JSON migration           │
 │  context/      AGENTS.md walk-up, skills, prompt build   │
 │  llm/          All providers (HTTP), tool-call parse     │
@@ -81,7 +90,7 @@ Today nib presents as a Rust CLI but **all agent work runs in Python**:
 └─────────────────────────────────────────────────────────┘
          │                              │
          ▼                              ▼
-   .nib/sessions/*.json          external LLM APIs
+   .nib/profiles/<id>/sessions   external LLM APIs
    .nib/config.toml              MCP servers, git, bwrap
 ```
 
@@ -126,8 +135,7 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 | OpenAI | Chat Completions | `llm::openai` | Native `tools` |
 | Anthropic | Messages | `llm::anthropic` | Native `tools` |
 | Google Gemini | Generative Language REST | `llm::gemini` | Function declarations |
-| Grok (xAI) | OpenAI-compatible | `llm::xai` | Native `tools` |
-| OpenRouter | OpenAI-compatible | `llm::openrouter` | Native `tools` |
+| Grok (xAI) / OpenRouter | OpenAI-compatible | `llm::openai` | Native `tools` |
 | Mock | In-process | `llm::mock` | Fixtures |
 
 ### TUI (Phase 4)
@@ -136,7 +144,7 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 
 | Screen | Purpose |
 |--------|---------|
-| Session list | Browse `.nib/sessions/` |
+| Session list | Browse the selected profile's session directory |
 | Session detail | Messages + tool calls + approval metadata |
 | Live run | Stream agent loop during `nib run` |
 | Approval modal | Destructive tool confirmation |
@@ -182,12 +190,12 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 | TOML migration breaks users | Auto-migrate + `config.json.bak`; `nib doctor` reports source |
 | Six LLM APIs to maintain | Shared trait; fixture tests per provider |
 | ratatui + async CLI | Library/binary split; TUI as thin view |
-| FT-003 scope creep | Dedicated Phase 5 / T019; Linux-first |
+| FT-003 scope creep | Dedicated Phase 5 reconciliation; Linux-first |
 | Phase 3 size | Parallel tasks T015–T017 |
 | Behavior regression vs Python | `--legacy-python` until Phase 3; E2E with Mock in CI |
 | Lost Python tests | Port meaningful tests to Rust; delete stale Python tests in Phase 6 |
 
-## Rollout plan
+## Historical Rollout Plan (completed)
 
 ### Phase 0 — Foundation + TOML (1–2 weeks)
 
@@ -232,10 +240,10 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 ### Phase 5 — FT-003 sandbox + MCP + doctor (2–3 weeks)
 
 - Implement FT-003 in `sandbox/`; `[execution]` from TOML.
-- MCP client (`rmcp` vs official SDK — decide in T020 planning).
+- MCP client with bounded stdio framing and child lifecycle ownership.
 - `nib doctor`: config, sandbox, providers, migration.
 
-**Tasks:** T019, T020 (partial)  
+**Tasks:** FT-003 reconciliation and T020
 **Exit:** FT-003 acceptance criteria met on Linux.
 
 ### Phase 6 — Decommission Python (1 week)
@@ -244,10 +252,13 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 - Add `docs/tech/backend_rust.md`; update architecture + project_structure.
 - Git tag `pre-rust-core`.
 
-**Tasks:** T020 (complete)  
+**Tasks:** T020 completion and Python fixture removal
 **Exit:** Binary-only install; all quality gates green.
 
-## Validation and acceptance criteria
+## Historical Migration Acceptance Snapshot
+
+This snapshot records Rust cutover acceptance and is superseded as current repository
+truth by the 2026-07-15 reconciliation below.
 
 ### Phase 0 (partial — track per task)
 
@@ -267,24 +278,85 @@ Shared `LlmClient` trait; `reqwest` + `rustls`. CI uses Mock + recorded HTTP fix
 - [x] `nib tui` shows session list (ratatui MVP).
 - [x] `nib chat` / `nib run` run in-process only (no subprocess).
 - [x] Session JSON backward compatible with pre-migration files.
-- [x] FT-001, FT-003, FT-004 acceptance criteria fully verified in Rust (write tools real; sandbox basic).
+- [x] The Rust cutover supplied the migration-owned implementations used by FT-001,
+  FT-003, and FT-004; current feature acceptance remains in each owning spec.
 - [x] `task check` + `task test` pass (Rust only).
 - [x] Python removed from tree.
 
-## Open questions
+## Resolved Migration Questions
 
-1. **Async CLI pattern:** `tokio` on async commands only — confirm clap integration in T012.
-2. **MCP crate:** `rmcp` vs official SDK — decide before T020.
-3. **Cross-compilation:** musl + `reqwest`/rustls in release CI — verify before Phase 3.
-4. **FT-004 status:** Reopen to `development/` when Python loop is replaced and acceptance criteria verified in Rust (mirror FT-003 reopen pattern).
+1. **Async CLI pattern:** Tokio and clap are integrated in the Rust binary entrypoints.
+2. **MCP implementation:** T020 uses the repository's bounded stdio client/framing
+   implementation rather than an SDK dependency.
+3. **Cross-compilation:** Release workflows own target-specific Rust builds and checks.
+4. **FT-004 status:** FT-004 was reopened and its Rust acceptance evidence reconciled.
 
 ## References
 
-- 2026-07 audit: FT-003 never implemented; FT-004 partial; Python write tools stubbed.
+- 2026-07 audit baseline: FT-003 had not been implemented, FT-004 was partial, and
+  Python write tools were stubbed.
 - `agents/memory/decisions.md` — 2026-07-02 scope lock.
-- [T009](../task/T009_rust_module_layout_and_toml_config.md) — Phase 0 foundation (complete).
+- [T009](../done/T009_rust_module_layout_and_toml_config.md) — Phase 0 foundation (complete).
 - skm — Rust-only CLI, CI, install reference.
 
 ---
 
-**Active work:** FT-003 full hybrid acceptance (plan gates, boundary tests); MCP client; TUI approval modal.
+**Completed follow-through:** FT-003 hybrid acceptance, the MCP client, and the TUI
+approval flow are evidenced in their reconciled specs.
+
+## Reopened Audit (2026-07-15)
+
+Scope: remove the remaining Python test dependency, add provider fixtures, reconcile
+the FT-001/FT-003/FT-004 verification dependencies, and reconcile migration task
+references.
+
+Affected areas: Rust provider tests, MCP test fixtures, migration docs, and dependent
+feature validation.
+
+Validation gates: Rust-only `task check`, `task test`, and dependency-spec gates.
+
+## Implementation Reconciliation (2026-07-15)
+
+### Scope
+
+Maintain a Rust-only binary and runtime with TOML config, provider clients, tools,
+sandboxing, sessions, TUI, MCP, doctor, and backward-compatible state migration.
+
+### Acceptance Criteria
+
+- [x] Normal install/build/runtime paths require Rust, not Python or uv.
+- [x] Canonical TOML config and legacy JSON/session migration are implemented.
+- [x] Provider clients, agent loop, tools, context, sandbox, TUI, MCP, and doctor are Rust modules.
+- [x] Chat and run execute in process.
+- [x] Python core and Python MCP test fixture are absent.
+- [x] Migration-dependent contracts are reconciled in their owning specs; unrelated
+  platform, release, and later quality-review gates remain explicit development work.
+
+### Affected Areas
+
+`Cargo.toml`, `src/`, `tests/`, installers, Taskfile, migration docs, and dependent specs.
+
+### Implementation Evidence
+
+`src/lib.rs` exposes the complete Rust module tree; `Cargo.toml` owns runtime
+dependencies. `src/config/mod.rs` and `src/profile/migration.rs` preserve legacy state.
+
+### Validation Evidence
+
+`tests/config_migration.rs`, `tests/session_roundtrip.rs`, provider module tests,
+`tests/installers.rs`, and Rust MCP/runtime integration tests cover the migration surface.
+
+### Validation Gates
+
+- [x] Rust-only focused and integration tests exist.
+- [x] Migration-dependent feature gaps are closed; later review findings and external
+  gates remain explicit in their owning development specs.
+- [x] `task check`.
+- [x] `task test`.
+
+### Scope Boundary
+
+The pure-Rust migration and its dependent feature implementations are complete. No
+in-scope migration gap remains; current platform, release, and post-migration review
+gates are tracked by their owning development specs and are not completion claims of
+this migration.

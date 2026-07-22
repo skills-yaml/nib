@@ -1,7 +1,7 @@
 # T009: Rust Module Layout + TOML Config Migration
 
-**Status:** Done  
-**Related feature:** [FT-005 Pure Rust Core Migration](../development/ft_005_pure_rust_core_migration.md) Phase 0  
+**Status:** Done
+**Related feature:** [FT-005 Pure Rust Core Migration](ft_005_pure_rust_core_migration.md) Phase 0
 **Depends on:** None (first migration task)
 
 ## Goal
@@ -41,7 +41,8 @@ Establish the Rust library/binary module tree, unify session models with proper 
 - [x] `nib auth` creates/updates TOML config.
 - [x] Session files written by Rust remain loadable (fixture test).
 - [x] `task check` runs fmt, clippy, test.
-- [x] No behavior change to chat/run Python bridge yet (`--legacy-python` unchanged).
+- [x] At the Phase 0 snapshot, the Python bridge remained unchanged; FT-005 later
+  removed that bridge and the historical `--legacy-python` surface.
 
 ## Validation gates
 
@@ -58,3 +59,11 @@ cargo test session_roundtrip
 ## Exit
 
 PR references T009 + FT-005 Phase 0; FT-005 Phase 0 exit criteria checked off.
+
+## Implementation Reconciliation (2026-07-15)
+
+T009 records the first migration phase rather than the final command surface.
+`src/config/mod.rs`, `src/session/mod.rs`, `tests/config_migration.rs`, and
+`tests/session_roundtrip.rs` retain its delivered TOML/session contracts. FT-005 is
+authoritative for the later removal of the Python bridge. Exact-current aggregate gate
+evidence is recorded in `docs/specs/README.md` rather than frozen into this phase spec.

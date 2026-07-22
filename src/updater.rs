@@ -55,3 +55,16 @@ fn latest_release_commit(channel: &str) -> Result<String, Box<dyn std::error::Er
         .unwrap_or("unknown")
         .to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_metadata_and_offline_install_guidance_are_available() {
+        assert!(!current_build_commit().is_empty());
+        assert!(!current_build_channel().is_empty());
+        install_update("development").expect("offline update guidance");
+        install_update("production").expect("production update guidance");
+    }
+}

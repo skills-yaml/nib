@@ -16,27 +16,153 @@ permissions:
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+
+      - name: Configure bubblewrap containment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor-profiles bubblewrap
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          bwrap --version
 
       - name: Install Task
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify managed-process containment
+        env:
+          NIB_REQUIRE_BWRAP_TESTS: "1"
+        run: task test:managed-process-capability
+
       - name: Run checks
         run: task check
+
+      - name: Run tests
+        env:
+          NIB_REQUIRE_BWRAP_TESTS: "1"
+        run: task test
+
+      - name: Enforce runtime coverage
+        run: task coverage
+
+      - name: Build release binary
+        run: task build
+
+      - name: Smoke managed-process owner loss
+        run: task smoke:managed-process
+
+  windows-tests:
+    name: Windows Tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check all targets and features
+        run: task check:all-targets
 
       - name: Run tests
         run: task test
 
       - name: Build release binary
         run: task build
+
+      - name: Smoke release binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binary = Join-Path $env:GITHUB_WORKSPACE "target\release\nib.exe"
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "nib --help failed" }
+          & $binary version | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "nib version failed" }
+
+          $fixture = Join-Path $env:RUNNER_TEMP "nib-smoke-$([guid]::NewGuid().ToString('N'))"
+          $smokeHome = Join-Path $fixture "home"
+          New-Item -ItemType Directory -Force -Path $fixture, $smokeHome | Out-Null
+          git -C $fixture init --quiet
+          if ($LASTEXITCODE -ne 0) { throw "git init failed" }
+
+          $previousHome = $env:HOME
+          $env:HOME = $smokeHome
+          Push-Location $fixture
+          try {
+            & $binary doctor | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "nib doctor failed" }
+          } finally {
+            Pop-Location
+            if ($null -eq $previousHome) {
+              Remove-Item Env:HOME -ErrorAction SilentlyContinue
+            } else {
+              $env:HOME = $previousHome
+            }
+            Remove-Item -Recurse -Force $fixture -ErrorAction SilentlyContinue
+          }
+
+  macos-tests:
+    name: macOS Tests
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Configure physical temporary directory
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check all targets and features
+        run: task check:all-targets
+
+      - name: Run tests
+        run: task test
+
+      - name: Build release binary
+        run: task build
+
+      - name: Smoke release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/target/release/nib"
+          "$binary" --help >/dev/null
+          "$binary" version >/dev/null
+
+          fixture="$(mktemp -d "$RUNNER_TEMP/nib-smoke.XXXXXX")"
+          trap 'rm -rf "$fixture"' EXIT
+          mkdir -p "$fixture/home"
+          git -C "$fixture" init --quiet
+          (
+            cd "$fixture"
+            HOME="$fixture/home" "$binary" doctor >/dev/null
+          )

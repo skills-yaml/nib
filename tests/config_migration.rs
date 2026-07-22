@@ -52,6 +52,7 @@ fn config_toml_save_load_integration() {
             ProviderEntry {
                 model: "openrouter/anthropic/claude-3.5-sonnet".to_string(),
                 api_key: Some("or-key".to_string()),
+                api_keys: Vec::new(),
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
             },
         )]),

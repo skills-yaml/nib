@@ -66,7 +66,7 @@ Your goal is to build nib as a focused, trustworthy coding + workload agent whil
 * [Project Structure](./docs/tech/project_structure.md) (once created) — Monorepo / project layout.
 * [SDLC](./docs/tech/sdlc.md) — Development workflow, branching, quality gates.
 * [Task](./docs/tech/task.md) — Task runner usage (all builds, checks, and automation must go through Task).
-* [Backend Python](./docs/tech/backend_python.md) (when relevant) — Python/uv conventions.
+* [Backend Rust](./docs/tech/backend_rust.md) — Rust conventions.
 * [CI](./docs/tech/ci.md) — Continuous integration expectations.
 * [symphony-spec-writing skill](/home/e/.grok/skills or registry equivalent) and subagent-driven-development patterns for planning and execution.
 * Existing specs under `docs/specs/`.

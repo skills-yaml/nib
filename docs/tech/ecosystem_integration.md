@@ -14,17 +14,25 @@ These are not optional features. They are fundamental to how coding and workload
 Every serious project in the workspace has an `AGENTS.md` (or `CLAUDE.md`) at the root.
 
 **Behavior**:
-- When nib activates a project or task, it **must** discover and load the relevant `AGENTS.md` files.
-- Walk up from the project root (or task workdir) until it finds one.
-- Also load the central reference: `~/work/projects/agents/AGENTS.md` and `docs/tech/*` when appropriate.
-- Inject the content into planning, execution, and reconciliation context.
+- When nib activates a project or task, it discovers the nearest supported instruction
+  file: `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, or `AGENTS.local.md`.
+- Discovery walks up from the project root (or task workdir) and falls back to
+  `$HOME/AGENTS.md` only when no workspace instruction file is found.
+- Project standards and technical documentation are loaded separately from bounded,
+  fixed roots inside the active project; nib does not implicitly load a sibling
+  workspace's central `AGENTS.md`.
+- Inject the selected instruction content into planning, execution, and reconciliation
+  context.
 - Respect the rules inside them (e.g., "MUST read docs/tech/backend_python.md before editing", "never update AGENTS.md yourself").
 
 **Implementation**:
-- `nib/context/agents.py` or `core/context.py`: `load_agents_instructions(project_path: Path) -> str`
-- Cache per-project.
-- Expose via workload model (store which AGENTS.md were active for a task).
-- The `load_project_standards` tool (see previous design) should prioritize these.
+- `src/context/agents.rs` discovers AGENTS.md, AGENTS.local.md, CLAUDE.md, and
+  CLAUDE.local.md from the active workspace hierarchy.
+- The agent loop injects the resolved instruction context before planning and each
+  execution step.
+- Tool policy directives are loaded by `ToolExecutor`; selected skill usage and MCP
+  results are persisted, but instruction-file provenance is not a separate session
+  record.
 
 Failure to follow loaded AGENTS.md should be treated as a serious violation during self-review or reconciliation.
 
@@ -36,8 +44,8 @@ nib should participate in the SKILL.md ecosystem (used by the Grok skill system 
 - Discover skills from standard locations:
   - `~/.grok/skills/`
   - Standard skill directories in the ecosystem (e.g. those used by Grok and similar tools)
-  - Local project skills (e.g. `<project>/.skills/` or `skills/`)
-  - The central registry (`~/work/projects/registry/skills/`)
+  - Local project skills (`<project>/.nib/skills/`)
+  - Paths from `[skills]` and the selected profile
 - Parse SKILL.md frontmatter (YAML) + body.
 - Load instructions, references, templates, and executable scripts.
 - Dynamically activate skills for the current workload item (e.g. "activate symphony-spec-writing for planning this task").
@@ -47,10 +55,9 @@ nib should participate in the SKILL.md ecosystem (used by the Grok skill system 
 - nib should be publishable as a skill itself (with frontmatter) so other agents can delegate workload/planning tasks to it.
 
 **Implementation**:
-- `nib/skills/` package with:
-  - `discovery.py`
-  - `loader.py` (parses frontmatter using `pyyaml`)
-  - `registry.py` (in-memory + persistent activation)
+- `src/context/skills.rs` parses YAML frontmatter and bodies, discovers configured
+  roots, matches tags, and derives policy rules and after-tool hooks.
+- `src/skill_cmd.rs` lists local/global skills and installs or removes global skills.
 - Skills can provide:
   - Additional system prompt sections
   - Specialized tools / behaviors
@@ -65,32 +72,31 @@ MCP (Model Context Protocol) is the standard way tools and context are provided 
 **nib must**:
 
 1. **Act as an MCP client**
-   - Connect to configured MCP servers (GitHub, Notion, Linear, filesystem, custom ones).
+   - Connect to MCP servers configured in the active project's `.nib/config.toml`
+     (GitHub, Notion, Linear, filesystem, custom ones).
    - Expose their tools to nib's own reasoning/planning/execution loops.
-   - Use the same MCP servers the user has already configured in the Grok session.
+   - External agent or Grok MCP configuration is not imported automatically.
 
-2. **Act as an MCP server** (highly recommended)
-   - Expose nib's core capabilities as MCP tools:
-     - Workload queries (`get_tasks`, `get_project_status`)
-     - Planning (`create_plan`, `decompose_goal`)
-     - Delegation helpers
-     - Reconciliation status
+2. **Act as an MCP server**
+   - Expose nib's gated core tools plus `nib_run` and `nib_get_status`.
    - This allows Claude Code, Grok subagents, and similar tools to call into nib for workload ownership instead of duplicating todo/kanban logic.
 
 **Implementation**:
-- Add `mcp` package to dependencies.
-- `nib/integrations/mcp.py`:
-  - `MCPClientManager` — connect to servers from config or env.
-  - `MCPServer` — serve nib tools.
-- Configuration: simple TOML/JSON or reuse existing `~/.grok/` or project-local config.
-- All MCP tool calls must go through nib's permission/approval layer (see permissions design).
-- Support stdio and HTTP/SSE transports.
+- `src/integrations/mcp.rs` manages configured stdio child servers and namespaces
+  discovered tools as `server::tool`.
+- `src/integrations/mcp_server.rs` serves JSON-RPC/MCP over stdio.
+- `.nib/config.toml` owns command, arguments, environment, working directory, and
+  request timeout configuration.
+- Advertised tool invocations pass through `ToolExecutor`. Starting an outbound MCP
+  child command is a separate, user-configured trust boundary.
+- HTTP/SSE transports and OAuth are not implemented in this release.
 
-Example config sketch (later):
+Example configuration:
 ```toml
-[mcp.servers]
-github = { command = "...", args = [...] }   # or url for remote
-notion = { ... }
+[mcp.servers.github]
+command = "/path/to/pinned-server"
+args = ["--stdio"]
+request_timeout_secs = 30
 ```
 
 ## Integration Principles
@@ -101,25 +107,40 @@ notion = { ... }
   - Respect AGENTS.md instead of inventing new rules.
 - **Context is king for nib**.
   - When starting work on a task, the first thing nib does internally is assemble rich context:
-    1. Relevant AGENTS.md files
+    1. The selected workspace instruction file
     2. Active skills
     3. Connected MCP tools
     4. Project libs documentation (as previously discussed)
     5. Current workload state
-- **Permissions apply universally** (see the full deep dive in [docs/tech/permissions.md](../permissions.md)).
+- **Permissions apply universally** (see the full deep dive in [docs/tech/permissions.md](permissions.md)).
   - Reading AGENTS.md / SKILL.md is low-risk (read-only, scoped).
   - MCP tool exposure and activation must respect the approval modes, path scoping, and command classification.
   - Destructive actions (especially via `run_terminal` or broad patches) must never bypass user approval or explicit policy, even when triggered through skills or MCP.
 - **Workload awareness**.
-  - Store in the workload model which AGENTS.md, skills, and MCP servers were active for each task. This creates an auditable history of *how* work was done.
+  - Session records persist selected skill usage and MCP tool results. The selected
+    instruction-file path and complete configured MCP-server inventory are not stored as
+    separate provenance manifests.
 
-## Next Steps for Implementation
+## Current Boundaries
 
-1. Create `src/nib/context/` for AGENTS.md + project standards loading.
-2. Create `src/nib/skills/` for discovery and loading.
-3. Add MCP client/server in `src/nib/integrations/mcp.py`.
-4. Wire them into the planner and executor so they are automatically used.
-5. Add configuration support (e.g. `nib config mcp add ...`).
-6. Expose "load context" as a first-class internal step (visible in TUI).
+- Runtime "workload" references mean profile-scoped session JSON with `PlanStep`
+  state plus durable daemon task records. They do not imply a global SQLite backlog.
+- Outbound MCP is stdio-only and configured per project.
+- The inbound MCP server is also stdio-only. HTTP/SSE transports and OAuth are future
+  work rather than part of the v1 contract.
+- Inbound MCP cannot use stdin for interactive approvals; uncovered risky calls fail
+  closed unless an explicit policy or configured approval covers them.
+- Remote skills are explicit CLI installations and are not signed; users must review
+  their instructions, constraints, and hooks. Installation copies only the manifest
+  and declared resources under count/depth/file/aggregate bounds; Git checkout is
+  noninteractive and time-bounded.
+- The gateway normalizes Console, Telegram, Slack, and Discord payloads and dispatches
+  them through profile-scoped agent sessions. Provider authentication, webhook/socket
+  listeners, and reply delivery belong to external adapters.
+- Gateway callers cannot inject tool schemas. The agent loop exposes only the tools
+  configured by nib and gated through `ToolExecutor`.
+- Session records preserve their own active-skill usage and every MCP tool result,
+  while daemon audit records cover scheduled delivery and maintenance.
 
-This makes nib a first-class participant in the user's existing agent stack instead of yet another isolated tool.
+These integrations make nib a participant in the user's existing agent stack while
+keeping execution policy and persistence local.

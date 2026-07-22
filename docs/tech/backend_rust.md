@@ -14,23 +14,28 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - **Async Runtime**: `tokio` is the standard asynchronous runtime.
 - **Configuration**: Managed via `toml` (and `serde`). Config is strictly kept in `.nib/config.toml`.
 - **HTTP / LLMs**: `reqwest` (with `rustls`) is used for all LLM API calls. `async-trait` is used for the `LlmClient` abstraction.
-- **Data Serialization**: `serde` and `serde_json` for interacting with LLM APIs, session storage (`.nib/sessions/*.json`), and tool calling formats.
+- **Data Serialization**: `serde` and `serde_json` for LLM APIs, profile-scoped session storage, daemon state, and tool calling formats.
 - **Error Handling**: `thiserror` for robust error modeling.
-- **Sandboxing**: OS-level isolation is achieved through direct execution of `bwrap`. Task isolation is handled via Git worktrees.
+- **Sandboxing**: Git worktrees isolate mutations. The hybrid provider adds `bwrap`
+  OS isolation on usable Linux hosts and otherwise falls back to direct execution in
+  the worktree; the strict `bwrap` provider fails closed.
 
 ### Project Structure (Rust specific)
 
 - `src/main.rs`: Entry point. Sets up logging and invokes the `clap` CLI router.
-- `src/cli/`: Logic for individual commands (auth, chat, run, doctor, etc.).
+- `src/auth.rs`, `src/chat.rs`, `src/run.rs`, and command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
-- `src/llm/`: The `LlmClient` traits and provider implementations (OpenAI, Anthropic, Gemini, Grok, OpenRouter, Mock).
+- `src/llm/`: The `LlmClient` traits and provider implementations (OpenAI, Anthropic,
+  Gemini, Grok, OpenRouter, Meta, Mock).
 - `src/tools/`: The `ToolRegistry` and `ToolExecutor`, encompassing permissions, approval gates, and actual implementations.
 - `src/sandbox/`: Hybrid sandbox execution logic (bwrap invocation, boundaries, named profiles).
-- `src/session/`: `SessionStore` logic for persisting `.nib/sessions/*.json`.
+- `src/session/`: indexed session, plan, event, memory, and profile-scoped persistence logic.
 - `src/config/`: Configuration definitions.
 
 ### Build and Testing
 
 - **Taskfile**: All development tasks are orchestrated via `task`.
-- **Quality Gates**: `task check` runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo check`, and `cargo test`.
+- **Quality Gates**: `task check` validates installers, formatting, Clippy warnings,
+  compilation, and tests. `task docs:check` validates links/spec state, and
+  `task coverage` enforces runtime line coverage.
 - **Unit and Fixture Tests**: CI runs against `MockLlmClient` to prevent flakiness and network dependencies.

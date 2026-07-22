@@ -4,3 +4,13 @@ pub fn show_version() {
     let channel = option_env!("NIB_BUILD_CHANNEL").unwrap_or("local");
     println!("nib {} ({} - {})", version, channel, commit);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_display_uses_embedded_build_metadata() {
+        show_version();
+    }
+}

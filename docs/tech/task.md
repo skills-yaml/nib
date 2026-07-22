@@ -12,9 +12,18 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 ## Current minimal tasks (see root Taskfile.yml)
 
 - `task` or `task default` — list tasks
-- `task check` — linting, formatting, static checks (expand as implementation begins)
-- `task test` — run test suites
-- `task fmt` — auto-format
+- `task check` — installer checks, Rust formatting, Clippy, compilation, and the full serial test suite
+- `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
+- `task test` — run the full Rust unit and integration suite serially
+- `task test:durable` — run detached background-task and scheduled-worker process tests
+- `task test:managed-process-capability` — verify the exact managed-process backend probe independently
+- `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
+- `task coverage` — enforce the configured runtime line-coverage threshold
+- `task build` — build the locked optimized release binary (optionally for `TARGET`)
+- `task smoke:managed-process` — build the Linux release binary, kill its active owner,
+  and verify a detached supervised descendant is reaped before terminal publication
+- `task fix` — apply Rust formatting and Clippy fixes
+- `task installers:check` — validate installer syntax, repository defaults, and checksum logic
 
 ## Adding new tasks
 
@@ -25,4 +34,4 @@ Reference implementations:
 - `~/work/projects/revized/Taskfile.yml` (with includes for fe/backend/deployment)
 - Central guidance in `~/work/projects/agents/docs/tech/task.md`
 
-This is a starting placeholder. Flesh it out as soon as concrete implementation directories and pipelines are added.
+The root Taskfile is authoritative; update this list whenever a canonical task changes.

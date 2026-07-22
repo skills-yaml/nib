@@ -4,20 +4,43 @@ use std::process;
 
 mod auth;
 mod chat;
+mod config_cmd;
+mod console;
 mod context_cmd;
 mod doctor;
 mod mcp_cmd;
+#[cfg(debug_assertions)]
+mod mcp_test_fixture;
 mod run;
 mod skill_cmd;
+mod task_cmd;
 mod updater;
 mod version;
 
 #[derive(Parser)]
 #[command(name = "nib")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "AI agent for coding and workload management", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn conventional_version_flag_is_available() {
+        let error = match Cli::try_parse_from(["nib", "--version"]) {
+            Ok(_) => panic!("the version flag must exit through clap's display path"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 }
 
 #[derive(Subcommand)]
@@ -36,6 +59,9 @@ enum Commands {
 
     /// Assemble and display rich project context
     Context(context_cmd::ContextArgs),
+
+    /// Inspect or edit project-local configuration
+    Config(config_cmd::ConfigArgs),
 
     /// Validate config, providers, sandbox, and sessions
     Doctor,
@@ -57,11 +83,53 @@ enum Commands {
     #[command(name = "mcp-server")]
     McpServer,
 
+    /// Copy MCP response frames to the server's real stdout
+    #[command(name = "mcp-stdio-relay", hide = true)]
+    McpStdioRelay,
+
     /// Manage skills (list, install, remove)
     Skill(skill_cmd::SkillArgs),
 
     /// Manage MCP servers (list, add, remove)
     Mcp(mcp_cmd::McpArgs),
+
+    /// Manage durable background terminal and scheduled jobs
+    Task(task_cmd::TaskArgs),
+
+    /// Execute one persisted job in a detached worker process
+    #[command(name = "task-worker", hide = true)]
+    TaskWorker {
+        #[arg(long)]
+        daemon_dir: PathBuf,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long, hide = true)]
+        lease_token: String,
+    },
+
+    /// Supervise one foreground subagent worker process
+    #[command(name = "subagent-supervisor", hide = true)]
+    SubagentSupervisor {
+        #[arg(long)]
+        project_root: PathBuf,
+        #[arg(long)]
+        subagent_id: String,
+        #[arg(long)]
+        execution_generation: u64,
+        #[arg(long, hide = true)]
+        owner_lease: String,
+        #[arg(long)]
+        worktree: PathBuf,
+    },
+
+    /// Execute one supervised subagent agent loop
+    #[command(name = "subagent-worker", hide = true)]
+    SubagentWorker {
+        #[arg(long)]
+        worktree: PathBuf,
+        #[arg(long)]
+        subagent_id: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -72,28 +140,96 @@ pub struct TuiArgs {
 }
 
 fn main() {
+    #[cfg(debug_assertions)]
+    if let Some(status) = mcp_test_fixture::run_if_requested() {
+        process::exit(status);
+    }
+
     let cli = Cli::parse();
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match &cli.command {
         Some(Commands::Version) => version::show_version(),
-        Some(Commands::Chat(args)) => chat::run_chat(args),
-        Some(Commands::Run(args)) => run::run_agent(args),
-        Some(Commands::Auth) => auth::run_auth_wizard(),
-        Some(Commands::Context(args)) => context_cmd::run_context(args),
+        Some(Commands::Chat(args)) => {
+            if let Err(error) = chat::run_chat(args) {
+                eprintln!("Chat error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Run(args)) => {
+            if let Err(error) = run::run_agent(args) {
+                eprintln!("Run error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Auth) => {
+            if let Err(error) = auth::run_auth_wizard() {
+                eprintln!("Auth error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Context(args)) => {
+            if let Err(error) = context_cmd::run_context(args) {
+                eprintln!("Context error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Config(args)) => {
+            if let Err(error) = config_cmd::run_config_cmd(args, &project) {
+                eprintln!("Config error: {error}");
+                process::exit(1);
+            }
+        }
         Some(Commands::Doctor) => {
             if !doctor::run_doctor(&project) {
                 process::exit(1);
             }
         }
         Some(Commands::DemoTool { tool, arg, yes }) => {
+            let cfg = match nib::config::load_nib_config_full(&project) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("Demo tool configuration error: {error}");
+                    process::exit(1);
+                }
+            };
+            let profiles = match nib::profile::ProfileRegistry::load(&project, &cfg.profiles) {
+                Ok(profiles) => profiles,
+                Err(error) => {
+                    eprintln!("Demo tool profile error: {error}");
+                    process::exit(1);
+                }
+            };
+            let profile = profiles
+                .for_workspace(&project)
+                .unwrap_or_else(|| profiles.default_profile());
+            if let Err(error) = profile.ensure_state_dirs() {
+                eprintln!("Demo tool profile error: {error}");
+                process::exit(1);
+            }
+            let session_store =
+                nib::session::SessionStore::at_dir(profile.sessions_dir().to_path_buf());
+            let session = match session_store.try_create_session() {
+                Ok(session) => session,
+                Err(error) => {
+                    eprintln!("Demo tool session error: {error}");
+                    process::exit(1);
+                }
+            };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("tokio");
-            let cfg = nib::config::load_nib_config(&project);
-            let mut executor = nib::tools::ToolExecutor::new(project.clone(), cfg.execution)
-                .with_auto_approve(*yes);
+            let mut executor = nib::tools::ToolExecutor::new(
+                profile.root_path().to_path_buf(),
+                cfg.execution.clone(),
+            )
+            .with_auto_approve(*yes)
+            .with_terminal_config(&cfg.terminal)
+            .with_approvals_config(&cfg.approvals)
+            .with_session_store(session_store)
+            .with_environment(profile.custom_env())
+            .with_sensitive_values(cfg.sensitive_values());
             let args_json = if tool == "run_terminal" {
                 serde_json::json!({"command": arg})
             } else if tool == "grep" {
@@ -106,10 +242,10 @@ fn main() {
             let call = nib::tools::ToolCall {
                 tool_name: tool.clone(),
                 arguments: args_json,
-                session_id: None,
-                project_root: Some(project),
+                session_id: Some(session.id.clone()),
+                project_root: Some(profile.root_path().to_path_buf()),
             };
-            let result = rt.block_on(executor.execute(call, None));
+            let result = rt.block_on(executor.execute(call, Some(&session.id)));
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).unwrap_or_default()
@@ -127,10 +263,81 @@ fn main() {
                 .enable_all()
                 .build()
                 .expect("tokio");
-            rt.block_on(nib::integrations::mcp_server::run_mcp_server(&project));
+            if let Err(error) = rt.block_on(nib::integrations::mcp_server::run_mcp_server(&project))
+            {
+                eprintln!("MCP server error: {error}");
+                process::exit(1);
+            }
         }
-        Some(Commands::Skill(args)) => skill_cmd::run_skill_cmd(args, &project),
-        Some(Commands::Mcp(args)) => mcp_cmd::run_mcp_cmd(args, &project),
+        Some(Commands::McpStdioRelay) => {
+            if let Err(error) = nib::integrations::mcp_server::run_stdio_relay() {
+                eprintln!("{error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Skill(args)) => {
+            if let Err(error) = skill_cmd::run_skill_cmd(args, &project) {
+                eprintln!("Skill error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Mcp(args)) => {
+            if let Err(error) = mcp_cmd::run_mcp_cmd(args, &project) {
+                eprintln!("MCP config error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Task(args)) => {
+            if let Err(error) = task_cmd::run_task_cmd(args, &project) {
+                eprintln!("Task error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::TaskWorker {
+            daemon_dir,
+            task_id,
+            lease_token,
+        }) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
+            if let Err(error) = rt.block_on(nib::daemons::workload::run_worker(
+                daemon_dir,
+                task_id,
+                lease_token,
+            )) {
+                eprintln!("Task worker error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::SubagentSupervisor {
+            project_root,
+            subagent_id,
+            execution_generation,
+            owner_lease,
+            worktree,
+        }) => {
+            if let Err(error) = nib::tools::delegation::run_subagent_supervisor(
+                project_root,
+                subagent_id,
+                *execution_generation,
+                owner_lease,
+                worktree,
+            ) {
+                eprintln!("Subagent supervisor error: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::SubagentWorker {
+            worktree,
+            subagent_id,
+        }) => {
+            if let Err(error) = nib::tools::delegation::run_subagent_worker(worktree, subagent_id) {
+                eprintln!("Subagent worker error: {error}");
+                process::exit(1);
+            }
+        }
         None => {
             println!("nib — AI agent for coding and workload management");
             println!(
