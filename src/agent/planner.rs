@@ -1,6 +1,6 @@
 use crate::context::budget::{build_bounded_planning_input, PlanningPromptRequest};
 use crate::context::RuntimeContextSections;
-use crate::llm::types::{StreamEvent, ToolCallAccumulator, ToolCallRequest};
+use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
 use crate::llm::LlmClient;
 use crate::session::{Plan, PlanStep};
 use serde_json::json;
@@ -45,6 +45,27 @@ pub async fn generate_plan_with_context_events_bounded(
     event_tx: Option<&Sender<StreamEvent>>,
     context_length: usize,
 ) -> Result<Plan, String> {
+    generate_plan_with_context_events_bounded_scoped(
+        llm,
+        goal,
+        context,
+        session,
+        event_tx,
+        context_length,
+        None,
+    )
+    .await
+}
+
+pub async fn generate_plan_with_context_events_bounded_scoped(
+    llm: &Arc<dyn LlmClient>,
+    goal: &str,
+    context: &RuntimeContextSections,
+    session: Option<&crate::session::Session>,
+    event_tx: Option<&Sender<StreamEvent>>,
+    context_length: usize,
+    scope: Option<LlmRequestScope>,
+) -> Result<Plan, String> {
     if goal.trim().is_empty() {
         return Err("cannot plan an empty goal".to_string());
     }
@@ -76,18 +97,24 @@ pub async fn generate_plan_with_context_events_bounded(
         tools: tools.as_array().unwrap(),
         context_length,
     })?;
-    let mut stream = llm
-        .stream(&bounded.messages, bounded.tools.as_deref(), 0.3)
-        .await?;
-    let mut accumulator = ToolCallAccumulator::default();
+    let scope = match scope {
+        Some(scope) => scope,
+        None => LlmRequestScope::new(
+            "standalone-planner",
+            uuid::Uuid::new_v4().simple().to_string(),
+        )?,
+    };
+    let request =
+        LlmRequest::new(&bounded.messages, bounded.tools.as_deref(), 0.3).with_scope(scope);
+    let mut stream = llm.stream(request).await?;
     while let Some(result) = stream.recv().await {
         let event = result?;
-        accumulator.push(&event);
         if let Some(tx) = event_tx.filter(|_| matches!(&event, StreamEvent::Content(_))) {
             let _ = tx.send(event).await;
         }
     }
-    plan_from_tool_calls(goal, accumulator.finish()?)
+    let completed = stream.finish().await?;
+    plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default())
 }
 
 pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<Plan, String> {
@@ -136,10 +163,10 @@ mod tests {
     fn parses_non_empty_structured_plan() {
         let plan = plan_from_tool_calls(
             "  inspect\tand verify ",
-            vec![ToolCallRequest {
-                name: "submit_plan".to_string(),
-                arguments: json!({"steps": ["inspect", {"description": "verify"}]}),
-            }],
+            vec![ToolCallRequest::new(
+                "submit_plan",
+                json!({"steps": ["inspect", {"description": "verify"}]}),
+            )],
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 2);
@@ -152,10 +179,7 @@ mod tests {
     fn rejects_empty_structured_plan() {
         let error = plan_from_tool_calls(
             "empty plan",
-            vec![ToolCallRequest {
-                name: "submit_plan".to_string(),
-                arguments: json!({"steps": [" "]}),
-            }],
+            vec![ToolCallRequest::new("submit_plan", json!({"steps": [" "]}))],
         )
         .unwrap_err();
         assert!(error.contains("empty or invalid"));
@@ -170,18 +194,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmClient for RecordingPlannerLlm {
-        async fn complete(
-            &self,
-            messages: &[Value],
-            tools: Option<&[Value]>,
-            _temperature: f64,
-        ) -> Result<LlmResponse, String> {
-            *self.request.lock().expect("request lock") =
-                Some((messages.to_vec(), tools.map(<[Value]>::to_vec)));
-            Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                name: "submit_plan".to_string(),
-                arguments: json!({"steps": ["inspect context", "perform work", "verify"]}),
-            }]))
+        async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+            *self.request.lock().expect("request lock") = Some((
+                request.messages.to_vec(),
+                request.tools.map(<[Value]>::to_vec),
+            ));
+            Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                "submit_plan",
+                json!({"steps": ["inspect context", "perform work", "verify"]}),
+            )]))
         }
     }
 

@@ -478,6 +478,7 @@ impl ToolExecutor {
                         Ok(store) => self.session_store = Some(store),
                         Err(error) => {
                             return ToolResult {
+                                invocation_id: call.invocation_id,
                                 tool_name: call.tool_name,
                                 success: false,
                                 output: None,
@@ -499,6 +500,7 @@ impl ToolExecutor {
                     Ok(session) => session,
                     Err(error) => {
                         return ToolResult {
+                            invocation_id: call.invocation_id,
                             tool_name: call.tool_name,
                             success: false,
                             output: None,
@@ -517,6 +519,7 @@ impl ToolExecutor {
                     json!({"tool_name": self.redact_text(&call.tool_name)}),
                 ) {
                     return ToolResult {
+                        invocation_id: call.invocation_id,
                         tool_name: call.tool_name,
                         success: false,
                         output: None,
@@ -612,6 +615,7 @@ impl ToolExecutor {
         if let Some(session_id) = effective_session {
             if !valid_session_id(session_id) {
                 return ToolResult {
+                    invocation_id: call.invocation_id,
                     tool_name: call.tool_name.clone(),
                     success: false,
                     output: None,
@@ -626,6 +630,7 @@ impl ToolExecutor {
                     Ok(store) => self.session_store = Some(store),
                     Err(error) => {
                         return ToolResult {
+                            invocation_id: call.invocation_id,
                             tool_name: call.tool_name.clone(),
                             success: false,
                             output: None,
@@ -641,6 +646,7 @@ impl ToolExecutor {
             }
             if let Err(error) = self.record_attempt(&call, session_id) {
                 return ToolResult {
+                    invocation_id: call.invocation_id,
                     tool_name: call.tool_name.clone(),
                     success: false,
                     output: None,
@@ -934,6 +940,7 @@ impl ToolExecutor {
             Err(error) => (false, None, Some(self.redact_text(&error))),
         };
         let mut result = ToolResult {
+            invocation_id: call.invocation_id,
             tool_name: call.tool_name.clone(),
             success,
             output,
@@ -953,6 +960,7 @@ impl ToolExecutor {
             let hook_session_id = effective_session.map(str::to_string);
             for hook in hooks {
                 let hook_call = ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "run_terminal".to_string(),
                     arguments: json!({
                         "command": hook.command,
@@ -1093,6 +1101,7 @@ impl ToolExecutor {
         let boundaries = verifier.execution_config.boundaries.clone();
         let verification = Box::pin(verifier.execute_inner(
             ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
                 tool_name: "run_terminal".to_string(),
                 arguments: json!({
                     "command": command,
@@ -1398,6 +1407,7 @@ impl ToolExecutor {
         plan_id: Option<String>,
     ) -> ToolResult {
         let mut result = ToolResult {
+            invocation_id: call.invocation_id,
             tool_name: call.tool_name.clone(),
             success: false,
             output: None,
@@ -1439,6 +1449,7 @@ impl ToolExecutor {
                 session_id,
                 "tool_attempted",
                 json!({
+                    "invocation_id": call.invocation_id,
                     "tool_name": self.redact_text(&call.tool_name),
                     "arguments": self.redact_value(call.arguments.clone()),
                 }),
@@ -1502,6 +1513,7 @@ impl ToolExecutor {
         }
 
         let record = ToolCallRecord {
+            invocation_id: Some(call.invocation_id),
             id: Some(format!("tool-{}", Uuid::new_v4())),
             session_id: Some(session_id.to_string()),
             tool_name: Some(self.redact_text(&call.tool_name)),
@@ -1917,13 +1929,31 @@ pub(crate) fn redact_value_with_environment(
     redact_value_with_secrets(value, &sensitive_environment_values(environment))
 }
 
-pub(crate) fn redact_value_with_sensitive_values(
+pub(crate) fn redact_value_with_encoded_sensitive_values(
     value: Value,
     values: impl IntoIterator<Item = String>,
 ) -> Value {
-    let mut secrets: Vec<String> = values.into_iter().collect();
-    normalize_sensitive_values(&mut secrets);
-    redact_value_with_secrets(value, &secrets)
+    let secrets = normalized_encoded_sensitive_values(values);
+    redact_value_with_encoded_secrets(value, &secrets)
+}
+
+fn redact_value_with_encoded_secrets(mut value: Value, secrets: &[String]) -> Value {
+    value = redact_value(value);
+    match &mut value {
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                *value = redact_value_with_encoded_secrets(std::mem::take(value), secrets);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                *value = redact_value_with_encoded_secrets(std::mem::take(value), secrets);
+            }
+        }
+        Value::String(text) => *text = redact_text_with_encoded_secrets(text, secrets),
+        _ => {}
+    }
+    value
 }
 
 fn redact_value_with_secrets(mut value: Value, secrets: &[String]) -> Value {
@@ -1962,13 +1992,12 @@ pub(crate) fn redact_text_with_environment(
     redact_text_with_secrets(text, &sensitive_environment_values(environment))
 }
 
-pub(crate) fn redact_text_with_sensitive_values(
+pub(crate) fn redact_text_with_encoded_sensitive_values(
     text: &str,
     values: impl IntoIterator<Item = String>,
 ) -> String {
-    let mut secrets: Vec<String> = values.into_iter().collect();
-    normalize_sensitive_values(&mut secrets);
-    redact_text_with_secrets(text, &secrets)
+    let secrets = normalized_encoded_sensitive_values(values);
+    redact_text_with_encoded_secrets(text, &secrets)
 }
 
 fn redact_text_with_secrets(text: &str, secrets: &[String]) -> String {
@@ -1977,6 +2006,147 @@ fn redact_text_with_secrets(text: &str, secrets: &[String]) -> String {
         redacted = redacted.replace(secret, "[REDACTED]");
     }
     redacted
+}
+
+fn redact_text_with_encoded_secrets(text: &str, secrets: &[String]) -> String {
+    const MAX_ENCODED_REDACTION_INPUT_BYTES: usize = 64 * 1024;
+
+    if text.len() > MAX_ENCODED_REDACTION_INPUT_BYTES {
+        return "[REDACTED]".to_string();
+    }
+
+    let Some(text_stages) = percent_decoded_byte_stages(text) else {
+        return "[REDACTED]".to_string();
+    };
+    let mut secret_stages = Vec::new();
+    for secret in secrets {
+        let Some(stages) = percent_decoded_byte_stages(secret) else {
+            return "[REDACTED]".to_string();
+        };
+        secret_stages.extend(
+            stages
+                .into_iter()
+                .map(|stage| stage.bytes)
+                .filter(|secret| !secret.is_empty()),
+        );
+    }
+    let mut spans = Vec::new();
+    for text_stage in &text_stages {
+        for secret in &secret_stages {
+            if secret.len() > text_stage.bytes.len() {
+                continue;
+            }
+            for offset in 0..=text_stage.bytes.len() - secret.len() {
+                if text_stage.bytes[offset..offset + secret.len()] == *secret.as_slice() {
+                    let mut start = text_stage.origins[offset].0;
+                    let mut end = text_stage.origins[offset + secret.len() - 1].1;
+                    while !text.is_char_boundary(start) {
+                        start = start.saturating_sub(1);
+                    }
+                    while end < text.len() && !text.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    spans.push((start, end));
+                }
+            }
+        }
+    }
+
+    if spans.is_empty() {
+        return redact_text_with_secrets(text, secrets);
+    }
+    spans.sort_unstable();
+    let mut merged = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, previous_end)) if start <= *previous_end => {
+                *previous_end = (*previous_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut redacted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in merged {
+        redacted.push_str(&text[cursor..start]);
+        redacted.push_str("[REDACTED]");
+        cursor = end;
+    }
+    redacted.push_str(&text[cursor..]);
+    redact_text(&redacted)
+}
+
+#[derive(Clone)]
+struct PercentDecodedBytes {
+    bytes: Vec<u8>,
+    origins: Vec<(usize, usize)>,
+}
+
+fn percent_decoded_byte_stages(value: &str) -> Option<Vec<PercentDecodedBytes>> {
+    const MAX_PERCENT_DECODE_PASSES: usize = 8;
+
+    let mut stages = vec![PercentDecodedBytes {
+        bytes: value.as_bytes().to_vec(),
+        origins: (0..value.len()).map(|index| (index, index + 1)).collect(),
+    }];
+    let mut passes = 0;
+    loop {
+        let current = stages.last().expect("percent-decoding stage");
+        let mut next = PercentDecodedBytes {
+            bytes: Vec::with_capacity(current.bytes.len()),
+            origins: Vec::with_capacity(current.origins.len()),
+        };
+        let mut index = 0;
+        let mut decoded_escape = false;
+        while index < current.bytes.len() {
+            if current.bytes[index] == b'%' && index + 2 < current.bytes.len() {
+                if let (Some(high), Some(low)) = (
+                    percent_hex_value(current.bytes[index + 1]),
+                    percent_hex_value(current.bytes[index + 2]),
+                ) {
+                    next.bytes.push((high << 4) | low);
+                    next.origins
+                        .push((current.origins[index].0, current.origins[index + 2].1));
+                    index += 3;
+                    decoded_escape = true;
+                    continue;
+                }
+            }
+            next.bytes.push(current.bytes[index]);
+            next.origins.push(current.origins[index]);
+            index += 1;
+        }
+        if !decoded_escape {
+            return Some(stages);
+        }
+        if passes == MAX_PERCENT_DECODE_PASSES {
+            return None;
+        }
+        stages.push(next);
+        passes += 1;
+    }
+}
+
+fn percent_hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn normalized_encoded_sensitive_values(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut secrets = values.into_iter().collect::<Vec<_>>();
+    secrets.extend(
+        secrets
+            .iter()
+            .map(|secret| secret.trim().to_string())
+            .collect::<Vec<_>>(),
+    );
+    normalize_sensitive_values(&mut secrets);
+    secrets
 }
 
 fn sensitive_environment_values(environment: &HashMap<String, String>) -> Vec<String> {
@@ -2207,6 +2377,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default());
         let terminal_call = |command: &str| ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({"command": command}),
             session_id: None,
@@ -2256,6 +2427,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "search_web".to_string(),
                     arguments: json!({"query": "must not be dispatched"}),
                     session_id: Some(session.id.clone()),
@@ -2307,6 +2479,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: format!("fixture::prefix_{secret}"),
                     arguments: json!({}),
                     session_id: None,
@@ -2352,6 +2525,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_redaction_is_symmetric_across_percent_decoding_stages() {
+        for (text, secret) in [
+            ("model-prefix-env%2Fonly-suffix", "env/only"),
+            ("model-prefix-env/only-suffix", "env%2Fonly"),
+            ("model-prefix-env%252Fonly-suffix", "env/only"),
+        ] {
+            let redacted = redact_text_with_encoded_sensitive_values(text, [secret.to_string()]);
+            assert_eq!(redacted, "model-prefix-[REDACTED]-suffix");
+            assert!(!redacted.contains("env"));
+        }
+
+        let redacted = redact_value_with_encoded_sensitive_values(
+            json!({"error": "provider echoed env%252Fonly"}),
+            [" env/only ".to_string()],
+        );
+        assert_eq!(redacted["error"], "provider echoed [REDACTED]");
+
+        let adversarial = format!("prefix-%{}41-suffix", "25".repeat(32));
+        assert_eq!(
+            redact_text_with_encoded_sensitive_values(
+                &adversarial,
+                ["unrelated-secret".to_string()]
+            ),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
     fn redaction_preserves_payload_whitespace() {
         assert_eq!(
             redact_text("first line\nsecond\tline\n"),
@@ -2390,6 +2591,7 @@ mod tests {
         assert!(error.contains("extra") || error.contains("Additional properties"));
 
         let internal_hook_call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({
                 "command": "true",
@@ -2417,6 +2619,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "read_file".to_string(),
                     arguments: json!({"path": "file.txt", "max_bytes": "unbounded"}),
                     session_id: None,
@@ -2441,6 +2644,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "run_terminal".to_string(),
                     arguments: json!({"command": "x".repeat(65_537)}),
                     session_id: None,
@@ -2606,6 +2810,7 @@ mod tests {
             executor
                 .execute(
                     ToolCall {
+                        invocation_id: crate::tools::ToolInvocationId::new(),
                         tool_name: "schedule".to_string(),
                         arguments: json!({
                             "prompt": "later",
@@ -2674,6 +2879,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "schedule".to_string(),
                     arguments: json!({
                         "prompt": "later",
@@ -2709,6 +2915,7 @@ mod tests {
         let result = executor
             .execute(
                 ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
                     tool_name: "schedule".to_string(),
                     arguments: json!({
                         "prompt": "later",

@@ -1,6 +1,6 @@
 //! Mock LLM for tests and offline development.
 
-use crate::llm::types::{LlmResponse, ToolCallRequest};
+use crate::llm::types::{LlmRequest, LlmResponse, ToolCallRequest};
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -64,12 +64,13 @@ fn is_compression_request(messages: &[serde_json::Value]) -> bool {
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn complete(
-        &self,
-        messages: &[serde_json::Value],
-        tools: Option<&[serde_json::Value]>,
-        _temperature: f64,
-    ) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+        if request.continuation.is_some() {
+            return Err("Mock requests do not support provider continuations".to_string());
+        }
+
+        let messages = request.messages;
+        let tools = request.tools;
         let last = messages
             .last()
             .and_then(|m| m.get("content"))
@@ -103,10 +104,10 @@ impl LlmClient for MockLlmClient {
             } else {
                 vec!["explore", "finish"]
             };
-            return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                name: "submit_plan".to_string(),
-                arguments: json!({"steps": steps}),
-            }]));
+            return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                "submit_plan",
+                json!({"steps": steps}),
+            )]));
         }
 
         let step = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -137,134 +138,131 @@ impl LlmClient for MockLlmClient {
 
         if tools.is_some() && step == 0 {
             if let Some(("parent", token)) = &managed_process_smoke {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "spawn_subagent".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "spawn_subagent",
+                    json!({
                         "prompt": format!("managed supervisor release smoke child {token}"),
                         "max_steps": 10
                     }),
-                }]));
+                )]));
             }
             if last.contains("durable background secret terminal") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({
                         "command": "sleep 1; printf '%s\\n' \"$NIB_DURABLE_TOKEN\"; cat ../../../config.toml",
                         "background": true
                     }),
-                }]));
+                )]));
             }
             if last.contains("durable cancellable background terminal") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({
                         "command": "sleep 30; printf 'must not complete\\n'",
                         "background": true
                     }),
-                }]));
+                )]));
             }
             if last.contains("durable background terminal") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({
                         "command": "sleep 2; printf 'durable worker complete\\n'",
                         "background": true
                     }),
-                }]));
+                )]));
             }
             if last.contains("durable scheduled wake") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "schedule".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "schedule",
+                    json!({
                         "prompt": "scheduled wake plan",
                         "duration_secs": 2,
                         "repeat_count": 1
                     }),
-                }]));
+                )]));
             }
             if last.contains("mixed question batch") {
                 return Ok(LlmResponse::with_tools(vec![
-                    ToolCallRequest {
-                        name: "ask_question".to_string(),
-                        arguments: json!({
+                    ToolCallRequest::new(
+                        "ask_question",
+                        json!({
                             "question": "Should I make the change?",
                             "options": ["yes", "no"]
                         }),
-                    },
-                    ToolCallRequest {
-                        name: "run_terminal".to_string(),
-                        arguments: json!({
+                    ),
+                    ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
                             "command": "printf changed > mixed-side-effect.txt"
                         }),
-                    },
+                    ),
                 ]));
             }
             if last.contains("recover from terminal failure") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({
                         "command": "printf 'recoverable stderr\\n' >&2; exit 7"
                     }),
-                }]));
+                )]));
             }
             if last.contains("safe terminal approval") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({"command": "printf ok"}),
-                }]));
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({"command": "printf ok"}),
+                )]));
             }
             if last.contains("runtime coding e2e") {
                 let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn answer() -> u32 {\n-    41\n+    42\n }\n";
                 return Ok(LlmResponse::with_tools(vec![
-                    ToolCallRequest {
-                        name: "apply_patch".to_string(),
-                        arguments: json!({"patch": patch, "dry_run": false}),
-                    },
-                    ToolCallRequest {
-                        name: "run_terminal".to_string(),
-                        arguments: json!({
+                    ToolCallRequest::new("apply_patch", json!({"patch": patch, "dry_run": false})),
+                    ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
                             "command": "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet"
                         }),
-                    },
+                    ),
                 ]));
             }
             if last.contains("subagent destructive denial") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({"command": "printf changed > delegated-side-effect.txt"}),
-                }]));
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({"command": "printf changed > delegated-side-effect.txt"}),
+                )]));
             }
             if last.contains("subagent network denial") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "run_terminal".to_string(),
-                    arguments: json!({"command": "curl --version > delegated-network-side-effect.txt"}),
-                }]));
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "run_terminal",
+                    json!({"command": "curl --version > delegated-network-side-effect.txt"}),
+                )]));
             }
             if last.contains("ask a question") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "ask_question".to_string(),
-                    arguments: json!({
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "ask_question",
+                    json!({
                         "question": "Which verification mode?",
                         "options": ["fast", "full"]
                     }),
-                }]));
+                )]));
             }
             if last.contains("explore") || last.contains("list") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "list_directory".to_string(),
-                    arguments: json!({"path": "."}),
-                }]));
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "list_directory",
+                    json!({"path": "."}),
+                )]));
             }
             if last.contains("read_file") || last.contains(" open file") {
-                return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                    name: "read_file".to_string(),
-                    arguments: json!({"path": "README.md"}),
-                }]));
+                return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                    "read_file",
+                    json!({"path": "README.md"}),
+                )]));
             }
-            return Ok(LlmResponse::with_tools(vec![ToolCallRequest {
-                name: "list_directory".to_string(),
-                arguments: json!({"path": "."}),
-            }]));
+            return Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
+                "list_directory",
+                json!({"path": "."}),
+            )]));
         }
 
         if matches!(managed_process_smoke, Some(("parent", _))) {
@@ -280,20 +278,39 @@ impl LlmClient for MockLlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::types::{LlmRequestScope, ProviderContinuation};
+
+    fn request_with_continuation(messages: &[serde_json::Value]) -> LlmRequest<'_> {
+        let continuation = ProviderContinuation::new(
+            "openai",
+            "test-model",
+            "responses",
+            Some(LlmRequestScope::new("test-session", "test-run").expect("request scope")),
+            vec![crate::tools::ToolInvocationId::new()],
+            1,
+            0,
+            (),
+        )
+        .expect("Responses continuation");
+        LlmRequest::new(messages, None, 0.0).with_continuation(Some(continuation))
+    }
 
     #[tokio::test]
     async fn mock_returns_tool_then_answer() {
         let client = MockLlmClient::new();
         let tools = vec![json!({"type": "function"})];
         let msgs = vec![json!({"role": "user", "content": "explore project"})];
-        let r1 = client.complete(&msgs, Some(&tools), 0.7).await.unwrap();
+        let r1 = client
+            .complete(LlmRequest::new(&msgs, Some(&tools), 0.7))
+            .await
+            .unwrap();
         assert!(r1.tool_calls.is_some());
         let r2 = client
-            .complete(
+            .complete(LlmRequest::new(
                 &[json!({"role": "user", "content": "summarize results"})],
                 None,
                 0.7,
-            )
+            ))
             .await
             .unwrap();
         assert!(r2.content.is_some());
@@ -303,32 +320,50 @@ mod tests {
     async fn compression_does_not_consume_the_runtime_tool_turn() {
         let client = MockLlmClient::new();
         let compressed = client
-            .complete(
+            .complete(LlmRequest::new(
                 &[json!({
                     "role": "system",
                     "content": "You are a context compression engine."
                 })],
                 None,
                 0.3,
-            )
+            ))
             .await
             .expect("compression response");
         assert!(compressed.content.is_some());
 
         let runtime = client
-            .complete(
+            .complete(LlmRequest::new(
                 &[json!({
                     "role": "user",
                     "content": "runtime coding e2e"
                 })],
                 Some(&[json!({"type": "function"})]),
                 0.7,
-            )
+            ))
             .await
             .expect("runtime response");
         let calls = runtime.tool_calls.expect("runtime tool calls");
         assert_eq!(calls[0].name, "apply_patch");
         assert_eq!(calls[1].name, "run_terminal");
+    }
+
+    #[tokio::test]
+    async fn complete_and_default_stream_reject_provider_continuations() {
+        let client = MockLlmClient::new();
+        let messages = [json!({"role": "user", "content": "x"})];
+
+        let error = client
+            .complete(request_with_continuation(&messages))
+            .await
+            .expect_err("completion must reject a provider continuation");
+        assert_eq!(error, "Mock requests do not support provider continuations");
+
+        let error = client
+            .stream(request_with_continuation(&messages))
+            .await
+            .expect_err("default stream must reject a provider continuation");
+        assert_eq!(error, "Mock requests do not support provider continuations");
     }
 
     #[test]

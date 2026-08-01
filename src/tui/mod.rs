@@ -954,6 +954,7 @@ mod tests {
                     api_key: None,
                     api_keys: Vec::new(),
                     base_url: None,
+                    ..ProviderEntry::default()
                 },
             )]),
             ..Default::default()
@@ -1166,6 +1167,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(TuiApprovalRequest {
             call: ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
                 tool_name: "run_terminal".to_string(),
                 arguments: json!({"command": "task test"}),
                 session_id: None,
@@ -1190,6 +1192,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(TuiApprovalRequest {
             call: ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
                 tool_name: "apply_patch".to_string(),
                 arguments: json!({}),
                 session_id: None,

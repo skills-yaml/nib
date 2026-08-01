@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use nib::config::NibConfig;
 use nib::context::bounded_session_context;
 use nib::context::compression::{approximate_tokens, maybe_compress_session};
-use nib::llm::{LlmClient, LlmResponse};
+use nib::llm::{LlmClient, LlmRequest, LlmResponse};
 use nib::session::SessionStore;
 use serde_json::Value;
 use std::sync::Arc;
@@ -12,12 +12,7 @@ struct SummaryLlm;
 
 #[async_trait]
 impl LlmClient for SummaryLlm {
-    async fn complete(
-        &self,
-        _messages: &[Value],
-        _tools: Option<&[Value]>,
-        _temperature: f64,
-    ) -> Result<LlmResponse, String> {
+    async fn complete(&self, _request: LlmRequest<'_>) -> Result<LlmResponse, String> {
         Ok(LlmResponse::text(format!(
             "Dense retained facts: {}",
             "verified context ".repeat(80)

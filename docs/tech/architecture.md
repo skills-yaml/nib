@@ -120,7 +120,7 @@ User / Workload Owner
 - `src/integrations/mcp_framing.rs` — Shared bounded, newline-delimited JSON framing for MCP client/server stdio.
 - `src/integrations/mcp_server.rs` — Inbound MCP server exposing the gated nib runtime.
 - `src/integrations/worktree.rs` — Session worktree manager built on sandbox ownership receipts.
-- `src/llm/{mod.rs,types.rs,factory.rs,openai.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral client/stream types, retry and response bounds, provider construction, concrete APIs, and deterministic test doubles.
+- `src/llm/{mod.rs,types.rs,factory.rs,openai.rs,responses.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral structured requests and private completed-turn streams, retry/response bounds, explicit Chat Completions and Responses transports, provider construction, concrete APIs, and deterministic test doubles.
 - `src/profile/{mod.rs,migration.rs}` — Workspace profile resolution, isolated state roots, environment loading, and legacy state migration.
 - `src/sandbox/mod.rs` — Command-shell resolution, capability checks, direct execution, and optional Linux `bwrap` isolation.
 - `src/sandbox/process.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
@@ -137,7 +137,8 @@ User / Workload Owner
 - `src/console.rs` — Shared blocking/async console input plus approval and question handlers used by CLI flows.
 - `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.
 - `src/mcp_cmd.rs`, `src/skill_cmd.rs`, and `src/task_cmd.rs` — MCP server configuration, skill inventory/install/remove operations, and durable task management.
-- `src/version.rs` and `src/updater.rs` — Embedded build metadata display and update-channel support.
+- `src/version.rs` and `src/updater.rs` — Embedded build identity, strict rolling-release
+  manifest checks, verified self-update, and bounded user-facing update notices.
 - `src/mcp_test_fixture.rs` — Debug-build-only subprocess fixture for MCP framing, lifecycle, and process-tree tests.
 
 ## Data Flow for a Typical Session

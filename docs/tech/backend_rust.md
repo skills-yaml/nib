@@ -39,3 +39,17 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
   compilation, and tests. `task docs:check` validates links/spec state, and
   `task coverage` enforces runtime line coverage.
 - **Unit and Fixture Tests**: CI runs against `MockLlmClient` to prevent flakiness and network dependencies.
+
+### OpenAI-Compatible Transport Contract
+
+OpenAI-compatible providers resolve an explicit `chat_completions` or `responses` API
+mode before network I/O. `LlmClient` receives a structured request, and streaming
+separates sanitized projected events from a private validated completed-turn envelope.
+Only the completed envelope can authorize tool execution. Responses continuations are
+byte/item bounded, bound to provider/model/session/run, redacted under `Debug`, and
+kept in memory only; session persistence contains provider-neutral audit evidence.
+
+The runtime does not infer capabilities from model names, silently disable reasoning,
+or retry a rejected request with different API semantics. Responses uses `store: false`
+for nib's local-first state contract, which is distinct from provider-side retention
+policy or Zero Data Retention eligibility.

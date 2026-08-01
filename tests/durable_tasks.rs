@@ -47,6 +47,7 @@ fn fixture() -> TempDir {
             api_key: None,
             api_keys: Vec::new(),
             base_url: None,
+            ..ProviderEntry::default()
         },
     )]);
     config.daemons.cron_enabled = false;

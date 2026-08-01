@@ -11,7 +11,7 @@ use nib::context::compression::{maybe_compress_session, CompressionReport};
 use nib::context::format_context_for_prompt;
 use nib::context::skills::load_relevant_skills;
 use nib::integrations::mcp::McpManager;
-use nib::llm::{LlmClient, LlmResponse, StreamEvent};
+use nib::llm::{LlmClient, LlmRequest, LlmResponse, StreamEvent};
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
 use nib::session::{Plan, PlanStep, SessionError, SessionStore};
@@ -23,8 +23,10 @@ use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
 use nib::tools::ToolExecutor;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tempfile::{tempdir, TempDir};
 
@@ -38,6 +40,7 @@ fn mock_llm_config(context_length: usize) -> LlmConfig {
                 api_key: None,
                 api_keys: Vec::new(),
                 base_url: None,
+                ..ProviderEntry::default()
             },
         )]),
         context_length,
@@ -114,6 +117,7 @@ fn git_repository() -> TempDir {
 
 fn tool_call(root: &Path, name: &str, arguments: Value) -> ToolCall {
     ToolCall {
+        invocation_id: nib::tools::ToolInvocationId::new(),
         tool_name: name.to_string(),
         arguments,
         session_id: None,
@@ -133,6 +137,951 @@ fn assert_trace_contains_in_order(trace: &[String], expected: &[&str]) {
         expected.len(),
         "trace did not contain {expected:?} in order: {trace:?}"
     );
+}
+
+fn serve_responses_sequence(responses: Vec<Value>) -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Responses fixture listener");
+    let address = listener.local_addr().expect("Responses fixture address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("Responses fixture connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("Responses fixture read timeout");
+            let request = read_http_request(&mut stream);
+            request_tx
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .expect("capture Responses fixture request");
+            let body = format!(
+                "data: {}\n\n",
+                json!({"type": "response.completed", "response": response})
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("Responses fixture response");
+        }
+    });
+    (format!("http://{address}/v1"), request_rx)
+}
+
+fn serve_planner_then_compression_failure(
+    secret: &'static str,
+) -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("compression fixture listener");
+    let address = listener.local_addr().expect("compression fixture address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("planner fixture connection");
+        let request = read_http_request(&mut stream);
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("capture planner request");
+        let planner = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "compression-plan-call",
+                    "name": "submit_plan",
+                    "arguments": "{\"steps\":[\"inspect after compression\"]}"
+                }]
+            }
+        });
+        let body = format!("data: {planner}\n\n");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("planner fixture response");
+
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("compression fixture connection");
+            let request = read_http_request(&mut stream);
+            request_tx
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .expect("capture compression request");
+            let body = json!({
+                "error": {
+                    "type": "server_error",
+                    "code": "compression_fixture_failure",
+                    "message": format!("compression provider echoed {secret}")
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("compression fixture failure");
+        }
+    });
+    (format!("http://{address}/v1"), request_rx)
+}
+
+fn serve_responses_interruption_fixture() -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Responses fixture listener");
+    let address = listener.local_addr().expect("Responses fixture address");
+    let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let initial_responses = [
+            json!({
+                "id": "resp-interrupted-plan",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "private-interrupted-plan-call",
+                    "name": "submit_plan",
+                    "arguments": "{\"steps\":[\"inspect the workspace once\"]}"
+                }]
+            }),
+            json!({
+                "id": "resp-interrupted-tool",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "reasoning-interrupted-private",
+                        "encrypted_content": "opaque-interrupted-reasoning"
+                    },
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "private-interrupted-runtime-call",
+                        "name": "list_directory",
+                        "arguments": "{\"path\":\".\"}"
+                    }
+                ]
+            }),
+        ];
+
+        for response in initial_responses {
+            let (mut stream, _) = listener.accept().expect("Responses fixture connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("Responses fixture read timeout");
+            let request = read_http_request(&mut stream);
+            request_tx
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .expect("capture Responses fixture request");
+            let body = format!(
+                "data: {}\n\n",
+                json!({"type": "response.completed", "response": response})
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("Responses fixture response");
+        }
+
+        let (mut interrupted_stream, _) = listener
+            .accept()
+            .expect("interrupted Responses continuation connection");
+        interrupted_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("interrupted Responses read timeout");
+        let request = read_http_request(&mut interrupted_stream);
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("capture interrupted Responses continuation request");
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("release interrupted Responses connection");
+        drop(interrupted_stream);
+
+        let (mut restarted_stream, _) = listener
+            .accept()
+            .expect("restarted Responses planner connection");
+        restarted_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("restarted Responses read timeout");
+        let request = read_http_request(&mut restarted_stream);
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("capture restarted Responses planner request");
+        let body = format!(
+            "data: {}\n\n",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-restarted-plan",
+                    "status": "completed",
+                    "output": [{
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "private-restarted-plan-call",
+                        "name": "submit_plan",
+                        "arguments": "{\"steps\":[\"review the interruption without replay\"]}"
+                    }]
+                }
+            })
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        restarted_stream
+            .write_all(response.as_bytes())
+            .expect("restarted Responses fixture response");
+    });
+
+    (
+        format!("http://{address}/v1"),
+        request_rx,
+        release_tx,
+        server,
+    )
+}
+
+fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).expect("fixture request read");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+    request
+}
+
+fn captured_json_body(request: &str) -> Value {
+    let (_, body) = request.split_once("\r\n\r\n").expect("captured HTTP body");
+    serde_json::from_str(body).expect("captured JSON body")
+}
+
+#[tokio::test]
+async fn responses_planner_and_runtime_round_trip_tool_outputs_privately() {
+    let root = git_repository();
+    let responses = vec![
+        json!({
+            "id": "resp-plan",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "private-plan-call",
+                "name": "submit_plan",
+                "arguments": "{\"steps\":[\"inspect the workspace\"]}"
+            }]
+        }),
+        json!({
+            "id": "resp-tool",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-private",
+                    "encrypted_content": "opaque-runtime-reasoning"
+                },
+                {
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "private-runtime-call",
+                    "name": "list_directory",
+                    "arguments": "{\"path\":\".\"}"
+                }
+            ]
+        }),
+        json!({
+            "id": "resp-final",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Workspace inspected."}]
+            }]
+        }),
+    ];
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            reasoning_effort: Some(nib::config::ReasoningEffort::Medium),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(root.path(), &mut config).expect("Responses runtime config");
+    let session_id = "responses-runtime-round-trip";
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(128);
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        session_id,
+        "inspect the workspace through a tool",
+        AgentLoopConfig {
+            max_steps: 8,
+            auto_approve: true,
+            stream_tx: Some(stream_tx),
+            ..AgentLoopConfig::default()
+        },
+    )
+    .await
+    .expect("Responses agent run");
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 1);
+    let requests = (0..3)
+        .map(|_| {
+            request_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("captured Responses request")
+        })
+        .collect::<Vec<_>>();
+    assert!(requests
+        .iter()
+        .all(|request| request.starts_with("POST /v1/responses HTTP/1.1")));
+    let bodies = requests
+        .iter()
+        .map(|request| captured_json_body(request))
+        .collect::<Vec<_>>();
+    assert!(bodies
+        .iter()
+        .all(|body| body["store"] == false && body["stream"] == true));
+    assert!(bodies
+        .iter()
+        .all(|body| body["reasoning"]["effort"] == "medium"));
+    assert!(bodies.iter().all(|body| body.get("temperature").is_none()));
+    assert_eq!(bodies[0]["tools"][0]["name"], "submit_plan");
+    assert!(bodies[0]["tools"][0].get("function").is_none());
+
+    let continued_input = bodies[2]["input"].as_array().expect("continued input");
+    let reasoning_index = continued_input
+        .iter()
+        .position(|item| item["id"] == "reasoning-private")
+        .expect("replayed reasoning item");
+    let call_index = continued_input
+        .iter()
+        .position(|item| {
+            item["call_id"] == "private-runtime-call" && item["type"] == "function_call"
+        })
+        .expect("replayed function call");
+    let output_index = continued_input
+        .iter()
+        .position(|item| {
+            item["call_id"] == "private-runtime-call" && item["type"] == "function_call_output"
+        })
+        .expect("matching function output");
+    assert!(reasoning_index < call_index && call_index < output_index);
+
+    let persisted = SessionStore::for_project(root.path())
+        .unwrap()
+        .load(session_id)
+        .expect("Responses session");
+    let persisted_json = serde_json::to_string(&persisted).unwrap();
+    assert!(!persisted_json.contains("private-runtime-call"));
+    assert!(!persisted_json.contains("opaque-runtime-reasoning"));
+    let mut public_events = Vec::new();
+    while let Ok(event) = stream_rx.try_recv() {
+        public_events.push(event);
+    }
+    let public_debug = format!("{public_events:?}");
+    assert!(!public_debug.contains("private-runtime-call"));
+    assert!(!public_debug.contains("opaque-runtime-reasoning"));
+}
+
+#[tokio::test]
+async fn responses_process_kill_and_restart_does_not_replay_completed_tool() {
+    let root = git_repository();
+    let (base_url, mut request_rx, release_interrupted, server) =
+        serve_responses_interruption_fixture();
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            reasoning_effort: Some(nib::config::ReasoningEffort::Medium),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(root.path(), &mut config).expect("Responses interruption config");
+
+    let session_id = "responses-interrupted-continuation";
+    let goal = "inspect the workspace through a tool";
+    let mut interrupted_run = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .current_dir(root.path())
+        .args([
+            "run",
+            goal,
+            "--session",
+            session_id,
+            "--max-steps",
+            "8",
+            "--yes",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch interruptible nib process");
+
+    let initial_requests = [
+        request_rx.recv().await.expect("initial planner request"),
+        request_rx.recv().await.expect("initial runtime request"),
+        request_rx
+            .recv()
+            .await
+            .expect("interrupted continuation request"),
+    ];
+    assert!(initial_requests
+        .iter()
+        .all(|request| request.starts_with("POST /v1/responses HTTP/1.1")));
+    let interrupted_body = captured_json_body(&initial_requests[2]);
+    let interrupted_json = serde_json::to_string(&interrupted_body).unwrap();
+    assert!(interrupted_json.contains("private-interrupted-runtime-call"));
+    assert!(interrupted_json.contains("reasoning-interrupted-private"));
+    assert!(interrupted_body["input"]
+        .as_array()
+        .expect("interrupted continuation input")
+        .iter()
+        .any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == "private-interrupted-runtime-call"
+        }));
+
+    let store = SessionStore::for_project(root.path()).expect("interrupted session store");
+    let before_abort = store
+        .load(session_id)
+        .expect("session after persisted tool completion");
+    let interrupted_plan_id = before_abort
+        .plan
+        .as_ref()
+        .expect("interrupted approved plan")
+        .id
+        .clone();
+    assert_eq!(
+        before_abort
+            .tool_calls
+            .iter()
+            .filter(|record| record.tool_name.as_deref() == Some("list_directory"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        before_abort
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_completed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        before_abort
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind.starts_with("provider_continuation_"))
+            .map(|event| event.kind.as_str()),
+        Some("provider_continuation_opened")
+    );
+    let before_abort_json = serde_json::to_string(&before_abort).unwrap();
+    assert!(!before_abort_json.contains("private-interrupted-runtime-call"));
+    assert!(!before_abort_json.contains("reasoning-interrupted-private"));
+    assert!(!before_abort_json.contains("opaque-interrupted-reasoning"));
+
+    interrupted_run
+        .kill()
+        .expect("kill interrupted nib process");
+    let interrupted_status = interrupted_run
+        .wait()
+        .expect("reap interrupted nib process");
+    assert!(
+        !interrupted_status.success(),
+        "killed process reported success"
+    );
+    release_interrupted
+        .send(())
+        .expect("release interrupted fixture connection");
+
+    let restarted = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .current_dir(root.path())
+        .args([
+            "run",
+            goal,
+            "--session",
+            session_id,
+            "--mode",
+            "plan",
+            "--max-steps",
+            "4",
+            "--yes",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch restarted nib process");
+
+    let restarted_request = request_rx
+        .recv()
+        .await
+        .expect("fresh restarted planner request");
+    assert!(restarted_request.starts_with("POST /v1/responses HTTP/1.1"));
+    let restarted_body = captured_json_body(&restarted_request);
+    assert_eq!(restarted_body["tools"][0]["name"], "submit_plan");
+    let restarted_json = serde_json::to_string(&restarted_body).unwrap();
+    assert!(!restarted_json.contains("private-interrupted-runtime-call"));
+    assert!(!restarted_json.contains("reasoning-interrupted-private"));
+    assert!(!restarted_json.contains("opaque-interrupted-reasoning"));
+    assert!(!restarted_body["input"]
+        .as_array()
+        .expect("fresh planner input")
+        .iter()
+        .any(|item| item["type"] == "function_call_output"));
+    let restarted_output = restarted
+        .wait_with_output()
+        .expect("wait for restarted nib process");
+    assert!(
+        restarted_output.status.success(),
+        "restarted nib failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&restarted_output.stdout),
+        String::from_utf8_lossy(&restarted_output.stderr)
+    );
+    server.join().expect("Responses interruption fixture exits");
+
+    let recovered = store.load(session_id).expect("recovered Responses session");
+    assert_eq!(
+        recovered
+            .tool_calls
+            .iter()
+            .filter(|record| record.tool_name.as_deref() == Some("list_directory"))
+            .count(),
+        1,
+        "the completed tool must not execute again after restart"
+    );
+    assert_eq!(
+        recovered
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_completed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered
+            .events
+            .iter()
+            .filter(|event| event.kind == "provider_continuation_interrupted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == "reconciliation"
+                    && event.details["outcome"] == "provider_continuation_interrupted"
+                    && event.details["continue"] == false
+            })
+            .count(),
+        1
+    );
+    assert!(recovered.events.iter().any(|event| {
+        event.kind == "plan_invalidated"
+            && event.details["reason"] == "provider_continuation_interrupted"
+            && event.details["previous_plan_id"] == interrupted_plan_id
+    }));
+    assert_ne!(
+        recovered.plan.as_ref().expect("fresh restarted plan").id,
+        interrupted_plan_id,
+        "restart must generate a new plan instead of resuming the interrupted plan"
+    );
+    let recovered_json = serde_json::to_string(&recovered).unwrap();
+    assert!(!recovered_json.contains("private-interrupted-runtime-call"));
+    assert!(!recovered_json.contains("reasoning-interrupted-private"));
+    assert!(!recovered_json.contains("opaque-interrupted-reasoning"));
+}
+
+#[tokio::test]
+async fn responses_planner_failure_reconciles_without_executing_tools_or_persisting_secrets() {
+    let root = git_repository();
+    let oversized_provider_error = format!(
+        "provider rejected inactive-provider-secret {}",
+        "x".repeat(8 * 1024)
+    );
+    let (base_url, request_rx) = serve_responses_sequence(vec![json!({
+        "id": "resp-failed",
+        "status": "failed",
+        "error": {
+            "code": "fixture_failure",
+            "message": oversized_provider_error
+        },
+        "output": []
+    })]);
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some("fixture-secret-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            reasoning_effort: Some(nib::config::ReasoningEffort::Medium),
+            ..ProviderEntry::default()
+        },
+    );
+    config.llm.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry {
+            model: "fixture-inactive-model".to_string(),
+            api_key: Some("inactive-provider-secret".to_string()),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(root.path(), &mut config).expect("Responses failure config");
+    let session_id = "responses-planner-failure";
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        session_id,
+        "inspect the workspace",
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..AgentLoopConfig::default()
+        },
+    )
+    .await
+    .expect("failed provider turn still reconciles the agent run");
+
+    assert!(summary.is_failure(), "{}", summary.outcome);
+    assert!(summary.outcome.starts_with("planning_failed:"));
+    assert!(summary.outcome.contains("Responses API did not complete"));
+    assert!(!summary.outcome.contains("inactive-provider-secret"));
+    assert!(!summary.outcome.contains("provider rejected"));
+    assert!(summary.outcome.len() < 8 * 1024);
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(summary.final_state, AgentState::Done);
+    let request = request_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("captured failed Responses request");
+    assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+
+    let persisted = SessionStore::for_project(root.path())
+        .unwrap()
+        .load(session_id)
+        .expect("failed Responses session");
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "reconciliation"
+            && event.details["outcome"]
+                .as_str()
+                .is_some_and(|outcome| outcome.starts_with("planning_failed:"))
+            && event.details["continue"] == false
+    }));
+    let persisted_json = serde_json::to_string(&persisted).unwrap();
+    assert!(!persisted_json.contains("inactive-provider-secret"));
+}
+
+#[tokio::test]
+async fn compression_provider_failure_blocks_the_plan_and_reconciles_terminally() {
+    const SECRET: &str = "compression-provider-secret";
+    let root = git_repository();
+    let (base_url, request_rx) = serve_planner_then_compression_failure(SECRET);
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.context_length = 4_000;
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some(SECRET.to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..ProviderEntry::default()
+        },
+    );
+    config.compression.threshold = 0.10;
+    config.compression.target_ratio = 0.05;
+    save_nib_config_full(root.path(), &mut config).expect("compression failure config");
+
+    let session_id = "compression-provider-failure";
+    let store = SessionStore::for_project(root.path()).expect("session store");
+    let session = store.create_session_with_id(session_id);
+    for index in 0..6 {
+        store
+            .try_append_message(
+                &session.id,
+                "user",
+                &format!(
+                    "historic request {index}: {}",
+                    "bounded context ".repeat(80)
+                ),
+            )
+            .expect("historic user message");
+        store
+            .try_append_message(
+                &session.id,
+                "assistant",
+                &format!("historic response {index}: {}", "verified fact ".repeat(80)),
+            )
+            .expect("historic assistant message");
+    }
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        session_id,
+        "inspect the workspace",
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..AgentLoopConfig::default()
+        },
+    )
+    .await
+    .expect("compression failure reconciles");
+
+    assert!(summary.is_failure(), "{}", summary.outcome);
+    assert!(summary.outcome.starts_with("compression_failed:"));
+    assert!(
+        summary.outcome.contains("Responses API HTTP 500"),
+        "{}",
+        summary.outcome
+    );
+    assert!(!summary.outcome.contains(SECRET));
+    assert!(!summary.outcome.contains("compression provider echoed"));
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(summary.final_state, AgentState::Done);
+    assert_trace_contains_in_order(
+        &summary.trace,
+        &[
+            "planning",
+            "plan_approval",
+            "compression",
+            "reconciliation",
+            "done",
+        ],
+    );
+    let requests = (0..4)
+        .map(|_| {
+            request_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("captured planner and compression requests")
+        })
+        .collect::<Vec<_>>();
+    assert!(requests
+        .iter()
+        .all(|request| request.starts_with("POST /v1/responses HTTP/1.1")));
+    assert_eq!(requests[1], requests[2]);
+    assert_eq!(requests[2], requests[3]);
+
+    let persisted = store.load(session_id).expect("reconciled session");
+    assert!(persisted.tool_calls.is_empty());
+    let plan = persisted.plan.expect("blocked plan");
+    assert_eq!(plan.outcome.as_deref(), Some(summary.outcome.as_str()));
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert!(!serde_json::to_string(&plan).unwrap().contains(SECRET));
+}
+
+#[tokio::test]
+async fn responses_runtime_refusal_blocks_the_plan_and_is_a_terminal_failure() {
+    let root = git_repository();
+    let responses = vec![
+        json!({
+            "id": "resp-plan-before-refusal",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "private-plan-call",
+                "name": "submit_plan",
+                "arguments": "{\"steps\":[\"inspect the workspace\"]}"
+            }]
+        }),
+        json!({
+            "id": "resp-refusal",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "refusal", "refusal": "fixture refusal"}]
+            }]
+        }),
+    ];
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(root.path(), &mut config).expect("Responses refusal config");
+    let session_id = "responses-runtime-refusal";
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        session_id,
+        "inspect the workspace",
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..AgentLoopConfig::default()
+        },
+    )
+    .await
+    .expect("refused provider turn still reconciles the agent run");
+
+    assert_eq!(summary.outcome, "model_refusal");
+    assert!(summary.is_failure());
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(summary.final_state, AgentState::Done);
+    for _ in 0..2 {
+        request_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("captured Responses refusal request");
+    }
+
+    let persisted = SessionStore::for_project(root.path())
+        .unwrap()
+        .load(session_id)
+        .expect("refused Responses session");
+    assert!(persisted.tool_calls.is_empty());
+    let plan = persisted.plan.expect("refused run plan");
+    assert_eq!(plan.outcome.as_deref(), Some("model_refusal"));
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+}
+
+#[tokio::test]
+async fn responses_runtime_transport_failure_blocks_the_approved_plan_without_tools() {
+    let root = git_repository();
+    let responses = vec![
+        json!({
+            "id": "resp-plan-before-failure",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "private-plan-call",
+                "name": "submit_plan",
+                "arguments": "{\"steps\":[\"inspect the workspace\"]}"
+            }]
+        }),
+        json!({
+            "id": "resp-runtime-failed",
+            "status": "failed",
+            "error": {
+                "code": "runtime_fixture_failure",
+                "message": "provider rejected fixture-runtime-secret"
+            },
+            "output": []
+        }),
+    ];
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.clear();
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-reasoning-model".to_string(),
+            api_key: Some("fixture-runtime-secret".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(root.path(), &mut config).expect("Responses runtime failure config");
+    let session_id = "responses-runtime-transport-failure";
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        session_id,
+        "inspect the workspace",
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..AgentLoopConfig::default()
+        },
+    )
+    .await
+    .expect("failed runtime provider turn still reconciles the agent run");
+
+    assert!(summary.is_failure());
+    assert!(summary.outcome.starts_with("llm_stream_failed:"));
+    assert!(summary.outcome.contains("Responses API did not complete"));
+    assert!(!summary.outcome.contains("fixture-runtime-secret"));
+    assert!(!summary.outcome.contains("provider rejected"));
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(summary.final_state, AgentState::Done);
+    for _ in 0..2 {
+        request_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("captured Responses runtime failure request");
+    }
+
+    let persisted = SessionStore::for_project(root.path())
+        .unwrap()
+        .load(session_id)
+        .expect("failed runtime Responses session");
+    assert!(persisted.tool_calls.is_empty());
+    let plan = persisted.plan.expect("failed runtime plan");
+    assert_eq!(plan.outcome.as_deref(), Some(summary.outcome.as_str()));
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert!(!serde_json::to_string(&plan)
+        .unwrap()
+        .contains("fixture-runtime-secret"));
 }
 
 #[tokio::test]
@@ -644,13 +1593,8 @@ struct RecordingCompressor {
 
 #[async_trait]
 impl LlmClient for RecordingCompressor {
-    async fn complete(
-        &self,
-        messages: &[Value],
-        _tools: Option<&[Value]>,
-        _temperature: f64,
-    ) -> Result<LlmResponse, String> {
-        self.prompts.lock().unwrap().push(messages.to_vec());
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(request.messages.to_vec());
         Ok(LlmResponse::text(
             "Retain the verified path, decisions, and current progress.",
         ))

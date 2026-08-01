@@ -15,7 +15,20 @@ const RELEASE_ARCHIVE_NAMES: [&str; 4] = [
 ];
 
 #[cfg(unix)]
-const RELEASE_ASSET_NAMES: [&str; 8] = [
+const RELEASE_ASSET_NAMES: [&str; 9] = [
+    "nib-linux-x86_64.tar.gz",
+    "nib-linux-x86_64.tar.gz.sha256",
+    "nib-macos-aarch64.tar.gz",
+    "nib-macos-aarch64.tar.gz.sha256",
+    "nib-macos-x86_64.tar.gz",
+    "nib-macos-x86_64.tar.gz.sha256",
+    "nib-release.json",
+    "nib-windows-x86_64.zip",
+    "nib-windows-x86_64.zip.sha256",
+];
+
+#[cfg(unix)]
+const LEGACY_RELEASE_ASSET_NAMES: [&str; 8] = [
     "nib-linux-x86_64.tar.gz",
     "nib-linux-x86_64.tar.gz.sha256",
     "nib-macos-aarch64.tar.gz",
@@ -373,14 +386,14 @@ impl ReleaseTransactionHarness {
         .expect("old release body");
         fs::write(
             gh_state.join("releases/old.assets"),
-            format!("{}\n", RELEASE_ASSET_NAMES.join("\n")),
+            format!("{}\n", LEGACY_RELEASE_ASSET_NAMES.join("\n")),
         )
         .expect("old release assets");
         fs::write(
             gh_state.join("releases/old.asset-metadata"),
             format!(
                 "{}\n",
-                RELEASE_ASSET_NAMES
+                LEGACY_RELEASE_ASSET_NAMES
                     .map(|name| format!("{name}|uploaded|1"))
                     .join("\n")
             ),
@@ -436,7 +449,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
       --notes) shift; body=$1 ;;
       --target) shift; target=$1 ;;
       --title) shift ;;
-      *.tar.gz|*.zip|*.sha256) assets+=("$(basename "$1")") ;;
+  *.tar.gz|*.zip|*.sha256|*.json) assets+=("$(basename "$1")") ;;
     esac
     shift
   done
@@ -708,6 +721,7 @@ exit "$status"
             .env("RELEASE_PRERELEASE", "false")
             .env("RELEASE_TAG", "prod-latest")
             .env("RELEASE_TITLE", "nib production")
+            .env("NIB_RELEASE_VERSION", env!("CARGO_PKG_VERSION"))
             .env("NIB_RELEASE_GIT_BIN", &self.fake_git)
             .env("NIB_RELEASE_GH_BIN", &self.fake_gh)
             .env("NIB_RELEASE_DIST_DIR", &self.dist)
@@ -899,6 +913,30 @@ exit "$status"
         self.assert_complete_candidate_release_with_prior(expected_tag, expected_draft, "old");
     }
 
+    fn assert_complete_prior_release(
+        &self,
+        release_id: &str,
+        expected_tag: &str,
+        expected_draft: &str,
+    ) {
+        assert_eq!(self.release_field(release_id, "tag"), expected_tag);
+        assert_eq!(self.release_field(release_id, "draft"), expected_draft);
+        assert_eq!(self.release_field(release_id, "prerelease"), "false");
+        assert_eq!(
+            self.release_assets(release_id),
+            LEGACY_RELEASE_ASSET_NAMES.map(str::to_string)
+        );
+        assert_eq!(
+            self.release_field(release_id, "asset-metadata")
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            LEGACY_RELEASE_ASSET_NAMES
+                .map(|name| format!("{name}|uploaded|1"))
+                .to_vec()
+        );
+    }
+
     fn assert_complete_candidate_release_with_prior(
         &self,
         expected_tag: &str,
@@ -928,7 +966,7 @@ exit "$status"
     fn assert_prior_release_restored(&self) {
         assert_eq!(self.remote_ref("refs/tags/prod-latest"), self.old_sha);
         assert_eq!(self.release_id("prod-latest").as_deref(), Some("old"));
-        self.assert_complete_release("old", "prod-latest", "false");
+        self.assert_complete_prior_release("old", "prod-latest", "false");
         assert!(self.release_id("nib-release-stage-prod").is_none());
         assert!(self
             .remote_ref("refs/tags/nib-release-stage-prod")
@@ -958,7 +996,7 @@ exit "$status"
             Some("old")
         );
         self.assert_complete_candidate_release("nib-release-stage-prod", "true");
-        self.assert_complete_release("old", "nib-release-backup-prod", "true");
+        self.assert_complete_prior_release("old", "nib-release-backup-prod", "true");
     }
 
     fn clear_fault_observations(&self) {
@@ -1037,6 +1075,21 @@ fn staged_release_transaction_publishes_complete_assets_coherently() {
     let release_id = harness.release_id("prod-latest").expect("promoted release");
     assert_eq!(release_id, "stage");
     harness.assert_complete_candidate_release("prod-latest", "false");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(harness.dist.join("nib-release.json"))
+            .expect("generated release manifest"),
+    )
+    .expect("valid release manifest JSON");
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["repository"], "example/nib");
+    assert_eq!(manifest["channel"], "prod");
+    assert_eq!(manifest["tag"], "prod-latest");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["commit"], harness.release_sha);
+    assert_eq!(
+        manifest["assets"].as_object().map(|assets| assets.len()),
+        Some(4)
+    );
     assert!(!harness.gh_state.join("releases/old.tag").exists());
     assert!(harness
         .remote_ref("refs/tags/nib-release-stage-prod")
@@ -1471,7 +1524,7 @@ fn failed_rollback_and_failed_forward_repair_retain_all_durable_state() {
         harness.old_sha
     );
     harness.assert_complete_candidate_release("nib-release-stage-prod", "true");
-    harness.assert_complete_release("old", "nib-release-backup-prod", "true");
+    harness.assert_complete_prior_release("old", "nib-release-backup-prod", "true");
     assert_eq!(
         harness.release_id("nib-release-stage-prod").as_deref(),
         Some("stage")
@@ -1511,7 +1564,7 @@ fn externally_retagged_prior_release_is_never_mutated_or_deleted() {
         harness.old_sha
     );
     harness.assert_complete_candidate_release("nib-release-stage-prod", "true");
-    harness.assert_complete_release("old", "external-release-tag", "true");
+    harness.assert_complete_prior_release("old", "external-release-tag", "true");
 }
 
 #[cfg(unix)]
@@ -1564,7 +1617,7 @@ fn invalid_candidate_markers_cause_zero_cleanup_mutations() {
             harness.old_sha
         );
         harness.assert_complete_release("stage", "nib-release-stage-prod", "true");
-        harness.assert_complete_release("old", "nib-release-backup-prod", "true");
+        harness.assert_complete_prior_release("old", "nib-release-backup-prod", "true");
     }
 }
 

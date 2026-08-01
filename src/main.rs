@@ -41,12 +41,28 @@ mod cli_tests {
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
     }
+
+    #[test]
+    fn update_command_is_public_and_worker_commands_skip_startup_checks() {
+        let update = Cli::try_parse_from(["nib", "update"]).expect("update command");
+        assert!(matches!(update.command, Some(Commands::Update)));
+        assert!(!startup_update_check_is_eligible(&update.command));
+
+        let version = Cli::try_parse_from(["nib", "version"]).expect("version command");
+        assert!(startup_update_check_is_eligible(&version.command));
+
+        let server = Cli::try_parse_from(["nib", "mcp-server"]).expect("MCP server command");
+        assert!(!startup_update_check_is_eligible(&server.command));
+    }
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Show the installed version
     Version,
+
+    /// Update this installed release to the current channel build
+    Update,
 
     /// Start an interactive chat session
     Chat(chat::ChatArgs),
@@ -148,8 +164,19 @@ fn main() {
     let cli = Cli::parse();
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+    if startup_update_check_is_eligible(&cli.command) {
+        updater::maybe_print_startup_notice();
+    }
+
     match &cli.command {
         Some(Commands::Version) => version::show_version(),
+        Some(Commands::Update) => match updater::run_update() {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("Update error: {error}");
+                process::exit(1);
+            }
+        },
         Some(Commands::Chat(args)) => {
             if let Err(error) = chat::run_chat(args) {
                 eprintln!("Chat error: {error}");
@@ -240,6 +267,7 @@ fn main() {
                 serde_json::json!({"path": arg})
             };
             let call = nib::tools::ToolCall {
+                invocation_id: nib::tools::ToolInvocationId::new(),
                 tool_name: tool.clone(),
                 arguments: args_json,
                 session_id: Some(session.id.clone()),
@@ -345,4 +373,18 @@ fn main() {
             );
         }
     }
+}
+
+fn startup_update_check_is_eligible(command: &Option<Commands>) -> bool {
+    !matches!(
+        command,
+        Some(
+            Commands::Update
+                | Commands::McpServer
+                | Commands::McpStdioRelay
+                | Commands::TaskWorker { .. }
+                | Commands::SubagentSupervisor { .. }
+                | Commands::SubagentWorker { .. }
+        )
+    )
 }

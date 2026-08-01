@@ -5,7 +5,7 @@ nib is a command-line AI coding assistant that plans, executes, and reconciles w
 ## Features
 
 - **Local Sessions:** Stores profile-scoped history under `./.nib/profiles/<id>/sessions/`.
-- **Pluggable LLMs:** Includes configured adapters for OpenAI, Anthropic, Gemini, Grok, OpenRouter, Meta, and Mock.
+- **Pluggable LLMs:** Includes OpenAI Responses and Chat Completions transports plus configured adapters for Anthropic, Gemini, Grok, OpenRouter, Meta, and Mock.
 - **Layered Execution:** Isolates mutations in Git worktrees; the default hybrid provider uses Linux `bwrap` when usable and otherwise runs directly in the worktree.
 - **Human-in-the-Loop:** Manual mode prompts for plans and risky actions; explicit deny policies remain authoritative.
 - **MCP Integration:** Can act as an MCP (Model Context Protocol) server for external IDEs or clients.
@@ -15,6 +15,8 @@ nib is a command-line AI coding assistant that plans, executes, and reconciles w
   Object and macOS process-group backends remain non-production native test mechanisms
   until their cleanup authority is isolated from managed workers.
 - **Persistent Memory:** Approval-gated environment and user facts carry across sessions without replacing the raw audit trail.
+- **Verified Self-Updates:** Official release builds can run `nib update`; ordinary
+  user-facing launches notify when their rolling channel has a different build.
 
 ## Installation
 
@@ -33,6 +35,13 @@ curl -fsSL https://raw.githubusercontent.com/skills-yaml/nib/main/scripts/instal
 ```
 
 The script downloads the binary and installs it to `~/.local/bin`. Ensure this directory is in your `PATH`.
+
+After the first updater-capable release is installed, update within its existing
+production or development channel with:
+
+```bash
+nib update
+```
 
 **Windows (PowerShell)**
 

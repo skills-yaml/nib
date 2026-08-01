@@ -83,6 +83,12 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
                     sid
                 ));
             }
+            if summary.is_failure() {
+                return Err(format!(
+                    "agent run failed for session {}: {}",
+                    sid, summary.outcome
+                ));
+            }
             println!("[green]Agent run completed for session {}[/green]", sid);
             if let Some(msg) = summary.last_message {
                 println!("Last: {}", msg.chars().take(300).collect::<String>());

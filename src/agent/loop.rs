@@ -6,7 +6,10 @@ use crate::context::skills::{Skill, SkillPolicyEffect};
 use crate::context::{
     assemble_runtime_context_sections, select_profile_skills, RuntimeContextSection,
 };
-use crate::llm::{create_client, LlmClient, StreamEvent, ToolCallAccumulator, ToolCallRequest};
+use crate::llm::{
+    LlmClient, LlmRequest, LlmRequestScope, LlmTerminalStatus, ProviderContinuation, StreamEvent,
+    ToolCallRequest,
+};
 use crate::session::{
     normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionRunLease, SessionStore,
     ToolCallRecord,
@@ -156,6 +159,12 @@ pub struct AgentRunSummary {
     pub trace: Vec<String>,
 }
 
+impl AgentRunSummary {
+    pub fn is_failure(&self) -> bool {
+        is_agent_failure_outcome(&self.outcome)
+    }
+}
+
 pub async fn run_agent_loop(
     project_root: PathBuf,
     session_id: &str,
@@ -299,6 +308,22 @@ async fn run_agent_loop_inner(
     goal: &str,
     cfg: AgentLoopConfig,
 ) -> Result<AgentRunSummary, String> {
+    let AgentLoopRuntime {
+        nib_cfg,
+        profile,
+        session_store: store,
+    } = runtime;
+    if store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .is_none()
+    {
+        store
+            .try_create_session_with_id(session_id.to_string())
+            .map_err(|error| format!("failed to create session {session_id}: {error}"))?;
+    }
+    reconcile_interrupted_provider_continuation(&store, session_id)?;
+
     let normalized_goal = normalize_plan_goal(goal);
     if normalized_goal.is_empty() {
         return Err("agent goal cannot be empty".to_string());
@@ -306,12 +331,10 @@ async fn run_agent_loop_inner(
     if !matches!(cfg.mode.as_str(), "execute" | "plan") {
         return Err(format!("unsupported agent mode: {}", cfg.mode));
     }
+    let run_id = uuid::Uuid::new_v4().simple().to_string();
+    let request_scope = LlmRequestScope::new(session_id, &run_id)?;
+    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
 
-    let AgentLoopRuntime {
-        nib_cfg,
-        profile,
-        session_store: store,
-    } = runtime;
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
         nib_cfg.agent.max_turns.max(1)
@@ -319,12 +342,15 @@ async fn run_agent_loop_inner(
         cfg.max_steps
     };
     let max_transitions = max_turns.saturating_mul(10).saturating_add(10);
-    let llm: Arc<dyn LlmClient> = create_client(&nib_cfg.llm, cfg.provider.as_deref())?;
+    let sensitive_values = nib_cfg.sensitive_values();
+    let llm: Arc<dyn LlmClient> = crate::llm::factory::create_client_with_sensitive_values(
+        &nib_cfg.llm,
+        cfg.provider.as_deref(),
+        &sensitive_values,
+    )?;
     let active_skills = select_profile_skills(&project_root, &nib_cfg, &profile, goal)?;
     let policy_rules = skill_policy_rules(&active_skills);
     let after_tool_hooks = skill_after_tool_hooks(&active_skills);
-    let sensitive_values = nib_cfg.sensitive_values();
-
     let mcp_manager = if nib_cfg.mcp.client_enabled && !nib_cfg.mcp.servers.is_empty() {
         Some(Arc::new(
             crate::integrations::mcp::McpManager::new(&nib_cfg.mcp.servers, &sensitive_values)
@@ -371,16 +397,6 @@ async fn run_agent_loop_inner(
         executor = executor.with_approval_handler(handler);
     }
 
-    if store
-        .load_result(session_id)
-        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
-        .is_none()
-    {
-        store
-            .try_create_session_with_id(session_id.to_string())
-            .map_err(|error| format!("failed to create session {session_id}: {error}"))?;
-    }
-    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
     prepare_user_turn(&store, session_id, goal)?;
     for skill in &active_skills {
         let reason = if profile
@@ -468,6 +484,7 @@ async fn run_agent_loop_inner(
     let mut outcome = "running".to_string();
     let mut bound_reached = false;
     let mut active_plan_id: Option<String> = None;
+    let mut provider_continuation: Option<ProviderContinuation> = None;
 
     store
         .record_event(
@@ -538,13 +555,14 @@ async fn run_agent_loop_inner(
                             format!("failed to load session context for planning: {error}")
                         })?
                         .ok_or_else(|| "session disappeared before planning".to_string())?;
-                    match crate::agent::planner::generate_plan_with_context_events_bounded(
+                    match crate::agent::planner::generate_plan_with_context_events_bounded_scoped(
                         &llm,
                         goal,
                         &context_sections,
                         Some(&planning_session),
                         cfg.stream_tx.as_ref(),
                         nib_cfg.llm.context_length,
+                        Some(request_scope.clone()),
                     )
                     .await
                     {
@@ -627,6 +645,7 @@ async fn run_agent_loop_inner(
                             }
                         }
                         Err(error) => {
+                            let error = redact_provider_error(&nib_cfg, &error);
                             reconciliation_reason = Some(format!("planning_failed: {error}"));
                             transition_state(
                                 &store,
@@ -722,6 +741,7 @@ async fn run_agent_loop_inner(
                         handler
                             .handle_approval(
                                 &ToolCall {
+                                    invocation_id: crate::tools::ToolInvocationId::new(),
                                     tool_name: "approve_plan".to_string(),
                                     arguments: arguments.clone(),
                                     session_id: Some(session_id.to_string()),
@@ -861,12 +881,41 @@ async fn run_agent_loop_inner(
                         &cfg.stream_tx,
                     )
                     .await?
-                } else {
-                    if let Some(report) = crate::context::compression::maybe_compress_session(
-                        &store, session_id, &llm, &nib_cfg,
+                } else if provider_continuation.is_some() {
+                    transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::InspectLlm,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
                     )
                     .await?
+                } else {
+                    let compression = match crate::context::compression::maybe_compress_session(
+                        &store, session_id, &llm, &nib_cfg,
+                    )
+                    .await
                     {
+                        Ok(compression) => compression,
+                        Err(error) => {
+                            let error = redact_provider_error(&nib_cfg, &error);
+                            reconciliation_reason = Some(format!("compression_failed: {error}"));
+                            state = transition_state(
+                                &store,
+                                session_id,
+                                state,
+                                AgentState::Reconciliation,
+                                &mut trace,
+                                &mut transition_count,
+                                &cfg.stream_tx,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                    if let Some(report) = compression {
                         llm_turns += 1;
                         emit(
                             &cfg.stream_tx,
@@ -971,10 +1020,23 @@ async fn run_agent_loop_inner(
             }
             AgentState::InspectLlm => {
                 llm_turns += 1;
-                let stream_result = llm.stream(&messages, llm_tools.as_deref(), 0.7).await;
+                let continued_turn = provider_continuation.is_some();
+                let request = LlmRequest::new(&messages, llm_tools.as_deref(), 0.7)
+                    .with_scope(request_scope.clone())
+                    .with_continuation(provider_continuation.take());
+                let stream_result = llm.stream(request).await;
                 let mut stream = match stream_result {
                     Ok(stream) => stream,
                     Err(error) => {
+                        if continued_turn {
+                            record_provider_continuation_lifecycle(
+                                &store,
+                                session_id,
+                                "provider_continuation_abandoned",
+                                &run_id,
+                            )?;
+                        }
+                        let error = redact_provider_error(&nib_cfg, &error);
                         reconciliation_reason = Some(format!("llm_stream_failed: {error}"));
                         state = transition_state(
                             &store,
@@ -989,41 +1051,49 @@ async fn run_agent_loop_inner(
                         continue;
                     }
                 };
-                let mut content = String::new();
-                let mut accumulator = ToolCallAccumulator::default();
-                let mut stream_error = None;
                 while let Some(result) = stream.recv().await {
                     match result {
-                        Ok(event) => {
-                            accumulator.push(&event);
-                            if let StreamEvent::Content(fragment) = &event {
-                                content.push_str(fragment);
-                            }
-                            emit(&cfg.stream_tx, event).await;
-                        }
-                        Err(error) => {
-                            stream_error = Some(error);
-                            break;
-                        }
+                        Ok(event) => emit(&cfg.stream_tx, event).await,
+                        Err(_) => break,
                     }
                 }
-                if let Some(error) = stream_error {
-                    reconciliation_reason = Some(format!("llm_stream_failed: {error}"));
-                    transition_state(
-                        &store,
-                        session_id,
-                        state,
-                        AgentState::Reconciliation,
-                        &mut trace,
-                        &mut transition_count,
-                        &cfg.stream_tx,
-                    )
-                    .await?
-                } else {
-                    response_content = (!content.trim().is_empty()).then_some(content);
-                    match accumulator.finish() {
-                        Ok(calls) => {
-                            tool_calls = calls;
+                match stream.finish().await {
+                    Ok(response) => {
+                        if continued_turn {
+                            record_provider_continuation_lifecycle(
+                                &store,
+                                session_id,
+                                "provider_continuation_closed",
+                                &run_id,
+                            )?;
+                        }
+                        if response.terminal_status == LlmTerminalStatus::Refused {
+                            response_content = None;
+                            tool_calls.clear();
+                            provider_continuation = None;
+                            reconciliation_reason = Some("model_refusal".to_string());
+                            transition_state(
+                                &store,
+                                session_id,
+                                state,
+                                AgentState::Reconciliation,
+                                &mut trace,
+                                &mut transition_count,
+                                &cfg.stream_tx,
+                            )
+                            .await?
+                        } else {
+                            response_content = response.content;
+                            tool_calls = response.tool_calls.unwrap_or_default();
+                            provider_continuation = response.continuation;
+                            if provider_continuation.is_some() {
+                                record_provider_continuation_lifecycle(
+                                    &store,
+                                    session_id,
+                                    "provider_continuation_opened",
+                                    &run_id,
+                                )?;
+                            }
                             transition_state(
                                 &store,
                                 session_id,
@@ -1035,19 +1105,28 @@ async fn run_agent_loop_inner(
                             )
                             .await?
                         }
-                        Err(error) => {
-                            reconciliation_reason = Some(format!("invalid_tool_stream: {error}"));
-                            transition_state(
+                    }
+                    Err(error) => {
+                        if continued_turn {
+                            record_provider_continuation_lifecycle(
                                 &store,
                                 session_id,
-                                state,
-                                AgentState::Reconciliation,
-                                &mut trace,
-                                &mut transition_count,
-                                &cfg.stream_tx,
-                            )
-                            .await?
+                                "provider_continuation_abandoned",
+                                &run_id,
+                            )?;
                         }
+                        let error = redact_provider_error(&nib_cfg, &error);
+                        reconciliation_reason = Some(format!("llm_stream_failed: {error}"));
+                        transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?
                     }
                 }
             }
@@ -1096,6 +1175,7 @@ async fn run_agent_loop_inner(
                     let intent = json!({
                         "content": response_content,
                         "tool_calls": tool_calls.iter().map(|call| json!({
+                            "invocation_id": call.invocation_id,
                             "name": call.name,
                             "arguments": call.arguments,
                         })).collect::<Vec<_>>(),
@@ -1139,6 +1219,7 @@ async fn run_agent_loop_inner(
                 }
                 for call in &tool_calls {
                     let tool_call = ToolCall {
+                        invocation_id: call.invocation_id,
                         tool_name: call.name.clone(),
                         arguments: call.arguments.clone(),
                         session_id: Some(session_id.to_string()),
@@ -1157,7 +1238,7 @@ async fn run_agent_loop_inner(
                             .record_event(
                                 session_id,
                                 "approval_required",
-                                json!({"kind": "tool", "tool_name": call.name, "arguments": call.arguments}),
+                                json!({"kind": "tool", "invocation_id": call.invocation_id, "tool_name": call.name, "arguments": call.arguments}),
                             )
                             .map_err(|error| error.to_string())?;
                     }
@@ -1205,6 +1286,7 @@ async fn run_agent_loop_inner(
                         .iter()
                         .map(|request| {
                             json!({
+                                "invocation_id": request.invocation_id,
                                 "tool": request.name,
                                 "success": false,
                                 "output": Value::Null,
@@ -1212,6 +1294,12 @@ async fn run_agent_loop_inner(
                             })
                         })
                         .collect::<Vec<_>>();
+                    let continuation_failure = record_provider_tool_outputs(
+                        &mut provider_continuation,
+                        &tool_calls,
+                        &observations,
+                    )
+                    .err();
                     for request in &tool_calls {
                         emit(
                             &cfg.stream_tx,
@@ -1230,7 +1318,10 @@ async fn run_agent_loop_inner(
                             "tool_batch_rejected",
                             json!({
                                 "reason": "mixed_question_batch",
-                                "tool_names": tool_calls.iter().map(|call| &call.name).collect::<Vec<_>>(),
+                                "tool_calls": tool_calls.iter().map(|call| json!({
+                                    "invocation_id": call.invocation_id,
+                                    "name": call.name,
+                                })).collect::<Vec<_>>(),
                             }),
                         )
                         .map_err(|error| error.to_string())?;
@@ -1247,12 +1338,20 @@ async fn run_agent_loop_inner(
                         &store,
                         session_id,
                         state,
-                        AgentState::BuildContext,
+                        if continuation_failure.is_some() {
+                            AgentState::Reconciliation
+                        } else {
+                            AgentState::BuildContext
+                        },
                         &mut trace,
                         &mut transition_count,
                         &cfg.stream_tx,
                     )
                     .await?;
+                    if let Some(error) = continuation_failure {
+                        reconciliation_reason =
+                            Some(format!("provider_continuation_failed: {error}"));
+                    }
                     continue;
                 }
 
@@ -1273,7 +1372,7 @@ async fn run_agent_loop_inner(
                         .record_event(
                             session_id,
                             "tool_started",
-                            json!({"tool_name": request.name, "arguments": request.arguments}),
+                            json!({"invocation_id": request.invocation_id, "tool_name": request.name, "arguments": request.arguments}),
                         )
                         .map_err(|error| error.to_string())?;
                     if request.name == "ask_question" {
@@ -1283,6 +1382,7 @@ async fn run_agent_loop_inner(
                             let result = executor
                                 .execute(
                                     ToolCall {
+                                        invocation_id: request.invocation_id,
                                         tool_name: request.name.clone(),
                                         arguments: request.arguments.clone(),
                                         session_id: Some(session_id.to_string()),
@@ -1310,6 +1410,7 @@ async fn run_agent_loop_inner(
                                     session_id,
                                     "tool_completed",
                                     json!({
+                                        "invocation_id": request.invocation_id,
                                         "tool_name": request.name,
                                         "success": false,
                                         "output": output.clone(),
@@ -1318,6 +1419,7 @@ async fn run_agent_loop_inner(
                                 )
                                 .map_err(|error| error.to_string())?;
                             observations.push(json!({
+                                "invocation_id": request.invocation_id,
                                 "tool": request.name,
                                 "success": false,
                                 "output": output,
@@ -1329,6 +1431,7 @@ async fn run_agent_loop_inner(
                     let result = executor
                         .execute(
                             ToolCall {
+                                invocation_id: request.invocation_id,
                                 tool_name: request.name.clone(),
                                 arguments: request.arguments.clone(),
                                 session_id: Some(session_id.to_string()),
@@ -1375,6 +1478,7 @@ async fn run_agent_loop_inner(
                             session_id,
                             "tool_completed",
                             json!({
+                                "invocation_id": request.invocation_id,
                                 "tool_name": request.name,
                                 "success": result.success,
                                 "output": output,
@@ -1383,13 +1487,45 @@ async fn run_agent_loop_inner(
                         )
                         .map_err(|error| error.to_string())?;
                     observations.push(json!({
+                        "invocation_id": request.invocation_id,
                         "tool": request.name,
                         "success": result.success,
                         "output": result.output,
                         "error": result.error,
                     }));
                 }
-                if pending_question.is_some() {
+                let continuation_failure = if pending_question.is_none() {
+                    record_provider_tool_outputs(
+                        &mut provider_continuation,
+                        &tool_calls,
+                        &observations,
+                    )
+                    .err()
+                } else {
+                    None
+                };
+                if let Some(error) = continuation_failure {
+                    store
+                        .try_append_message(
+                            session_id,
+                            "tool",
+                            &json!({"observations": observations}).to_string(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    tool_calls.clear();
+                    response_content = None;
+                    reconciliation_reason = Some(format!("provider_continuation_failed: {error}"));
+                    transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?
+                } else if pending_question.is_some() {
                     pending_observations = observations;
                     pending_batch_success = batch_success;
                     tool_calls.clear();
@@ -1535,7 +1671,7 @@ async fn run_agent_loop_inner(
                     .record_event(
                         session_id,
                         "question_required",
-                        json!({"question": question, "options": options}),
+                        json!({"invocation_id": request.invocation_id, "question": question, "options": options}),
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -1565,6 +1701,7 @@ async fn run_agent_loop_inner(
                 let result = executor
                     .execute(
                         ToolCall {
+                            invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
                             arguments,
                             session_id: Some(session_id.to_string()),
@@ -1598,6 +1735,7 @@ async fn run_agent_loop_inner(
                         session_id,
                         "tool_completed",
                         json!({
+                            "invocation_id": request.invocation_id,
                             "tool_name": request.name,
                             "success": question_success,
                             "output": question_output,
@@ -1605,12 +1743,20 @@ async fn run_agent_loop_inner(
                         }),
                     )
                     .map_err(|error| error.to_string())?;
-                pending_observations.push(json!({
+                let question_observation = json!({
+                    "invocation_id": request.invocation_id,
                     "tool": request.name,
                     "success": question_success,
                     "output": question_output,
                     "error": question_error,
-                }));
+                });
+                let continuation_failure = record_provider_tool_output(
+                    &mut provider_continuation,
+                    &request,
+                    &question_observation,
+                )
+                .err();
+                pending_observations.push(question_observation);
                 let batch_success = pending_batch_success && question_success;
                 store
                     .try_append_message(
@@ -1633,7 +1779,19 @@ async fn run_agent_loop_inner(
                 )?;
                 pending_observations.clear();
                 pending_batch_success = true;
-                if !plan_updated {
+                if let Some(error) = continuation_failure {
+                    reconciliation_reason = Some(format!("provider_continuation_failed: {error}"));
+                    transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?
+                } else if !plan_updated {
                     reconciliation_reason = Some("plan_binding_changed".to_string());
                     transition_state(
                         &store,
@@ -1671,6 +1829,14 @@ async fn run_agent_loop_inner(
                 }
             }
             AgentState::Reconciliation => {
+                if provider_continuation.take().is_some() {
+                    record_provider_continuation_lifecycle(
+                        &store,
+                        session_id,
+                        "provider_continuation_abandoned",
+                        &run_id,
+                    )?;
+                }
                 let reason = reconciliation_reason
                     .take()
                     .unwrap_or_else(|| "reconciled".to_string());
@@ -1757,6 +1923,15 @@ async fn run_agent_loop_inner(
                         "plan_approval_denied".to_string()
                     }
                     other => {
+                        if is_agent_failure_outcome(other) {
+                            block_active_plan_for_failure(
+                                &store,
+                                session_id,
+                                active_plan_id.as_deref(),
+                                &normalized_goal,
+                                other,
+                            )?;
+                        }
                         append_assistant_if_allowed(
                             &store,
                             session_id,
@@ -1999,6 +2174,209 @@ fn append_session_event(session: &mut Session, kind: &str, details: Value) {
     });
 }
 
+fn record_provider_continuation_lifecycle(
+    store: &SessionStore,
+    session_id: &str,
+    kind: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    store
+        .record_event(session_id, kind, json!({"run_id": run_id}))
+        .map(|_| ())
+        .map_err(|error| format!("failed to record provider continuation lifecycle: {error}"))
+}
+
+fn record_provider_tool_output(
+    continuation: &mut Option<ProviderContinuation>,
+    request: &ToolCallRequest,
+    observation: &Value,
+) -> Result<(), String> {
+    match continuation.as_mut() {
+        Some(continuation) => continuation.record_tool_output(request.invocation_id, observation),
+        None => Ok(()),
+    }
+}
+
+fn record_provider_tool_outputs(
+    continuation: &mut Option<ProviderContinuation>,
+    requests: &[ToolCallRequest],
+    observations: &[Value],
+) -> Result<(), String> {
+    if continuation.is_none() {
+        return Ok(());
+    }
+    if requests.len() != observations.len() {
+        return Err("provider continuation tool/output counts do not match".to_string());
+    }
+    for (request, observation) in requests.iter().zip(observations) {
+        record_provider_tool_output(continuation, request, observation)?;
+    }
+    Ok(())
+}
+
+fn reconcile_interrupted_provider_continuation(
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<bool, String> {
+    store
+        .update_session(session_id, |session| {
+            let latest_lifecycle = session.events.iter().rev().find(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "provider_continuation_opened"
+                        | "provider_continuation_closed"
+                        | "provider_continuation_abandoned"
+                        | "provider_continuation_interrupted"
+                        | "reconciliation"
+                )
+            });
+            let Some(opened) = latest_lifecycle
+                .filter(|event| event.kind == "provider_continuation_opened")
+            else {
+                return Ok(false);
+            };
+            let prior_run_id = opened
+                .details
+                .get("run_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let current_state = last_persisted_state(session);
+            append_session_event(
+                session,
+                "provider_continuation_interrupted",
+                json!({
+                    "prior_run_id": prior_run_id,
+                    "reason": "opaque continuation was discarded after process interruption",
+                }),
+            );
+            if !matches!(
+                current_state.as_deref(),
+                Some("Reconciliation") | Some("Done")
+            ) {
+                append_session_event(
+                    session,
+                    "state_transition",
+                    json!({
+                        "from": current_state,
+                        "to": AgentState::Reconciliation.as_str(),
+                    }),
+                );
+            }
+            if let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) {
+                plan.outcome = Some("provider_continuation_interrupted".to_string());
+                if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
+                    if step.status != "Completed" {
+                        step.status = "Blocked".to_string();
+                        step.outcome = Some("provider_continuation_interrupted".to_string());
+                        step.updated_at = Some(Utc::now());
+                    }
+                }
+            }
+            if matches!(
+                session.messages.last().map(|message| message.role.as_str()),
+                Some("user") | Some("tool")
+            ) {
+                session.messages.push(SessionMessage {
+                    index: session.messages.len(),
+                    role: "assistant".to_string(),
+                    content: "Previous provider turn was interrupted after tool execution; its opaque continuation was discarded and no tool was replayed.".to_string(),
+                    timestamp: Some(Utc::now()),
+                });
+            }
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({
+                    "outcome": "provider_continuation_interrupted",
+                    "continue": false,
+                }),
+            );
+            if current_state.as_deref() != Some(AgentState::Done.as_str()) {
+                append_session_event(
+                    session,
+                    "state_transition",
+                    json!({
+                        "from": AgentState::Reconciliation.as_str(),
+                        "to": AgentState::Done.as_str(),
+                    }),
+                );
+            }
+            Ok(true)
+        })
+        .map_err(|error| format!("failed to reconcile interrupted provider turn: {error}"))
+}
+
+fn block_active_plan_for_failure(
+    store: &SessionStore,
+    session_id: &str,
+    active_plan_id: Option<&str>,
+    normalized_goal: &str,
+    reason: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let Some(plan) = session.plan.as_mut() else {
+                return Ok(());
+            };
+            if active_plan_id != Some(plan.id.as_str())
+                || !plan.matches_goal(normalized_goal)
+                || plan.is_complete()
+            {
+                return Ok(());
+            }
+            plan.outcome = Some(reason.to_string());
+            if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
+                if step.status != "Completed" {
+                    step.status = "Blocked".to_string();
+                    step.outcome = Some(reason.to_string());
+                    step.updated_at = Some(Utc::now());
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("failed to block plan after provider failure: {error}"))
+}
+
+fn is_agent_failure_outcome(outcome: &str) -> bool {
+    let prefixed_failure = [
+        "planning_failed:",
+        "llm_stream_failed:",
+        "invalid_tool_stream:",
+        "provider_continuation_failed:",
+        "compression_failed:",
+    ]
+    .iter()
+    .any(|prefix| outcome.starts_with(prefix));
+    prefixed_failure
+        || matches!(
+            outcome,
+            "model_refusal"
+                | "empty_model_response"
+                | "tool_execution_failed"
+                | "transition_limit_reached"
+                | "turn_limit_reached"
+                | "provider_continuation_interrupted"
+        )
+}
+
+fn redact_provider_error(config: &crate::config::NibConfig, error: &str) -> String {
+    const MAX_PERSISTED_PROVIDER_ERROR_CHARS: usize = 8 * 1024;
+    let redacted = crate::tools::executor::redact_text_with_encoded_sensitive_values(
+        error,
+        crate::llm::factory::provider_error_sensitive_values(config.sensitive_values()),
+    );
+    let mut chars = redacted.chars();
+    let bounded = chars
+        .by_ref()
+        .take(MAX_PERSISTED_PROVIDER_ERROR_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...[truncated]")
+    } else {
+        bounded
+    }
+}
+
 fn record_curator_tool_call(
     store: &SessionStore,
     session_id: &str,
@@ -2033,6 +2411,7 @@ fn record_curator_tool_call(
     };
     store
         .record_tool_call(ToolCallRecord {
+            invocation_id: Some(crate::tools::ToolInvocationId::new()),
             id: Some(format!("daemon-curator-{}", uuid::Uuid::new_v4())),
             session_id: Some(session_id.to_string()),
             tool_name: Some("daemon_curator".to_string()),
@@ -2097,6 +2476,8 @@ fn plan_invalidation_reason(
         Some("legacy_plan")
     } else if !plan.is_structured() {
         Some("invalid_plan")
+    } else if plan.outcome.as_deref() == Some("provider_continuation_interrupted") {
+        Some("provider_continuation_interrupted")
     } else if plan.is_complete() {
         Some("completed_plan")
     } else if !plan.matches_goal(normalized_goal) {
@@ -2414,6 +2795,28 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
+    struct EnvironmentGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     struct DenyApproval;
 
     struct AnswerQuestion;
@@ -2451,6 +2854,7 @@ mod tests {
                     api_key: None,
                     api_keys: Vec::new(),
                     base_url: None,
+                    ..ProviderEntry::default()
                 },
             )]),
             ..Default::default()
@@ -2468,6 +2872,152 @@ mod tests {
                 updated_at: None,
             }],
         )
+    }
+
+    #[test]
+    fn interrupted_provider_turn_is_reconciled_once_and_never_replays_tools() {
+        let dir = tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let mut session = store.create_session_with_id("interrupted-provider-turn");
+        let mut plan = pending_plan("inspect safely", "read the requested file");
+        plan.approve();
+        session.plan = Some(plan);
+        store.save(&mut session).expect("approved plan");
+        store
+            .try_append_message(&session.id, "user", "inspect safely")
+            .unwrap();
+        store
+            .try_append_message(&session.id, "assistant", "normalized tool intent")
+            .unwrap();
+        record_provider_continuation_lifecycle(
+            &store,
+            &session.id,
+            "provider_continuation_opened",
+            "prior-run",
+        )
+        .unwrap();
+        store
+            .record_event(
+                &session.id,
+                "tool_completed",
+                json!({"tool_name": "read_file", "success": true}),
+            )
+            .unwrap();
+        store
+            .try_append_message(
+                &session.id,
+                "tool",
+                &json!({"observations": [{"tool": "read_file", "success": true}]}).to_string(),
+            )
+            .unwrap();
+
+        assert!(reconcile_interrupted_provider_continuation(&store, &session.id).unwrap());
+        let reconciled = store.load(&session.id).expect("reconciled session");
+        let plan = reconciled.plan.as_ref().expect("blocked plan");
+        assert_eq!(
+            plan.outcome.as_deref(),
+            Some("provider_continuation_interrupted")
+        );
+        assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+        assert_eq!(
+            reconciled
+                .events
+                .iter()
+                .filter(|event| event.kind == "tool_completed")
+                .count(),
+            1
+        );
+        assert!(reconciled.events.iter().any(|event| {
+            event.kind == "reconciliation"
+                && event.details["outcome"] == "provider_continuation_interrupted"
+                && event.details["continue"] == false
+        }));
+
+        invalidate_nonresumable_plan(&store, &session.id, "inspect safely").unwrap();
+        assert!(store.load(&session.id).unwrap().plan.is_none());
+        assert!(!reconcile_interrupted_provider_continuation(&store, &session.id).unwrap());
+        assert_eq!(
+            store
+                .load(&session.id)
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.kind == "tool_completed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn provider_failures_block_the_bound_plan_and_classify_the_run_as_failed() {
+        let dir = tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let mut session = store.create_session_with_id("provider-failure");
+        let mut plan = pending_plan("continue", "call the model");
+        plan.approve();
+        let plan_id = plan.id.clone();
+        session.plan = Some(plan);
+        store.save(&mut session).unwrap();
+
+        let failure = "llm_stream_failed: bounded provider error";
+        for failure in [failure, "compression_failed: bounded provider error"] {
+            block_active_plan_for_failure(&store, &session.id, Some(&plan_id), "continue", failure)
+                .unwrap();
+            let plan = store.load(&session.id).unwrap().plan.unwrap();
+            assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+            assert_eq!(plan.outcome.as_deref(), Some(failure));
+            assert!(is_agent_failure_outcome(failure));
+        }
+
+        let summary = AgentRunSummary {
+            session_id: session.id,
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: AgentState::Done,
+            outcome: failure.to_string(),
+            bound_reached: false,
+            trace: Vec::new(),
+        };
+        assert!(summary.is_failure());
+        assert!(!AgentRunSummary {
+            outcome: "completed".to_string(),
+            ..summary
+        }
+        .is_failure());
+
+        let mut config = crate::config::NibConfig::default();
+        config.llm.providers.insert(
+            "anthropic".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some("inactive-provider-secret".to_string()),
+                ..ProviderEntry::default()
+            },
+        );
+        let redacted = redact_provider_error(
+            &config,
+            &format!("inactive-provider-secret {}", "x".repeat(16 * 1024)),
+        );
+        assert!(!redacted.contains("inactive-provider-secret"));
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(redacted.ends_with("...[truncated]"));
+        assert!(redacted.chars().count() <= 8 * 1024 + "...[truncated]".len());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_failure_persistence_redacts_inactive_environment_credentials() {
+        const SECRET: &str = "inactive/env-provider-secret";
+        let _environment = EnvironmentGuard::set("ANTHROPIC_API_KEY", SECRET);
+        let config = crate::config::NibConfig::default();
+        let error = "request failed for model-inactive%2Fenv-provider-secret";
+
+        let redacted = redact_provider_error(&config, error);
+
+        assert_eq!(redacted, "request failed for model-[REDACTED]");
+        assert!(!redacted.contains(SECRET));
+        assert!(!redacted.contains("inactive%2Fenv-provider-secret"));
     }
 
     #[test]

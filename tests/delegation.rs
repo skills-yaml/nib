@@ -319,6 +319,7 @@ async fn execute_merge(
     executor
         .execute(
             ToolCall {
+                invocation_id: nib::tools::ToolInvocationId::new(),
                 tool_name: "merge_subagent_worktree".to_string(),
                 arguments: json!({
                     "subagent_id": subagent_id,

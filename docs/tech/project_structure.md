@@ -38,7 +38,7 @@ nib/
 │   ├── run.rs                   # One-shot agent command
 │   ├── skill_cmd.rs             # Skill list/install/remove command
 │   ├── task_cmd.rs              # Durable task command
-│   ├── updater.rs               # Update-channel support
+│   ├── updater.rs               # Verified self-update + startup availability checks
 │   ├── version.rs               # Build metadata display
 │   ├── agent/                   # Loop, planner, and run state
 │   ├── config/                  # Configuration schema and persistence

@@ -211,6 +211,7 @@ mod tests {
 
     fn terminal(command: &str) -> ToolCall {
         ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({"command": command}),
             session_id: None,
@@ -279,6 +280,7 @@ mod tests {
     #[test]
     fn management_actions_are_classified_by_effect() {
         let call = |tool_name: &str, action: &str| ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: tool_name.to_string(),
             arguments: json!({"action": action}),
             session_id: None,

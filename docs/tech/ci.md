@@ -85,6 +85,13 @@ lease, and rolling-tag lease before promotion. A later run reconciles an interru
 transaction before it considers its own SHA. Recovery preserves all artifacts until a
 complete forward or rollback state has been re-read.
 
+The publisher also generates `nib-release.json` after validating the archives. The
+strict manifest binds repository, channel, rolling tag, package version, candidate
+commit, and the four archive sizes/digests. It is staged, validated, promoted, recovered,
+or rolled back as part of the same Release asset set. A legacy eight-asset rolling
+Release remains a valid predecessor during the first manifest-producing transaction;
+new candidates require the manifest.
+
 GitHub Release `PATCH` and `DELETE` operations do not expose a conditional-write
 precondition. nib therefore adopts an exclusive-writer contract for rolling Releases:
 the channel workflow's repository `GITHUB_TOKEN` is the only actor permitted to create,
@@ -101,5 +108,9 @@ unfenceable proof-to-mutation interval from the supported operating model.
 T010 remains in development until the exact committed workflow revision completes a
 development-channel run and its published artifacts are inspected.
 
-The CLI does not currently expose a self-update command; rerun the installer for the
-selected rolling channel.
+Official release builds expose `nib update`. It compares the embedded build commit with
+the selected rolling channel manifest, reports a successful no-op when current, and
+otherwise downloads, verifies, smokes, and safely replaces the current executable.
+Local/source builds remain installer-managed. Eligible user-facing commands perform a
+bounded, read-only startup check; `NIB_NO_UPDATE_CHECK=1` disables it, and protocol or
+worker commands never emit update notices.

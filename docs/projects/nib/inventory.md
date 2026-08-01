@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@1.2.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-07-21
+- Last reviewed: 2026-07-29
 
 ## Adopted Files
 
@@ -47,6 +47,11 @@ Metadata:
   containment. Linux production proof, supervisor-crash recovery, launch fencing, and
   bounded scope retirement are integrated; Windows/macOS production delegation remains
   rejected until cleanup authority is inaccessible to managed workers.
+- T021 is in `development/` and specifies explicit OpenAI-compatible API-mode and
+  reasoning configuration plus Responses function-tool support.
+- T022 is in `development/` and specifies the typed provider-neutral LLM contract,
+  distinct provider adapters, native correlated tool continuation, safe terminal/error
+  normalization, and shared provider conformance gates.
 - `docs/specs/feature/` and `docs/specs/task/` are retained only as empty legacy
   directories; active lifecycle state uses the canonical state directories.
 - MCP v1 is stdio-only; HTTP/SSE and OAuth require a separate future spec.
@@ -109,7 +114,8 @@ Local cross-target compilation is also blocked before nib code by the missing MS
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
 - Lifecycle: 19 audited specs are in `done/`; T003, T004, T006, T007, T010, T020,
-  FT-015, FT-016, and FT-017 are in `development/`; no spec is in `backlog/`.
+  FT-015, FT-016, FT-017, T021, and T022 are in `development/`; no spec is in
+  `backlog/`.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate
   model-context accounting.

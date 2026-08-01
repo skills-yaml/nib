@@ -116,10 +116,12 @@ active_provider = "openai"
 context_length = 128000
 
 [llm.providers.openai]
-model = "gpt-4o"
+model = "gpt-5.6-luna"
 api_key = "replace-or-use-OPENAI_API_KEY"
 api_keys = []
-# base_url = "https://api.openai.com/v1/chat/completions"
+api = "responses"              # responses | chat_completions
+reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|max
+# base_url = "https://api.openai.com/v1"
 
 [agent]
 max_turns = 90
@@ -199,6 +201,38 @@ MODE = "production"
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
 network settings apply only to sandboxed terminal processes, not LLM HTTP, web tools,
 skill installation, or MCP child-process startup.
+
+#### OpenAI API mode
+
+New official OpenAI entries created by `nib auth` select `api = "responses"`.
+Existing entries without `api` continue to use `chat_completions`; nib does not rewrite
+them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways also
+retain Chat Completions unless their entry explicitly selects Responses. The selected
+mode is never inferred from a model name, and a rejected request is not retried through
+a different API or with a different reasoning effort.
+
+`base_url` may be a provider root or the full endpoint matching `api`. nib appends
+exactly one `/responses` or `/chat/completions` suffix and rejects conflicting or
+doubled suffixes, embedded credentials, query strings, and fragments before network
+I/O. Check the effective source, provider, model, API mode, endpoint path, and reasoning
+setting locally with:
+
+```bash
+nib config show
+nib config validate
+nib doctor
+```
+
+Responses requests use `store: false`. This keeps opaque response continuation data in
+memory for only the active nib run and out of session audit records; it is not a claim
+that the API provider offers Zero Data Retention. Provider continuation data is not
+persisted; existing provider-neutral session records still include ordinary user and
+assistant messages, plans, normalized tool intent, approvals, results, errors, and
+reconciliation evidence. If a run stops after a tool result, the opaque continuation is
+discarded and the old run is reconciled without automatically executing that tool again.
+
+Run the credential-free transport fixtures and the rest of the canonical suite locally
+with `task test`, then run `task check` before shipping a configuration or code change.
 
 Named boundary profiles are optional tighten-only overlays. An instruction line such
 as `nib-boundary: profile offline` selects the matching
@@ -462,8 +496,28 @@ It creates missing profile directories and temporary write probes, but does not 
 provider APIs or run destructive cleanup. It exits nonzero for required checks that
 fail.
 
-To update, rerun the installer for the same channel. `prod-latest` is the stable rolling
-release; `development-latest` is the prerelease channel. The installers verify the
+Official release builds update within their embedded rolling channel:
+
+```bash
+nib update
+```
+
+When the installed commit is current, the command exits successfully and reports that
+nib is already up to date. Otherwise it downloads the platform archive and checksum,
+requires both to agree with the bounded `nib-release.json` manifest, verifies the staged
+binary's channel/version/commit identity, and replaces the executable. It never switches
+between `prod-latest` and `development-latest`, invokes `sudo`, changes `PATH`, or
+updates a local/source build. If the current installation is unmanaged or not writable,
+rerun the installer for the intended channel.
+
+Ordinary user-facing launches perform a one-second best-effort manifest check and print
+one stderr notice when a different channel commit is available. Checks never install an
+update, do not alter command exit status, stay silent offline, and are excluded from MCP
+stdio and hidden worker processes. Set `NIB_NO_UPDATE_CHECK=1` to disable the startup
+request in offline or privacy-sensitive environments.
+
+`prod-latest` is the stable rolling release; `development-latest` is the prerelease
+channel. Existing installers remain the bootstrap and recovery path and verify the
 matching `.sha256` asset before extraction. Do not manually retag or edit a rolling
 GitHub Release while its publication workflow is active.
 

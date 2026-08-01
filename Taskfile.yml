@@ -23,6 +23,11 @@ tasks:
     cmds:
       - cargo check --all-targets --all-features {{if .TARGET}}--target {{.TARGET}}{{end}}
 
+  fmt:
+    desc: Format Rust source
+    cmds:
+      - cargo fmt
+
   docs:check:
     desc: Validate internal Markdown links and spec-state invariants
     cmds:
@@ -65,6 +70,17 @@ tasks:
     desc: Verify the exact managed-process backend probe independently
     cmds:
       - cargo test --test managed_process_capability -- --test-threads=1
+
+  test:updater:
+    desc: Run self-update and update-notification unit tests
+    cmds:
+      - cargo test --bin nib updater::tests -- --test-threads=1
+      - cargo test --test updater -- --test-threads=1
+
+  test:installers:
+    desc: Run installer and release-transaction integration tests
+    cmds:
+      - cargo test --test installers -- --test-threads=1
 
   build:
     desc: Build optimized release binary (supports cross TARGET)

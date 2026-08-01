@@ -14,9 +14,12 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task` or `task default` — list tasks
 - `task check` — installer checks, Rust formatting, Clippy, compilation, and the full serial test suite
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
+- `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
 - `task test:durable` — run detached background-task and scheduled-worker process tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
+- `task test:updater` — run self-update and update-notification unit tests
+- `task test:installers` — run installer and release-transaction integration tests
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold
 - `task build` — build the locked optimized release binary (optionally for `TARGET`)

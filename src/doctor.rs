@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
-use nib::config::{config_paths, load_nib_config_full, NibConfig};
+use nib::config::{config_paths, load_nib_config_full_with_source, NibConfig};
 use nib::context::select_profile_skills;
 use nib::daemons::cron::Cron;
 use nib::daemons::curator::{Curator, CuratorPolicy};
 use nib::integrations::mcp::McpManager;
-use nib::llm::factory::provider_ready;
+use nib::llm::factory::{provider_diagnostics, provider_ready, validate_provider_endpoints};
 use nib::profile::ProfileRegistry;
 use nib::sandbox;
 use nib::tools::executor::ApprovalHandler;
@@ -33,26 +33,32 @@ impl ApprovalHandler for DoctorDenyApproval {
 pub fn run_doctor(project: &Path) -> bool {
     println!("nib doctor");
     println!("==========");
+    println!("Build: {}", crate::version::version_display());
+    println!("LLM runtime: native Rust");
 
     let mut all_passed = true;
 
     let paths = config_paths(project);
-    let source_label = if paths.toml.exists() {
-        "config.toml"
-    } else if paths.json.exists() {
-        "config.json (migration required)"
-    } else {
-        "defaults (no config file)"
-    };
-
     // 1. Full Config Validation
     print!("Checking config... ");
-    let nib_cfg = match load_nib_config_full(project) {
-        Ok(config) => {
-            println!("OK ({source_label})");
+    let nib_cfg = match load_nib_config_full_with_source(project) {
+        Ok((config, source)) => {
+            println!("OK ({})", source.as_str());
             let active_provider = config.llm.get_active_provider();
-            println!("  Active provider: {active_provider}");
-            for (name, _) in nib::config::SUPPORTED_PROVIDERS {
+            match active_provider_diagnostic_lines(&config) {
+                Ok(lines) => {
+                    println!("  Effective LLM configuration:");
+                    for line in lines {
+                        println!("    {line}");
+                    }
+                }
+                Err(error) => {
+                    println!("  FAILED: {error}");
+                    all_passed = false;
+                }
+            }
+            for provider in nib::llm::registry::PROVIDERS {
+                let name = provider.id;
                 let ready = provider_ready(config.llm.get_provider(Some(name)), name);
                 println!(
                     "  Provider {name}: {}",
@@ -365,6 +371,12 @@ pub fn run_doctor(project: &Path) -> bool {
     all_passed
 }
 
+fn active_provider_diagnostic_lines(config: &NibConfig) -> Result<Vec<String>, String> {
+    validate_provider_endpoints(&config.llm)?;
+    provider_diagnostics(&config.llm, None)
+        .map(|diagnostics| diagnostics.redacted_lines(&config.sensitive_values()))
+}
+
 fn resolve_path(project: &Path, configured: &Path) -> PathBuf {
     if configured.is_absolute() {
         return configured.to_path_buf();
@@ -482,6 +494,7 @@ fn check_permission_layer(
         let read = executor
             .execute(
                 ToolCall {
+                    invocation_id: nib::tools::ToolInvocationId::new(),
                     tool_name: "list_directory".to_string(),
                     arguments: json!({"path": "."}),
                     session_id: None,
@@ -500,6 +513,7 @@ fn check_permission_layer(
         let destructive = executor
             .execute(
                 ToolCall {
+                    invocation_id: nib::tools::ToolInvocationId::new(),
                     tool_name: "apply_patch".to_string(),
                     arguments: json!({"patch": "invalid", "dry_run": true}),
                     session_id: None,
@@ -561,7 +575,9 @@ fn validate_daemons(config: &NibConfig, profiles: &ProfileRegistry) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nib::config::{config_paths, save_nib_config_full, NibConfig};
+    use nib::config::{
+        config_paths, save_nib_config_full, LlmApiMode, NibConfig, ProviderEntry, ReasoningEffort,
+    };
     use tempfile::tempdir;
 
     fn initialize_git(path: &Path) {
@@ -634,6 +650,8 @@ mod tests {
                 api_key: None,
                 api_keys: Vec::new(),
                 base_url: None,
+                api: None,
+                reasoning_effort: None,
             },
         );
         save_nib_config_full(dir.path(), &mut config).expect("save config");
@@ -718,5 +736,59 @@ mod tests {
         std::fs::write(sessions.join("corrupt-session.json"), "not json").expect("corrupt session");
 
         assert!(!run_doctor(dir.path()));
+    }
+
+    #[test]
+    fn doctor_diagnostics_report_effective_openai_transport_without_credentials() {
+        let mut config = NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gpt-5.6-luna".to_string(),
+                api: Some(LlmApiMode::Responses),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let lines = active_provider_diagnostic_lines(&config)
+            .expect("effective provider diagnostics")
+            .join("\n");
+        assert!(lines.contains("Provider: openai"));
+        assert!(lines.contains("Model: gpt-5.6-luna"));
+        assert!(lines.contains("API mode: responses"));
+        assert!(lines.contains("Endpoint path: /v1/responses"));
+        assert!(lines.contains("Reasoning effort: medium"));
+        assert!(!lines.contains("api_key"));
+    }
+
+    #[test]
+    fn doctor_diagnostics_warn_for_canonical_openai_chat_and_reject_unsafe_urls() {
+        let mut config = NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "unknown-doctor-secret-model".to_string(),
+                api_key: Some("doctor-secret".to_string()),
+                api: Some(LlmApiMode::ChatCompletions),
+                ..ProviderEntry::default()
+            },
+        );
+        let lines = active_provider_diagnostic_lines(&config)
+            .expect("Chat diagnostics")
+            .join("\n");
+        assert!(lines.contains("consider api = \"responses\""));
+        assert!(!lines.contains("gpt-"));
+        assert!(lines.contains("Model: <redacted>"));
+        assert!(!lines.contains("doctor-secret"));
+
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some("https://user:doctor-secret@example.test/v1".to_string());
+        let error =
+            active_provider_diagnostic_lines(&config).expect_err("embedded URL credentials");
+        assert!(error.contains("embedded credentials"), "{error}");
+        assert!(!error.contains("doctor-secret"), "{error}");
     }
 }

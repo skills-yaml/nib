@@ -1766,7 +1766,7 @@ async fn run_terminal_worker(
                     &environment_keys,
                     outcome,
                 );
-                let result = crate::tools::executor::redact_value_with_sensitive_values(
+                let result = crate::tools::executor::redact_value_with_encoded_sensitive_values(
                     result,
                     config_sensitive_values.iter().cloned(),
                 );
@@ -1775,7 +1775,7 @@ async fn run_terminal_worker(
                     profile.custom_env(),
                 );
                 let error = error.map(|value| {
-                    let value = crate::tools::executor::redact_text_with_sensitive_values(
+                    let value = crate::tools::executor::redact_text_with_encoded_sensitive_values(
                         &value,
                         config_sensitive_values.iter().cloned(),
                     );
@@ -2624,6 +2624,7 @@ async fn run_schedule_worker(
             }
             MonitoredRun::LeaseLost => return Ok(()),
         };
+        let outcome = classify_agent_run_outcome(outcome);
         match outcome {
             Ok(summary) => {
                 let next_run = if occurrence < job.repeat_count {
@@ -2670,7 +2671,7 @@ async fn run_schedule_worker(
                 }
             }
             Err(error) => {
-                let error = crate::tools::executor::redact_text_with_sensitive_values(
+                let error = crate::tools::executor::redact_text_with_encoded_sensitive_values(
                     &error,
                     config_sensitive_values.iter().cloned(),
                 );
@@ -2935,6 +2936,23 @@ fn reconcile_expired_job(
     }
 }
 
+fn classify_agent_run_outcome(
+    outcome: Result<crate::agent::AgentRunSummary, String>,
+) -> Result<crate::agent::AgentRunSummary, String> {
+    match outcome {
+        Ok(summary)
+            if summary.final_state == crate::agent::state::AgentState::Done
+                && summary.outcome == "plan_ready"
+                && !summary.bound_reached
+                && summary.tool_call_count == 0 =>
+        {
+            Ok(summary)
+        }
+        Ok(summary) => Err(summary.outcome.clone()),
+        Err(error) => Err(error),
+    }
+}
+
 fn load_worker_profile(
     project_root: &Path,
     profile_id: &str,
@@ -2946,7 +2964,8 @@ fn load_worker_profile(
         .map_err(|error| format!("failed to resolve worker project root: {error}"))?;
     let config =
         crate::config::load_nib_config_full(&project_root).map_err(|error| error.to_string())?;
-    let sensitive_values = config.sensitive_values();
+    let sensitive_values =
+        crate::llm::factory::provider_error_sensitive_values(config.sensitive_values());
     let profiles = ProfileRegistry::load(&project_root, &config.profiles)
         .map_err(|error| error.to_string())?;
     let profile = profiles
@@ -3695,7 +3714,31 @@ mod tests {
     use crate::session::ToolCallRecord;
     #[cfg(unix)]
     use std::fs;
+    use std::io::Write;
+    use std::net::TcpListener;
     use tempfile::tempdir;
+
+    struct EnvironmentGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     const TASK_LOCK_CHILD_DAEMON_DIR: &str = "NIB_TEST_TASK_LOCK_DAEMON_DIR";
     const TASK_LOCK_CHILD_KIND: &str = "NIB_TEST_TASK_LOCK_KIND";
@@ -3721,6 +3764,134 @@ mod tests {
     const TASK_COMMIT_CHILD_READY: &str = "NIB_TASK_COMMIT_CHILD_READY";
     #[cfg(unix)]
     const TASK_COMMIT_CHILD_RELEASE: &str = "NIB_TASK_COMMIT_CHILD_RELEASE";
+
+    #[test]
+    fn scheduled_plan_summary_accepts_only_the_exact_plan_ready_contract() {
+        let failed = crate::agent::AgentRunSummary {
+            session_id: "scheduled-provider-failure".to_string(),
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: crate::agent::state::AgentState::Done,
+            outcome: "planning_failed: bounded provider error".to_string(),
+            bound_reached: false,
+            trace: Vec::new(),
+        };
+        assert_eq!(
+            classify_agent_run_outcome(Ok(failed)).unwrap_err(),
+            "planning_failed: bounded provider error"
+        );
+
+        let refused = crate::agent::AgentRunSummary {
+            session_id: "scheduled-provider-refusal".to_string(),
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: crate::agent::state::AgentState::Done,
+            outcome: "model_refusal".to_string(),
+            bound_reached: false,
+            trace: Vec::new(),
+        };
+        assert_eq!(
+            classify_agent_run_outcome(Ok(refused)).unwrap_err(),
+            "model_refusal"
+        );
+
+        let completed = crate::agent::AgentRunSummary {
+            session_id: "scheduled-success".to_string(),
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: crate::agent::state::AgentState::Done,
+            outcome: "plan_ready".to_string(),
+            bound_reached: false,
+            trace: Vec::new(),
+        };
+        assert_eq!(
+            classify_agent_run_outcome(Ok(completed)).unwrap().outcome,
+            "plan_ready"
+        );
+
+        for (outcome, final_state, bound_reached, tool_call_count) in [
+            (
+                "transition_limit_reached",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            (
+                "turn_limit_reached",
+                crate::agent::state::AgentState::Done,
+                true,
+                0,
+            ),
+            (
+                "plan_changed_during_generation",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            (
+                "plan_binding_changed",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            (
+                "plan_approval_denied",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            (
+                "empty_model_response",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            (
+                "tool_execution_failed",
+                crate::agent::state::AgentState::Done,
+                false,
+                1,
+            ),
+            (
+                "waiting_for_user_input",
+                crate::agent::state::AgentState::Done,
+                false,
+                0,
+            ),
+            ("completed", crate::agent::state::AgentState::Done, false, 0),
+            (
+                "plan_ready",
+                crate::agent::state::AgentState::Planning,
+                false,
+                0,
+            ),
+            ("plan_ready", crate::agent::state::AgentState::Done, true, 0),
+            (
+                "plan_ready",
+                crate::agent::state::AgentState::Done,
+                false,
+                1,
+            ),
+        ] {
+            let unexpected = crate::agent::AgentRunSummary {
+                session_id: "scheduled-unexpected-outcome".to_string(),
+                steps_taken: 1,
+                last_message: None,
+                tool_call_count,
+                final_state,
+                outcome: outcome.to_string(),
+                bound_reached,
+                trace: Vec::new(),
+            };
+            assert_eq!(
+                classify_agent_run_outcome(Ok(unexpected)).unwrap_err(),
+                outcome
+            );
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, DurableTaskStore, SessionStore) {
         let directory = tempdir().expect("tempdir");
@@ -3794,6 +3965,66 @@ mod tests {
         session_store.create_session_with_id("origin");
         let store = DurableTaskStore::for_project(directory.path()).expect("durable task store");
         (directory, store, session_store)
+    }
+
+    fn serve_failed_responses_once(secret: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Responses fixture listener");
+        let address = listener.local_addr().expect("Responses fixture address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Responses fixture connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("Responses fixture timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("Responses fixture read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let content_length = String::from_utf8_lossy(&request[..header_end])
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let body = format!(
+                "data: {}\n\n",
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "scheduled-response-failed",
+                        "status": "failed",
+                        "error": {
+                            "code": "scheduled_fixture_failure",
+                            "message": format!("provider rejected {secret}")
+                        },
+                        "output": []
+                    }
+                })
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("Responses fixture response");
+        });
+        format!("http://{address}/v1")
     }
 
     fn prepare_owned_due_schedule(
@@ -3918,6 +4149,131 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == "scheduled_agent_run_failed"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_provider_failure_publishes_one_redacted_durable_failure() {
+        const SECRET: &str = "scheduled-provider-secret";
+        let (directory, store, session_store) = scheduled_agent_fixture();
+        let base_url = serve_failed_responses_once(SECRET);
+        let mut config =
+            crate::config::load_nib_config_full(directory.path()).expect("runtime config");
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.clear();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            crate::config::ProviderEntry {
+                model: "fixture-reasoning-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                base_url: Some(base_url),
+                api: Some(crate::config::LlmApiMode::Responses),
+                ..crate::config::ProviderEntry::default()
+            },
+        );
+        crate::config::save_nib_config_full(directory.path(), &mut config)
+            .expect("failed Responses schedule config");
+        let task_id = "schedule-provider-failure";
+        let (owner, job, _) =
+            prepare_owned_due_schedule(&directory, &store, &session_store, task_id);
+
+        timeout(
+            Duration::from_secs(10),
+            run_schedule_worker(&store, &owner, task_id, job),
+        )
+        .await
+        .expect("failed schedule worker completes")
+        .expect("failed schedule worker reconciles");
+
+        let failed = store.get_file(task_id).expect("failed schedule record");
+        assert_eq!(failed.record.status, "failed");
+        assert_eq!(failed.record.completed_occurrences, 0);
+        let error = failed.record.error.expect("failed schedule error");
+        assert!(error.starts_with("planning_failed:"), "{error}");
+        assert!(error.contains("Responses API did not complete"), "{error}");
+        assert!(!error.contains(SECRET), "{error}");
+        assert!(!error.contains("provider rejected"), "{error}");
+
+        let session = session_store
+            .load("origin")
+            .expect("failed schedule session");
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .filter(|event| event.kind == "scheduled_agent_run_failed")
+                .count(),
+            1
+        );
+        assert!(!session
+            .events
+            .iter()
+            .any(|event| event.kind == "scheduled_agent_run_completed"));
+        assert!(!serde_json::to_string(&session).unwrap().contains(SECRET));
+
+        let audits = DaemonAuditLog::at_path(store.daemon_dir().join("audit.jsonl"))
+            .read_all()
+            .expect("failed schedule audit");
+        assert!(audits.iter().any(|record| {
+            record.action == "wake_agent_loop"
+                && record.outcome == "failed"
+                && record.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("Responses API did not complete")
+                        && !detail.contains(SECRET)
+                        && !detail.contains("provider rejected")
+                })
+        }));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn scheduled_failure_redacts_encoded_inactive_environment_credential() {
+        const SECRET: &str = "scheduled/inactive-env-secret";
+        const ENCODED_SECRET: &str = "scheduled%2Finactive-env-secret";
+        let _environment = EnvironmentGuard::set("ANTHROPIC_API_KEY", SECRET);
+        let (directory, store, session_store) = scheduled_agent_fixture();
+        let base_url = serve_failed_responses_once("provider detail is omitted");
+        let mut config =
+            crate::config::load_nib_config_full(directory.path()).expect("runtime config");
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.clear();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            crate::config::ProviderEntry {
+                model: format!("fixture-{ENCODED_SECRET}"),
+                api_key: Some("active-openai-key".to_string()),
+                base_url: Some(base_url),
+                api: Some(crate::config::LlmApiMode::Responses),
+                ..crate::config::ProviderEntry::default()
+            },
+        );
+        crate::config::save_nib_config_full(directory.path(), &mut config)
+            .expect("failed Responses schedule config");
+        let task_id = "schedule-inactive-env-redaction";
+        let (owner, job, _) =
+            prepare_owned_due_schedule(&directory, &store, &session_store, task_id);
+
+        timeout(
+            Duration::from_secs(10),
+            run_schedule_worker(&store, &owner, task_id, job),
+        )
+        .await
+        .expect("failed schedule worker completes")
+        .expect("failed schedule worker reconciles");
+
+        let failed = store.get_file(task_id).expect("failed schedule record");
+        let serialized_record = serde_json::to_string(&failed).expect("schedule record JSON");
+        let serialized_session = serde_json::to_string(
+            &session_store
+                .load("origin")
+                .expect("failed schedule session"),
+        )
+        .expect("schedule session JSON");
+        assert_eq!(failed.record.status, "failed");
+        assert!(serialized_record.contains("[REDACTED]"));
+        for serialized in [&serialized_record, &serialized_session] {
+            assert!(!serialized.contains(SECRET), "{serialized}");
+            assert!(!serialized.contains(ENCODED_SECRET), "{serialized}");
+        }
     }
 
     #[tokio::test]

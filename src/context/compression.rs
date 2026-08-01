@@ -1,6 +1,6 @@
 use crate::config::NibConfig;
 use crate::context::budget::bound_single_turn_input;
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, LlmRequest};
 use crate::session::{SessionError, SessionEvent, SessionStore};
 use chrono::Utc;
 use serde_json::json;
@@ -139,7 +139,11 @@ pub async fn maybe_compress_session(
         8,
     )?;
     let response = llm
-        .complete(&bounded.messages, bounded.tools.as_deref(), 0.3)
+        .complete(LlmRequest::new(
+            &bounded.messages,
+            bounded.tools.as_deref(),
+            0.3,
+        ))
         .await?;
     let summary_content = response
         .content

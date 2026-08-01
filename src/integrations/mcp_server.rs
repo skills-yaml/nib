@@ -1988,6 +1988,7 @@ async fn call_tool(
         MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT,
         executor.execute(
             ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
                 tool_name: executor_name,
                 arguments,
                 session_id: Some(audit_session.id.clone()),
@@ -2064,6 +2065,7 @@ fn resolve_mcp_runtime(project_root: &Path, config: &NibConfig) -> Result<McpRun
 
 fn invalid_tool_result(tool_name: &str, error: impl Into<String>) -> ToolResult {
     ToolResult {
+        invocation_id: crate::tools::ToolInvocationId::new(),
         tool_name: tool_name.to_string(),
         success: false,
         output: None,
@@ -3195,6 +3197,7 @@ mod tests {
     #[test]
     fn oversized_tool_output_becomes_a_small_error_before_content_duplication() {
         let content = tool_result_content(ToolResult {
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "fixture".to_string(),
             success: true,
             output: Some(json!({"payload": "x".repeat(MAX_MCP_TOOL_OUTPUT_BYTES)})),
