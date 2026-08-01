@@ -339,3 +339,43 @@ of `.github/workflows/release.yml` and failed exact substrings containing LF. Fo
 LF-sensitive assertions were masked by those first failures; the shared canonicalization
 covers all of them. Canonicalizing fixture text at read time preserves the intended
 source-level checks and leaves production files unchanged.
+
+## FT-018 Release Manifest Extension (2026-08-01)
+
+### Scope And Design
+
+Generate a strict `nib-release.json` from the already validated archives and portable
+checksum files. The manifest binds repository, channel, rolling tag, package version,
+candidate commit, and the size/SHA-256 identity of each platform archive. It is the
+ninth candidate asset and follows the existing staging, promotion, recovery, and
+rollback transaction.
+
+The first manifest-producing transaction accepts the historical eight-asset rolling
+Release as a coherent predecessor. Every new candidate requires the manifest; legacy
+acceptance is restricted to prior/backup state and cannot make a new incomplete stage
+coherent.
+
+### Acceptance Criteria
+
+- [x] Local generation emits strict JSON with the exact candidate and four archive
+  identities.
+- [x] Staged candidate validation requires the manifest plus all four archives and four
+  checksum files.
+- [x] Rollback and forward recovery keep the manifest coherent with the candidate while
+  accepting a legacy predecessor.
+- [x] The 23-test local installer/release harness passes success, failure, process-loss,
+  stale-source, retag, read-error, rollback, and forward-repair paths.
+- [ ] An exact committed development-channel run publishes and validates the nine-asset
+  release before FT-018 production rollout.
+
+### Affected Areas And Validation Gates
+
+`scripts/publish-release.sh`, `tests/installers.rs`, `docs/tech/ci.md`, FT-018, and the
+hosted development release. Local gates are `task installers:check` and
+`task test:installers`; the existing exact-current remote gate remains authoritative.
+
+### Risk
+
+If legacy assets were accepted for a newly staged candidate, a missing manifest could
+be promoted. Candidate and predecessor validation are therefore separate: only the
+predecessor may use the legacy eight-asset set.

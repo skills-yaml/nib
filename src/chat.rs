@@ -398,6 +398,11 @@ fn execute_agent_step(
             Err(format!(
                 "question input was unavailable; session {session_id} was reconciled without continuing"
             ))
+        } else if summary.is_failure() {
+            Err(format!(
+                "agent run failed for session {session_id}: {}",
+                summary.outcome
+            ))
         } else {
             Ok(())
         }

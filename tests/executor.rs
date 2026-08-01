@@ -6,7 +6,7 @@ use nib::tools::executor::ApprovalHandler;
 use nib::tools::models::{
     AfterToolHook, ApprovalDecision, PermissionLevel, PolicyEffect, PolicyRule,
 };
-use nib::tools::{ApprovalMode, ToolCall, ToolExecutor};
+use nib::tools::{ApprovalMode, ToolCall, ToolExecutor, ToolInvocationId};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +27,7 @@ fn task_reads_are_noninteractive_but_state_reconciliation_requires_approval() {
     let root = tempdir().expect("tempdir");
     let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default());
     let task_call = |action: &str| ToolCall {
+        invocation_id: nib::tools::ToolInvocationId::new(),
         tool_name: "manage_task".to_string(),
         arguments: json!({"action": action}),
         session_id: None,
@@ -57,6 +58,45 @@ async fn executor_fallback_audit_store_is_profile_scoped() {
 }
 
 #[tokio::test]
+async fn executor_preserves_invocation_id_in_result_and_audit_record() {
+    let root = tempdir().expect("tempdir");
+    let store = SessionStore::new(root.path());
+    let session = store.create_session_with_id("invocation-audit");
+    let invocation_id = ToolInvocationId::new();
+    let mut executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+        .with_session_store(store.clone());
+
+    let result = executor
+        .execute(
+            ToolCall {
+                invocation_id,
+                tool_name: "list_directory".to_string(),
+                arguments: json!({"path": "."}),
+                session_id: Some(session.id.clone()),
+                project_root: Some(root.path().to_path_buf()),
+            },
+            Some(&session.id),
+        )
+        .await;
+
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.invocation_id, invocation_id);
+    let audited = store.load(&session.id).expect("audited session");
+    let record = audited.tool_calls.last().expect("tool audit record");
+    assert_eq!(record.invocation_id, Some(invocation_id));
+    assert!(record
+        .id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("tool-")));
+    let attempted = audited
+        .events
+        .iter()
+        .find(|event| event.kind == "tool_attempted")
+        .expect("attempt audit event");
+    assert_eq!(attempted.details["invocation_id"], json!(invocation_id));
+}
+
+#[tokio::test]
 async fn profile_memory_tool_is_session_audited_and_survives_restart() {
     let root = tempdir().expect("tempdir");
     let store = SessionStore::for_project(root.path()).expect("profile session store");
@@ -80,6 +120,7 @@ async fn profile_memory_tool_is_session_audited_and_survives_restart() {
             arguments["value"] = json!(value);
         }
         ToolCall {
+            invocation_id: nib::tools::ToolInvocationId::new(),
             tool_name: "manage_memory".to_string(),
             arguments,
             session_id: Some("memory-session".to_string()),
@@ -183,6 +224,7 @@ async fn sessionless_read_is_redacted_and_persisted_in_an_implicit_audit_session
 
 fn call(tool_name: &str, arguments: serde_json::Value, root: &Path) -> ToolCall {
     ToolCall {
+        invocation_id: nib::tools::ToolInvocationId::new(),
         tool_name: tool_name.to_string(),
         arguments,
         session_id: None,

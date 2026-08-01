@@ -554,6 +554,12 @@ pub async fn dispatch_gateway_request(
         config,
     )
     .await?;
+    if summary.is_failure() {
+        return Err(format!(
+            "gateway agent run failed for session {}: {}",
+            summary.session_id, summary.outcome
+        ));
+    }
     let text = summary
         .last_message
         .unwrap_or_else(|| format!("nib run {}: {}", summary.outcome, summary.session_id));

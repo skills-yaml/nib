@@ -29,7 +29,7 @@ if [[ ! "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "Invalid GITHUB_REPOSITORY value." >&2
   exit 2
 fi
-if [[ ! "$GITHUB_SHA" =~ ^[0-9A-Fa-f]{40,64}$ ]]; then
+if [[ ! "$GITHUB_SHA" =~ ^[0-9A-Fa-f]{40}$ ]]; then
   echo "Invalid GITHUB_SHA value." >&2
   exit 2
 fi
@@ -56,8 +56,11 @@ checksum_names=(
   nib-macos-x86_64.tar.gz.sha256
   nib-windows-x86_64.zip.sha256
 )
-expected_asset_names=("${archive_names[@]}" "${checksum_names[@]}")
+manifest_name=nib-release.json
+expected_asset_names=("${archive_names[@]}" "${checksum_names[@]}" "$manifest_name")
 expected_asset_listing=$(printf '%s\n' "${expected_asset_names[@]}" | LC_ALL=C sort)
+legacy_asset_names=("${archive_names[@]}" "${checksum_names[@]}")
+legacy_asset_listing=$(printf '%s\n' "${legacy_asset_names[@]}" | LC_ALL=C sort)
 marker_start='<!-- nib-release-transaction-v1'
 
 build_transaction_body() {
@@ -245,6 +248,21 @@ release_has_expected_assets() {
   fi
 }
 
+release_has_supported_prior_assets() {
+  local release_id=$1
+  local actual incomplete
+  actual=$(release_asset_names "$release_id") || return 1
+  if [ "$actual" != "$expected_asset_listing" ] && [ "$actual" != "$legacy_asset_listing" ]; then
+    echo "Prior release $release_id does not contain a supported asset set." >&2
+    return 1
+  fi
+  incomplete=$(release_incomplete_asset_names "$release_id") || return 1
+  if [ -n "$incomplete" ]; then
+    echo "Prior release $release_id contains incomplete or empty assets: $incomplete" >&2
+    return 1
+  fi
+}
+
 release_has_expected_state() {
   local release_id=$1
   local expected_tag=$2
@@ -261,6 +279,13 @@ release_is_coherent() {
   local expected_tag=$2
   local expected_draft=$3
   release_has_expected_state "$release_id" "$expected_tag" "$expected_draft" && release_has_expected_assets "$release_id"
+}
+
+release_is_prior_coherent() {
+  local release_id=$1
+  local expected_tag=$2
+  local expected_draft=$3
+  release_has_expected_state "$release_id" "$expected_tag" "$expected_draft" && release_has_supported_prior_assets "$release_id"
 }
 
 patch_release_from_tag() {
@@ -378,6 +403,65 @@ validate_local_assets() {
   done
 }
 
+generate_release_manifest() {
+  local release_version=${NIB_RELEASE_VERSION:-}
+  local index archive checksum line hash size comma manifest_tmp
+  if [ -z "$release_version" ]; then
+    if [ ! -f Cargo.toml ] || [ -L Cargo.toml ]; then
+      echo "Cannot resolve the release package version from Cargo.toml." >&2
+      return 1
+    fi
+    release_version=$(awk '
+      /^\[package\][[:space:]]*$/ { in_package = 1; next }
+      /^\[/ { in_package = 0 }
+      in_package && /^[[:space:]]*version[[:space:]]*=/ {
+        value = $0
+        sub(/^[^=]*=[[:space:]]*"/, "", value)
+        sub(/"[[:space:]]*$/, "", value)
+        print value
+        exit
+      }
+    ' Cargo.toml)
+  fi
+  if [[ ! "$release_version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$ ]]; then
+    echo "Invalid release package version." >&2
+    return 1
+  fi
+
+  manifest_tmp="$dist_dir/.nib-release.json.tmp.$$"
+  umask 077
+  {
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "repository": "%s",\n' "$GITHUB_REPOSITORY"
+    printf '  "channel": "%s",\n' "$RELEASE_CHANNEL"
+    printf '  "tag": "%s",\n' "$RELEASE_TAG"
+    printf '  "version": "%s",\n' "$release_version"
+    printf '  "commit": "%s",\n' "${GITHUB_SHA,,}"
+    printf '  "assets": {\n'
+    for index in "${!archive_names[@]}"; do
+      archive=${archive_names[$index]}
+      checksum=${checksum_names[$index]}
+      line=$(tr -d '\r\n' <"$dist_dir/$checksum")
+      hash=${line%% *}
+      hash=${hash,,}
+      size=$(wc -c <"$dist_dir/$archive" | tr -d '[:space:]')
+      comma=,
+      if [ "$index" -eq "$((${#archive_names[@]} - 1))" ]; then
+        comma=
+      fi
+      printf '    "%s": {"sha256": "%s", "size": %s}%s\n' "$archive" "$hash" "$size" "$comma"
+    done
+    printf '  }\n'
+    printf '}\n'
+  } >"$manifest_tmp"
+  mv -f "$manifest_tmp" "$dist_dir/$manifest_name"
+  if [ ! -f "$dist_dir/$manifest_name" ] || [ -L "$dist_dir/$manifest_name" ]; then
+    echo "Failed to create a regular release manifest." >&2
+    return 1
+  fi
+}
+
 promote_stage_release() {
   local release_id=$1
   local candidate_sha=$2
@@ -402,16 +486,16 @@ detach_promoted_release() {
 
 backup_stable_release() {
   local release_id=$1
-  release_is_coherent "$release_id" "$RELEASE_TAG" false || return 1
+  release_is_prior_coherent "$release_id" "$RELEASE_TAG" false || return 1
   patch_release_from_tag "$release_id" "$RELEASE_TAG" -f tag_name="$backup_tag" -F draft=true || true
-  release_is_coherent "$release_id" "$backup_tag" true
+  release_is_prior_coherent "$release_id" "$backup_tag" true
 }
 
 restore_backup_release() {
   local release_id=$1
-  release_is_coherent "$release_id" "$backup_tag" true || return 1
+  release_is_prior_coherent "$release_id" "$backup_tag" true || return 1
   patch_release_from_tag "$release_id" "$backup_tag" -f tag_name="$RELEASE_TAG" -F draft=false || true
-  release_is_coherent "$release_id" "$RELEASE_TAG" false
+  release_is_prior_coherent "$release_id" "$RELEASE_TAG" false
 }
 
 release_has_marker_start() {
@@ -493,7 +577,7 @@ cleanup_forward_state() {
         echo "Backup release exists without its recorded backup ref." >&2
         return 1
       fi
-      release_is_coherent "$prior_release_id" "$backup_tag" true || return 1
+      release_is_prior_coherent "$prior_release_id" "$backup_tag" true || return 1
       delete_release_from_tag "$prior_release_id" "$backup_tag" || return 1
     elif [ -n "$prior_tag" ]; then
       echo "Prior release $prior_release_id changed to $prior_tag; retaining transaction state." >&2
@@ -526,7 +610,7 @@ cleanup_rollback_state() {
       echo "Rollback did not restore the recorded prior release." >&2
       return 1
     fi
-    release_is_coherent "$prior_release_id" "$RELEASE_TAG" false || return 1
+    release_is_prior_coherent "$prior_release_id" "$RELEASE_TAG" false || return 1
   elif [ -n "$stable_release_id" ]; then
     echo "Rollback unexpectedly left a stable release." >&2
     return 1
@@ -677,7 +761,7 @@ recover_existing_transaction() {
     rolling=$(remote_sha "refs/tags/$RELEASE_TAG") || return 1
     if [ -n "$backup_sha" ] && [ -z "$backup_release_id" ] && [ "$rolling" = "$backup_sha" ]; then
       if [ -n "$stable_release_id" ]; then
-        release_is_coherent "$stable_release_id" "$RELEASE_TAG" false || return 1
+        release_is_prior_coherent "$stable_release_id" "$RELEASE_TAG" false || return 1
       fi
       delete_backup_ref "$backup_sha"
       return
@@ -711,7 +795,7 @@ recover_existing_transaction() {
       return 1
     fi
     if [ -n "$stable_release_id" ]; then
-      release_is_coherent "$stable_release_id" "$RELEASE_TAG" false || return 1
+      release_is_prior_coherent "$stable_release_id" "$RELEASE_TAG" false || return 1
     fi
     delete_backup_ref "$backup_sha"
     return
@@ -834,6 +918,7 @@ trap on_exit EXIT
 shopt -s nullglob
 recover_existing_transaction
 validate_local_assets
+generate_release_manifest
 
 source_sha=$(remote_sha "refs/heads/$GITHUB_REF_NAME")
 if [ "$source_sha" != "$GITHUB_SHA" ]; then
@@ -848,7 +933,7 @@ if [ -n "$old_release_id" ]; then
     echo "Rolling release exists without its Git tag: $RELEASE_TAG" >&2
     exit 1
   fi
-  if ! release_is_coherent "$old_release_id" "$RELEASE_TAG" false; then
+  if ! release_is_prior_coherent "$old_release_id" "$RELEASE_TAG" false; then
     echo "Existing rolling release is incomplete or not published; refusing replacement." >&2
     exit 1
   fi

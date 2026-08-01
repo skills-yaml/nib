@@ -77,47 +77,6 @@ fn run_config_read_hook(path: &Path) -> Result<(), ConfigError> {
     hook.map_or(Ok(()), |hook| hook(path).map_err(config_state_error))
 }
 
-pub const SUPPORTED_PROVIDERS: &[(&str, &str)] = &[
-    ("openai", "OpenAI (gpt-4o etc)"),
-    ("anthropic", "Anthropic Claude"),
-    ("google", "Google Gemini"),
-    ("grok", "xAI Grok"),
-    ("openrouter", "OpenRouter"),
-    ("meta", "Meta (Muse Spark)"),
-    ("mock", "Mock"),
-];
-
-pub const AVAILABLE_MODELS: &[(&str, &[&str])] = &[
-    (
-        "openai",
-        &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"],
-    ),
-    (
-        "anthropic",
-        &[
-            "claude-3-5-sonnet-20241022",
-            "claude-3-opus-20240229",
-            "claude-3-haiku-20240307",
-        ],
-    ),
-    (
-        "google",
-        &["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"],
-    ),
-    ("grok", &["grok-2-1212", "grok-beta", "grok-3"]),
-    (
-        "openrouter",
-        &[
-            "openrouter/anthropic/claude-3.5-sonnet",
-            "openrouter/meta-llama/llama-3.1-70b-instruct",
-            "openrouter/google/gemini-1.5-pro",
-            "openrouter/mistralai/mistral-large",
-        ],
-    ),
-    ("meta", &["muse-spark-1.1", "muse-spark-1.1-mini"]),
-    ("mock", &["mock-model"]),
-];
-
 /// Legacy alias used by CLI modules during the Rust migration.
 pub type LLMConfigFile = LlmConfig;
 
@@ -564,6 +523,73 @@ fn default_context_length() -> usize {
     128_000
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmApiMode {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+impl LlmApiMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+
+    pub fn endpoint_suffix(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/chat/completions",
+            Self::Responses => "/responses",
+        }
+    }
+}
+
+impl fmt::Display for LlmApiMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub fn is_openai_compatible_provider(name: &str) -> bool {
+    crate::llm::registry::provider_descriptor(name)
+        .is_some_and(|provider| provider.is_openai_compatible())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
@@ -572,6 +598,16 @@ pub struct ProviderEntry {
     #[serde(default)]
     pub api_keys: Vec<String>,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub api: Option<LlmApiMode>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl ProviderEntry {
+    pub fn resolved_api_mode(&self) -> LlmApiMode {
+        self.api.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,16 +625,26 @@ pub enum ConfigSource {
     Default,
 }
 
+impl ConfigSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Toml => "config.toml",
+            Self::MigratedFromJson => "migrated config.json",
+            Self::Default => "defaults (no config file)",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to parse TOML: {0}")]
-    Toml(#[from] toml::de::Error),
+    Toml(String),
     #[error("failed to serialize TOML: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse legacy JSON: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(String),
     #[error(transparent)]
     Validation(#[from] ConfigValidationError),
     #[error("configuration operation failed: {0}")]
@@ -609,6 +655,28 @@ pub enum ConfigError {
     LockPoisoned(String),
     #[error("configuration file {path} is {size} bytes; maximum is {max} bytes")]
     FileTooLarge { path: String, size: u64, max: u64 },
+}
+
+impl From<toml::de::Error> for ConfigError {
+    fn from(error: toml::de::Error) -> Self {
+        let location = error
+            .span()
+            .map(|span| format!(" near byte {}", span.start))
+            .unwrap_or_default();
+        Self::Toml(format!(
+            "invalid syntax or value{location}; source excerpt omitted"
+        ))
+    }
+}
+
+impl From<serde_json::Error> for ConfigError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(format!(
+            "invalid syntax or value at line {} column {}; source excerpt omitted",
+            error.line(),
+            error.column()
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -677,7 +745,27 @@ impl NibConfig {
                     issues.push(format!(
                         "llm.providers.{name}.base_url must be at most {MAX_URL_BYTES} bytes and contain no NUL"
                     ));
+                } else if is_openai_compatible_provider(name) {
+                    if let Some(issue) =
+                        configured_endpoint_issue(url, provider.resolved_api_mode())
+                    {
+                        if issue.starts_with("conflicts") {
+                            issues.push(format!(
+                                "llm.providers.{name}.base_url conflicts with api = '{}' or contains a doubled API suffix",
+                                provider.resolved_api_mode()
+                            ));
+                        } else {
+                            issues.push(format!("llm.providers.{name}.base_url {issue}"));
+                        }
+                    }
                 }
+            }
+            if !is_openai_compatible_provider(name)
+                && (provider.api.is_some() || provider.reasoning_effort.is_some())
+            {
+                issues.push(format!(
+                    "llm.providers.{name}.api and reasoning_effort are supported only by OpenAI-compatible providers"
+                ));
             }
             if let Some(key) = &provider.api_key {
                 if key.trim().is_empty() {
@@ -1138,6 +1226,115 @@ fn is_safe_identifier(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
+fn configured_endpoint_conflicts(base_url: &str, mode: LlmApiMode) -> bool {
+    let path = base_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(base_url)
+        .trim_end_matches('/');
+    let terminal_mode = configured_terminal_api_mode(path);
+    terminal_mode.is_some_and(|terminal| terminal != mode)
+        || terminal_mode.is_some_and(|terminal| {
+            let prefix = path
+                .strip_suffix(terminal.endpoint_suffix())
+                .expect("terminal mode suffix");
+            configured_terminal_api_mode(prefix).is_some()
+        })
+}
+
+fn configured_endpoint_issue(base_url: &str, mode: LlmApiMode) -> Option<&'static str> {
+    let Ok(parsed) = reqwest::Url::parse(base_url.trim()) else {
+        return Some("must be an absolute HTTP(S) URL");
+    };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Some("must be an absolute HTTP(S) URL");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Some("must not contain embedded credentials");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Some("must not contain a query string or fragment");
+    }
+    let path = parsed.path().trim_end_matches('/');
+    let Some(decoded_path) = configured_percent_decode_repeated(path) else {
+        return Some("percent-encoding nesting exceeds the supported limit");
+    };
+    if decoded_path != path
+        && configured_terminal_api_modes(&decoded_path) != configured_terminal_api_modes(path)
+    {
+        return Some("API endpoint suffix must not be percent-encoded");
+    }
+    configured_endpoint_conflicts(parsed.path(), mode)
+        .then_some("conflicts with the selected api mode or contains a doubled API suffix")
+}
+
+fn configured_terminal_api_mode(path: &str) -> Option<LlmApiMode> {
+    let path = path.trim_end_matches('/');
+    [LlmApiMode::ChatCompletions, LlmApiMode::Responses]
+        .into_iter()
+        .find(|mode| path.ends_with(mode.endpoint_suffix()))
+}
+
+fn configured_terminal_api_modes(mut path: &str) -> Vec<LlmApiMode> {
+    let mut modes = Vec::new();
+    while let Some(mode) = configured_terminal_api_mode(path) {
+        modes.push(mode);
+        path = path
+            .trim_end_matches('/')
+            .strip_suffix(mode.endpoint_suffix())
+            .expect("terminal mode suffix");
+    }
+    modes
+}
+
+fn configured_percent_decode_repeated(value: &str) -> Option<String> {
+    const MAX_PERCENT_DECODE_PASSES: usize = 8;
+
+    let mut decoded = value.to_string();
+    let mut passes = 0;
+    loop {
+        let next = configured_percent_decode_once(&decoded);
+        if next == decoded {
+            return Some(decoded);
+        }
+        if passes == MAX_PERCENT_DECODE_PASSES {
+            return None;
+        }
+        decoded = next;
+        passes += 1;
+    }
+}
+
+fn configured_percent_decode_once(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (
+                configured_hex_value(bytes[index + 1]),
+                configured_hex_value(bytes[index + 2]),
+            ) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn configured_hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn path_bytes(path: &Path) -> usize {
     path.as_os_str().as_encoded_bytes().len()
 }
@@ -1187,10 +1384,14 @@ impl LlmConfig {
     pub fn get_available_models(&self, provider: Option<&str>) -> Vec<String> {
         let active = self.get_active_provider();
         let p = provider.unwrap_or(active.as_str());
-        AVAILABLE_MODELS
-            .iter()
-            .find(|(name, _)| *name == p)
-            .map(|(_, models)| models.iter().map(|s| s.to_string()).collect())
+        crate::llm::registry::provider_descriptor(p)
+            .map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|model| model.to_string())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1206,6 +1407,8 @@ impl LlmConfig {
                     api_key: None,
                     api_keys: Vec::new(),
                     base_url: None,
+                    api: None,
+                    reasoning_effort: None,
                 },
             );
             if self.active_provider.is_none() {
@@ -1220,6 +1423,13 @@ impl LlmConfig {
         model: String,
         api_key: Option<String>,
     ) {
+        let is_new = !self.providers.contains_key(&provider);
+        let default_api = is_new
+            .then(|| {
+                crate::llm::registry::provider_descriptor(&provider)
+                    .and_then(|provider| provider.auth_api_default)
+            })
+            .flatten();
         let entry = self
             .providers
             .entry(provider.clone())
@@ -1228,6 +1438,8 @@ impl LlmConfig {
                 api_key: None,
                 api_keys: Vec::new(),
                 base_url: None,
+                api: default_api,
+                reasoning_effort: None,
             });
         entry.model = model;
         if api_key.is_some() {
@@ -1266,8 +1478,15 @@ pub fn load_nib_config_or_default(project_root: &Path) -> Result<NibConfig, Conf
 }
 
 pub fn load_nib_config_full(project_root: &Path) -> Result<NibConfig, ConfigError> {
+    load_nib_config_full_with_source(project_root).map(|(config, _)| config)
+}
+
+pub fn load_nib_config_full_with_source(
+    project_root: &Path,
+) -> Result<(NibConfig, ConfigSource), ConfigError> {
     with_config_lock(project_root, |paths, directory| {
-        load_nib_config_with_source_unlocked(paths, directory).map(|loaded| loaded.config)
+        load_nib_config_with_source_unlocked(paths, directory)
+            .map(|loaded| (loaded.config, loaded.source))
     })
 }
 
@@ -1760,6 +1979,8 @@ mod tests {
                     api_key: Some("sk-test".to_string()),
                     api_keys: vec!["sk-backup".to_string()],
                     base_url: None,
+                    api: Some(LlmApiMode::Responses),
+                    reasoning_effort: Some(ReasoningEffort::Medium),
                 },
             )]),
             context_length: 128_000,
@@ -1771,6 +1992,156 @@ mod tests {
         let serialized = toml::to_string_pretty(&nib).expect("serialize");
         let parsed: NibConfig = toml::from_str(&serialized).expect("parse");
         assert_eq!(parsed.llm, llm);
+    }
+
+    #[test]
+    fn legacy_provider_defaults_to_chat_completions_without_rewriting() {
+        let provider: ProviderEntry = toml::from_str(
+            r#"
+model = "gpt-5.6-luna"
+api_key = "fixture"
+"#,
+        )
+        .expect("legacy provider");
+
+        assert_eq!(provider.api, None);
+        assert_eq!(provider.reasoning_effort, None);
+        assert_eq!(provider.resolved_api_mode(), LlmApiMode::ChatCompletions);
+        let serialized = toml::to_string(&provider).expect("serialize legacy provider");
+        assert!(!serialized.contains("api ="));
+        assert!(!serialized.contains("reasoning_effort"));
+    }
+
+    #[test]
+    fn provider_api_validation_is_typed_scoped_and_suffix_safe() {
+        let mut config = NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gpt-5.6-luna".to_string(),
+                api_key: Some("fixture".to_string()),
+                base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
+                api: Some(LlmApiMode::Responses),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..ProviderEntry::default()
+            },
+        );
+        let error = config
+            .validate()
+            .expect_err("conflicting endpoint suffix")
+            .to_string();
+        assert!(
+            error.contains("conflicts with api = 'responses'"),
+            "{error}"
+        );
+
+        let provider = config.llm.providers.get_mut("openai").unwrap();
+        provider.base_url = Some("https://api.openai.com/v1".to_string());
+        config.validate().expect("matching root URL");
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some("https://gateway.test/proxy/responses/v1".to_string());
+        config
+            .validate()
+            .expect("reserved nonterminal segment is a valid root URL");
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some("https://gateway.test/tenant/acme%20corp/v1/responses".to_string());
+        config
+            .validate()
+            .expect("encoded tenant path is a valid full endpoint");
+
+        for (url, expected) in [
+            (
+                "https://user:config-secret@example.test/v1",
+                "embedded credentials",
+            ),
+            (
+                "https://example.test/v1?token=config-secret",
+                "query string or fragment",
+            ),
+            ("file:///tmp/openai", "absolute HTTP(S) URL"),
+            (
+                "https://example.test/v1/%72esponses",
+                "must not be percent-encoded",
+            ),
+            (
+                "https://example.test/v1/responses/%2572esponses",
+                "must not be percent-encoded",
+            ),
+        ] {
+            config.llm.providers.get_mut("openai").unwrap().base_url = Some(url.to_string());
+            let error = config
+                .validate()
+                .expect_err("unsafe provider URL")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("config-secret"), "{error}");
+        }
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some("https://api.openai.com/v1".to_string());
+
+        let deeply_encoded_suffix = (0..9).fold("%72esponses".to_string(), |value, _| {
+            value.replace('%', "%25")
+        });
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some(format!("https://example.test/v1/{deeply_encoded_suffix}"));
+        let error = config
+            .validate()
+            .expect_err("excessive percent-encoding nesting must fail closed")
+            .to_string();
+        assert!(
+            error.contains("nesting exceeds the supported limit"),
+            "{error}"
+        );
+        config.llm.providers.get_mut("openai").unwrap().base_url =
+            Some("https://api.openai.com/v1".to_string());
+
+        config.llm.active_provider = Some("anthropic".to_string());
+        config.llm.providers.insert(
+            "anthropic".to_string(),
+            ProviderEntry {
+                model: "claude".to_string(),
+                api_key: Some("fixture".to_string()),
+                api: Some(LlmApiMode::Responses),
+                ..ProviderEntry::default()
+            },
+        );
+        let error = config
+            .validate()
+            .expect_err("unused provider mode")
+            .to_string();
+        assert!(
+            error.contains("supported only by OpenAI-compatible"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn new_openai_auth_defaults_to_responses_without_migrating_existing_entries() {
+        let mut llm = LlmConfig::default();
+        llm.add_or_update_provider(
+            "openai".to_string(),
+            "gpt-5.6-luna".to_string(),
+            Some("fixture".to_string()),
+        );
+        assert_eq!(llm.providers["openai"].api, Some(LlmApiMode::Responses));
+
+        let mut legacy = LlmConfig {
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderEntry {
+                    model: "gpt-4o".to_string(),
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        };
+        legacy.add_or_update_provider(
+            "openai".to_string(),
+            "gpt-5.6-luna".to_string(),
+            Some("fixture".to_string()),
+        );
+        assert_eq!(legacy.providers["openai"].api, None);
     }
 
     #[test]
@@ -1825,6 +2196,7 @@ mod tests {
                     api_key: None,
                     api_keys: Vec::new(),
                     base_url: None,
+                    ..ProviderEntry::default()
                 },
             )]),
             context_length: 128_000,
@@ -1855,16 +2227,25 @@ mod tests {
         let root = tempdir().expect("temporary config root");
         let paths = config_paths(root.path());
         fs::create_dir_all(&paths.nib_dir).expect("create config directory");
-        fs::write(&paths.toml, b"not = [valid").expect("write malformed config");
+        fs::write(
+            &paths.toml,
+            b"[llm.providers.openai]\napi_key = \"doctor-parse-secret",
+        )
+        .expect("write malformed config");
 
-        assert!(matches!(
-            load_config_or_default(root.path()),
-            Err(ConfigError::Toml(_))
-        ));
-        assert!(matches!(
-            load_nib_config_or_default(root.path()),
-            Err(ConfigError::Toml(_))
-        ));
+        for error in [
+            load_config_or_default(root.path()).unwrap_err(),
+            load_nib_config_or_default(root.path()).unwrap_err(),
+        ] {
+            assert!(matches!(error, ConfigError::Toml(_)));
+            let diagnostic = error.to_string();
+            assert!(!diagnostic.contains("doctor-parse-secret"), "{diagnostic}");
+            assert!(
+                diagnostic.contains("source excerpt omitted"),
+                "{diagnostic}"
+            );
+            assert!(!diagnostic.contains('\n'), "{diagnostic}");
+        }
     }
 
     #[test]
@@ -2126,7 +2507,10 @@ command = "mcp-server"
         fs::write(&paths.toml, "termnal = {}").expect("write typo config");
         let top_level =
             load_nib_config_full(root.path()).expect_err("top-level config typo must fail closed");
-        assert!(top_level.to_string().contains("unknown field `termnal`"));
+        let top_level = top_level.to_string();
+        assert!(top_level.contains("invalid syntax or value"), "{top_level}");
+        assert!(top_level.contains("source excerpt omitted"), "{top_level}");
+        assert!(!top_level.contains("termnal"), "{top_level}");
 
         let nested = toml::from_str::<NibConfig>(
             r#"
@@ -2235,6 +2619,7 @@ request_timeot_secs = 10
                     .map(|_| "backup".to_string())
                     .collect(),
                 base_url: Some("u".repeat(MAX_URL_BYTES + 1)),
+                ..ProviderEntry::default()
             },
         );
         config.profiles.default = "profile".to_string();
@@ -2279,6 +2664,7 @@ request_timeot_secs = 10
                     String::new(),
                 ],
                 base_url: None,
+                ..ProviderEntry::default()
             },
         );
         config.mcp.servers.insert(

@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Duration;
 
@@ -13,12 +12,18 @@ pub mod factory;
 pub mod gemini;
 pub mod mock;
 pub mod openai;
+pub mod registry;
+pub mod responses;
 pub mod types;
 
 pub use factory::{create_client, provider_ready};
 pub use mock::MockLlmClient;
 use tokio::sync::mpsc::{Receiver, Sender};
-pub use types::{LlmResponse, StreamEvent, ToolCallAccumulator, ToolCallRequest};
+use tokio::sync::{mpsc, oneshot};
+pub use types::{
+    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
+    ProviderContinuation, StreamEvent, ToolCallAccumulator, ToolCallRequest,
+};
 
 pub(crate) const MAX_LLM_COMPLETE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_LLM_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
@@ -99,6 +104,134 @@ pub(crate) async fn send_stream_event(
     sender.send(event).await.is_ok()
 }
 
+pub struct LlmStream {
+    receiver: Receiver<Result<StreamEvent, String>>,
+    private_completion: Option<oneshot::Receiver<Result<LlmResponse, String>>>,
+    content: String,
+    tool_calls: ToolCallAccumulator,
+    finish_reason: Option<String>,
+    stream_error: Option<String>,
+    exhausted: bool,
+}
+
+impl std::fmt::Debug for LlmStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmStream")
+            .field("private_completion", &self.private_completion.is_some())
+            .field("content_bytes", &self.content.len())
+            .field("finish_reason", &self.finish_reason)
+            .field("has_error", &self.stream_error.is_some())
+            .field("exhausted", &self.exhausted)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LlmStream {
+    pub(crate) fn from_public_receiver(receiver: Receiver<Result<StreamEvent, String>>) -> Self {
+        Self {
+            receiver,
+            private_completion: None,
+            content: String::new(),
+            tool_calls: ToolCallAccumulator::default(),
+            finish_reason: None,
+            stream_error: None,
+            exhausted: false,
+        }
+    }
+
+    pub(crate) fn with_private_completion(
+        receiver: Receiver<Result<StreamEvent, String>>,
+        completion: oneshot::Receiver<Result<LlmResponse, String>>,
+    ) -> Self {
+        Self {
+            private_completion: Some(completion),
+            ..Self::from_public_receiver(receiver)
+        }
+    }
+
+    fn from_response(response: LlmResponse) -> Self {
+        let (tx, rx) = mpsc::channel(100);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let content = response.content.clone();
+        let calls = response.tool_calls.clone().unwrap_or_default();
+        let finish_reason = response.finish_reason.clone();
+        tokio::spawn(async move {
+            if let Some(content) = content {
+                if !send_stream_event(&tx, Ok(StreamEvent::Content(content))).await {
+                    return;
+                }
+            }
+            for (index, call) in calls.into_iter().enumerate() {
+                if !send_stream_event(
+                    &tx,
+                    Ok(StreamEvent::ToolCallChunk {
+                        index,
+                        name: Some(call.name),
+                        arguments: Some(call.arguments.to_string()),
+                    }),
+                )
+                .await
+                {
+                    return;
+                }
+            }
+            if !send_stream_event(&tx, Ok(StreamEvent::End(finish_reason))).await {
+                return;
+            }
+            let _ = completion_tx.send(Ok(response));
+        });
+        Self::with_private_completion(rx, completion_rx)
+    }
+
+    pub async fn recv(&mut self) -> Option<Result<StreamEvent, String>> {
+        let next = self.receiver.recv().await;
+        match &next {
+            Some(Ok(event)) => {
+                self.tool_calls.push(event);
+                match event {
+                    StreamEvent::Content(fragment) => self.content.push_str(fragment),
+                    StreamEvent::End(reason) => self.finish_reason = Some(reason.clone()),
+                    _ => {}
+                }
+            }
+            Some(Err(error)) => {
+                if self.stream_error.is_none() {
+                    self.stream_error = Some(error.clone());
+                }
+            }
+            None => self.exhausted = true,
+        }
+        next
+    }
+
+    pub async fn finish(mut self) -> Result<LlmResponse, String> {
+        while !self.exhausted {
+            if self.recv().await.is_none() {
+                break;
+            }
+        }
+        if let Some(error) = self.stream_error {
+            return Err(error);
+        }
+        if let Some(completion) = self.private_completion.take() {
+            return completion
+                .await
+                .map_err(|_| "provider stream ended without a private completion".to_string())?;
+        }
+        let finish_reason = self
+            .finish_reason
+            .ok_or_else(|| "provider stream ended before a terminal event".to_string())?;
+        let tool_calls = self.tool_calls.finish()?;
+        Ok(LlmResponse {
+            terminal_status: LlmTerminalStatus::Completed,
+            content: (!self.content.trim().is_empty()).then_some(self.content),
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            finish_reason,
+            continuation: None,
+        })
+    }
+}
+
 pub(crate) async fn read_bounded_response(
     response: Response,
     limit: usize,
@@ -153,16 +286,34 @@ pub fn is_transient_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
+pub fn is_anthropic_transient_status(status: StatusCode) -> bool {
+    is_transient_status(status) || status.as_u16() == 529
+}
+
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
 /// Sends a provider request with bounded retry and credential rotation.
 ///
 /// The request factory receives the credential index to use, allowing every
 /// provider to rotate through its configured key pool after HTTP 429.
 pub async fn send_with_retry<F>(
-    mut request_factory: F,
+    request_factory: F,
     credential_count: usize,
 ) -> Result<Response, String>
 where
     F: FnMut(usize) -> RequestBuilder,
+{
+    send_with_retry_for(request_factory, credential_count, is_transient_status).await
+}
+
+pub async fn send_with_retry_for<F, RetryStatus>(
+    mut request_factory: F,
+    credential_count: usize,
+    retry_status: RetryStatus,
+) -> Result<Response, String>
+where
+    F: FnMut(usize) -> RequestBuilder,
+    RetryStatus: Fn(StatusCode) -> bool,
 {
     if credential_count == 0 {
         return Err("provider request requires at least one credential".to_string());
@@ -178,58 +329,96 @@ where
         credential_count,
         policy,
         |response: &Response| response.status(),
+        retry_status,
+        retry_after_delay,
         |error: &reqwest::Error| error.is_timeout() || error.is_connect(),
     )
     .await
 }
 
-async fn send_with_retry_using<T, E, F, Fut, Status, RetryError>(
+fn retry_after_delay(response: &Response) -> Option<Duration> {
+    if !matches!(response.status().as_u16(), 429 | 503 | 529) {
+        return None;
+    }
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        let delay = Duration::from_secs(seconds);
+        return (delay <= MAX_RETRY_AFTER).then_some(delay);
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let delay = retry_at.signed_duration_since(chrono::Utc::now());
+    let milliseconds = delay.num_milliseconds();
+    if milliseconds <= 0 {
+        return None;
+    }
+    let delay = Duration::from_millis(milliseconds as u64);
+    (delay <= MAX_RETRY_AFTER).then_some(delay)
+}
+
+async fn send_with_retry_using<T, E, F, Fut, Status, RetryStatus, RetryAfter, RetryError>(
     mut send: F,
     credential_count: usize,
     policy: RetryPolicy,
     status: Status,
+    retry_status: RetryStatus,
+    retry_after: RetryAfter,
     retry_error: RetryError,
 ) -> Result<T, String>
 where
     F: FnMut(usize) -> Fut,
     Fut: Future<Output = Result<T, E>>,
     Status: Fn(&T) -> StatusCode,
+    RetryStatus: Fn(StatusCode) -> bool,
+    RetryAfter: Fn(&T) -> Option<Duration>,
     RetryError: Fn(&E) -> bool,
     E: ToString,
 {
     if credential_count == 0 {
         return Err("provider retry requires at least one credential".to_string());
     }
-    let attempts = policy
-        .max_attempts
-        .saturating_mul(credential_count)
-        .max(credential_count)
-        .max(1);
-    let mut rate_limited_credentials = BTreeSet::new();
+    let attempts = policy.max_attempts.max(1);
+    let mut credential_index = 0;
 
     for attempt in 0..attempts {
-        let credential_index = attempt % credential_count;
         match send(credential_index).await {
-            Ok(response) if is_transient_status(status(&response)) => {
-                if status(&response) == StatusCode::TOO_MANY_REQUESTS {
-                    rate_limited_credentials.insert(credential_index);
-                }
+            Ok(response) if retry_status(status(&response)) => {
                 if attempt + 1 == attempts {
-                    if rate_limited_credentials.len() == credential_count {
-                        return Err(format!(
-                            "all {credential_count} provider credential(s) exhausted by HTTP 429 after {attempts} attempts"
-                        ));
-                    }
                     return Ok(response);
                 }
+                let response_status = status(&response);
+                let delay = retry_after(&response).unwrap_or_else(|| {
+                    let multiplier = 1u32 << attempt.min(6);
+                    policy
+                        .base_delay
+                        .saturating_mul(multiplier)
+                        .min(MAX_RETRY_AFTER)
+                });
+                if response_status == StatusCode::TOO_MANY_REQUESTS {
+                    credential_index = (credential_index + 1) % credential_count;
+                }
+                tokio::time::sleep(delay).await;
             }
             Ok(response) => return Ok(response),
-            Err(error) if retry_error(&error) && attempt + 1 < attempts => {}
+            Err(error) if retry_error(&error) && attempt + 1 < attempts => {
+                let multiplier = 1u32 << attempt.min(6);
+                tokio::time::sleep(
+                    policy
+                        .base_delay
+                        .saturating_mul(multiplier)
+                        .min(MAX_RETRY_AFTER),
+                )
+                .await;
+            }
             Err(error) => return Err(error.to_string()),
         }
-
-        let multiplier = 1u32 << attempt.min(6);
-        tokio::time::sleep(policy.base_delay.saturating_mul(multiplier)).await;
     }
 
     Err("provider retry loop ended without a response".to_string())
@@ -237,55 +426,11 @@ where
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn complete(
-        &self,
-        messages: &[Value],
-        tools: Option<&[Value]>,
-        temperature: f64,
-    ) -> Result<LlmResponse, String>;
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String>;
 
-    async fn stream(
-        &self,
-        messages: &[Value],
-        tools: Option<&[Value]>,
-        temperature: f64,
-    ) -> Result<Receiver<Result<StreamEvent, String>>, String> {
-        // default impl just calls complete and yields one big chunk
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let resp = self.complete(messages, tools, temperature).await;
-        tokio::spawn(async move {
-            match resp {
-                Ok(r) => {
-                    if let Some(content) = r.content {
-                        if !send_stream_event(&tx, Ok(StreamEvent::Content(content))).await {
-                            return;
-                        }
-                    }
-                    if let Some(tool_calls) = r.tool_calls {
-                        for (i, tc) in tool_calls.into_iter().enumerate() {
-                            if !send_stream_event(
-                                &tx,
-                                Ok(StreamEvent::ToolCallChunk {
-                                    index: i,
-                                    name: Some(tc.name),
-                                    arguments: Some(tc.arguments.to_string()),
-                                }),
-                            )
-                            .await
-                            {
-                                return;
-                            }
-                        }
-                    }
-                    let _receiver_open =
-                        send_stream_event(&tx, Ok(StreamEvent::End(r.finish_reason))).await;
-                }
-                Err(e) => {
-                    let _receiver_open = send_stream_event(&tx, Err(e)).await;
-                }
-            }
-        });
-        Ok(rx)
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, String> {
+        let response = self.complete(request).await?;
+        Ok(LlmStream::from_response(response))
     }
 }
 
@@ -447,12 +592,56 @@ mod tests {
                 request_timeout: Duration::from_secs(1),
             },
             |status| *status,
+            is_transient_status,
+            |_| None,
             |_| false,
         )
         .await
         .expect("backup credential succeeds");
         assert_eq!(response, StatusCode::OK);
         assert_eq!(credential_indices, [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn retry_budget_is_global_and_non_rate_limits_keep_the_credential() {
+        let mut responses = VecDeque::from([
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ]);
+        let mut credential_indices = Vec::new();
+        let response = send_with_retry_using(
+            |credential_index| {
+                credential_indices.push(credential_index);
+                std::future::ready(Ok::<StatusCode, String>(
+                    responses.pop_front().expect("scripted response"),
+                ))
+            },
+            4,
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::ZERO,
+                request_timeout: Duration::from_secs(1),
+            },
+            |status| *status,
+            is_transient_status,
+            |_| None,
+            |_| false,
+        )
+        .await
+        .expect("last transient response is returned to the adapter");
+        assert_eq!(response, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(credential_indices, [0, 0, 0]);
+        assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn anthropic_retry_policy_adds_only_overload() {
+        assert!(is_anthropic_transient_status(
+            StatusCode::from_u16(529).unwrap()
+        ));
+        assert!(!is_transient_status(StatusCode::from_u16(529).unwrap()));
+        assert!(!is_anthropic_transient_status(StatusCode::BAD_REQUEST));
     }
 
     #[test]
@@ -490,5 +679,39 @@ mod tests {
             .await
             .expect("producer observes receiver closure")
             .expect("producer task"));
+    }
+
+    #[tokio::test]
+    async fn projected_tool_deltas_cannot_override_private_completion() {
+        let (public_tx, public_rx) = mpsc::channel(4);
+        public_tx
+            .send(Ok(StreamEvent::ToolCallChunk {
+                index: 0,
+                name: Some("untrusted_public_call".to_string()),
+                arguments: Some("{}".to_string()),
+            }))
+            .await
+            .unwrap();
+        public_tx
+            .send(Ok(StreamEvent::End("tool_calls".to_string())))
+            .await
+            .unwrap();
+        drop(public_tx);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        completion_tx
+            .send(Ok(LlmResponse::text("validated terminal response")))
+            .unwrap();
+
+        let mut stream = LlmStream::with_private_completion(public_rx, completion_rx);
+        while stream.recv().await.is_some() {}
+        let debug = format!("{stream:?}");
+        let completed = stream.finish().await.unwrap();
+
+        assert_eq!(
+            completed.content.as_deref(),
+            Some("validated terminal response")
+        );
+        assert!(completed.tool_calls.is_none());
+        assert!(!debug.contains("untrusted_public_call"));
     }
 }

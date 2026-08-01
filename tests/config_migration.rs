@@ -54,6 +54,7 @@ fn config_toml_save_load_integration() {
                 api_key: Some("or-key".to_string()),
                 api_keys: Vec::new(),
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                ..ProviderEntry::default()
             },
         )]),
         context_length: 128_000,

@@ -1,7 +1,8 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use nib::config::{load_config_with_source, update_nib_config, ConfigSource, SUPPORTED_PROVIDERS};
+use nib::config::{load_config_with_source, update_nib_config, ConfigSource};
+use nib::llm::registry::{provider_descriptor, PROVIDERS};
 
 pub fn run_auth_wizard() -> Result<(), String> {
     let stdin = io::stdin();
@@ -34,9 +35,9 @@ fn run_auth_wizard_with_input(
 
     loop {
         println!("Available providers:");
-        let providers: Vec<_> = SUPPORTED_PROVIDERS.iter().collect();
-        for (i, (name, desc)) in providers.iter().enumerate() {
-            println!("  {}. {} - {}", i + 1, name, desc);
+        let providers: Vec<_> = PROVIDERS.iter().collect();
+        for (i, provider) in providers.iter().enumerate() {
+            println!("  {}. {} - {}", i + 1, provider.id, provider.display_name);
         }
 
         print!("Enter provider name or number (or 'done' to finish): ");
@@ -54,7 +55,7 @@ fn run_auth_wizard_with_input(
 
         let provider = if let Ok(num) = input.parse::<usize>() {
             if num > 0 && num <= providers.len() {
-                providers[num - 1].0.to_string()
+                providers[num - 1].id.to_string()
             } else {
                 println!("Invalid number.");
                 continue;
@@ -63,7 +64,7 @@ fn run_auth_wizard_with_input(
             input.to_lowercase()
         };
 
-        let provider_known = SUPPORTED_PROVIDERS.iter().any(|(p, _)| *p == provider);
+        let provider_known = provider_descriptor(&provider).is_some();
         if !provider_known && provider != "mock" {
             println!("Unknown provider: {}. Try again.", provider);
             continue;
@@ -73,20 +74,8 @@ fn run_auth_wizard_with_input(
         io::stdout().flush().unwrap();
         let api_key = read_password().trim().to_string();
 
-        let default_models: std::collections::HashMap<&str, &str> = [
-            ("openai", "gpt-4o"),
-            ("anthropic", "claude-3-5-sonnet-20241022"),
-            ("google", "gemini-1.5-pro"),
-            ("grok", "grok-2-1212"),
-            ("openrouter", "openrouter/anthropic/claude-3.5-sonnet"),
-            ("meta", "muse-spark-1.1"),
-            ("mock", "mock-model"),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-
-        let default_model = default_models.get(provider.as_str()).unwrap_or(&"default");
+        let descriptor = provider_descriptor(&provider).expect("provider validated above");
+        let default_model = descriptor.default_model;
         print!("Default model [{}]: ", default_model);
         io::stdout().flush().unwrap();
         let mut model_input = String::new();
@@ -141,7 +130,7 @@ fn run_auth_wizard_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nib::config::{config_paths, load_nib_config_full};
+    use nib::config::{config_paths, load_nib_config_full, LlmApiMode};
     use serial_test::serial;
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -203,6 +192,10 @@ mod tests {
         assert_eq!(
             config.llm.providers["openai"].api_key.as_deref(),
             Some("secret-key")
+        );
+        assert_eq!(
+            config.llm.providers["openai"].api,
+            Some(LlmApiMode::Responses)
         );
         restore_env("NIB_AUTH_ONE", previous_one);
     }

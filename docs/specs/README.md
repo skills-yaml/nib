@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **19 done, 9 development, and 0 backlog**.
+The current lifecycle is **19 done, 12 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -38,6 +38,13 @@ macOS runtime evidence, FT-016 retains Windows runtime evidence, and both inheri
 FT-015's remaining platform limits. FT-017 owns the stronger abrupt-owner
 descendant-process containment contract: Linux production proof is implemented, while
 Windows/macOS production delegation fails closed pending protected cleanup authority.
+T021 is in development for explicit OpenAI-compatible API-mode and reasoning
+configuration plus Responses function-tool support.
+T022 is in development for a typed provider-neutral LLM contract, distinct provider
+adapters composed from shared wire codecs, native correlated tool continuation, safe
+terminal/error normalization, and provider conformance gates.
+FT-018 is in development for a verified self-update command and bounded update notices
+on ordinary user-facing launches.
 
 Each audited file has an `Implementation Reconciliation (2026-07-15)` section that
 supersedes older proposal text. Later dated remediation sections and their unchecked
@@ -61,6 +68,8 @@ work or narrower guarantees.
 - [T012: Toolset Expansion](done/T012_toolset_expansion.md)
 - [T018: ratatui Approval Flow](done/T018_ratatui_tui_approval.md)
 - [T020: MCP Client Integration](development/T020_mcp_client_integration.md)
+- [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
+- [T022: Provider-Neutral LLM Contract and Adapter Conformance](development/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
 
 ### Feature specs
 
@@ -77,6 +86,7 @@ work or narrower guarantees.
 - [FT-015: Subagent Delegation](development/ft_015_subagent_delegation.md)
 - [FT-016: MCP Server Exposure](development/ft_016_mcp_server_exposure.md)
 - [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
+- [FT-018: Self-Update Command and Update Availability Notices](development/ft_018_self_update_and_update_notifications.md)
 
 ## Current Local Validation (2026-07-16)
 

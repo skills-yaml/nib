@@ -26,12 +26,9 @@ pub fn run_config_cmd(args: &ConfigArgs, project_root: &Path) -> Result<(), Stri
     match &args.command {
         ConfigCommands::Edit => edit_config(project_root),
         ConfigCommands::Show { show_secrets } => {
-            let mut config = nib::config::load_nib_config_full(project_root)
+            let (config, source) = nib::config::load_nib_config_full_with_source(project_root)
                 .map_err(|error| error.to_string())?;
-            if !show_secrets {
-                redact_credentials(&mut config);
-            }
-            let value = toml::to_string_pretty(&config).map_err(|error| error.to_string())?;
+            let value = render_config_with_source(config, *show_secrets, Some(source.as_str()))?;
             print!("{value}");
             Ok(())
         }
@@ -39,6 +36,7 @@ pub fn run_config_cmd(args: &ConfigArgs, project_root: &Path) -> Result<(), Stri
             let config = nib::config::load_nib_config_full(project_root)
                 .map_err(|error| error.to_string())?;
             config.validate().map_err(|error| error.to_string())?;
+            nib::llm::factory::validate_provider_endpoints(&config.llm)?;
             println!(
                 "{} is valid",
                 nib::config::config_paths(project_root).toml.display()
@@ -46,6 +44,77 @@ pub fn run_config_cmd(args: &ConfigArgs, project_root: &Path) -> Result<(), Stri
             Ok(())
         }
     }
+}
+
+#[cfg(test)]
+fn render_config(config: nib::config::NibConfig, show_secrets: bool) -> Result<String, String> {
+    render_config_with_source(config, show_secrets, None)
+}
+
+fn render_config_with_source(
+    mut config: nib::config::NibConfig,
+    show_secrets: bool,
+    source: Option<&str>,
+) -> Result<String, String> {
+    nib::llm::factory::validate_provider_endpoints(&config.llm)?;
+    let diagnostics = nib::llm::factory::provider_diagnostics(&config.llm, None)?;
+    let mut sensitive_values = config.sensitive_values();
+    sensitive_values.extend(nib::llm::factory::provider_environment_credentials());
+    if !show_secrets {
+        redact_credentials(&mut config);
+    }
+    let mut serialized_config =
+        toml::Value::try_from(&config).map_err(|error| error.to_string())?;
+    if !show_secrets {
+        redact_toml_string_values(&mut serialized_config, &sensitive_values, &mut Vec::new());
+    }
+    let serialized =
+        toml::to_string_pretty(&serialized_config).map_err(|error| error.to_string())?;
+    let mut output = String::from("# Effective LLM configuration\n");
+    if let Some(source) = source {
+        output.push_str("# Configuration source: ");
+        output.push_str(source);
+        output.push('\n');
+    }
+    for line in diagnostics.redacted_lines(&sensitive_values) {
+        output.push_str("# ");
+        output.push_str(&line);
+        output.push('\n');
+    }
+    output.push_str(&serialized);
+    Ok(output)
+}
+
+fn redact_toml_string_values(
+    value: &mut toml::Value,
+    sensitive_values: &[String],
+    path: &mut Vec<String>,
+) {
+    match value {
+        toml::Value::String(text) if !is_provider_enum_path(path) => {
+            *text = nib::llm::factory::redact_sensitive_value(text, sensitive_values);
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                redact_toml_string_values(value, sensitive_values, path);
+            }
+        }
+        toml::Value::Table(table) => {
+            for (field, value) in table {
+                path.push(field.clone());
+                redact_toml_string_values(value, sensitive_values, path);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_provider_enum_path(path: &[String]) -> bool {
+    path.len() == 4
+        && path[0] == "llm"
+        && path[1] == "providers"
+        && matches!(path[3].as_str(), "api" | "reasoning_effort")
 }
 
 fn redact_credentials(config: &mut nib::config::NibConfig) {
@@ -97,7 +166,7 @@ fn edit_config(project_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nib::config::{McpServerEntry, ProviderEntry};
+    use nib::config::{LlmApiMode, McpServerEntry, ProviderEntry, ReasoningEffort};
     use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -118,7 +187,7 @@ mod tests {
                 model: "model".to_string(),
                 api_key: Some("primary-secret".to_string()),
                 api_keys: vec!["backup-secret".to_string()],
-                base_url: None,
+                ..ProviderEntry::default()
             },
         )]);
         config.mcp.servers = HashMap::from([(
@@ -143,6 +212,160 @@ mod tests {
             "<redacted>"
         );
         assert_eq!(config.mcp.servers["fixture"].env["PUBLIC_VALUE"], "visible");
+    }
+
+    #[test]
+    fn config_display_reports_effective_transport_and_remains_redacted_toml() {
+        let mut config = nib::config::NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gpt-5.6-luna".to_string(),
+                api_key: Some("display-secret".to_string()),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                api: Some(LlmApiMode::Responses),
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let rendered = render_config(config, false).expect("redacted config display");
+        assert!(rendered.starts_with("# Effective LLM configuration\n"));
+        assert!(rendered.contains("# Provider: openai"));
+        assert!(rendered.contains("# Model: gpt-5.6-luna"));
+        assert!(rendered.contains("# API mode: responses"));
+        assert!(rendered.contains("# Endpoint path: /v1/responses"));
+        assert!(rendered.contains("# Reasoning effort: high"));
+        assert!(rendered.contains("api_key = \"<redacted>\""));
+        assert!(!rendered.contains("display-secret"));
+        toml::from_str::<nib::config::NibConfig>(&rendered)
+            .expect("diagnostic comments preserve valid TOML");
+    }
+
+    #[test]
+    fn config_display_rejects_unsafe_inactive_provider_endpoint_without_leaking_it() {
+        let mut config = nib::config::NibConfig::default();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "model".to_string(),
+                base_url: Some("https://user:inactive-secret@example.test/v1".to_string()),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let error = render_config(config, false).expect_err("unsafe provider URL");
+        assert!(error.contains("embedded credentials"), "{error}");
+        assert!(!error.contains("inactive-secret"), "{error}");
+    }
+
+    #[test]
+    fn config_display_redacts_credentials_reused_in_model_and_endpoint_path() {
+        let mut config = nib::config::NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "model-path-secret".to_string(),
+                api_key: Some("path-secret".to_string()),
+                base_url: Some("https://gateway.test/path-secret/v1".to_string()),
+                api: Some(LlmApiMode::Responses),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let rendered = render_config(config, false).expect("redacted config display");
+        assert!(!rendered.contains("path-secret"));
+        assert!(rendered.contains("# Model: <redacted>"));
+        assert!(rendered.contains("# Endpoint path: <redacted>"));
+        assert!(rendered.contains("model = \"<redacted>\""));
+        assert!(rendered.contains("base_url = \"<redacted>\""));
+        toml::from_str::<nib::config::NibConfig>(&rendered).expect("redacted output is valid TOML");
+    }
+
+    #[test]
+    fn config_display_short_credentials_do_not_rewrite_toml_keys() {
+        let mut config = nib::config::NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "monkey".to_string(),
+                api_key: Some("key".to_string()),
+                base_url: Some("https://gateway.test/key/v1".to_string()),
+                api: Some(LlmApiMode::Responses),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let rendered = render_config(config, false).expect("redacted config display");
+        assert!(rendered.contains("api_key = \"<redacted>\""));
+        assert!(rendered.contains("api = \"responses\""));
+        assert!(rendered.contains("base_url = \"<redacted>\""));
+        assert!(!rendered.contains("api_<redacted>"));
+        assert!(!rendered.contains("monkey"));
+        toml::from_str::<nib::config::NibConfig>(&rendered).expect("field names remain valid TOML");
+    }
+
+    #[test]
+    #[serial]
+    fn config_display_redacts_environment_credentials_and_encoded_reuse() {
+        let previous = std::env::var_os("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "env/only");
+
+        let mut config = nib::config::NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "model-env/only".to_string(),
+                base_url: Some("https://gateway.test/env%2Fonly/v1".to_string()),
+                api: Some(LlmApiMode::Responses),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let rendered = render_config(config, false);
+        restore_env("OPENAI_API_KEY", previous);
+        let rendered = rendered.expect("redacted config display");
+        assert!(!rendered.contains("env/only"));
+        assert!(!rendered.contains("env%2Fonly"));
+        assert!(rendered.contains("# Model: <redacted>"));
+        assert!(rendered.contains("# Endpoint path: <redacted>"));
+        assert!(rendered.contains("model = \"<redacted>\""));
+        assert!(rendered.contains("base_url = \"<redacted>\""));
+        toml::from_str::<nib::config::NibConfig>(&rendered).expect("redacted output is valid TOML");
+    }
+
+    #[test]
+    #[serial]
+    fn config_display_does_not_exempt_unrelated_enum_named_keys() {
+        let previous = std::env::var_os("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "env-schema-secret");
+
+        let mut config = nib::config::NibConfig::default();
+        config.mcp.servers.insert(
+            "fixture".to_string(),
+            McpServerEntry {
+                command: "fixture".to_string(),
+                env: HashMap::from([
+                    ("api".to_string(), "env-schema-secret".to_string()),
+                    (
+                        "reasoning_effort".to_string(),
+                        "env-schema-secret".to_string(),
+                    ),
+                ]),
+                ..McpServerEntry::default()
+            },
+        );
+
+        let rendered = render_config(config, false);
+        restore_env("OPENAI_API_KEY", previous);
+        let rendered = rendered.expect("redacted config display");
+        assert!(!rendered.contains("env-schema-secret"));
+        assert!(rendered.contains("api = \"<redacted>\""));
+        assert!(rendered.contains("reasoning_effort = \"<redacted>\""));
     }
 
     #[test]

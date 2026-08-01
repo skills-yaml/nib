@@ -3,7 +3,35 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::path::PathBuf;
+use uuid::Uuid;
+
+/// Provider-neutral identity for one nib tool invocation.
+///
+/// Provider correlation handles are deliberately separate and must never be
+/// used as this durable workload identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolInvocationId(Uuid);
+
+impl ToolInvocationId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for ToolInvocationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ToolInvocationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +73,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
+    pub invocation_id: ToolInvocationId,
     pub tool_name: String,
     pub arguments: Value,
     pub session_id: Option<String>,
@@ -53,6 +82,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    pub invocation_id: ToolInvocationId,
     pub tool_name: String,
     pub success: bool,
     #[serde(default)]

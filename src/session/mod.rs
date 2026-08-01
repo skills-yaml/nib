@@ -28,6 +28,8 @@ pub struct SessionMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ToolCallRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<crate::tools::ToolInvocationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -257,6 +259,9 @@ fn session_mismatch_field(expected: &Session, published: &Session) -> &'static s
         return "tool_calls.length";
     }
     for (expected, published) in expected.tool_calls.iter().zip(&published.tool_calls) {
+        if expected.invocation_id != published.invocation_id {
+            return "tool_calls.invocation_id";
+        }
         if expected.id != published.id {
             return "tool_calls.id";
         }
@@ -1800,9 +1805,11 @@ mod tests {
         let store = SessionStore::new(dir.path());
         let session = store.create_session();
         let duration = 1.551_978_736_000_000_1_f64;
+        let invocation_id = crate::tools::ToolInvocationId::new();
 
         store
             .record_tool_call(ToolCallRecord {
+                invocation_id: Some(invocation_id),
                 session_id: Some(session.id.clone()),
                 tool_name: Some("roundtrip_probe".to_string()),
                 arguments: serde_json::json!({"nested_duration": duration}),
@@ -1813,6 +1820,7 @@ mod tests {
 
         let loaded = store.load(&session.id).expect("load session");
         let call = loaded.tool_calls.last().expect("audit call");
+        assert_eq!(call.invocation_id, Some(invocation_id));
         assert_eq!(
             call.duration_seconds.expect("duration").to_bits(),
             duration.to_bits()
@@ -1842,6 +1850,29 @@ mod tests {
         let loaded = store.load("legacy-session").expect("load legacy");
         assert_eq!(loaded.messages.len(), 1);
         assert!(loaded.messages[0].timestamp.is_none());
+    }
+
+    #[test]
+    fn loads_legacy_tool_call_record_without_invocation_id() {
+        let dir = tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let legacy = r#"{
+  "id": "legacy-tool-record",
+  "messages": [],
+  "tool_calls": [
+    {
+      "id": "tool-legacy",
+      "tool_name": "read_file",
+      "arguments": {"path": "README.md"}
+    }
+  ]
+}"#;
+        fs::write(store.path("legacy-tool-record"), legacy).expect("write legacy");
+
+        let loaded = store.load("legacy-tool-record").expect("load legacy");
+        let call = loaded.tool_calls.first().expect("legacy tool record");
+        assert_eq!(call.id.as_deref(), Some("tool-legacy"));
+        assert_eq!(call.invocation_id, None);
     }
 
     #[test]
