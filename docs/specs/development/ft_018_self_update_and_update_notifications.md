@@ -453,10 +453,12 @@ versioned releases require separate follow-up decisions if they enter scope.
 
 ### Remaining Gates
 
-- `task check` currently stops on four Clippy findings in the overlapping T021/T022
-  provider work. A direct repository-wide `task test` reaches 681 passing library tests
-  before eight provider-continuation failures in the same work. FT-018's focused gates
-  are green, but the canonical repository-wide gates are not yet green.
+- The four overlapping T021/T022 Clippy findings and eight stale provider-continuation
+  fixtures are repaired locally; the canonical `task check` gate passes.
+- Workflow-changing production publication now uses T010's marked forward-only mode so
+  the Actions token never creates a backup ref at an older workflow revision. The local
+  25-test release harness covers success and process-loss recovery; hosted publication
+  remains required.
 - Native macOS and Windows executable replacement remains unexecuted.
 - A manifest-producing development release and a second release that exercises actual
   notification and self-replacement have not run. The spec remains in Development.

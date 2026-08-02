@@ -379,3 +379,52 @@ hosted development release. Local gates are `task installers:check` and
 If legacy assets were accepted for a newly staged candidate, a missing manifest could
 be promoted. Candidate and predecessor validation are therefore separate: only the
 predecessor may use the legacy eight-asset set.
+
+## Workflow-Permission CI Remediation (2026-08-02)
+
+### Problem
+
+Production run `30707796559` built all four platform artifacts but failed before
+staging because the workflow `GITHUB_TOKEN` attempted to create the backup tag at the
+older release SHA. That predecessor contains a different `.github/workflows/` tree,
+and GitHub refuses a GitHub App token without the separate Workflows permission. The
+Actions `GITHUB_TOKEN` cannot be granted that permission.
+
+### Scope And Design
+
+Retain the rollback-capable staging/backup transaction when the candidate and
+predecessor have the same workflow tree. When they differ, select a forward-only mode
+that never creates a ref or retags a Release at the predecessor SHA:
+
+1. Create and fully validate the candidate draft and nine-asset set.
+2. Record `transaction_mode=forward-only` and transition the durable marker from
+   `staged` to `forward` before removing public predecessor state.
+3. Delete the prior Release by its revalidated ID, move the rolling tag to the current
+   source SHA through the Git refs API, and promote the staged Release.
+4. Before the phase transition, recovery removes the stage and preserves the prior
+   channel. After it, recovery can only converge forward to the already validated
+   candidate.
+
+The mode uses the existing serialized environment and exclusive-writer policy. It does
+not add a PAT, another GitHub App, or a second publisher.
+
+### Acceptance Criteria
+
+- [x] A workflow-tree change selects forward-only publication and creates no backup
+  ref or backup Release.
+- [x] The candidate is complete and marker-owned before the forward boundary is
+  durable.
+- [x] Process loss immediately after prior-Release deletion is recovered forward on a
+  rerun, leaving one coherent rolling ref/Release pair.
+- [x] Ordinary releases retain the existing rollback transaction and its fault matrix.
+- [x] `task installers:check` and all 25 installer/release transaction tests pass.
+- [ ] The exact committed production run passes and publishes the nine-asset Release.
+
+### Affected Areas And Risk
+
+`scripts/publish-release.sh`, `tests/installers.rs`, and `docs/tech/ci.md` are affected.
+The forward boundary intentionally gives up rollback only after the candidate is fully
+validated; failures after that point may leave a failed workflow run but must leave or
+recover a coherent candidate channel. A development candidate whose workflow tree
+still differs from the repository default branch remains an external GitHub token
+constraint and is not claimed by the production-path evidence.

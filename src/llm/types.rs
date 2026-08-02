@@ -152,6 +152,9 @@ impl fmt::Debug for ProviderContinuation {
 }
 
 impl ProviderContinuation {
+    // These fields are separate security boundaries: provider identity, request scope,
+    // continuation limits, and opaque state must not be collapsed or inferred.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new<T: Any + Send>(
         provider: &str,
         model: &str,
@@ -175,6 +178,8 @@ impl ProviderContinuation {
         )
     }
 
+    // Ordered continuations intentionally expose the same validated boundaries.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_ordered<T: Any + Send>(
         provider: &str,
         model: &str,
@@ -248,11 +253,7 @@ impl ProviderContinuation {
         invocation_id: ToolInvocationId,
         output: &Value,
     ) -> Result<(), String> {
-        if !self
-            .pending_invocations
-            .iter()
-            .any(|pending| *pending == invocation_id)
-        {
+        if !self.pending_invocations.contains(&invocation_id) {
             return Err("tool invocation ID does not belong to this continuation".to_string());
         }
         if self.tool_outputs.contains_key(&invocation_id) {

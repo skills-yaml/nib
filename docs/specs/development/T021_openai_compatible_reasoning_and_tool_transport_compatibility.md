@@ -427,6 +427,20 @@ Linux, macOS, and Windows CI evidence. T021 therefore remains in Development.
 - Which third-party providers should receive dedicated Responses fixtures before their
   auth defaults may offer that mode?
 
+## Hosted CI Reconciliation (2026-08-02)
+
+The first merged T021/T022 revision exposed four Clippy diagnostics that local evidence
+had not retained. The remediation uses an explicit conditional for response guidance,
+documents the validated continuation constructor's intentionally independent security
+boundaries, and uses direct membership lookup for pending invocation IDs. OpenAI tool
+completion and stream fixtures now provide the required request scope before a tool
+continuation can be created.
+
+These changes do not alter transport selection or continuation authority. The exact
+local `task check` gate passes 689 library tests, 77 CLI tests, and every integration
+group. Hosted Linux, macOS, and Windows gates remain required before T021 can move to
+done.
+
 ## External References
 
 - [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)

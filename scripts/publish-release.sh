@@ -68,6 +68,8 @@ build_transaction_body() {
   local prior_sha=${2:-none}
   local staged_release_id=${3:-pending}
   local prior_release_id=${4:-none}
+  local transaction_mode=${5:-rollback}
+  local transaction_phase=${6:-staged}
   cat <<EOF
 $notes
 
@@ -78,6 +80,8 @@ prior_sha=$prior_sha
 staged_release_id=$staged_release_id
 prior_release_id=$prior_release_id
 prior_release_draft=false
+transaction_mode=$transaction_mode
+transaction_phase=$transaction_phase
 -->
 EOF
 }
@@ -85,6 +89,7 @@ EOF
 marker_value() {
   local body=$1
   local key=$2
+  local allow_missing=${3:-false}
   local matches first remainder
   matches=$(printf '%s\n' "$body" | awk -v start="$marker_start" -v key="$key" '
     $0 == start { inside = 1; next }
@@ -97,7 +102,11 @@ marker_value() {
   else
     remainder=${matches#*$'\n'}
   fi
-  if [ -z "$first" ] || [ -n "$remainder" ]; then
+  if [ -z "$first" ]; then
+    [ "$allow_missing" = true ]
+    return
+  fi
+  if [ -n "$remainder" ]; then
     return 1
   fi
   printf '%s' "$first"
@@ -123,6 +132,10 @@ load_transaction_marker() {
   marker_staged_release_id=$(marker_value "$marker_body" staged_release_id) || return 1
   marker_prior_release_id=$(marker_value "$marker_body" prior_release_id) || return 1
   marker_prior_release_draft=$(marker_value "$marker_body" prior_release_draft) || return 1
+  marker_transaction_mode=$(marker_value "$marker_body" transaction_mode true) || return 1
+  marker_transaction_phase=$(marker_value "$marker_body" transaction_phase true) || return 1
+  [ -n "$marker_transaction_mode" ] || marker_transaction_mode=rollback
+  [ -n "$marker_transaction_phase" ] || marker_transaction_phase=staged
   if [ "$marker_channel" != "$RELEASE_CHANNEL" ] || { [ -n "$expected_candidate" ] && [ "$marker_candidate_sha" != "$expected_candidate" ]; }; then
     echo "Release $release_id transaction marker does not match this channel and candidate." >&2
     return 1
@@ -150,6 +163,12 @@ load_transaction_marker() {
     return 1
   fi
   if [ "$marker_prior_release_draft" != false ]; then
+    return 1
+  fi
+  if [ "$marker_transaction_mode" != rollback ] && [ "$marker_transaction_mode" != forward-only ]; then
+    return 1
+  fi
+  if [ "$marker_transaction_phase" != staged ] && [ "$marker_transaction_phase" != forward ]; then
     return 1
   fi
 }
@@ -366,6 +385,49 @@ delete_stage_ref() {
 delete_backup_ref() {
   local backup_sha=$1
   delete_owned_ref "refs/tags/$backup_tag" "$backup_sha" "backup tag"
+}
+
+move_rolling_ref_via_api() {
+  local expected=$1
+  local desired=$2
+  local current
+  current=$(remote_sha "refs/tags/$RELEASE_TAG") || return 1
+  if [ "$current" = "$desired" ]; then
+    return 0
+  fi
+  if [ "$current" != "$expected" ]; then
+    echo "Rolling tag changed to an unowned SHA: $current" >&2
+    return 1
+  fi
+  if [ -n "$current" ]; then
+    "$gh_bin" api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG" -f sha="$desired" -F force=true >/dev/null || true
+  else
+    "$gh_bin" api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$desired" >/dev/null || true
+  fi
+  current=$(remote_sha "refs/tags/$RELEASE_TAG") || return 1
+  if [ "$current" != "$desired" ]; then
+    echo "Rolling tag did not reach the transaction's expected state." >&2
+    return 1
+  fi
+}
+
+delete_stage_ref_via_api() {
+  local expected=$1
+  local current
+  current=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ -z "$current" ]; then
+    return 0
+  fi
+  if [ "$current" != "$expected" ]; then
+    echo "Refusing to delete staging tag changed by another actor: $current" >&2
+    return 1
+  fi
+  "$gh_bin" api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$stage_tag" >/dev/null || true
+  current=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ -n "$current" ]; then
+    echo "Failed to delete staging tag." >&2
+    return 1
+  fi
 }
 
 validate_local_assets() {
@@ -744,7 +806,105 @@ recover_rollback() {
   cleanup_rollback_state "$candidate_sha" "$prior_sha" "$candidate_release_id" "$prior_release_id"
 }
 
+mark_forward_only_phase() {
+  local release_id=$1
+  local candidate_sha=$2
+  local forward_body
+  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  if [ "$marker_transaction_mode" != forward-only ]; then
+    return 1
+  fi
+  if [ "$marker_transaction_phase" = forward ]; then
+    return 0
+  fi
+  forward_body=${marker_body/transaction_phase=staged/transaction_phase=forward}
+  patch_release_from_tag "$release_id" "$stage_tag" -f body="$forward_body" || true
+  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  [ "$marker_transaction_mode" = forward-only ] && [ "$marker_transaction_phase" = forward ]
+}
+
+recover_forward_only_candidate() {
+  local candidate_release_id=$1
+  local candidate_sha candidate_tag expected_draft prior_sha prior_release_id prior_tag rolling stage_ref
+  load_transaction_marker "$candidate_release_id" "" || return 1
+  if [ "$marker_transaction_mode" != forward-only ]; then
+    return 2
+  fi
+  candidate_sha=$marker_candidate_sha
+  candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
+  if [ "$marker_staged_release_id" = pending ]; then
+    if [ "$candidate_tag" != "$stage_tag" ]; then
+      echo "Pending forward-only marker crossed the publication boundary." >&2
+      return 1
+    fi
+    finalize_transaction_marker "$candidate_release_id" "$candidate_sha" || return 1
+    load_transaction_marker "$candidate_release_id" "$candidate_sha" || return 1
+  fi
+  prior_sha=$marker_prior_sha
+  [ "$prior_sha" = none ] && prior_sha=
+  prior_release_id=$marker_prior_release_id
+  [ "$prior_release_id" = none ] && prior_release_id=
+  rolling=$(remote_sha "refs/tags/$RELEASE_TAG") || return 1
+  stage_ref=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ -n "$stage_ref" ] && [ "$stage_ref" != "$candidate_sha" ]; then
+    echo "Staging tag changed before forward-only recovery." >&2
+    return 1
+  fi
+
+  if [ "$marker_transaction_phase" = staged ]; then
+    if [ "$candidate_tag" != "$stage_tag" ] || [ "$rolling" != "$prior_sha" ]; then
+      echo "Staged forward-only transaction crossed an unrecorded boundary." >&2
+      return 1
+    fi
+    if [ -n "$prior_release_id" ]; then
+      prior_tag=$(release_tag_for_id "$prior_release_id") || return 1
+      if [ "$prior_tag" != "$RELEASE_TAG" ]; then
+        echo "Recorded prior release changed before staged cleanup." >&2
+        return 1
+      fi
+      release_is_prior_coherent "$prior_release_id" "$RELEASE_TAG" false || return 1
+    fi
+    delete_stage_ref_via_api "$candidate_sha" || return 1
+    delete_release_from_tag "$candidate_release_id" "$stage_tag"
+    return
+  fi
+
+  if [ "$candidate_tag" != "$stage_tag" ] && [ "$candidate_tag" != "$RELEASE_TAG" ]; then
+    echo "Forward-only release changed to unowned tag $candidate_tag." >&2
+    return 1
+  fi
+  expected_draft=false
+  [ "$candidate_tag" != "$stage_tag" ] || expected_draft=true
+  release_is_coherent "$candidate_release_id" "$candidate_tag" "$expected_draft" || return 1
+  if [ "$rolling" != "$prior_sha" ] && [ "$rolling" != "$candidate_sha" ]; then
+    echo "Rolling tag is outside the forward-only transaction states." >&2
+    return 1
+  fi
+
+  if [ -n "$prior_release_id" ]; then
+    prior_tag=$(release_tag_for_id "$prior_release_id") || return 1
+    if [ "$prior_tag" = "$RELEASE_TAG" ]; then
+      release_is_prior_coherent "$prior_release_id" "$RELEASE_TAG" false || return 1
+      delete_release_from_tag "$prior_release_id" "$RELEASE_TAG" || return 1
+    elif [ -n "$prior_tag" ]; then
+      echo "Recorded prior release changed to unowned tag $prior_tag." >&2
+      return 1
+    fi
+  fi
+  if [ "$rolling" != "$candidate_sha" ]; then
+    move_rolling_ref_via_api "$prior_sha" "$candidate_sha" || return 1
+  fi
+  candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
+  if [ "$candidate_tag" = "$stage_tag" ]; then
+    promote_stage_release "$candidate_release_id" "$candidate_sha" || return 1
+  else
+    release_is_coherent "$candidate_release_id" "$RELEASE_TAG" false || return 1
+  fi
+  delete_stage_ref_via_api "$candidate_sha"
+}
+
 recover_existing_transaction() {
+  local forward_status
   local stage_sha backup_sha rolling
   local stage_release_id backup_release_id stable_release_id candidate_release_id candidate_tag
   local prior_sha prior_release_id prior_tag stable_marked=0
@@ -753,6 +913,22 @@ recover_existing_transaction() {
   stage_release_id=$(release_id_for_tag "$stage_tag") || return 1
   backup_release_id=$(release_id_for_tag "$backup_tag") || return 1
   stable_release_id=$(release_id_for_tag "$RELEASE_TAG") || return 1
+
+  if [ -n "$stage_release_id" ]; then
+    if recover_forward_only_candidate "$stage_release_id"; then
+      return 0
+    else
+      forward_status=$?
+      [ "$forward_status" -eq 2 ] || return "$forward_status"
+    fi
+  elif [ -n "$stage_sha" ] && [ -n "$stable_release_id" ]; then
+    if recover_forward_only_candidate "$stable_release_id"; then
+      return 0
+    else
+      forward_status=$?
+      [ "$forward_status" -eq 2 ] || return "$forward_status"
+    fi
+  fi
 
   if [ -z "$stage_sha" ] && [ -z "$stage_release_id" ]; then
     if [ -z "$backup_sha" ] && [ -z "$backup_release_id" ]; then
@@ -950,6 +1126,98 @@ if [ -n "$old_tag_sha" ] && [ "$old_tag_sha" != "$GITHUB_SHA" ]; then
   fi
 fi
 
+upload_paths=()
+for name in "${expected_asset_names[@]}"; do
+  upload_paths+=("$dist_dir/$name")
+done
+prior_sha_marker=${old_tag_sha:-none}
+prior_release_id_marker=${old_release_id:-none}
+
+workflow_change_transaction=0
+if [ -n "$old_tag_sha" ] && [ "$old_tag_sha" != "$GITHUB_SHA" ]; then
+  if "$git_bin" diff --quiet "$old_tag_sha" "$GITHUB_SHA" -- .github/workflows; then
+    :
+  else
+    diff_status=$?
+    if [ "$diff_status" -eq 1 ]; then
+      workflow_change_transaction=1
+    else
+      echo "Could not compare workflow revisions before publication." >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [ "$workflow_change_transaction" -eq 1 ]; then
+  transaction_started=1
+  transaction_body=$(build_transaction_body "$GITHUB_SHA" "$prior_sha_marker" pending "$prior_release_id_marker" forward-only staged)
+  create_args=(
+    release create "$stage_tag"
+    "${upload_paths[@]}"
+    --target "$GITHUB_SHA"
+    --draft
+    --title "$RELEASE_TITLE"
+    --notes "$transaction_body"
+  )
+  if [ "$RELEASE_PRERELEASE" = true ]; then
+    create_args+=(--prerelease)
+  fi
+  "$gh_bin" "${create_args[@]}"
+  stage_sha=$(remote_sha "refs/tags/$stage_tag")
+  if [ "$stage_sha" != "$GITHUB_SHA" ]; then
+    echo "GitHub did not create the forward-only staging tag at the candidate SHA." >&2
+    exit 1
+  fi
+  stage_release_id=$(release_id_for_tag "$stage_tag")
+  if [ -z "$stage_release_id" ] || ! release_is_coherent "$stage_release_id" "$stage_tag" true; then
+    echo "Forward-only staged release could not be resolved with the exact expected assets." >&2
+    exit 1
+  fi
+  finalize_transaction_marker "$stage_release_id" "$GITHUB_SHA" || {
+    echo "Forward-only release ownership marker could not be finalized." >&2
+    exit 1
+  }
+
+  source_sha=$(remote_sha "refs/heads/$GITHUB_REF_NAME")
+  if [ "$source_sha" != "$GITHUB_SHA" ]; then
+    echo "Refusing stale $RELEASE_CHANNEL promotion: $GITHUB_REF_NAME is at $source_sha, not $GITHUB_SHA." >&2
+    exit 1
+  fi
+  mark_forward_only_phase "$stage_release_id" "$GITHUB_SHA" || {
+    echo "Forward-only publication boundary could not be recorded." >&2
+    exit 1
+  }
+  if [ -n "$old_release_id" ]; then
+    release_is_prior_coherent "$old_release_id" "$RELEASE_TAG" false || exit 1
+    delete_release_from_tag "$old_release_id" "$RELEASE_TAG" || exit 1
+  fi
+  move_rolling_ref_via_api "$old_tag_sha" "$GITHUB_SHA" || exit 1
+  promote_stage_release "$stage_release_id" "$GITHUB_SHA" || {
+    echo "Forward-only staged release did not reach a coherent published state." >&2
+    exit 1
+  }
+
+  source_sha=$(remote_sha "refs/heads/$GITHUB_REF_NAME")
+  published_sha=$(remote_sha "refs/tags/$RELEASE_TAG")
+  if [ "$published_sha" != "$GITHUB_SHA" ] || ! release_is_coherent "$stage_release_id" "$RELEASE_TAG" false; then
+    echo "Forward-only release state changed during final verification." >&2
+    exit 1
+  fi
+  load_transaction_marker "$stage_release_id" "$GITHUB_SHA" || {
+    echo "Forward-only release ownership marker changed during final verification." >&2
+    exit 1
+  }
+  committed=1
+  delete_stage_ref_via_api "$GITHUB_SHA" ||
+    echo "Warning: retained the forward-only staging ref for cleanup by the next run." >&2
+  if [ "$source_sha" != "$GITHUB_SHA" ]; then
+    echo "Source branch advanced after the forward-only publication boundary; the candidate remains coherent." >&2
+    exit 1
+  fi
+  echo "Published coherent $RELEASE_CHANNEL release $RELEASE_TAG at $GITHUB_SHA."
+  exit 0
+fi
+
 transaction_started=1
 if [ -n "$old_tag_sha" ]; then
   "$git_bin" push --force-with-lease="refs/tags/$backup_tag:" "$origin" "$old_tag_sha:refs/tags/$backup_tag" >/dev/null
@@ -960,12 +1228,6 @@ if [ -n "$old_tag_sha" ]; then
   fi
 fi
 
-upload_paths=()
-for name in "${expected_asset_names[@]}"; do
-  upload_paths+=("$dist_dir/$name")
-done
-prior_sha_marker=${old_tag_sha:-none}
-prior_release_id_marker=${old_release_id:-none}
 transaction_body=$(build_transaction_body "$GITHUB_SHA" "$prior_sha_marker" pending "$prior_release_id_marker")
 create_args=(
   release create "$stage_tag"

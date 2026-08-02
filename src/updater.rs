@@ -417,6 +417,7 @@ fn install_available_update(
     reject_link(&lock_path, false)?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
