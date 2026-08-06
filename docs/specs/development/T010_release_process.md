@@ -528,16 +528,16 @@ child launched through the host observes an interactive standard error handle be
 release qualification relies on it.
 
 Hosted Windows Server 2025 also duplicates the Actions runner's redirected standard
-handles into a process attached directly to ConPTY. The repository-owned terminal root
-must therefore open its attached `CONIN$` / `CONOUT$` devices and launch the requested
-console child only after installing those handles. This repair stays inside the
-separately killable ConPTY process tree and must preserve the same output, exit-code,
-timeout, and descendant-cleanup contracts.
-
-Hosted validation of the initial repair showed that implicit same-console duplication
-still retained redirected standard handles. The terminal root must instead make its
-opened console devices inheritable and pass only those devices explicitly through a
-restricted process handle list when it creates the requested child.
+handles into a process attached directly to ConPTY when its startup handles remain
+null. Attempts to repair those handles through an intermediate terminal root retained
+the redirected error handle both with implicit console duplication and with an explicit
+restricted handle list. The host must instead launch the requested process directly
+with `STARTF_USESTDHANDLES`, all three standard-handle fields set to
+`INVALID_HANDLE_VALUE`, handle inheritance disabled, and the pseudoconsole process
+attribute present. This sentinel contract prevents redirected parent pipes from being
+copied while allowing ConPTY to install the requested process's console handles. The
+direct launch stays inside the separately killable ConPTY process tree and must preserve
+the same output, exit-code, timeout, and descendant-cleanup contracts.
 
 ### Acceptance Criteria And Gates
 
