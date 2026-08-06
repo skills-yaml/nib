@@ -58,22 +58,18 @@ try {
     $bootstrapDigest = (Get-FileHash -LiteralPath $nibPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
     Remove-Item Env:NIB_NO_UPDATE_CHECK
-    $winptyCommand = Get-Command winpty.exe -ErrorAction SilentlyContinue
-    if ($null -ne $winptyCommand) {
-        $winptyPath = $winptyCommand.Source
-    } else {
-        $winptyPath = Join-Path $env:ProgramFiles "Git\usr\bin\winpty.exe"
-    }
-    if (-not (Test-Path -LiteralPath $winptyPath -PathType Leaf)) {
-        throw "winpty.exe is required to prove the interactive Windows notice"
-    }
+    . (Join-Path $PSScriptRoot "invoke-windows-pseudoterminal.ps1")
 
     $candidateShort = $CandidateCommit.Substring(0, 7)
     $noticeSeen = $false
     $noticeOutput = ""
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $noticeOutput = (& $winptyPath $nibPath version 2>&1 | Out-String)
-        if ($LASTEXITCODE -eq 0 -and
+        $noticeResult = Invoke-WindowsPseudoTerminal `
+            -Executable $nibPath `
+            -Arguments @("version") `
+            -TimeoutMilliseconds 60000
+        $noticeOutput = $noticeResult.Output
+        if ($noticeResult.ExitCode -eq 0 -and
             $noticeOutput.Contains('[nib] Channel update available:') -and
             $noticeOutput.Contains($candidateShort)) {
             $noticeSeen = $true

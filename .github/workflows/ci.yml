@@ -86,6 +86,9 @@ jobs:
       - name: Run tests
         run: task test
 
+      - name: Smoke headless Windows pseudoterminal
+        run: task test:windows-pseudoterminal
+
       - name: Build release binary
         run: task build
 

@@ -147,6 +147,18 @@ the complete qualification succeeds may the exact held production deployment be
 approved. The qualification workflow cannot mutate Releases or refs and does not weaken
 the release workflow's exclusive-writer contract.
 
+The Windows qualification creates its terminal with the operating system's ConPTY API
+through the repository-owned `scripts/windows-pseudoterminal.cs` host. Unlike the Git
+for Windows `winpty.exe` adapter, this host does not require the Actions PowerShell
+process to already have terminal handles. Normal hosted Windows CI first launches a
+PowerShell probe through the same host and requires the child to observe interactive
+standard error, captured output, and its exact nonzero exit status. Every ConPTY call
+runs inside a separately supervised PowerShell process: synchronous output is drained
+on its own thread, shutdown has an internal deadline, and the supervisor kills the
+complete host process tree if that deadline is exceeded. The same CI smoke test forces
+a timeout with a lingering console descendant and requires bounded cleanup with no
+surviving child.
+
 The publisher creates its reserved staging Git ref explicitly at the candidate SHA
 before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to
 materialize that ref. If execution stops after ref creation but before the draft exists,

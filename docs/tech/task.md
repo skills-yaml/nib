@@ -23,6 +23,8 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   a supplied development bootstrap artifact and prove notice, replacement, and no-op
 - `task qualify:release-update:windows` — run the equivalent qualification against a
   supplied development bootstrap artifact on a native Windows release runner
+- `task test:windows-pseudoterminal` — prove the repository-owned ConPTY host creates
+  an interactive child terminal and preserves captured output and exit status
 - `task test:installers` — run installer and release-transaction integration tests
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold
