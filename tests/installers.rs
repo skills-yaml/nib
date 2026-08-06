@@ -120,6 +120,13 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(
         workflow.contains("CANDIDATE_VERSION=\"${{ needs.prepare.outputs.candidate_version }}\"")
     );
+    assert!(workflow.contains(
+        "      - name: Exercise notification and replacement (Unix)\n        if: runner.os != 'Windows'\n        shell: bash\n"
+    ));
+    assert!(workflow.contains(
+        "      - name: Exercise notification and replacement (Windows)\n        if: runner.os == 'Windows'\n        shell: pwsh\n"
+    ));
+    assert!(!workflow.contains("shell: ${{ runner.os"));
     assert!(workflow.contains("  verify:\n    name: Confirm production remains held\n"));
     assert!(release_workflow
         .contains("    paths-ignore:\n      - 'docs/**'\n      - 'agents/memory/**'\n"));

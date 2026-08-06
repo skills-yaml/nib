@@ -156,8 +156,19 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.bootstrap_run_id }}
 
-      - name: Exercise notification and replacement
-        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+      - name: Exercise notification and replacement (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          task ${{ matrix.task }}
+          BOOTSTRAP_ARCHIVE="bootstrap/${{ matrix.asset }}"
+          BOOTSTRAP_COMMIT="${{ inputs.bootstrap_commit }}"
+          CANDIDATE_COMMIT="${{ github.sha }}"
+          CANDIDATE_VERSION="${{ needs.prepare.outputs.candidate_version }}"
+
+      - name: Exercise notification and replacement (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: >-
           task ${{ matrix.task }}
           BOOTSTRAP_ARCHIVE="bootstrap/${{ matrix.asset }}"
