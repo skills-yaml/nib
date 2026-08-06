@@ -25,6 +25,7 @@ namespace Nib.ReleaseQualification
     {
         private const uint ExtendedStartupInfoPresent = 0x00080000;
         private const long ProcThreadAttributePseudoConsole = 0x00020016;
+        private const int StartfUseStdHandles = 0x00000100;
         private const uint WaitObject0 = 0;
         private const uint WaitTimeout = 258;
 
@@ -224,6 +225,9 @@ namespace Nib.ReleaseQualification
 
                 StartupInfoEx startupInfo = new StartupInfoEx();
                 startupInfo.StartupInfo.cb = Marshal.SizeOf(typeof(StartupInfoEx));
+                // Explicit null handles prevent CreateProcessW from duplicating the
+                // redirected parent's pipes before ConPTY installs console handles.
+                startupInfo.StartupInfo.dwFlags = StartfUseStdHandles;
                 startupInfo.lpAttributeList = attributeList;
                 ProcessInformation processInformation;
                 StringBuilder commandLine = new StringBuilder(BuildCommandLine(application, arguments));

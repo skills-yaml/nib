@@ -190,6 +190,8 @@ fn release_update_qualification_is_read_only_and_native() {
     ));
     assert!(windows_pty.contains("CreatePseudoConsole"));
     assert!(windows_pty.contains("ProcThreadAttributePseudoConsole"));
+    assert!(windows_pty.contains("StartfUseStdHandles"));
+    assert!(windows_pty.contains("startupInfo.StartupInfo.dwFlags = StartfUseStdHandles"));
     assert!(windows_pty.contains("SafeFileHandle outputHandle"));
     assert!(windows_pty.contains("ClosePseudoConsoleBounded"));
     assert!(windows_pty.contains("Preserve the live child hierarchy"));
