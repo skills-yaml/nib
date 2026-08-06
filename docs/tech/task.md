@@ -19,6 +19,10 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task test:durable` — run detached background-task and scheduled-worker process tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
 - `task test:updater` — run self-update and update-notification unit tests
+- `task qualify:release-update:unix` — on a native Linux/macOS release runner, install
+  a supplied development bootstrap artifact and prove notice, replacement, and no-op
+- `task qualify:release-update:windows` — run the equivalent qualification against a
+  supplied development bootstrap artifact on a native Windows release runner
 - `task test:installers` — run installer and release-transaction integration tests
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold

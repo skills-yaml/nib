@@ -462,3 +462,64 @@ versioned releases require separate follow-up decisions if they enter scope.
 - Native macOS and Windows executable replacement remains unexecuted.
 - A manifest-producing development release and a second release that exercises actual
   notification and self-replacement have not run. The spec remains in Development.
+
+## Hosted Consecutive-Development Qualification (2026-08-06)
+
+### Scope And Design
+
+Add a manually dispatched, read-only GitHub Actions qualification workflow for the
+rollout steps above. The workflow accepts the successful bootstrap and candidate
+Release Artifacts run IDs, the bootstrap commit, and the held production run ID. It
+downloads the bootstrap run's four native archives and runs one job on each matching
+Linux, macOS Intel, macOS Apple Silicon, and Windows runner. Each job installs the
+bootstrap binary into an isolated temporary directory, requires an interactive startup
+notice for the already-published second development commit, runs `nib update`, verifies
+that the executable at the same path now reports the exact second commit and manifest
+version, and proves a subsequent update is a byte-preserving current-build no-op.
+
+The qualification is accepted only when dispatched from the `development` branch. It
+receives `actions: read` and `contents: read`, never release-write permission, and
+validates both exact 40-hex commits before running. The rolling release workflow remains
+the sole publisher and exclusive writer.
+
+GitHub requires a manually dispatched workflow to exist on the default branch. The
+candidate therefore lands on `main` behind a required `release-prod` reviewer, without
+approving its production publication, and the exact same SHA is published from
+`development`. Qualification requires that exact main/development identity, a still-held
+production run, successful exact bootstrap and candidate runs from the release workflow,
+bootstrap ancestry, chronological and run-ID order, and no intervening successful
+development publication. After the four native jobs, a final read-only job requires the
+same production deployment to remain pending on `release-prod` and proves that no
+production ref moved. Passing qualification authorizes approval only for that held
+production run and SHA.
+
+The rollout also requires draft publication to create the reserved staging Git ref at
+the exact candidate SHA before uploading assets and to create the draft with
+`--verify-tag`. This avoids GitHub's `untagged-*` draft placeholder path and keeps the
+rolling channel unchanged until the complete candidate has been validated.
+
+### Acceptance Criteria And Validation Gates
+
+- [ ] The first exact-revision development release succeeds and publishes the complete
+  manifest plus four archive/checksum pairs.
+- [ ] A distinct second exact-revision development release succeeds with the same
+  complete asset contract.
+- [ ] Native Linux, macOS Intel, macOS Apple Silicon, and Windows jobs each observe the
+  second-build startup notice from the first binary, replace that executable through
+  `nib update`, verify the second full commit identity, and prove a checksum-stable
+  already-current update.
+- [ ] The qualification workflow is manual-only, development-only, read-only, pinned to
+  immutable action revisions, and consumes artifacts only from the supplied successful
+  bootstrap run.
+- [ ] The candidate SHA exactly matches `main`, `development-latest`, the successful
+  candidate development run, and a still-unapproved `release-prod` run; the bootstrap
+  is its ancestor and no successful development publication occurred between the two.
+- [ ] Documentation-only and agent-memory-only reconciliation commits do not publish a
+  new binary after the exact qualified production revision.
+- [ ] `task installers:check`, `task test:installers`, `task test:updater`, `task check`,
+  and hosted CI pass on the exact second revision before production promotion.
+
+Affected areas are `.github/workflows/release.yml`,
+`.github/workflows/release-update-qualification.yml`,
+`scripts/qualify-release-update.sh`, `scripts/qualify-release-update.ps1`,
+`Taskfile.yml`, `tests/installers.rs`, `docs/tech/ci.md`, and `docs/tech/task.md`.

@@ -89,6 +89,87 @@ fn release_workflow_emits_portable_checksum_manifests() {
 }
 
 #[test]
+fn release_update_qualification_is_read_only_and_native() {
+    let workflow = read_repository_text(".github/workflows/release-update-qualification.yml");
+    let release_workflow = read_repository_text(".github/workflows/release.yml");
+    let taskfile = read_repository_text("Taskfile.yml");
+    let unix = read_repository_text("scripts/qualify-release-update.sh");
+    let windows = read_repository_text("scripts/qualify-release-update.ps1");
+
+    assert!(workflow.contains("  workflow_dispatch:\n"));
+    assert!(!workflow.contains("\n  push:\n"));
+    assert!(!workflow.contains("\n  pull_request:\n"));
+    assert!(workflow.contains("permissions:\n  actions: read\n  contents: read\n"));
+    assert!(!workflow.contains("contents: write"));
+    assert!(workflow.contains("test \"$GITHUB_REF\" = \"refs/heads/development\""));
+    assert!(workflow
+        .contains("test \"$(jq -r .path <<<\"$run\")\" = \".github/workflows/release.yml\""));
+    assert!(workflow.contains("test \"$(jq -r .workflow_id <<<\"$run\")\" = \"$workflow_id\""));
+    assert!(workflow
+        .contains("test \"$(jq -r .head_sha <<<\"$bootstrap_run\")\" = \"$BOOTSTRAP_COMMIT\""));
+    assert!(workflow.contains("test \"$(jq -r .conclusion <<<\"$candidate_run\")\" = \"success\""));
+    assert!(workflow.contains("test \"$(jq -r .status <<<\"$production_run\")\" != \"completed\""));
+    assert!(workflow.contains("select(.environment.name == \"release-prod\")"));
+    assert!(workflow.contains(
+        "test \"$(jq -r .merge_base_commit.sha <<<\"$comparison\")\" = \"$BOOTSTRAP_COMMIT\""
+    ));
+    assert!(workflow.contains("intervening=$(jq"));
+    assert!(workflow.contains("run-id: ${{ inputs.bootstrap_run_id }}"));
+    assert!(workflow.contains("candidate_run_id:"));
+    assert!(workflow.contains("production_run_id:"));
+    assert!(
+        workflow.contains("CANDIDATE_VERSION=\"${{ needs.prepare.outputs.candidate_version }}\"")
+    );
+    assert!(workflow.contains("  verify:\n    name: Confirm production remains held\n"));
+    assert!(release_workflow
+        .contains("    paths-ignore:\n      - 'docs/**'\n      - 'agents/memory/**'\n"));
+
+    for runner in [
+        "ubuntu-latest",
+        "macos-15-intel",
+        "macos-15",
+        "windows-2025",
+    ] {
+        assert!(workflow.contains(&format!("          - os: {runner}\n")));
+    }
+    for asset in [
+        "nib-linux-x86_64.tar.gz",
+        "nib-macos-aarch64.tar.gz",
+        "nib-macos-x86_64.tar.gz",
+        "nib-windows-x86_64.zip",
+    ] {
+        assert!(workflow.contains(&format!("            asset: {asset}\n")));
+    }
+
+    let action_refs: Vec<_> = workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("uses: "))
+        .map(|reference| reference.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(
+        action_refs,
+        vec![
+            "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+            "arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611",
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        ]
+    );
+
+    assert!(taskfile.contains("  qualify:release-update:unix:\n"));
+    assert!(taskfile.contains("  qualify:release-update:windows:\n"));
+    assert!(unix.contains("script -q"));
+    assert!(unix.contains("\"$nib_path\" update"));
+    assert!(unix.contains("expected_candidate_version=$4"));
+    assert!(unix.contains("candidate_identity=$(NIB_NO_UPDATE_CHECK=1"));
+    assert!(unix.contains("already-current update changed the executable"));
+    assert!(windows.contains("winpty.exe"));
+    assert!(windows.contains("ExpectedCandidateVersion"));
+    assert!(windows.contains("$candidateIdentity = (& $nibPath version"));
+    assert!(windows.contains("& $nibPath update"));
+    assert!(windows.contains("already-current update changed the executable"));
+}
+
+#[test]
 fn release_workflow_serializes_channels_and_rejects_stale_publication() {
     let workflow = read_repository_text(".github/workflows/release.yml");
     let transaction = read_repository_text("scripts/publish-release.sh");
@@ -131,9 +212,12 @@ fn release_workflow_serializes_channels_and_rejects_stale_publication() {
     let draft_upload = transaction
         .rfind("release create \"$stage_tag\"")
         .expect("all assets must upload to a draft staging release");
+    let stage_ref = transaction
+        .rfind(r#"create_stage_ref_via_api "$GITHUB_SHA""#)
+        .expect("the staging ref must be created explicitly before the draft release");
     let stage_target = transaction
         .rfind(r#"--target "$GITHUB_SHA""#)
-        .expect("the draft release must create the fixed staging tag at the candidate SHA");
+        .expect("the draft release must bind to the fixed staging tag at the candidate SHA");
     let backup_ref = transaction
         .find(r#"--force-with-lease="refs/tags/$backup_tag:""#)
         .expect("the prior release SHA must have an owned backup tag");
@@ -163,12 +247,15 @@ fn release_workflow_serializes_channels_and_rejects_stale_publication() {
     assert!(transaction.contains("recover_rollback"));
     assert!(transaction.contains("forward-only"));
     assert!(transaction.contains("move_rolling_ref_via_api"));
+    assert!(transaction.contains("--verify-tag"));
     assert!(transaction.contains(r#"stage_tag="nib-release-stage-$RELEASE_CHANNEL""#));
     assert!(transaction.contains(r#"backup_tag="nib-release-backup-$RELEASE_CHANNEL""#));
     assert!(transaction.contains(r#"--jq '.assets[].name'"#));
     assert!(transaction.contains(r#"prerelease=$(release_field "$release_id" prerelease)"#));
     assert!(draft_upload < stage_target);
     assert!(backup_ref < draft_upload);
+    assert!(backup_ref < stage_ref);
+    assert!(stage_ref < draft_upload);
     assert!(draft_upload < asset_validation);
     assert!(backup_ref < backup_release);
     assert!(asset_validation < backup_release);
@@ -276,6 +363,7 @@ struct ReleaseFaults {
     fail_first_atomic: bool,
     fail_old_restore: bool,
     kill_after_backup_ref: bool,
+    kill_after_stage_ref: bool,
     kill_before_backup_ref_delete: bool,
     kill_after_old_backup: bool,
     move_rolling_on_second_stage_lookup: bool,
@@ -459,24 +547,29 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
   prerelease=false
   body=
   target=
+  verify_tag=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --draft) draft=true ;;
       --prerelease) prerelease=true ;;
       --notes) shift; body=$1 ;;
       --target) shift; target=$1 ;;
+      --verify-tag) verify_tag=true ;;
       --title) shift ;;
   *.tar.gz|*.zip|*.sha256|*.json) assets+=("$(basename "$1")") ;;
     esac
     shift
   done
+  if [ "$verify_tag" = true ]; then
+    tag_sha=$("$REAL_GIT_BIN" --git-dir="$FAKE_REMOTE" rev-parse --verify "refs/tags/$tag")
+    [ -z "$target" ] || [ "$tag_sha" = "$target" ]
+  elif [ -n "$target" ]; then
+    "$REAL_GIT_BIN" --git-dir="$FAKE_REMOTE" update-ref "refs/tags/$tag" "$target"
+  fi
   printf '%s\n' "$tag" > "$releases/$id.tag"
   printf '%s\n' "$draft" > "$releases/$id.draft"
   printf '%s\n' "$prerelease" > "$releases/$id.prerelease"
   printf '%s\n' "$body" > "$releases/$id.body"
-  if [ -n "$target" ]; then
-    "$REAL_GIT_BIN" --git-dir="$FAKE_REMOTE" update-ref "refs/tags/$tag" "$target"
-  fi
   printf 'CREATE %s %s\n' "$id" "$tag" >> "$events"
   if [ "${FAKE_GH_FAIL_CREATE:-0}" = 1 ]; then
     printf '%s\n' "${assets[0]}" > "$releases/$id.assets"
@@ -565,6 +658,10 @@ if [[ "$endpoint" == */git/refs || "$endpoint" == */git/refs/tags/* ]]; then
     POST)
       printf 'REF CREATE %s %s\n' "$ref" "$sha" >> "$events"
       "$REAL_GIT_BIN" --git-dir="$FAKE_REMOTE" update-ref "$ref" "$sha"
+      if [ "${FAKE_KILL_AFTER_STAGE_REF:-0}" = 1 ] && [ "$ref" = refs/tags/nib-release-stage-prod ]; then
+        kill -KILL "$PPID"
+        exit 137
+      fi
       ;;
     PATCH)
       ref="refs/${endpoint#*/git/refs/}"
@@ -811,6 +908,14 @@ exit "$status"
             .env(
                 "FAKE_KILL_AFTER_BACKUP_REF",
                 if faults.kill_after_backup_ref {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_KILL_AFTER_STAGE_REF",
+                if faults.kill_after_stage_ref {
                     "1"
                 } else {
                     "0"
@@ -1491,6 +1596,100 @@ fn rerun_exact_lease_cleans_a_backup_only_crash_before_publishing() {
     assert!(harness
         .remote_ref("refs/tags/nib-release-backup-prod")
         .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rerun_exact_lease_cleans_a_stage_only_crash_before_publishing() {
+    let harness = ReleaseTransactionHarness::new();
+    let interrupted = harness.run(ReleaseFaults {
+        kill_after_stage_ref: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!interrupted.status.success());
+    assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+    assert_eq!(
+        harness.remote_ref("refs/tags/nib-release-backup-prod"),
+        harness.old_sha
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/nib-release-stage-prod"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("old"));
+    assert!(harness.release_id("nib-release-stage-prod").is_none());
+
+    harness.clear_fault_observations();
+    let rerun = harness.run(ReleaseFaults::default());
+    assert!(
+        rerun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+
+    let events = harness.events();
+    let cleanup = events
+        .iter()
+        .position(|event| event == "REF DELETE refs/tags/nib-release-stage-prod")
+        .expect("rerun must delete the exact unreleased staging ref");
+    let new_create = events
+        .iter()
+        .rposition(|event| event == "CREATE stage nib-release-stage-prod")
+        .expect("rerun must create a staged release after recovery");
+    assert!(cleanup < new_create, "{events:?}");
+
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-backup-prod")
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn stage_only_recovery_ignores_an_older_stable_transaction_marker_in_both_modes() {
+    for workflow_change in [false, true] {
+        let harness = ReleaseTransactionHarness::with_workflow_change(workflow_change);
+        harness.mark_old_release_as_completed_transaction();
+        let interrupted = harness.run(ReleaseFaults {
+            kill_after_stage_ref: true,
+            ..ReleaseFaults::default()
+        });
+
+        assert!(!interrupted.status.success());
+        assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+        assert_eq!(
+            harness.remote_ref("refs/tags/nib-release-stage-prod"),
+            harness.release_sha
+        );
+        assert!(harness.release_id("nib-release-stage-prod").is_none());
+
+        harness.clear_fault_observations();
+        let rerun = harness.run(ReleaseFaults::default());
+        assert!(
+            rerun.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rerun.stderr)
+        );
+        assert!(harness
+            .events()
+            .iter()
+            .any(|event| event == "REF DELETE refs/tags/nib-release-stage-prod"));
+        assert_eq!(
+            harness.remote_ref("refs/tags/prod-latest"),
+            harness.release_sha
+        );
+        assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+        harness.assert_complete_candidate_release("prod-latest", "false");
+    }
 }
 
 #[cfg(unix)]

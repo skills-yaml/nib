@@ -127,3 +127,32 @@ otherwise downloads, verifies, smokes, and safely replaces the current executabl
 Local/source builds remain installer-managed. Eligible user-facing commands perform a
 bounded, read-only startup check; `NIB_NO_UPDATE_CHECK=1` disables it, and protocol or
 worker commands never emit update notices.
+
+Before the first updater-capable production rollout, configure `release-prod` with a
+required reviewer and leave the candidate's exact production publication unapproved.
+Run two distinct successful development publications, with the second using that same
+candidate SHA already present on `main`. Then manually dispatch
+`.github/workflows/release-update-qualification.yml` from `development` with the
+bootstrap and candidate Release Artifacts run IDs, bootstrap commit, and held production
+run ID. The workflow verifies exact workflow provenance, ancestry, chronological
+ordering, no intervening successful development publication, the current development
+manifest, and the still-held same-SHA production run. Its read-only four-runner matrix
+downloads the first run's native archives and requires each bootstrap binary to emit the
+second commit's interactive notice, replace itself from the public
+`development-latest` release, report the second exact identity, and leave its bytes
+unchanged on a subsequent already-current update. A final job revalidates that the same
+production deployment remains pending on `release-prod`, `main` and
+`development-latest` still name the candidate, and `prod-latest` does not. Only after
+the complete qualification succeeds may the exact held production deployment be
+approved. The qualification workflow cannot mutate Releases or refs and does not weaken
+the release workflow's exclusive-writer contract.
+
+The publisher creates its reserved staging Git ref explicitly at the candidate SHA
+before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to
+materialize that ref. If execution stops after ref creation but before the draft exists,
+only an exact-SHA rerun may clean that unreleased stage (and its matching backup ref)
+after revalidating the coherent prior rolling release.
+
+Pushes that change only `docs/**` and/or `agents/memory/**` do not start Release
+Artifacts. This lets exact hosted rollout evidence be reconciled after publication
+without replacing an already-qualified binary with a documentation-only commit.
