@@ -182,7 +182,10 @@ remote_sha() {
 release_id_for_tag() {
   local tag=$1
   local matches first remainder
-  matches=$("$gh_bin" api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .id")
+  matches=$("$gh_bin" api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .id") || {
+    echo "Failed to list releases for transaction tag $tag." >&2
+    return 1
+  }
   first=${matches%%$'\n'*}
   if [ "$first" = "$matches" ]; then
     remainder=
@@ -196,10 +199,48 @@ release_id_for_tag() {
   printf '%s' "$first"
 }
 
+release_id_for_untagged_transaction() {
+  local matches first remainder
+  matches=$("$gh_bin" api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+    --jq ".[] | select(.draft == true and (.tag_name | startswith(\"untagged-\")) and ((.body // \"\") | contains(\"\\nchannel=$RELEASE_CHANNEL\\n\"))) | .id") || {
+    echo "Failed to list untagged draft transactions for $RELEASE_CHANNEL." >&2
+    return 1
+  }
+  first=${matches%%$'\n'*}
+  if [ "$first" = "$matches" ]; then
+    remainder=
+  else
+    remainder=${matches#*$'\n'}
+  fi
+  if [ -n "$remainder" ]; then
+    echo "Multiple untagged draft transactions exist for $RELEASE_CHANNEL." >&2
+    return 1
+  fi
+  if [ -n "$first" ] && [[ ! "$first" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+    echo "Untagged draft transaction has an invalid release ID." >&2
+    return 1
+  fi
+  printf '%s' "$first"
+}
+
+release_id_for_staged_transaction() {
+  local tagged_id untagged_id
+  tagged_id=$(release_id_for_tag "$stage_tag") || return 1
+  untagged_id=$(release_id_for_untagged_transaction) || return 1
+  if [ -n "$tagged_id" ] && [ -n "$untagged_id" ] && [ "$tagged_id" != "$untagged_id" ]; then
+    echo "Both tagged and untagged draft transactions exist for $RELEASE_CHANNEL." >&2
+    return 1
+  fi
+  printf '%s' "${tagged_id:-$untagged_id}"
+}
+
 release_tag_for_id() {
   local release_id=$1
   local matches first remainder
-  matches=$("$gh_bin" api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select((.id | tostring) == \"$release_id\") | .tag_name")
+  matches=$("$gh_bin" api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select((.id | tostring) == \"$release_id\") | .tag_name") || {
+    echo "Failed to find release ID $release_id." >&2
+    return 1
+  }
   first=${matches%%$'\n'*}
   if [ "$first" = "$matches" ]; then
     remainder=
@@ -307,6 +348,65 @@ release_is_prior_coherent() {
   release_has_expected_state "$release_id" "$expected_tag" "$expected_draft" && release_has_supported_prior_assets "$release_id"
 }
 
+is_staged_release_tag() {
+  local tag=$1
+  [ "$tag" = "$stage_tag" ] || [[ "$tag" =~ ^untagged-[0-9a-f]{20}$ ]]
+}
+
+release_is_owned_staged_transaction() {
+  local release_id=$1
+  local candidate_sha=$2
+  local tag draft prerelease target
+  tag=$(release_field "$release_id" tag_name) || return 1
+  draft=$(release_field "$release_id" draft) || return 1
+  prerelease=$(release_field "$release_id" prerelease) || return 1
+  target=$(release_field "$release_id" target_commitish) || return 1
+  if ! is_staged_release_tag "$tag" || [ "$draft" != true ] ||
+    [ "$prerelease" != "$RELEASE_PRERELEASE" ] || [ "$target" != "$candidate_sha" ]; then
+    echo "Release $release_id is not the exact private staged transaction." >&2
+    return 1
+  fi
+  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  [ "$marker_staged_release_id" = pending ] || [ "$marker_staged_release_id" = "$release_id" ]
+}
+
+release_is_staged_transaction() {
+  local release_id=$1
+  local candidate_sha=$2
+  release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
+  release_has_expected_assets "$release_id"
+}
+
+patch_owned_staged_release() {
+  local release_id=$1
+  local candidate_sha=$2
+  shift 2
+  release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
+  patch_release "$release_id" "$@"
+}
+
+patch_staged_release() {
+  local release_id=$1
+  local candidate_sha=$2
+  shift 2
+  release_is_staged_transaction "$release_id" "$candidate_sha" || return 1
+  patch_release "$release_id" "$@"
+}
+
+delete_staged_release() {
+  local release_id=$1
+  local candidate_sha=$2
+  local remaining
+  release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
+  "$gh_bin" api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id" >/dev/null || true
+  remaining=$(release_tag_for_id "$release_id") || return 1
+  if [ -z "$remaining" ]; then
+    return 0
+  fi
+  echo "Failed to delete staged transaction release $release_id at $remaining." >&2
+  return 1
+}
+
 patch_release_from_tag() {
   local release_id=$1
   local expected_tag=$2
@@ -319,7 +419,7 @@ finalize_transaction_marker() {
   local release_id=$1
   local candidate_sha=$2
   local finalized_body
-  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
   if [ "$marker_staged_release_id" = "$release_id" ]; then
     return 0
   fi
@@ -327,8 +427,8 @@ finalize_transaction_marker() {
     return 1
   fi
   finalized_body=${marker_body/staged_release_id=pending/staged_release_id=$release_id}
-  patch_release_from_tag "$release_id" "$stage_tag" -f body="$finalized_body" || true
-  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  patch_owned_staged_release "$release_id" "$candidate_sha" -f body="$finalized_body" || true
+  release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
   [ "$marker_staged_release_id" = "$release_id" ]
 }
 
@@ -544,12 +644,11 @@ generate_release_manifest() {
 promote_stage_release() {
   local release_id=$1
   local candidate_sha=$2
-  release_has_expected_assets "$release_id" || return 1
-  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  release_is_staged_transaction "$release_id" "$candidate_sha" || return 1
   if [ "$marker_staged_release_id" != "$release_id" ]; then
     return 1
   fi
-  patch_release_from_tag "$release_id" "$stage_tag" -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TITLE" -f body="$marker_body" -F draft=false -F prerelease="$RELEASE_PRERELEASE" -f target_commitish="$candidate_sha" || true
+  patch_staged_release "$release_id" "$candidate_sha" -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TITLE" -f body="$marker_body" -F draft=false -F prerelease="$RELEASE_PRERELEASE" -f target_commitish="$candidate_sha" || true
   release_is_coherent "$release_id" "$RELEASE_TAG" false || return 1
   load_transaction_marker "$release_id" "$candidate_sha"
 }
@@ -559,8 +658,7 @@ detach_promoted_release() {
   local candidate_sha=$2
   load_transaction_marker "$release_id" "$candidate_sha" || return 1
   patch_release_from_tag "$release_id" "$RELEASE_TAG" -f tag_name="$stage_tag" -F draft=true || true
-  release_is_coherent "$release_id" "$stage_tag" true || return 1
-  load_transaction_marker "$release_id" "$candidate_sha"
+  release_is_staged_transaction "$release_id" "$candidate_sha"
 }
 
 backup_stable_release() {
@@ -607,6 +705,22 @@ move_rolling_ref() {
   if [ "$current" != "$desired" ]; then
     echo "Rolling tag did not reach the transaction's expected state." >&2
     return 1
+  fi
+}
+
+move_rolling_ref_to_candidate() {
+  local expected=$1
+  local candidate_sha=$2
+  local stage_ref
+  stage_ref=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ -n "$stage_ref" ]; then
+    if [ "$stage_ref" != "$candidate_sha" ]; then
+      echo "Staging tag changed before rolling-tag recovery." >&2
+      return 1
+    fi
+    move_rolling_ref "$expected" "$candidate_sha" "refs/tags/$stage_tag"
+  else
+    move_rolling_ref_via_api "$expected" "$candidate_sha"
   fi
 }
 
@@ -694,8 +808,7 @@ cleanup_rollback_state() {
     echo "Rollback unexpectedly left a stable release." >&2
     return 1
   fi
-  release_has_expected_state "$candidate_release_id" "$stage_tag" true || return 1
-  load_transaction_marker "$candidate_release_id" "$candidate_sha" || return 1
+  release_is_owned_staged_transaction "$candidate_release_id" "$candidate_sha" || return 1
   if [ "$marker_staged_release_id" != "$candidate_release_id" ]; then
     return 1
   fi
@@ -721,7 +834,7 @@ cleanup_rollback_state() {
   if [ -n "$backup_ref" ]; then
     delete_backup_ref "$prior_sha" || return 1
   fi
-  delete_release_from_tag "$candidate_release_id" "$stage_tag" || return 1
+  delete_staged_release "$candidate_release_id" "$candidate_sha" || return 1
 }
 
 recover_forward() {
@@ -763,11 +876,11 @@ recover_forward() {
       echo "Cannot move an unowned rolling tag during forward recovery." >&2
       return 1
     fi
-    move_rolling_ref "$prior_sha" "$candidate_sha" "refs/tags/$stage_tag" || return 1
+    move_rolling_ref_to_candidate "$prior_sha" "$candidate_sha" || return 1
   fi
 
   candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
-  if [ "$candidate_tag" = "$stage_tag" ]; then
+  if is_staged_release_tag "$candidate_tag"; then
     promote_stage_release "$candidate_release_id" "$candidate_sha" || return 1
   elif [ "$candidate_tag" = "$RELEASE_TAG" ]; then
     release_is_coherent "$candidate_release_id" "$RELEASE_TAG" false || return 1
@@ -788,7 +901,7 @@ recover_rollback() {
   candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
   if [ "$candidate_tag" = "$RELEASE_TAG" ]; then
     detach_promoted_release "$candidate_release_id" "$candidate_sha" || return 1
-  elif [ "$candidate_tag" != "$stage_tag" ]; then
+  elif ! is_staged_release_tag "$candidate_tag"; then
     echo "Recorded staged release changed to $candidate_tag; refusing rollback." >&2
     return 1
   fi
@@ -811,7 +924,7 @@ recover_rollback() {
     if [ "$prior_tag" = "$backup_tag" ]; then
       if ! restore_backup_release "$prior_release_id"; then
         echo "Prior release restoration failed; attempting coherent forward repair." >&2
-        move_rolling_ref "$prior_sha" "$candidate_sha" "refs/tags/$stage_tag" || return 1
+        move_rolling_ref_to_candidate "$prior_sha" "$candidate_sha" || return 1
         recover_forward "$candidate_sha" "$prior_sha" "$candidate_release_id" "$prior_release_id"
         return
       fi
@@ -835,8 +948,8 @@ mark_forward_only_phase() {
     return 0
   fi
   forward_body=${marker_body/transaction_phase=staged/transaction_phase=forward}
-  patch_release_from_tag "$release_id" "$stage_tag" -f body="$forward_body" || true
-  load_transaction_marker "$release_id" "$candidate_sha" || return 1
+  patch_staged_release "$release_id" "$candidate_sha" -f body="$forward_body" || true
+  release_is_staged_transaction "$release_id" "$candidate_sha" || return 1
   [ "$marker_transaction_mode" = forward-only ] && [ "$marker_transaction_phase" = forward ]
 }
 
@@ -850,7 +963,7 @@ recover_forward_only_candidate() {
   candidate_sha=$marker_candidate_sha
   candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
   if [ "$marker_staged_release_id" = pending ]; then
-    if [ "$candidate_tag" != "$stage_tag" ]; then
+    if ! is_staged_release_tag "$candidate_tag"; then
       echo "Pending forward-only marker crossed the publication boundary." >&2
       return 1
     fi
@@ -869,7 +982,7 @@ recover_forward_only_candidate() {
   fi
 
   if [ "$marker_transaction_phase" = staged ]; then
-    if [ "$candidate_tag" != "$stage_tag" ] || [ "$rolling" != "$prior_sha" ]; then
+    if ! is_staged_release_tag "$candidate_tag" || [ "$rolling" != "$prior_sha" ]; then
       echo "Staged forward-only transaction crossed an unrecorded boundary." >&2
       return 1
     fi
@@ -882,17 +995,21 @@ recover_forward_only_candidate() {
       release_is_prior_coherent "$prior_release_id" "$RELEASE_TAG" false || return 1
     fi
     delete_stage_ref_via_api "$candidate_sha" || return 1
-    delete_release_from_tag "$candidate_release_id" "$stage_tag"
+    delete_staged_release "$candidate_release_id" "$candidate_sha"
     return
   fi
 
-  if [ "$candidate_tag" != "$stage_tag" ] && [ "$candidate_tag" != "$RELEASE_TAG" ]; then
+  if ! is_staged_release_tag "$candidate_tag" && [ "$candidate_tag" != "$RELEASE_TAG" ]; then
     echo "Forward-only release changed to unowned tag $candidate_tag." >&2
     return 1
   fi
   expected_draft=false
-  [ "$candidate_tag" != "$stage_tag" ] || expected_draft=true
-  release_is_coherent "$candidate_release_id" "$candidate_tag" "$expected_draft" || return 1
+  if is_staged_release_tag "$candidate_tag"; then
+    expected_draft=true
+    release_is_staged_transaction "$candidate_release_id" "$candidate_sha" || return 1
+  else
+    release_is_coherent "$candidate_release_id" "$candidate_tag" "$expected_draft" || return 1
+  fi
   if [ "$rolling" != "$prior_sha" ] && [ "$rolling" != "$candidate_sha" ]; then
     echo "Rolling tag is outside the forward-only transaction states." >&2
     return 1
@@ -912,7 +1029,7 @@ recover_forward_only_candidate() {
     move_rolling_ref_via_api "$prior_sha" "$candidate_sha" || return 1
   fi
   candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
-  if [ "$candidate_tag" = "$stage_tag" ]; then
+  if is_staged_release_tag "$candidate_tag"; then
     promote_stage_release "$candidate_release_id" "$candidate_sha" || return 1
   else
     release_is_coherent "$candidate_release_id" "$RELEASE_TAG" false || return 1
@@ -959,10 +1076,10 @@ recover_existing_transaction() {
   local forward_status
   local stage_sha backup_sha rolling
   local stage_release_id backup_release_id stable_release_id candidate_release_id candidate_tag
-  local prior_sha prior_release_id prior_tag stable_marked=0
+  local prior_sha prior_release_id prior_tag stable_marked=0 stage_ref_missing=0
   stage_sha=$(remote_sha "refs/tags/$stage_tag") || return 1
   backup_sha=$(remote_sha "refs/tags/$backup_tag") || return 1
-  stage_release_id=$(release_id_for_tag "$stage_tag") || return 1
+  stage_release_id=$(release_id_for_staged_transaction) || return 1
   backup_release_id=$(release_id_for_tag "$backup_tag") || return 1
   stable_release_id=$(release_id_for_tag "$RELEASE_TAG") || return 1
 
@@ -1052,17 +1169,15 @@ recover_existing_transaction() {
   fi
 
   if [ -z "$stage_sha" ] && [ -n "$stage_release_id" ]; then
+    stage_ref_missing=1
     load_transaction_marker "$stage_release_id" "" || return 1
-    if [ "$marker_staged_release_id" != "$stage_release_id" ]; then
-      echo "Unfinalized staged marker lost its staging ref; refusing cleanup." >&2
+    if [ "$marker_staged_release_id" = pending ]; then
+      finalize_transaction_marker "$stage_release_id" "$marker_candidate_sha" || return 1
+    elif [ "$marker_staged_release_id" != "$stage_release_id" ]; then
+      echo "Staged marker lost its staging ref with an invalid release identity." >&2
       return 1
     fi
-    prior_sha=$marker_prior_sha
-    [ "$prior_sha" = none ] && prior_sha=
-    prior_release_id=$marker_prior_release_id
-    [ "$prior_release_id" = none ] && prior_release_id=
-    cleanup_rollback_state "$marker_candidate_sha" "$prior_sha" "$stage_release_id" "$prior_release_id"
-    return
+    stage_sha=$marker_candidate_sha
   fi
 
   if [ -z "$stage_sha" ]; then
@@ -1092,7 +1207,7 @@ recover_existing_transaction() {
 
   candidate_tag=$(release_tag_for_id "$candidate_release_id") || return 1
   if [ "$marker_staged_release_id" = pending ]; then
-    if [ "$candidate_tag" != "$stage_tag" ]; then
+    if ! is_staged_release_tag "$candidate_tag"; then
       echo "Pending transaction marker crossed a public boundary; refusing recovery." >&2
       return 1
     fi
@@ -1101,8 +1216,8 @@ recover_existing_transaction() {
   if [ "$marker_staged_release_id" != "$candidate_release_id" ]; then
     return 1
   fi
-  if [ "$candidate_tag" = "$stage_tag" ]; then
-    release_has_expected_state "$candidate_release_id" "$stage_tag" true || return 1
+  if is_staged_release_tag "$candidate_tag"; then
+    release_is_owned_staged_transaction "$candidate_release_id" "$stage_sha" || return 1
   elif [ "$candidate_tag" = "$RELEASE_TAG" ]; then
     release_is_coherent "$candidate_release_id" "$RELEASE_TAG" false || return 1
   else
@@ -1131,7 +1246,11 @@ recover_existing_transaction() {
     return 1
   fi
   if [ "$backup_sha" != "$prior_sha" ]; then
-    if [ "$rolling" != "$stage_sha" ] || [ -n "${prior_tag:-}" ]; then
+    if [ "$stage_ref_missing" -eq 1 ] && [ -z "$backup_sha" ] &&
+      [ "$rolling" = "$prior_sha" ] &&
+      { [ -z "$prior_release_id" ] || [ "${prior_tag:-}" = "$RELEASE_TAG" ]; }; then
+      :
+    elif [ "$rolling" != "$stage_sha" ] || [ -n "${prior_tag:-}" ]; then
       echo "Backup ref does not match the recorded predecessor." >&2
       return 1
     fi
@@ -1143,7 +1262,7 @@ recover_existing_transaction() {
 
   if [ "$rolling" = "$stage_sha" ] || [ "$candidate_tag" = "$RELEASE_TAG" ]; then
     recover_forward "$stage_sha" "$prior_sha" "$candidate_release_id" "$prior_release_id"
-  elif [ "$candidate_tag" = "$stage_tag" ] && [ "$rolling" = "$prior_sha" ]; then
+  elif is_staged_release_tag "$candidate_tag" && [ "$rolling" = "$prior_sha" ]; then
     recover_rollback "$stage_sha" "$prior_sha" "$candidate_release_id" "$prior_release_id"
   else
     echo "Transaction state cannot be classified safely; retaining all artifacts." >&2
@@ -1244,8 +1363,8 @@ if [ "$workflow_change_transaction" -eq 1 ]; then
     echo "GitHub did not create the forward-only staging tag at the candidate SHA." >&2
     exit 1
   fi
-  stage_release_id=$(release_id_for_tag "$stage_tag")
-  if [ -z "$stage_release_id" ] || ! release_is_coherent "$stage_release_id" "$stage_tag" true; then
+  stage_release_id=$(release_id_for_staged_transaction)
+  if [ -z "$stage_release_id" ] || ! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA"; then
     echo "Forward-only staged release could not be resolved with the exact expected assets." >&2
     exit 1
   fi
@@ -1324,8 +1443,8 @@ if [ "$stage_sha" != "$GITHUB_SHA" ]; then
   echo "GitHub did not create the staging tag at the candidate SHA." >&2
   exit 1
 fi
-stage_release_id=$(release_id_for_tag "$stage_tag")
-if [ -z "$stage_release_id" ] || ! release_is_coherent "$stage_release_id" "$stage_tag" true; then
+stage_release_id=$(release_id_for_staged_transaction)
+if [ -z "$stage_release_id" ] || ! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA"; then
   echo "Staged draft release could not be resolved with the exact expected assets." >&2
   exit 1
 fi

@@ -471,12 +471,20 @@ bootstrap ancestry, chronological and run-ID order, and absence of an intervenin
 successful development publication. A final post-matrix job revalidates that the exact
 production deployment is still pending on `release-prod` and no production ref moved.
 
-Hosted qualification exposed that a draft created for a missing tag can retain an
-`untagged-*` placeholder instead of materializing the requested transaction tag. The
-publisher therefore creates the reserved staging ref at the exact candidate SHA first
-and passes `--verify-tag` when creating the draft. A rerun may remove a stage-only crash
-artifact only when the ref still names the same `GITHUB_SHA`, the stable release remains
-coherent, and any backup ref still names that stable rolling SHA.
+Hosted qualification exposed that GitHub can asynchronously rewrite a private draft to
+an `untagged-*` placeholder even when the publisher created the reserved staging ref at
+the exact candidate SHA first and supplied `--verify-tag`. The publisher therefore
+follows the unique private draft by immutable Release ID, exact transaction marker,
+target commit, asset set, and channel while accepting only GitHub's bounded
+`untagged-*` form as an alternate staged state. A rerun recovers or removes that exact
+marked draft even if the staging ref was already cleaned, including rollback-mode
+states after the prior release was backed up or the rolling ref reached the candidate;
+it may finalize a pending immutable-ID marker only after proving the exact private
+draft, while removal or public mutation additionally requires coherent rolling and
+backup state. Ambiguous or mismatched drafts and failed discovery reads fail closed. A
+stage-only crash artifact remains removable only when the ref still names the same
+`GITHUB_SHA`, the stable release remains coherent, and any backup ref still names that
+stable rolling SHA.
 
 ### Acceptance Criteria And Gates
 
@@ -491,9 +499,9 @@ coherent, and any backup ref still names that stable rolling SHA.
   canonical local, hosted CI, and four-platform update qualification gates pass.
 - [ ] Documentation-only and agent-memory-only pushes do not republish unchanged
   binaries; post-rollout evidence can be reconciled without moving a qualified channel.
-- [ ] Draft upload requires an explicitly created, exact-SHA staging ref and an exact
-  rerun recovers a crash between staging-ref creation and draft creation without
-  changing the prior rolling release.
+- [ ] Draft upload requires an explicitly created, exact-SHA staging ref; publication
+  and rerun recovery preserve immutable-ID ownership if GitHub rewrites that private
+  draft to `untagged-*`, without changing the prior rolling release.
 
 Affected areas are `.github/workflows/release.yml`, `scripts/publish-release.sh`,
 `.github/workflows/release-update-qualification.yml`, the two native qualification
