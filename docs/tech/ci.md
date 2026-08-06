@@ -152,9 +152,10 @@ through the repository-owned `scripts/windows-pseudoterminal.cs` host. Unlike th
 for Windows `winpty.exe` adapter, this host does not require the Actions PowerShell
 process to already have terminal handles. Immediately around child creation, the host
 launches a single-purpose terminal root inside ConPTY. That root opens its attached
-`CONIN$` and `CONOUT$` devices, installs them as its standard handles, and launches the
-requested console child. Windows then duplicates console handles instead of the
-Actions runner's redirected pipes, while the outer host still captures the ConPTY
+`CONIN$` and `CONOUT$` devices, installs them as its standard handles, and passes only
+those handles explicitly to the requested console child through a restricted process
+handle list. This avoids both Windows Server 2025's redirected-handle fallback and
+ambient inheritable-handle leakage, while the outer host still captures the ConPTY
 stream. Normal hosted Windows CI first launches a PowerShell probe through the same
 host and requires the child to observe interactive standard error, captured output,
 and its exact nonzero exit status. Every ConPTY call runs inside a separately

@@ -534,6 +534,11 @@ console child only after installing those handles. This repair stays inside the
 separately killable ConPTY process tree and must preserve the same output, exit-code,
 timeout, and descendant-cleanup contracts.
 
+Hosted validation of the initial repair showed that implicit same-console duplication
+still retained redirected standard handles. The terminal root must instead make its
+opened console devices inheritable and pass only those devices explicitly through a
+restricted process handle list when it creates the requested child.
+
 ### Acceptance Criteria And Gates
 
 - [ ] The Windows helper launches from headless PowerShell without downloading a

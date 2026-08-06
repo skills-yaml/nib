@@ -31,6 +31,10 @@ namespace Nib.ReleaseQualification
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint OpenExisting = 3;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const long ProcThreadAttributeHandleList = 0x00020002;
+        private const int StartfUseStdHandles = 0x00000100;
+        private const uint HandleFlagInherit = 0x00000001;
         private const uint WaitObject0 = 0;
         private const uint Infinite = 0xffffffff;
 
@@ -66,6 +70,13 @@ namespace Nib.ReleaseQualification
             internal uint dwThreadId;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfoEx
+        {
+            internal StartupInfo StartupInfo;
+            internal IntPtr lpAttributeList;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateFileW(
             string fileName,
@@ -83,6 +94,35 @@ namespace Nib.ReleaseQualification
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetStdHandle(int standardHandle, IntPtr handle);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation(
+            IntPtr handle,
+            uint mask,
+            uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            int attributeCount,
+            int flags,
+            ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            IntPtr attribute,
+            IntPtr value,
+            IntPtr size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcessW(
@@ -94,7 +134,7 @@ namespace Nib.ReleaseQualification
             uint creationFlags,
             IntPtr environment,
             string currentDirectory,
-            ref StartupInfo startupInfo,
+            ref StartupInfoEx startupInfo,
             out ProcessInformation processInformation);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -132,6 +172,9 @@ namespace Nib.ReleaseQualification
             IntPtr consoleOutput = IntPtr.Zero;
             IntPtr process = IntPtr.Zero;
             IntPtr thread = IntPtr.Zero;
+            IntPtr handleList = IntPtr.Zero;
+            IntPtr attributeList = IntPtr.Zero;
+            bool attributeListInitialized = false;
 
             try
             {
@@ -140,9 +183,48 @@ namespace Nib.ReleaseQualification
                 SetStandardHandle(StdInputHandle, consoleInput, "input");
                 SetStandardHandle(StdOutputHandle, consoleOutput, "output");
                 SetStandardHandle(StdErrorHandle, consoleOutput, "error");
+                SetHandleInheritable(consoleInput, "input");
+                SetHandleInheritable(consoleOutput, "output");
 
-                StartupInfo startupInfo = new StartupInfo();
-                startupInfo.cb = Marshal.SizeOf(typeof(StartupInfo));
+                handleList = Marshal.AllocHGlobal(IntPtr.Size * 2);
+                Marshal.WriteIntPtr(handleList, 0, consoleInput);
+                Marshal.WriteIntPtr(handleList, IntPtr.Size, consoleOutput);
+
+                IntPtr attributeListSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                if (attributeListSize == IntPtr.Zero)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(
+                    attributeList,
+                    1,
+                    0,
+                    ref attributeListSize))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                attributeListInitialized = true;
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    new IntPtr(ProcThreadAttributeHandleList),
+                    handleList,
+                    new IntPtr(IntPtr.Size * 2),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                StartupInfoEx startupInfo = new StartupInfoEx();
+                startupInfo.StartupInfo.cb = Marshal.SizeOf(typeof(StartupInfoEx));
+                startupInfo.StartupInfo.dwFlags = StartfUseStdHandles;
+                startupInfo.StartupInfo.hStdInput = consoleInput;
+                startupInfo.StartupInfo.hStdOutput = consoleOutput;
+                startupInfo.StartupInfo.hStdError = consoleOutput;
+                startupInfo.lpAttributeList = attributeList;
                 ProcessInformation processInformation;
                 StringBuilder commandLine = new StringBuilder(
                     WindowsPseudoTerminal.BuildCommandLine(application, arguments));
@@ -151,8 +233,8 @@ namespace Nib.ReleaseQualification
                     commandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
-                    false,
-                    0,
+                    true,
+                    ExtendedStartupInfoPresent,
                     IntPtr.Zero,
                     null,
                     ref startupInfo,
@@ -185,6 +267,20 @@ namespace Nib.ReleaseQualification
                 SetStdHandle(StdInputHandle, savedInput);
                 CloseOwnedHandle(ref thread);
                 CloseOwnedHandle(ref process);
+                if (attributeList != IntPtr.Zero)
+                {
+                    if (attributeListInitialized)
+                    {
+                        DeleteProcThreadAttributeList(attributeList);
+                    }
+                    Marshal.FreeHGlobal(attributeList);
+                }
+                if (handleList != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(handleList);
+                }
+                SetHandleInformation(consoleOutput, HandleFlagInherit, 0);
+                SetHandleInformation(consoleInput, HandleFlagInherit, 0);
                 CloseOwnedHandle(ref consoleOutput);
                 CloseOwnedHandle(ref consoleInput);
             }
@@ -216,6 +312,16 @@ namespace Nib.ReleaseQualification
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
                     "Unable to set the pseudoterminal child " + label + " handle.");
+            }
+        }
+
+        private static void SetHandleInheritable(IntPtr handle, string label)
+        {
+            if (!SetHandleInformation(handle, HandleFlagInherit, HandleFlagInherit))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Unable to make the pseudoterminal child " + label + " handle inheritable.");
             }
         }
 
