@@ -153,6 +153,23 @@ materialize that ref. If execution stops after ref creation but before the draft
 only an exact-SHA rerun may clean that unreleased stage (and its matching backup ref)
 after revalidating the coherent prior rolling release.
 
+GitHub may still asynchronously rewrite the private draft's tag to a generated
+`untagged-*` value. The publisher treats only one exact marked draft for the channel as
+the staged transaction, revalidating its immutable Release ID, target commit, draft
+state, and transaction marker before cleanup, plus its complete asset set before any
+forward or public mutation. A missing staging ref does not orphan that exact draft,
+while multiple or mismatched untagged drafts stop publication for operator
+reconciliation. Every tagged, untagged, and immutable-ID discovery read must succeed;
+an ambiguous mutation is accepted only after a successful read proves its terminal
+state.
+
+For rollback-mode transactions, immutable-ID recovery also classifies the retained
+rolling and backup state after a missing staging ref, so it can safely restore the
+prior release or finish an already-started forward publication. A legacy pending draft
+whose stage and matching backup refs were already cleaned can be finalized after exact
+private-draft ownership is proven, but it is removed only while its recorded prior
+rolling tag and Release remain coherent.
+
 Pushes that change only `docs/**` and/or `agents/memory/**` do not start Release
 Artifacts. This lets exact hosted rollout evidence be reconciled after publication
 without replacing an already-qualified binary with a documentation-only commit.

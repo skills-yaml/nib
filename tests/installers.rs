@@ -229,7 +229,7 @@ fn release_workflow_serializes_channels_and_rejects_stale_publication() {
         .find(r#"--force-with-lease="refs/tags/$backup_tag:""#)
         .expect("the prior release SHA must have an owned backup tag");
     let asset_validation = transaction
-        .rfind(r#"! release_is_coherent "$stage_release_id" "$stage_tag" true"#)
+        .rfind(r#"! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA""#)
         .expect("staged release metadata and exact asset names must be validated");
     let backup_release = transaction
         .find(r#"backup_stable_release "$old_release_id""#)
@@ -378,9 +378,15 @@ struct ReleaseFaults {
     fail_promote_before_mutation: bool,
     empty_stage_asset: bool,
     fail_release_list_read: bool,
+    fail_tagged_release_list_read: bool,
+    fail_untagged_release_list_read: bool,
     fail_release_get_read: bool,
+    fail_stage_delete_before_mutation: bool,
+    fail_release_id_list_after_delete: bool,
     fail_ls_remote_read: bool,
     kill_after_old_delete: bool,
+    rewrite_stage_to_untagged: bool,
+    kill_after_untagged_rewrite: bool,
 }
 
 #[cfg(unix)]
@@ -496,6 +502,8 @@ impl ReleaseTransactionHarness {
             "Prior production release.\n",
         )
         .expect("old release body");
+        fs::write(gh_state.join("releases/old.target"), format!("{old_sha}\n"))
+            .expect("old release target");
         fs::write(
             gh_state.join("releases/old.assets"),
             format!("{}\n", LEGACY_RELEASE_ASSET_NAMES.join("\n")),
@@ -577,6 +585,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
   printf '%s\n' "$draft" > "$releases/$id.draft"
   printf '%s\n' "$prerelease" > "$releases/$id.prerelease"
   printf '%s\n' "$body" > "$releases/$id.body"
+  printf '%s\n' "$target" > "$releases/$id.target"
   printf 'CREATE %s %s\n' "$id" "$tag" >> "$events"
   if [ "${FAKE_GH_FAIL_CREATE:-0}" = 1 ]; then
     printf '%s\n' "${assets[0]}" > "$releases/$id.assets"
@@ -621,7 +630,26 @@ if [[ "$endpoint" == *"releases?"* ]]; then
   if [ "${FAKE_GH_FAIL_LIST_READ:-0}" = 1 ]; then
     exit 1
   fi
-  if [[ "$query" == *".id | tostring"* ]]; then
+  if [[ "$query" == *'startswith("untagged-")'* ]]; then
+    if [ "${FAKE_GH_FAIL_UNTAGGED_LIST_READ:-0}" = 1 ]; then
+      exit 1
+    fi
+    for path in "$releases"/*.tag; do
+      [ -e "$path" ] || continue
+      id=$(basename "$path" .tag)
+      tag=$(tr -d '\n' < "$path")
+      draft=$(tr -d '\n' < "$releases/$id.draft")
+      body=$(cat "$releases/$id.body")
+      if [[ "$tag" == untagged-* ]] && [ "$draft" = true ] &&
+        grep -Fq 'channel=prod' <<<"$body"; then
+        printf '%s\n' "$id"
+      fi
+    done
+  elif [[ "$query" == *".id | tostring"* ]]; then
+    if [ "${FAKE_GH_FAIL_ID_LIST_AFTER_DELETE:-0}" = 1 ] &&
+      [ -e "$FAKE_GH_STATE/stage-delete-attempted" ]; then
+      exit 1
+    fi
     id=$(printf '%s\n' "$query" | sed -n 's/.*tostring) == "\([^"]*\)".*/\1/p')
     if [ "$id" = stage ] && [ "${FAKE_MOVE_ROLLING_ON_SECOND_STAGE_LOOKUP:-0}" = 1 ]; then
       lookup_file="$FAKE_GH_STATE/stage-id-lookups"
@@ -637,6 +665,9 @@ if [[ "$endpoint" == *"releases?"* ]]; then
       cat "$releases/$id.tag"
     fi
   else
+    if [ "${FAKE_GH_FAIL_TAGGED_LIST_READ:-0}" = 1 ]; then
+      exit 1
+    fi
     tag=$(printf '%s\n' "$query" | sed -n 's/.*tag_name == "\([^"]*\)".*/\1/p')
     for path in "$releases"/*.tag; do
       [ -e "$path" ] || continue
@@ -696,6 +727,7 @@ case "$method" in
       .draft) cat "$releases/$id.draft" ;;
       .prerelease) cat "$releases/$id.prerelease" ;;
       .body) cat "$releases/$id.body" ;;
+      .target_commitish) cat "$releases/$id.target" ;;
       '.assets[].name') cat "$releases/$id.assets" ;;
       '.assets[] | select(.state != "uploaded" or .size <= 0) | .name') awk -F '|' '$2 != "uploaded" || $3 <= 0 { print $1 }' "$releases/$id.asset-metadata" ;;
       '.assets | length') awk 'NF { count += 1 } END { print count + 0 }' "$releases/$id.assets" ;;
@@ -735,8 +767,20 @@ case "$method" in
         draft) printf '%s\n' "$value" > "$releases/$id.draft" ;;
         prerelease) printf '%s\n' "$value" > "$releases/$id.prerelease" ;;
         body) printf '%s\n' "$value" > "$releases/$id.body" ;;
+        target_commitish) printf '%s\n' "$value" > "$releases/$id.target" ;;
       esac
     done
+    if [ "$id" = stage ] && [ "${FAKE_REWRITE_STAGE_TO_UNTAGGED:-0}" = 1 ] &&
+      [ ! -e "$FAKE_GH_STATE/retagged-stage" ] &&
+      grep -Fq 'staged_release_id=stage' "$releases/$id.body"; then
+      printf '%s\n' 'untagged-708ba2fca6bbe012874c' > "$releases/$id.tag"
+      printf '%s\n' 'RETAG stage untagged-708ba2fca6bbe012874c' >> "$events"
+      touch "$FAKE_GH_STATE/retagged-stage"
+      if [ "${FAKE_KILL_AFTER_UNTAGGED_REWRITE:-0}" = 1 ]; then
+        kill -KILL "$PPID"
+        exit 137
+      fi
+    fi
     if [ "$backed_up" -eq 1 ] && [ "${FAKE_KILL_AFTER_OLD_BACKUP:-0}" = 1 ]; then
       kill -KILL "$PPID"
       exit 137
@@ -751,7 +795,11 @@ case "$method" in
     ;;
   DELETE)
     printf 'DELETE %s\n' "$id" >> "$events"
-    rm -f "$releases/$id.tag" "$releases/$id.draft" "$releases/$id.prerelease" "$releases/$id.body" "$releases/$id.assets" "$releases/$id.asset-metadata"
+    if [ "$id" = stage ] && [ "${FAKE_GH_FAIL_STAGE_DELETE_BEFORE_MUTATION:-0}" = 1 ]; then
+      touch "$FAKE_GH_STATE/stage-delete-attempted"
+      exit 1
+    fi
+    rm -f "$releases/$id.tag" "$releases/$id.draft" "$releases/$id.prerelease" "$releases/$id.body" "$releases/$id.target" "$releases/$id.assets" "$releases/$id.asset-metadata"
     if [ "$id" = old ] && [ "${FAKE_KILL_AFTER_OLD_DELETE:-0}" = 1 ]; then
       kill -KILL "$PPID"
       exit 137
@@ -965,8 +1013,40 @@ exit "$status"
                 },
             )
             .env(
+                "FAKE_GH_FAIL_TAGGED_LIST_READ",
+                if faults.fail_tagged_release_list_read {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_GH_FAIL_UNTAGGED_LIST_READ",
+                if faults.fail_untagged_release_list_read {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
                 "FAKE_GH_FAIL_GET_READ",
                 if faults.fail_release_get_read {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_GH_FAIL_STAGE_DELETE_BEFORE_MUTATION",
+                if faults.fail_stage_delete_before_mutation {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_GH_FAIL_ID_LIST_AFTER_DELETE",
+                if faults.fail_release_id_list_after_delete {
                     "1"
                 } else {
                     "0"
@@ -1004,6 +1084,22 @@ exit "$status"
                     "0"
                 },
             )
+            .env(
+                "FAKE_REWRITE_STAGE_TO_UNTAGGED",
+                if faults.rewrite_stage_to_untagged {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_KILL_AFTER_UNTAGGED_REWRITE",
+                if faults.kill_after_untagged_rewrite {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .env("FAKE_ADVANCE_SHA", &self.advance_sha)
             .env("FAKE_OLD_SHA", &self.old_sha)
             .env("FAKE_REMOTE", &self.remote)
@@ -1025,6 +1121,42 @@ exit "$status"
             .next()
             .unwrap_or("")
             .to_string()
+    }
+
+    fn delete_remote_ref(&self, reference: &str) {
+        let output = Command::new("git")
+            .args([
+                "--git-dir",
+                self.remote.to_str().unwrap(),
+                "update-ref",
+                "-d",
+                reference,
+            ])
+            .output()
+            .expect("delete fixture remote ref");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_remote_ref(&self, reference: &str, sha: &str) {
+        let output = Command::new("git")
+            .args([
+                "--git-dir",
+                self.remote.to_str().unwrap(),
+                "update-ref",
+                reference,
+                sha,
+            ])
+            .output()
+            .expect("write fixture remote ref");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn release_id(&self, tag: &str) -> Option<String> {
@@ -1175,7 +1307,12 @@ exit "$status"
 
     fn clear_fault_observations(&self) {
         fs::write(self.gh_state.join("events.log"), "").expect("clear fake GH events");
-        for name in ["advanced", "stage-id-lookups"] {
+        for name in [
+            "advanced",
+            "stage-id-lookups",
+            "retagged-stage",
+            "stage-delete-attempted",
+        ] {
             let path = self.gh_state.join(name);
             if path.exists() {
                 fs::remove_file(path).expect("clear release fault observation");
@@ -1218,6 +1355,7 @@ exit "$status"
             "draft",
             "prerelease",
             "body",
+            "target",
             "assets",
             "asset-metadata",
         ] {
@@ -1307,6 +1445,138 @@ fn workflow_change_uses_forward_only_release_transaction_without_backup_ref() {
         .events()
         .iter()
         .any(|event| event.contains("nib-release-backup-prod")));
+}
+
+#[cfg(unix)]
+#[test]
+fn workflow_change_tolerates_github_rewriting_the_private_draft_tag() {
+    let harness = ReleaseTransactionHarness::with_workflow_change(true);
+    let output = harness.run(ReleaseFaults {
+        rewrite_stage_to_untagged: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    assert!(harness
+        .events()
+        .iter()
+        .any(|event| event == "RETAG stage untagged-708ba2fca6bbe012874c"));
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rerun_recovers_an_exact_marked_untagged_draft_without_its_stage_ref() {
+    let harness = ReleaseTransactionHarness::with_workflow_change(true);
+    let interrupted = harness.run(ReleaseFaults {
+        rewrite_stage_to_untagged: true,
+        kill_after_untagged_rewrite: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!interrupted.status.success());
+    assert_eq!(
+        harness
+            .release_id("untagged-708ba2fca6bbe012874c")
+            .as_deref(),
+        Some("stage")
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/nib-release-stage-prod"),
+        harness.release_sha
+    );
+    harness.delete_remote_ref("refs/tags/nib-release-stage-prod");
+
+    harness.clear_fault_observations();
+    let recovery = harness.run(ReleaseFaults::default());
+    assert!(
+        recovery.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovery.stderr)
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    let events = harness.events();
+    let cleanup = events
+        .iter()
+        .position(|event| event == "DELETE stage")
+        .expect("rerun must delete the exact marked untagged draft");
+    let recreate = events
+        .iter()
+        .position(|event| event == "CREATE stage nib-release-stage-prod")
+        .expect("rerun must create a fresh transaction after cleanup");
+    assert!(cleanup < recreate, "{events:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn multiple_untagged_channel_drafts_fail_closed_without_mutation() {
+    let harness = ReleaseTransactionHarness::with_workflow_change(true);
+    let interrupted = harness.run(ReleaseFaults {
+        rewrite_stage_to_untagged: true,
+        kill_after_untagged_rewrite: true,
+        ..ReleaseFaults::default()
+    });
+    assert!(!interrupted.status.success());
+    harness.delete_remote_ref("refs/tags/nib-release-stage-prod");
+
+    for field in [
+        "draft",
+        "prerelease",
+        "body",
+        "target",
+        "assets",
+        "asset-metadata",
+    ] {
+        fs::copy(
+            harness
+                .gh_state
+                .join("releases")
+                .join(format!("stage.{field}")),
+            harness
+                .gh_state
+                .join("releases")
+                .join(format!("duplicate.{field}")),
+        )
+        .unwrap_or_else(|error| panic!("copy duplicate release {field}: {error}"));
+    }
+    harness.write_release_field("duplicate", "tag", "untagged-ffffffffffffffffffff");
+
+    harness.clear_fault_observations();
+    let recovery = harness.run(ReleaseFaults::default());
+    assert!(!recovery.status.success());
+    assert!(String::from_utf8_lossy(&recovery.stderr)
+        .contains("Multiple untagged draft transactions exist for prod."));
+    assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+    assert!(harness.events().is_empty());
+    assert_eq!(
+        harness
+            .release_id("untagged-708ba2fca6bbe012874c")
+            .as_deref(),
+        Some("stage")
+    );
+    assert_eq!(
+        harness
+            .release_id("untagged-ffffffffffffffffffff")
+            .as_deref(),
+        Some("duplicate")
+    );
 }
 
 #[cfg(unix)]
@@ -1539,6 +1809,136 @@ fn rerun_recovers_a_process_killed_after_the_old_release_backup_before_new_work(
     assert!(harness
         .remote_ref("refs/tags/nib-release-backup-prod")
         .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rerun_recovers_an_untagged_rollback_after_prior_backup_without_the_stage_ref() {
+    let harness = ReleaseTransactionHarness::new();
+    let interrupted = harness.run(ReleaseFaults {
+        kill_after_old_backup: true,
+        rewrite_stage_to_untagged: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!interrupted.status.success());
+    assert_eq!(
+        harness
+            .release_id("untagged-708ba2fca6bbe012874c")
+            .as_deref(),
+        Some("stage")
+    );
+    assert_eq!(
+        harness.release_id("nib-release-backup-prod").as_deref(),
+        Some("old")
+    );
+    assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+    harness.delete_remote_ref("refs/tags/nib-release-stage-prod");
+
+    harness.clear_fault_observations();
+    let rerun = harness.run(ReleaseFaults::default());
+    assert!(
+        rerun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-backup-prod")
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rerun_finishes_an_untagged_rollback_after_public_ref_move_without_the_stage_ref() {
+    let harness = ReleaseTransactionHarness::new();
+    let interrupted = harness.run(ReleaseFaults {
+        kill_after_old_backup: true,
+        rewrite_stage_to_untagged: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!interrupted.status.success());
+    harness.delete_remote_ref("refs/tags/nib-release-stage-prod");
+    harness.write_remote_ref("refs/tags/prod-latest", &harness.release_sha);
+
+    harness.clear_fault_observations();
+    let rerun = harness.run(ReleaseFaults::default());
+    assert!(
+        rerun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    assert!(!harness.gh_state.join("releases/old.tag").exists());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-backup-prod")
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rerun_finalizes_and_removes_a_pending_untagged_legacy_orphan() {
+    let harness = ReleaseTransactionHarness::new();
+    let interrupted = harness.run(ReleaseFaults {
+        rewrite_stage_to_untagged: true,
+        kill_after_untagged_rewrite: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!interrupted.status.success());
+    let pending_body = harness
+        .release_field("stage", "body")
+        .replace("staged_release_id=stage", "staged_release_id=pending");
+    harness.write_release_field("stage", "body", &pending_body);
+    harness.delete_remote_ref("refs/tags/nib-release-stage-prod");
+    harness.delete_remote_ref("refs/tags/nib-release-backup-prod");
+    harness.write_remote_ref("refs/heads/main", &harness.advance_sha);
+
+    harness.clear_fault_observations();
+    let recovery = harness.run(ReleaseFaults::default());
+
+    assert!(!recovery.status.success());
+    assert!(String::from_utf8_lossy(&recovery.stderr).contains("Refusing stale prod publication"));
+    assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("old"));
+    harness.assert_complete_prior_release("old", "prod-latest", "false");
+    assert!(harness
+        .release_id("untagged-708ba2fca6bbe012874c")
+        .is_none());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-backup-prod")
+        .is_empty());
+    let events = harness.events();
+    let finalize = events
+        .iter()
+        .position(|event| event == "PATCH stage")
+        .expect("rerun must finalize the pending immutable release ID");
+    let cleanup = events
+        .iter()
+        .position(|event| event == "DELETE stage")
+        .expect("rerun must delete the exact pending orphan");
+    assert!(finalize < cleanup, "{events:?}");
+    assert!(!events.iter().any(|event| event.starts_with("CREATE stage")));
 }
 
 #[cfg(unix)]
@@ -2011,6 +2411,119 @@ fn recovery_read_errors_fail_closed_without_release_or_ref_mutations() {
         );
         harness.assert_backed_up_transaction_retained();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn each_staged_draft_discovery_read_must_succeed_before_recovery_mutates() {
+    let fault_cases = [
+        (
+            "tagged-list",
+            true,
+            "untagged-708ba2fca6bbe012874c",
+            ReleaseFaults {
+                fail_tagged_release_list_read: true,
+                ..ReleaseFaults::default()
+            },
+        ),
+        (
+            "untagged-list",
+            false,
+            "nib-release-stage-prod",
+            ReleaseFaults {
+                fail_untagged_release_list_read: true,
+                ..ReleaseFaults::default()
+            },
+        ),
+    ];
+
+    for (fault_name, rewrite_stage, candidate_tag, faults) in fault_cases {
+        let harness = ReleaseTransactionHarness::new();
+        let interrupted = harness.run(ReleaseFaults {
+            kill_after_old_backup: true,
+            rewrite_stage_to_untagged: rewrite_stage,
+            ..ReleaseFaults::default()
+        });
+        assert!(!interrupted.status.success(), "{fault_name}");
+        assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+        assert_eq!(
+            harness.remote_ref("refs/tags/nib-release-stage-prod"),
+            harness.release_sha
+        );
+        assert_eq!(
+            harness.remote_ref("refs/tags/nib-release-backup-prod"),
+            harness.old_sha
+        );
+        assert_eq!(harness.release_id(candidate_tag).as_deref(), Some("stage"));
+        assert_eq!(
+            harness.release_id("nib-release-backup-prod").as_deref(),
+            Some("old")
+        );
+
+        harness.clear_fault_observations();
+        let recovery = harness.run(faults);
+
+        assert!(!recovery.status.success(), "{fault_name}");
+        assert!(
+            harness.events().is_empty(),
+            "{fault_name}: {:?}",
+            harness.events()
+        );
+        assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+        assert_eq!(
+            harness.remote_ref("refs/tags/nib-release-stage-prod"),
+            harness.release_sha
+        );
+        assert_eq!(
+            harness.remote_ref("refs/tags/nib-release-backup-prod"),
+            harness.old_sha
+        );
+        assert_eq!(harness.release_id(candidate_tag).as_deref(), Some("stage"));
+        assert_eq!(
+            harness.release_id("nib-release-backup-prod").as_deref(),
+            Some("old")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ambiguous_staged_delete_with_failed_id_read_never_starts_a_new_transaction() {
+    let harness = ReleaseTransactionHarness::new();
+    let interrupted = harness.run(ReleaseFaults {
+        kill_after_old_backup: true,
+        rewrite_stage_to_untagged: true,
+        ..ReleaseFaults::default()
+    });
+    assert!(!interrupted.status.success());
+
+    harness.clear_fault_observations();
+    let recovery = harness.run(ReleaseFaults {
+        fail_stage_delete_before_mutation: true,
+        fail_release_id_list_after_delete: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(!recovery.status.success());
+    assert!(String::from_utf8_lossy(&recovery.stderr).contains("Failed to find release ID stage."));
+    assert_eq!(harness.remote_ref("refs/tags/prod-latest"), harness.old_sha);
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("old"));
+    harness.assert_complete_prior_release("old", "prod-latest", "false");
+    assert_eq!(
+        harness
+            .release_id("untagged-708ba2fca6bbe012874c")
+            .as_deref(),
+        Some("stage")
+    );
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-stage-prod")
+        .is_empty());
+    assert!(harness
+        .remote_ref("refs/tags/nib-release-backup-prod")
+        .is_empty());
+    let events = harness.events();
+    assert!(events.iter().any(|event| event == "DELETE stage"));
+    assert!(!events.iter().any(|event| event.starts_with("CREATE stage")));
 }
 
 #[cfg(unix)]
