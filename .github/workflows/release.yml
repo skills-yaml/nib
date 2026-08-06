@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - development
+    paths-ignore:
+      - 'docs/**'
+      - 'agents/memory/**'
   workflow_dispatch:
     inputs:
       channel:

@@ -1,0 +1,199 @@
+name: Release Update Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap_run_id:
+        description: Successful first development Release Artifacts run ID
+        required: true
+        type: string
+      bootstrap_commit:
+        description: Exact 40-hex commit embedded in the first development release
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful second development Release Artifacts run ID
+        required: true
+        type: string
+      production_run_id:
+        description: Held main Release Artifacts run for the exact candidate commit
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-update-qualification
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release pair
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_version: ${{ steps.validate.outputs.candidate_version }}
+    steps:
+      - name: Validate immutable development revisions
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOTSTRAP_RUN_ID: ${{ inputs.bootstrap_run_id }}
+          BOOTSTRAP_COMMIT: ${{ inputs.bootstrap_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          PRODUCTION_RUN_ID: ${{ inputs.production_run_id }}
+        run: |
+          set -euo pipefail
+
+          test "$GITHUB_REF" = "refs/heads/development"
+          grep -Eq '^[0-9a-f]{40}$' <<<"$BOOTSTRAP_COMMIT"
+          grep -Eq '^[0-9a-f]{40}$' <<<"$GITHUB_SHA"
+          test "$BOOTSTRAP_COMMIT" != "$GITHUB_SHA"
+          for run_id in "$BOOTSTRAP_RUN_ID" "$CANDIDATE_RUN_ID" "$PRODUCTION_RUN_ID"; do
+            case "$run_id" in
+              '' | *[!0-9]*) echo "Release run IDs must be numeric." >&2; exit 1 ;;
+            esac
+          done
+          test "$BOOTSTRAP_RUN_ID" != "$CANDIDATE_RUN_ID"
+          test "$BOOTSTRAP_RUN_ID" -lt "$CANDIDATE_RUN_ID"
+
+          bootstrap_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BOOTSTRAP_RUN_ID")
+          candidate_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID")
+          production_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCTION_RUN_ID")
+          workflow_id=$(jq -r .workflow_id <<<"$bootstrap_run")
+
+          for run in "$bootstrap_run" "$candidate_run" "$production_run"; do
+            test "$(jq -r .name <<<"$run")" = "Release Artifacts"
+            test "$(jq -r .path <<<"$run")" = ".github/workflows/release.yml"
+            test "$(jq -r .workflow_id <<<"$run")" = "$workflow_id"
+            test "$(jq -r .event <<<"$run")" = "push"
+          done
+          test "$(jq -r .head_branch <<<"$bootstrap_run")" = "development"
+          test "$(jq -r .head_sha <<<"$bootstrap_run")" = "$BOOTSTRAP_COMMIT"
+          test "$(jq -r .conclusion <<<"$bootstrap_run")" = "success"
+          test "$(jq -r .head_branch <<<"$candidate_run")" = "development"
+          test "$(jq -r .head_sha <<<"$candidate_run")" = "$GITHUB_SHA"
+          test "$(jq -r .conclusion <<<"$candidate_run")" = "success"
+          test "$(jq -r .head_branch <<<"$production_run")" = "main"
+          test "$(jq -r .head_sha <<<"$production_run")" = "$GITHUB_SHA"
+          test "$(jq -r .status <<<"$production_run")" != "completed"
+          test "$(jq -r .conclusion <<<"$production_run")" = "null"
+          pending_deployments=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCTION_RUN_ID/pending_deployments")
+          test "$(jq '[.[] | select(.environment.name == "release-prod")] | length' \
+            <<<"$pending_deployments")" -eq 1
+
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          prod_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/prod-latest" --jq .object.sha)
+          test "$main_sha" = "$GITHUB_SHA"
+          test "$prod_sha" != "$GITHUB_SHA"
+
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BOOTSTRAP_COMMIT...$GITHUB_SHA")
+          test "$(jq -r .status <<<"$comparison")" = "ahead"
+          test "$(jq -r .merge_base_commit.sha <<<"$comparison")" = "$BOOTSTRAP_COMMIT"
+
+          bootstrap_created=$(jq -r .created_at <<<"$bootstrap_run")
+          candidate_created=$(jq -r .created_at <<<"$candidate_run")
+          test "$bootstrap_created" '<' "$candidate_created"
+          successful_runs=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?branch=development&status=success&per_page=100")
+          test "$(jq -r .total_count <<<"$successful_runs")" -le 100
+          intervening=$(jq --argjson bootstrap "$BOOTSTRAP_RUN_ID" \
+            --argjson candidate "$CANDIDATE_RUN_ID" \
+            '[.workflow_runs[] | select(.id > $bootstrap and .id < $candidate)] | length' \
+            <<<"$successful_runs")
+          test "$intervening" -eq 0
+
+          manifest=$(curl --fail --silent --show-error --location \
+            --proto '=https' --max-time 30 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/development-latest/nib-release.json")
+          test "$(jq -r .channel <<<"$manifest")" = "development"
+          test "$(jq -r .tag <<<"$manifest")" = "development-latest"
+          test "$(jq -r .commit <<<"$manifest")" = "$GITHUB_SHA"
+          candidate_version=$(jq -r .version <<<"$manifest")
+          test "${#candidate_version}" -le 64
+          grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+-]*$' <<<"$candidate_version"
+          echo "candidate_version=$candidate_version" >>"$GITHUB_OUTPUT"
+
+  qualify:
+    name: Qualify ${{ matrix.asset }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: nib-linux-x86_64.tar.gz
+            task: qualify:release-update:unix
+          - os: macos-15-intel
+            asset: nib-macos-x86_64.tar.gz
+            task: qualify:release-update:unix
+          - os: macos-15
+            asset: nib-macos-aarch64.tar.gz
+            task: qualify:release-update:unix
+          - os: windows-2025
+            asset: nib-windows-x86_64.zip
+            task: qualify:release-update:windows
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download bootstrap artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ matrix.asset }}
+          path: bootstrap
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.bootstrap_run_id }}
+
+      - name: Exercise notification and replacement
+        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+        run: >-
+          task ${{ matrix.task }}
+          BOOTSTRAP_ARCHIVE="bootstrap/${{ matrix.asset }}"
+          BOOTSTRAP_COMMIT="${{ inputs.bootstrap_commit }}"
+          CANDIDATE_COMMIT="${{ github.sha }}"
+          CANDIDATE_VERSION="${{ needs.prepare.outputs.candidate_version }}"
+
+  verify:
+    name: Confirm production remains held
+    needs:
+      - prepare
+      - qualify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Revalidate exact pending production deployment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_RUN_ID: ${{ inputs.production_run_id }}
+        run: |
+          set -euo pipefail
+
+          production_run=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCTION_RUN_ID")
+          test "$(jq -r .path <<<"$production_run")" = ".github/workflows/release.yml"
+          test "$(jq -r .head_branch <<<"$production_run")" = "main"
+          test "$(jq -r .head_sha <<<"$production_run")" = "$GITHUB_SHA"
+          test "$(jq -r .status <<<"$production_run")" != "completed"
+          test "$(jq -r .conclusion <<<"$production_run")" = "null"
+
+          pending_deployments=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCTION_RUN_ID/pending_deployments")
+          test "$(jq '[.[] | select(.environment.name == "release-prod")] | length' \
+            <<<"$pending_deployments")" -eq 1
+
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/development" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/development-latest" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/prod-latest" --jq .object.sha)" != "$GITHUB_SHA"

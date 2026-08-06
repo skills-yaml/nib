@@ -89,6 +89,87 @@ fn release_workflow_emits_portable_checksum_manifests() {
 }
 
 #[test]
+fn release_update_qualification_is_read_only_and_native() {
+    let workflow = read_repository_text(".github/workflows/release-update-qualification.yml");
+    let release_workflow = read_repository_text(".github/workflows/release.yml");
+    let taskfile = read_repository_text("Taskfile.yml");
+    let unix = read_repository_text("scripts/qualify-release-update.sh");
+    let windows = read_repository_text("scripts/qualify-release-update.ps1");
+
+    assert!(workflow.contains("  workflow_dispatch:\n"));
+    assert!(!workflow.contains("\n  push:\n"));
+    assert!(!workflow.contains("\n  pull_request:\n"));
+    assert!(workflow.contains("permissions:\n  actions: read\n  contents: read\n"));
+    assert!(!workflow.contains("contents: write"));
+    assert!(workflow.contains("test \"$GITHUB_REF\" = \"refs/heads/development\""));
+    assert!(workflow
+        .contains("test \"$(jq -r .path <<<\"$run\")\" = \".github/workflows/release.yml\""));
+    assert!(workflow.contains("test \"$(jq -r .workflow_id <<<\"$run\")\" = \"$workflow_id\""));
+    assert!(workflow
+        .contains("test \"$(jq -r .head_sha <<<\"$bootstrap_run\")\" = \"$BOOTSTRAP_COMMIT\""));
+    assert!(workflow.contains("test \"$(jq -r .conclusion <<<\"$candidate_run\")\" = \"success\""));
+    assert!(workflow.contains("test \"$(jq -r .status <<<\"$production_run\")\" != \"completed\""));
+    assert!(workflow.contains("select(.environment.name == \"release-prod\")"));
+    assert!(workflow.contains(
+        "test \"$(jq -r .merge_base_commit.sha <<<\"$comparison\")\" = \"$BOOTSTRAP_COMMIT\""
+    ));
+    assert!(workflow.contains("intervening=$(jq"));
+    assert!(workflow.contains("run-id: ${{ inputs.bootstrap_run_id }}"));
+    assert!(workflow.contains("candidate_run_id:"));
+    assert!(workflow.contains("production_run_id:"));
+    assert!(
+        workflow.contains("CANDIDATE_VERSION=\"${{ needs.prepare.outputs.candidate_version }}\"")
+    );
+    assert!(workflow.contains("  verify:\n    name: Confirm production remains held\n"));
+    assert!(release_workflow
+        .contains("    paths-ignore:\n      - 'docs/**'\n      - 'agents/memory/**'\n"));
+
+    for runner in [
+        "ubuntu-latest",
+        "macos-15-intel",
+        "macos-15",
+        "windows-2025",
+    ] {
+        assert!(workflow.contains(&format!("          - os: {runner}\n")));
+    }
+    for asset in [
+        "nib-linux-x86_64.tar.gz",
+        "nib-macos-aarch64.tar.gz",
+        "nib-macos-x86_64.tar.gz",
+        "nib-windows-x86_64.zip",
+    ] {
+        assert!(workflow.contains(&format!("            asset: {asset}\n")));
+    }
+
+    let action_refs: Vec<_> = workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("uses: "))
+        .map(|reference| reference.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(
+        action_refs,
+        vec![
+            "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+            "arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611",
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        ]
+    );
+
+    assert!(taskfile.contains("  qualify:release-update:unix:\n"));
+    assert!(taskfile.contains("  qualify:release-update:windows:\n"));
+    assert!(unix.contains("script -q"));
+    assert!(unix.contains("\"$nib_path\" update"));
+    assert!(unix.contains("expected_candidate_version=$4"));
+    assert!(unix.contains("candidate_identity=$(NIB_NO_UPDATE_CHECK=1"));
+    assert!(unix.contains("already-current update changed the executable"));
+    assert!(windows.contains("winpty.exe"));
+    assert!(windows.contains("ExpectedCandidateVersion"));
+    assert!(windows.contains("$candidateIdentity = (& $nibPath version"));
+    assert!(windows.contains("& $nibPath update"));
+    assert!(windows.contains("already-current update changed the executable"));
+}
+
+#[test]
 fn release_workflow_serializes_channels_and_rejects_stale_publication() {
     let workflow = read_repository_text(".github/workflows/release.yml");
     let transaction = read_repository_text("scripts/publish-release.sh");

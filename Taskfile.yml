@@ -39,6 +39,7 @@ tasks:
       - sh -n scripts/install.sh
       - sh -n scripts/first-time-setup.sh
       - bash -n scripts/publish-release.sh
+      - bash -n scripts/qualify-release-update.sh
       - bash -n scripts/check-managed-process-release.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.ps1
@@ -76,6 +77,32 @@ tasks:
     cmds:
       - cargo test --bin nib updater::tests -- --test-threads=1
       - cargo test --test updater -- --test-threads=1
+
+  qualify:release-update:unix:
+    desc: Qualify a published development self-update on a native Unix runner
+    platforms: [linux, darwin]
+    requires:
+      vars: [BOOTSTRAP_ARCHIVE, BOOTSTRAP_COMMIT, CANDIDATE_COMMIT, CANDIDATE_VERSION]
+    cmds:
+      - >-
+        scripts/qualify-release-update.sh
+        "{{.BOOTSTRAP_ARCHIVE}}"
+        "{{.BOOTSTRAP_COMMIT}}"
+        "{{.CANDIDATE_COMMIT}}"
+        "{{.CANDIDATE_VERSION}}"
+
+  qualify:release-update:windows:
+    desc: Qualify a published development self-update on a native Windows runner
+    platforms: [windows]
+    requires:
+      vars: [BOOTSTRAP_ARCHIVE, BOOTSTRAP_COMMIT, CANDIDATE_COMMIT, CANDIDATE_VERSION]
+    cmds:
+      - >-
+        pwsh -NoLogo -NoProfile -File scripts/qualify-release-update.ps1
+        -BootstrapArchive "{{.BOOTSTRAP_ARCHIVE}}"
+        -BootstrapCommit "{{.BOOTSTRAP_COMMIT}}"
+        -CandidateCommit "{{.CANDIDATE_COMMIT}}"
+        -ExpectedCandidateVersion "{{.CANDIDATE_VERSION}}"
 
   test:installers:
     desc: Run installer and release-transaction integration tests

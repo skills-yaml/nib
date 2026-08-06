@@ -450,3 +450,41 @@ Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, and
 `docs/tech/ci.md`. Validation gates are the Bash 3.2 installer suite,
 `task test:installers`, `task check`, `task docs:check`, and the exact-revision hosted
 matrix.
+
+## Updater Rollout Qualification (2026-08-06)
+
+### Scope
+
+Preserve T010's exclusive release writer while adding a separate manual, read-only
+workflow that qualifies FT-018 across two published development revisions. The
+qualification downloads the first successful Release Artifacts run's native archives
+and exercises the second public `development-latest` manifest; it does not create,
+retag, edit, or delete any Git ref or Release.
+
+Because GitHub exposes manual dispatch only for workflows present on the default branch,
+the qualification revision first lands on `main` while `release-prod` has a required
+reviewer and its exact production publication job remains unapproved. The same main SHA
+is then moved to `development`, published there, and qualified. Only the held production
+run for that already-qualified SHA may be approved. The workflow validates the exact
+bootstrap, candidate, and held-production run IDs, their workflow path and workflow ID,
+bootstrap ancestry, chronological and run-ID order, and absence of an intervening
+successful development publication. A final post-matrix job revalidates that the exact
+production deployment is still pending on `release-prod` and no production ref moved.
+
+### Acceptance Criteria And Gates
+
+- [ ] Two distinct exact-revision development publications complete with nine coherent
+  assets before production promotion.
+- [ ] The qualification workflow runs only from `development`, has only `actions: read`
+  and `contents: read`, and pins every third-party action to a reviewed commit.
+- [ ] All four release platforms prove the first binary notices and self-replaces with
+  the second exact development build, then reports a byte-preserving current no-op.
+- [ ] The exact candidate SHA is present on both `main` and `development`, its production
+  publication remains held by `release-prod`, and that same run is approved only after
+  canonical local, hosted CI, and four-platform update qualification gates pass.
+- [ ] Documentation-only and agent-memory-only pushes do not republish unchanged
+  binaries; post-rollout evidence can be reconciled without moving a qualified channel.
+
+Affected areas are `.github/workflows/release.yml`,
+`.github/workflows/release-update-qualification.yml`, the two native qualification
+scripts, `Taskfile.yml`, `tests/installers.rs`, and release CI docs.
