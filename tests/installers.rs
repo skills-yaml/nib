@@ -551,14 +551,16 @@ fi
 if [[ "$endpoint" == */git/refs || "$endpoint" == */git/refs/tags/* ]]; then
   ref=
   sha=
-  for field in "${fields[@]}"; do
-    key=${field%%=*}
-    value=${field#*=}
-    case "$key" in
-      ref) ref=$value ;;
-      sha) sha=$value ;;
-    esac
-  done
+  if [ "$method" != DELETE ]; then
+    for field in "${fields[@]}"; do
+      key=${field%%=*}
+      value=${field#*=}
+      case "$key" in
+        ref) ref=$value ;;
+        sha) sha=$value ;;
+      esac
+    done
+  fi
   case "$method" in
     POST)
       printf 'REF CREATE %s %s\n' "$ref" "$sha" >> "$events"
@@ -1130,7 +1132,11 @@ fn staged_release_transaction_publishes_complete_assets_coherently() {
     );
     assert_eq!(
         harness.remote_ref("refs/tags/prod-latest"),
-        harness.release_sha
+        harness.release_sha,
+        "stdout: {}\nstderr: {}\nevents: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        harness.events()
     );
     let release_id = harness.release_id("prod-latest").expect("promoted release");
     assert_eq!(release_id, "stage");

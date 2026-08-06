@@ -101,6 +101,10 @@ or rolled back as part of the same Release asset set. A legacy eight-asset rolli
 Release remains a valid predecessor during the first manifest-producing transaction;
 new candidates require the manifest.
 
+The publisher and its transaction harness must remain compatible with the Bash 3.2
+runtime provided by hosted macOS runners. Case normalization uses portable utilities,
+and mock API paths must not expand empty arrays while `nounset` is active.
+
 GitHub Release `PATCH` and `DELETE` operations do not expose a conditional-write
 precondition. nib therefore adopts an exclusive-writer contract for rolling Releases:
 the channel workflow's repository `GITHUB_TOKEN` is the only actor permitted to create,

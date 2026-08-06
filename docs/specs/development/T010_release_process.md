@@ -428,3 +428,25 @@ validated; failures after that point may leave a failed workflow run but must le
 recover a coherent candidate channel. A development candidate whose workflow tree
 still differs from the repository default branch remains an external GitHub token
 constraint and is not claimed by the production-path evidence.
+
+## Hosted macOS Bash Portability Remediation (2026-08-06)
+
+### Reproduction And Scope
+
+PR run `31083581973` reached the installer transaction suite on macOS after the provider
+fixtures passed, then exposed two Bash 3.2 incompatibilities that Linux's Bash 5 did not:
+manifest hash normalization used `${var,,}`, and the new mock Git-refs DELETE path
+expanded an empty array under `set -u`. Reproduce the runner shell locally with Bash
+3.2.57 and run the complete installer test binary.
+
+### Acceptance Criteria And Gates
+
+- [x] Release-manifest commit and digest normalization use portable `tr` conversion.
+- [x] The fake Git-refs API avoids empty-array expansion for DELETE requests.
+- [x] All 25 installer/release tests pass under Bash 3.2.57 and the default local shell.
+- [ ] The exact committed PR revision passes hosted macOS, Windows, and Validate jobs.
+
+Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, and
+`docs/tech/ci.md`. Validation gates are the Bash 3.2 installer suite,
+`task test:installers`, `task check`, `task docs:check`, and the exact-revision hosted
+matrix.

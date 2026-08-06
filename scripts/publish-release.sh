@@ -467,7 +467,7 @@ validate_local_assets() {
 
 generate_release_manifest() {
   local release_version=${NIB_RELEASE_VERSION:-}
-  local index archive checksum line hash size comma manifest_tmp
+  local index archive checksum line hash size comma manifest_tmp normalized_commit
   if [ -z "$release_version" ]; then
     if [ ! -f Cargo.toml ] || [ -L Cargo.toml ]; then
       echo "Cannot resolve the release package version from Cargo.toml." >&2
@@ -491,6 +491,7 @@ generate_release_manifest() {
   fi
 
   manifest_tmp="$dist_dir/.nib-release.json.tmp.$$"
+  normalized_commit=$(printf '%s' "$GITHUB_SHA" | tr '[:upper:]' '[:lower:]')
   umask 077
   {
     printf '{\n'
@@ -499,14 +500,14 @@ generate_release_manifest() {
     printf '  "channel": "%s",\n' "$RELEASE_CHANNEL"
     printf '  "tag": "%s",\n' "$RELEASE_TAG"
     printf '  "version": "%s",\n' "$release_version"
-    printf '  "commit": "%s",\n' "${GITHUB_SHA,,}"
+    printf '  "commit": "%s",\n' "$normalized_commit"
     printf '  "assets": {\n'
     for index in "${!archive_names[@]}"; do
       archive=${archive_names[$index]}
       checksum=${checksum_names[$index]}
       line=$(tr -d '\r\n' <"$dist_dir/$checksum")
       hash=${line%% *}
-      hash=${hash,,}
+      hash=$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')
       size=$(wc -c <"$dist_dir/$archive" | tr -d '[:space:]')
       comma=,
       if [ "$index" -eq "$((${#archive_names[@]} - 1))" ]; then
