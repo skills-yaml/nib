@@ -262,13 +262,15 @@ impl OpenAiCompatClient {
             Err(error) if error.contains("byte limit") => error,
             Err(_) => "provider error response could not be read".to_string(),
         };
-        let guidance = (requests_tools_with_reasoning
+        let guidance = if requests_tools_with_reasoning
             && matches!(
                 status,
                 StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
-            ))
-        .then_some(CHAT_REASONING_TOOL_GUIDANCE)
-        .unwrap_or_default();
+            ) {
+            CHAT_REASONING_TOOL_GUIDANCE
+        } else {
+            ""
+        };
         self.contextual_error(
             &format!("error HTTP {}", status.as_u16()),
             &format!("{detail}{guidance}"),
@@ -1254,11 +1256,17 @@ mod tests {
             base_url,
         );
         let response = client
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "inspect"})],
-                Some(&[json!({"type": "function", "function": {"name": "read_file"}})]),
-                0.2,
-            ))
+            .complete(
+                LlmRequest::new(
+                    &[json!({"role": "user", "content": "inspect"})],
+                    Some(&[json!({"type": "function", "function": {"name": "read_file"}})]),
+                    0.2,
+                )
+                .with_scope(
+                    crate::llm::types::LlmRequestScope::new("test-session", "test-run")
+                        .expect("test scope"),
+                ),
+            )
             .await
             .expect("OpenAI completion");
 
@@ -1384,11 +1392,13 @@ mod tests {
             base_url,
         );
         let mut stream = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "search"})],
-                None,
-                0.1,
-            ))
+            .stream(
+                LlmRequest::new(&[json!({"role": "user", "content": "search"})], None, 0.1)
+                    .with_scope(
+                        crate::llm::types::LlmRequestScope::new("test-session", "test-run")
+                            .expect("test scope"),
+                    ),
+            )
             .await
             .expect("OpenAI stream");
         let mut content = String::new();

@@ -829,18 +829,21 @@ mod tests {
     }
 
     fn request_with_continuation(messages: &[Value]) -> LlmRequest<'_> {
+        let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
         let continuation = ProviderContinuation::new(
             "openai",
             "test-model",
             "responses",
-            Some(LlmRequestScope::new("test-session", "test-run").unwrap()),
+            Some(scope.clone()),
             vec![crate::tools::ToolInvocationId::new()],
             1,
             0,
             (),
         )
         .unwrap();
-        LlmRequest::new(messages, None, 0.0).with_continuation(Some(continuation))
+        LlmRequest::new(messages, None, 0.0)
+            .with_scope(scope)
+            .with_continuation(Some(continuation))
     }
 
     #[test]
@@ -910,25 +913,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_and_stream_reject_unsupported_structured_request_fields() {
+    async fn complete_and_stream_reject_foreign_continuations_and_unsupported_reasoning() {
         let client = test_client("http://127.0.0.1:9".to_string());
         let messages = [json!({"role": "user", "content": "x"})];
 
         let error = client
             .complete(request_with_continuation(&messages))
             .await
-            .expect_err("completion must reject a provider continuation");
+            .expect_err("completion must reject a foreign provider continuation");
         assert_eq!(
             error,
-            "Anthropic requests do not support provider continuations"
+            "provider continuation does not match the provider, model, API mode, session, or run"
         );
         let error = client
             .stream(request_with_continuation(&messages))
             .await
-            .expect_err("stream must reject a provider continuation");
+            .expect_err("stream must reject a foreign provider continuation");
         assert_eq!(
             error,
-            "Anthropic requests do not support provider continuations"
+            "provider continuation does not match the provider, model, API mode, session, or run"
         );
 
         let reasoning_request = || {
@@ -1034,21 +1037,24 @@ mod tests {
             .to_string(),
         );
         let response = test_client(base_url)
-            .complete(LlmRequest::new(
-                &[
-                    json!({"role": "system", "content": "follow project rules"}),
-                    json!({"role": "user", "content": "search"}),
-                ],
-                Some(&[json!({
-                    "type": "function",
-                    "function": {
-                        "name": "grep",
-                        "description": "search files",
-                        "parameters": {"type": "object", "required": ["pattern"]}
-                    }
-                })]),
-                0.3,
-            ))
+            .complete(
+                LlmRequest::new(
+                    &[
+                        json!({"role": "system", "content": "follow project rules"}),
+                        json!({"role": "user", "content": "search"}),
+                    ],
+                    Some(&[json!({
+                        "type": "function",
+                        "function": {
+                            "name": "grep",
+                            "description": "search files",
+                            "parameters": {"type": "object", "required": ["pattern"]}
+                        }
+                    })]),
+                    0.3,
+                )
+                .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
+            )
             .await
             .expect("Anthropic completion");
 
@@ -1090,11 +1096,10 @@ mod tests {
         );
         let (base_url, request_rx) = serve_once("200 OK", "text/event-stream", body);
         let mut stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "read"})],
-                None,
-                0.0,
-            ))
+            .stream(
+                LlmRequest::new(&[json!({"role": "user", "content": "read"})], None, 0.0)
+                    .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
+            )
             .await
             .expect("Anthropic stream");
         let mut content = String::new();

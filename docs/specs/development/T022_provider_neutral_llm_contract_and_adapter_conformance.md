@@ -708,6 +708,20 @@ No blocking design questions remain for this scope. Native Anthropic/Gemini reas
 multimodal messages, hosted provider tools, and durable provider continuation require
 separate specs rather than expansion of T022.
 
+## Hosted Fixture Reconciliation (2026-08-02)
+
+The first hosted matrix run after the provider-neutral implementation found eight
+fixtures that constructed tool-bearing responses without the request scope required by
+the sealed continuation contract. OpenAI, Anthropic, and Gemini completion/stream
+fixtures now supply a deterministic session/run scope. The Anthropic and Gemini
+negative fixtures continue to use a deliberately foreign OpenAI continuation, but now
+assert the binding error because both adapters support their own native continuation.
+
+This is a fixture and lint reconciliation, not a weakening of continuation validation:
+provider/model/API/session/run mismatches still fail before I/O. The exact local
+`task check` gate passes; exact-revision hosted matrix evidence and the broader
+unchecked conformance criteria remain open.
+
 ## External References
 
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)

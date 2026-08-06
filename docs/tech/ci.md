@@ -78,12 +78,21 @@ publishes GitHub Releases through `prod-latest` / `development-latest`. Producti
 accepted only from `main`; development is accepted only from `development`. Runs are
 serialized per channel.
 
-Publication uses fixed per-channel staging and backup refs plus a versioned marker in
-the staged Release body. The publisher verifies the four exact archives, their four
-portable checksum manifests, uploaded asset state, positive asset sizes, source-branch
-lease, and rolling-tag lease before promotion. A later run reconciles an interrupted
-transaction before it considers its own SHA. Recovery preserves all artifacts until a
-complete forward or rollback state has been re-read.
+Publication normally uses fixed per-channel staging and backup refs plus a versioned
+marker in the staged Release body. When `.github/workflows/` differs between the
+predecessor and candidate, the workflow-scoped `GITHUB_TOKEN` cannot create a backup
+ref at the predecessor because GitHub does not grant that token the separate Workflows
+permission. That case uses a marked forward-only transaction: validate the complete
+candidate draft first, durably record the forward boundary, delete the prior Release,
+move the rolling ref to the source-branch candidate through the Git refs API, and
+promote the candidate. A crash before the boundary rolls back the stage; a crash after
+it converges forward on the next run. No personal token or parallel publisher is added.
+
+Both modes verify the four exact archives, their four portable checksum manifests,
+uploaded asset state, positive asset sizes, source-branch identity, and rolling-tag
+identity before promotion. A later run reconciles an interrupted transaction before it
+considers its own SHA. Recovery preserves candidate artifacts until a complete forward
+or rollback state has been re-read.
 
 The publisher also generates `nib-release.json` after validating the archives. The
 strict manifest binds repository, channel, rolling tag, package version, candidate
@@ -91,6 +100,10 @@ commit, and the four archive sizes/digests. It is staged, validated, promoted, r
 or rolled back as part of the same Release asset set. A legacy eight-asset rolling
 Release remains a valid predecessor during the first manifest-producing transaction;
 new candidates require the manifest.
+
+The publisher and its transaction harness must remain compatible with the Bash 3.2
+runtime provided by hosted macOS runners. Case normalization uses portable utilities,
+and mock API paths must not expand empty arrays while `nounset` is active.
 
 GitHub Release `PATCH` and `DELETE` operations do not expose a conditional-write
 precondition. nib therefore adopts an exclusive-writer contract for rolling Releases:
