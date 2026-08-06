@@ -23,11 +23,30 @@ try {
 
     $sourcePath = Join-Path $PSScriptRoot "windows-pseudoterminal.cs"
     Add-Type -Path $sourcePath
-    $result = [Nib.ReleaseQualification.WindowsPseudoTerminal]::Run(
-        [string]$request.executable,
-        $arguments,
-        $timeoutMilliseconds
+    $childRequest = @{
+        executable = [string]$request.executable
+        arguments = @($arguments)
+    } | ConvertTo-Json -Compress
+    $env:NIB_WINDOWS_PTY_CHILD_REQUEST = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($childRequest)
     )
+    try {
+        $terminalRoot = (Get-Process -Id $PID).Path
+        $terminalArguments = [string[]]@(
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            (Join-Path $PSScriptRoot "start-windows-pseudoterminal-child.ps1")
+        )
+        $result = [Nib.ReleaseQualification.WindowsPseudoTerminal]::Run(
+            $terminalRoot,
+            $terminalArguments,
+            $timeoutMilliseconds
+        )
+    } finally {
+        Remove-Item Env:NIB_WINDOWS_PTY_CHILD_REQUEST -ErrorAction SilentlyContinue
+    }
     [Console]::Out.WriteLine((@{
         exit_code = $result.ExitCode
         output = $result.Output

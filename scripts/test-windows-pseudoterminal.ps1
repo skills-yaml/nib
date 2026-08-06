@@ -69,8 +69,8 @@ try {
         Invoke-WindowsPseudoTerminal `
             -Executable $pwshPath `
             -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $timeoutProbe) `
-            -TimeoutMilliseconds 5000 `
-            -HostGraceMilliseconds 8000 | Out-Null
+            -TimeoutMilliseconds 7000 `
+            -HostGraceMilliseconds 7000 | Out-Null
     } catch {
         $timeoutFailed = $true
     }

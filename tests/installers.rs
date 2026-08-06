@@ -97,6 +97,7 @@ fn release_update_qualification_is_read_only_and_native() {
     let windows = read_repository_text("scripts/qualify-release-update.ps1");
     let windows_pty = read_repository_text("scripts/windows-pseudoterminal.cs");
     let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
+    let windows_pty_child = read_repository_text("scripts/start-windows-pseudoterminal-child.ps1");
     let windows_pty_invoke = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
     let windows_pty_test = read_repository_text("scripts/test-windows-pseudoterminal.ps1");
     let resistant_child =
@@ -190,15 +191,24 @@ fn release_update_qualification_is_read_only_and_native() {
     ));
     assert!(windows_pty.contains("CreatePseudoConsole"));
     assert!(windows_pty.contains("ProcThreadAttributePseudoConsole"));
-    assert!(windows_pty.contains("StartfUseStdHandles"));
-    assert!(windows_pty.contains("startupInfo.StartupInfo.dwFlags = StartfUseStdHandles"));
+    assert!(windows_pty.contains("WindowsConsoleChild"));
+    assert!(windows_pty.contains("OpenConsole(\"CONIN$\")"));
+    assert!(windows_pty.contains("OpenConsole(\"CONOUT$\")"));
+    assert!(windows_pty.contains("SetStdHandle"));
+    assert!(windows_pty.contains("SetStandardHandle(StdInputHandle, consoleInput, \"input\");"));
+    assert!(windows_pty.contains("SetStandardHandle(StdOutputHandle, consoleOutput, \"output\");"));
+    assert!(windows_pty.contains("SetStandardHandle(StdErrorHandle, consoleOutput, \"error\");"));
     assert!(windows_pty.contains("SafeFileHandle outputHandle"));
     assert!(windows_pty.contains("ClosePseudoConsoleBounded"));
     assert!(windows_pty.contains("Preserve the live child hierarchy"));
     assert!(windows_pty_host.contains(windows_pty_source_binding));
     assert!(windows_pty_host.contains("Add-Type -Path $sourcePath"));
     assert!(windows_pty_host.contains("WindowsPseudoTerminal]::Run"));
+    assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
+    assert!(windows_pty_host.contains("start-windows-pseudoterminal-child.ps1"));
     assert!(windows_pty_host.contains("while ($true)"));
+    assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
+    assert!(windows_pty_child.contains("WindowsConsoleChild]::Run"));
     assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));
     assert!(windows_pty_invoke.contains("$process.WaitForExit(5000)"));
@@ -207,7 +217,7 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
     assert!(windows_pty_test.contains("$result.ExitCode -ne 0"));
     assert!(windows_pty_test.contains("$exitResult.ExitCode -ne 23"));
-    assert!(windows_pty_test.contains("-TimeoutMilliseconds 5000"));
+    assert!(windows_pty_test.contains("-TimeoutMilliseconds 7000"));
     assert!(windows_pty_test.contains("timeout left its descendant running"));
     assert!(windows_pty_test.contains("test-windows-pseudoterminal-resistant-child.ps1"));
     assert!(resistant_child.contains("SetConsoleCtrlHandler"));

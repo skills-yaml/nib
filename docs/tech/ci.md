@@ -151,11 +151,13 @@ The Windows qualification creates its terminal with the operating system's ConPT
 through the repository-owned `scripts/windows-pseudoterminal.cs` host. Unlike the Git
 for Windows `winpty.exe` adapter, this host does not require the Actions PowerShell
 process to already have terminal handles. Immediately around child creation, the host
-sets `STARTF_USESTDHANDLES` with explicit null standard handles so `CreateProcessW`
-does not copy the Actions runner's redirected pipes and ConPTY can assign the child its
-own console handles. Normal hosted Windows CI first launches a PowerShell probe through
-the same host and requires the child to observe interactive standard error, captured
-output, and its exact nonzero exit status. Every ConPTY call runs inside a separately
+launches a single-purpose terminal root inside ConPTY. That root opens its attached
+`CONIN$` and `CONOUT$` devices, installs them as its standard handles, and launches the
+requested console child. Windows then duplicates console handles instead of the
+Actions runner's redirected pipes, while the outer host still captures the ConPTY
+stream. Normal hosted Windows CI first launches a PowerShell probe through the same
+host and requires the child to observe interactive standard error, captured output,
+and its exact nonzero exit status. Every ConPTY call runs inside a separately
 supervised PowerShell process: synchronous output is drained on its own thread,
 shutdown has an internal deadline, and the supervisor kills the complete host process
 tree if that deadline is exceeded. The same CI smoke test forces a timeout with a

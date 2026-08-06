@@ -527,6 +527,13 @@ and leave no console descendant. The normal hosted Windows CI job must prove tha
 child launched through the host observes an interactive standard error handle before
 release qualification relies on it.
 
+Hosted Windows Server 2025 also duplicates the Actions runner's redirected standard
+handles into a process attached directly to ConPTY. The repository-owned terminal root
+must therefore open its attached `CONIN$` / `CONOUT$` devices and launch the requested
+console child only after installing those handles. This repair stays inside the
+separately killable ConPTY process tree and must preserve the same output, exit-code,
+timeout, and descendant-cleanup contracts.
+
 ### Acceptance Criteria And Gates
 
 - [ ] The Windows helper launches from headless PowerShell without downloading a
