@@ -147,22 +147,23 @@ the complete qualification succeeds may the exact held production deployment be
 approved. The qualification workflow cannot mutate Releases or refs and does not weaken
 the release workflow's exclusive-writer contract.
 
-The Windows qualification creates its terminal with the operating system's ConPTY API
-through the repository-owned `scripts/windows-pseudoterminal.cs` host. Unlike the Git
-for Windows `winpty.exe` adapter, this host does not require the Actions PowerShell
-process to already have terminal handles. Immediately around child creation, the host
-launches the requested process directly with the pseudoconsole attribute,
-`STARTF_USESTDHANDLES`, and `INVALID_HANDLE_VALUE` in all three standard-handle fields.
-Handle inheritance remains disabled. This prevents Windows Server 2025 from copying
-the redirected Actions pipes while allowing ConPTY to install the process's console
-handles, and it avoids a second process hop. The outer host still captures the ConPTY
-stream. Normal hosted Windows CI first launches a PowerShell probe through the same host
-and requires the child to observe interactive standard error, captured output, and its
-exact nonzero exit status. Every ConPTY call runs inside a separately
-supervised PowerShell process: synchronous output is drained on its own thread,
-shutdown has an internal deadline, and the supervisor kills the complete host process
-tree if that deadline is exceeded. The same CI smoke test forces a timeout with a
-lingering console descendant and requires bounded cleanup with no surviving child.
+The Windows qualification creates its terminal with the operating system's inbox
+`conhost.exe --headless` mode through a repository-owned bounded adapter. Unlike the
+Git for Windows `winpty.exe` adapter, the inbox host does not require the Actions
+PowerShell process to already have terminal handles. It accepts redirected input and
+output pipes, creates the real child console, and returns that console's combined VT
+stream. A repository child adapter runs the requested executable without redirecting
+its handles and writes one unpredictable exit marker after it completes, so the outer
+host can preserve an exact nonzero child status without trusting `conhost.exe`'s own
+status or allowing child output to forge the marker.
+
+Normal hosted Windows CI runs this smoke before the long Windows compilation and test
+steps. It requires a PowerShell child to observe interactive standard error, captured
+output, and its exact nonzero exit status. Every invocation remains inside a separately
+supervised PowerShell process: output and diagnostics drain asynchronously, shutdown
+has an internal deadline, and both supervisors kill the complete host process tree if
+that deadline is exceeded. The same smoke forces a timeout with a lingering console
+descendant and requires bounded cleanup with no surviving child.
 
 The publisher creates its reserved staging Git ref explicitly at the candidate SHA
 before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to

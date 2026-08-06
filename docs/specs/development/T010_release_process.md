@@ -517,27 +517,31 @@ standard input to already be a terminal. GitHub Actions launches PowerShell with
 handles, so `winpty.exe` reports `stdin is not a tty` and cannot be used to create the
 first terminal in that environment.
 
-Replace that adapter with a repository-owned host for the native Windows ConPTY API.
-The host must create and drain a pseudoconsole without interactive parent handles,
-capture the child's combined console stream, preserve its exit code, enforce a timeout,
-and release every pipe, process, attribute-list, and pseudoconsole handle. Run that host
-behind a separately killable process boundary so a stuck operating-system close cannot
-make qualification unbounded; timeout cleanup must terminate that complete process tree
-and leave no console descendant. The normal hosted Windows CI job must prove that a
-child launched through the host observes an interactive standard error handle before
-release qualification relies on it.
+Replace that adapter with a repository-owned bounded adapter over Windows' inbox
+headless console host. The adapter must create and drain a child console without
+interactive parent handles, capture the combined console stream, preserve the requested
+process's exit code, enforce a timeout, and release every pipe and process handle. Run
+that host behind a separately killable process boundary so a stuck operating-system
+close cannot make qualification unbounded; timeout cleanup must terminate that complete
+process tree and leave no console descendant. The normal hosted Windows CI job must
+prove that a child launched through the host observes an interactive standard error
+handle before release qualification relies on it.
 
-Hosted Windows Server 2025 also duplicates the Actions runner's redirected standard
-handles into a process attached directly to ConPTY when its startup handles remain
-null. Attempts to repair those handles through an intermediate terminal root retained
-the redirected error handle both with implicit console duplication and with an explicit
-restricted handle list. The host must instead launch the requested process directly
-with `STARTF_USESTDHANDLES`, all three standard-handle fields set to
-`INVALID_HANDLE_VALUE`, handle inheritance disabled, and the pseudoconsole process
-attribute present. This sentinel contract prevents redirected parent pipes from being
-copied while allowing ConPTY to install the requested process's console handles. The
-direct launch stays inside the separately killable ConPTY process tree and must preserve
-the same output, exit-code, timeout, and descendant-cleanup contracts.
+Hosted Windows Server 2025 duplicates the Actions runner's redirected standard handles
+into clients of a directly created pseudoconsole when startup handles remain null.
+Intermediate terminal roots retained the redirected error handle with both implicit
+console duplication and an explicit restricted handle list. Exact hosted run
+`31129873191` then proved that `STARTF_USESTDHANDLES` with
+`INVALID_HANDLE_VALUE` sentinels also leaves the PowerShell child's error stream
+non-interactive. These failed contracts must not be released.
+
+Use the Windows inbox `conhost.exe --headless` mode instead. Feed it owned redirected
+input, output, and diagnostic pipes, then launch a repository child adapter as its sole
+console client. The adapter invokes the requested process without redirection and emits
+one unpredictable completion marker containing its exact exit status. The bounded host
+must require exactly one matching marker, remove it from captured output, and kill the
+complete console process tree on timeout. Windows CI runs this smoke before its longer
+compile and test phases so regressions fail fast.
 
 ### Acceptance Criteria And Gates
 
@@ -552,6 +556,6 @@ the same output, exit-code, timeout, and descendant-cleanup contracts.
   a new read-only four-platform release-update qualification run passes before the
   exact held production deployment is approved.
 
-Affected areas are `scripts/windows-pseudoterminal.cs`, its bounded PowerShell host and
-invocation scripts, the Windows qualification and smoke-test scripts, `Taskfile.yml`,
+Affected areas are the bounded Windows pseudoterminal host, child, and invocation
+scripts, the Windows qualification and smoke-test scripts, `Taskfile.yml`,
 `.github/workflows/ci.yml`, `tests/installers.rs`, and release/task CI docs.
