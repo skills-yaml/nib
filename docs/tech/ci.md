@@ -147,6 +147,12 @@ the complete qualification succeeds may the exact held production deployment be
 approved. The qualification workflow cannot mutate Releases or refs and does not weaken
 the release workflow's exclusive-writer contract.
 
+The publisher creates its reserved staging Git ref explicitly at the candidate SHA
+before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to
+materialize that ref. If execution stops after ref creation but before the draft exists,
+only an exact-SHA rerun may clean that unreleased stage (and its matching backup ref)
+after revalidating the coherent prior rolling release.
+
 Pushes that change only `docs/**` and/or `agents/memory/**` do not start Release
 Artifacts. This lets exact hosted rollout evidence be reconciled after publication
 without replacing an already-qualified binary with a documentation-only commit.

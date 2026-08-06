@@ -493,6 +493,11 @@ same production deployment to remain pending on `release-prod` and proves that n
 production ref moved. Passing qualification authorizes approval only for that held
 production run and SHA.
 
+The rollout also requires draft publication to create the reserved staging Git ref at
+the exact candidate SHA before uploading assets and to create the draft with
+`--verify-tag`. This avoids GitHub's `untagged-*` draft placeholder path and keeps the
+rolling channel unchanged until the complete candidate has been validated.
+
 ### Acceptance Criteria And Validation Gates
 
 - [ ] The first exact-revision development release succeeds and publishes the complete

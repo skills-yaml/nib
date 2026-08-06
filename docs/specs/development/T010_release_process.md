@@ -471,6 +471,13 @@ bootstrap ancestry, chronological and run-ID order, and absence of an intervenin
 successful development publication. A final post-matrix job revalidates that the exact
 production deployment is still pending on `release-prod` and no production ref moved.
 
+Hosted qualification exposed that a draft created for a missing tag can retain an
+`untagged-*` placeholder instead of materializing the requested transaction tag. The
+publisher therefore creates the reserved staging ref at the exact candidate SHA first
+and passes `--verify-tag` when creating the draft. A rerun may remove a stage-only crash
+artifact only when the ref still names the same `GITHUB_SHA`, the stable release remains
+coherent, and any backup ref still names that stable rolling SHA.
+
 ### Acceptance Criteria And Gates
 
 - [ ] Two distinct exact-revision development publications complete with nine coherent
@@ -484,7 +491,10 @@ production deployment is still pending on `release-prod` and no production ref m
   canonical local, hosted CI, and four-platform update qualification gates pass.
 - [ ] Documentation-only and agent-memory-only pushes do not republish unchanged
   binaries; post-rollout evidence can be reconciled without moving a qualified channel.
+- [ ] Draft upload requires an explicitly created, exact-SHA staging ref and an exact
+  rerun recovers a crash between staging-ref creation and draft creation without
+  changing the prior rolling release.
 
-Affected areas are `.github/workflows/release.yml`,
+Affected areas are `.github/workflows/release.yml`, `scripts/publish-release.sh`,
 `.github/workflows/release-update-qualification.yml`, the two native qualification
 scripts, `Taskfile.yml`, `tests/installers.rs`, and release CI docs.

@@ -411,6 +411,22 @@ move_rolling_ref_via_api() {
   fi
 }
 
+create_stage_ref_via_api() {
+  local desired=$1
+  local current
+  current=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ -n "$current" ]; then
+    echo "Refusing to replace an existing staging tag: $current" >&2
+    return 1
+  fi
+  "$gh_bin" api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$stage_tag" -f sha="$desired" >/dev/null || return 1
+  current=$(remote_sha "refs/tags/$stage_tag") || return 1
+  if [ "$current" != "$desired" ]; then
+    echo "Staging tag did not reach the candidate SHA." >&2
+    return 1
+  fi
+}
+
 delete_stage_ref_via_api() {
   local expected=$1
   local current
@@ -904,6 +920,41 @@ recover_forward_only_candidate() {
   delete_stage_ref_via_api "$candidate_sha"
 }
 
+recover_unreleased_stage_ref() {
+  local stage_sha=$1
+  local backup_sha=$2
+  local stable_release_id=$3
+  local backup_release_id=$4
+  local rolling
+  if [ "$stage_sha" != "$GITHUB_SHA" ]; then
+    echo "Unreleased staging tag belongs to another candidate: $stage_sha" >&2
+    return 1
+  fi
+  if [ -n "$backup_release_id" ]; then
+    echo "Unreleased staging tag is accompanied by an unowned backup release." >&2
+    return 1
+  fi
+  rolling=$(remote_sha "refs/tags/$RELEASE_TAG") || return 1
+  if [ -n "$stable_release_id" ]; then
+    if [ -z "$rolling" ]; then
+      echo "Prior release exists without its rolling tag." >&2
+      return 1
+    fi
+    release_is_prior_coherent "$stable_release_id" "$RELEASE_TAG" false || return 1
+  elif [ -n "$rolling" ]; then
+    echo "Rolling tag exists without a release while recovering an unreleased stage." >&2
+    return 1
+  fi
+  if [ -n "$backup_sha" ] && [ "$backup_sha" != "$rolling" ]; then
+    echo "Unreleased staging tag has an unrelated backup ref." >&2
+    return 1
+  fi
+  delete_stage_ref_via_api "$stage_sha" || return 1
+  if [ -n "$backup_sha" ]; then
+    delete_backup_ref "$backup_sha" || return 1
+  fi
+}
+
 recover_existing_transaction() {
   local forward_status
   local stage_sha backup_sha rolling
@@ -914,6 +965,28 @@ recover_existing_transaction() {
   stage_release_id=$(release_id_for_tag "$stage_tag") || return 1
   backup_release_id=$(release_id_for_tag "$backup_tag") || return 1
   stable_release_id=$(release_id_for_tag "$RELEASE_TAG") || return 1
+
+  if [ -n "$stage_sha" ] && [ -z "$stage_release_id" ]; then
+    if [ -n "$stable_release_id" ]; then
+      if release_has_marker_start "$stable_release_id"; then
+        load_transaction_marker "$stable_release_id" "" || return 1
+        if [ "$marker_candidate_sha" = "$stage_sha" ]; then
+          stable_marked=1
+        else
+          stable_marked=0
+        fi
+      else
+        case $? in
+          1) stable_marked=0 ;;
+          *) return 1 ;;
+        esac
+      fi
+    fi
+    if [ "$stable_marked" -eq 0 ]; then
+      recover_unreleased_stage_ref "$stage_sha" "$backup_sha" "$stable_release_id" "$backup_release_id"
+      return
+    fi
+  fi
 
   if [ -n "$stage_release_id" ]; then
     if recover_forward_only_candidate "$stage_release_id"; then
@@ -1151,11 +1224,13 @@ fi
 
 if [ "$workflow_change_transaction" -eq 1 ]; then
   transaction_started=1
+  create_stage_ref_via_api "$GITHUB_SHA"
   transaction_body=$(build_transaction_body "$GITHUB_SHA" "$prior_sha_marker" pending "$prior_release_id_marker" forward-only staged)
   create_args=(
     release create "$stage_tag"
     "${upload_paths[@]}"
     --target "$GITHUB_SHA"
+    --verify-tag
     --draft
     --title "$RELEASE_TITLE"
     --notes "$transaction_body"
@@ -1229,11 +1304,13 @@ if [ -n "$old_tag_sha" ]; then
   fi
 fi
 
+create_stage_ref_via_api "$GITHUB_SHA"
 transaction_body=$(build_transaction_body "$GITHUB_SHA" "$prior_sha_marker" pending "$prior_release_id_marker")
 create_args=(
   release create "$stage_tag"
   "${upload_paths[@]}"
   --target "$GITHUB_SHA"
+  --verify-tag
   --draft
   --title "$RELEASE_TITLE"
   --notes "$transaction_body"
