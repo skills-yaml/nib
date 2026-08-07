@@ -213,11 +213,33 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
     assert!(windows_pty_test.contains("$result.ExitCode -ne 0"));
     assert!(windows_pty_test.contains("$exitResult.ExitCode -ne 23"));
-    assert!(windows_pty_test.contains("-TimeoutMilliseconds 7000"));
+    assert!(windows_pty_test.contains("NIB_PTY_DESCENDANT_READY_FILE"));
+    assert!(windows_pty_test.contains("NIB_PTY_PROBE_ARMED_FILE"));
+    assert!(windows_pty_test.contains("-TimeoutMilliseconds 20000"));
+    assert!(windows_pty_test.contains("$hostElapsedMilliseconds -lt 18000"));
+    assert!(windows_pty_test.contains("$hostElapsedMilliseconds -ge 35000"));
+    assert!(windows_pty_test.contains("$stopwatch.ElapsedMilliseconds -ge 40000"));
+    assert!(windows_pty_test.contains("Windows pseudoterminal host exceeded its bounded timeout"));
+    assert!(windows_pty_test.contains("timeout probe exited early with status"));
+    assert!(windows_pty_test.contains("ready resistant descendant"));
+    assert!(windows_pty_test.contains("if ($descendant.HasExited) { exit 44 }"));
+    assert!(windows_pty_test.contains("probe did not arm after descendant readiness"));
     assert!(windows_pty_test.contains("timeout left its descendant running"));
+    assert!(windows_pty_test.contains("$null -eq $descendantPid -and"));
     assert!(windows_pty_test.contains("test-windows-pseudoterminal-resistant-child.ps1"));
     assert!(resistant_child.contains("SetConsoleCtrlHandler"));
     assert!(resistant_child.contains("return controlType == 2"));
+    let descendant_pid = resistant_child
+        .find("NIB_PTY_DESCENDANT_PID_FILE")
+        .expect("resistant descendant PID signal");
+    let install_handler = resistant_child
+        .find("[NibResistantConsoleChild]::Install()")
+        .expect("resistant descendant handler installation");
+    let descendant_ready = resistant_child
+        .find("NIB_PTY_DESCENDANT_READY_FILE")
+        .expect("resistant descendant readiness signal");
+    assert!(descendant_pid < install_handler);
+    assert!(install_handler < descendant_ready);
     let ci = read_repository_text(".github/workflows/ci.yml");
     let windows_smoke = ci
         .find("run: task test:windows-pseudoterminal")

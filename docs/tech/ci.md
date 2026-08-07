@@ -163,7 +163,14 @@ output, and its exact nonzero exit status. Every invocation remains inside a sep
 supervised PowerShell process: output and diagnostics drain asynchronously, shutdown
 has an internal deadline, and both supervisors kill the complete host process tree if
 that deadline is exceeded. The same smoke forces a timeout with a lingering console
-descendant and requires bounded cleanup with no surviving child.
+descendant and requires bounded cleanup with no surviving child. That resistant child
+publishes its PID before cold handler compilation and a separate readiness signal only
+after the console-close handler is installed. The probe accepts only the exact bounded
+outer-host timeout inside a finite time window, so slow hosted startup cannot masquerade
+as successful timeout cleanup and an early setup exit receives a distinct diagnostic.
+After observing readiness, the probe publishes a separate armed signal and continuously
+requires the descendant to remain alive until cleanup. The full timeout and cleanup
+sequence has a 40-second end-to-end upper bound.
 
 The publisher creates its reserved staging Git ref explicitly at the candidate SHA
 before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to

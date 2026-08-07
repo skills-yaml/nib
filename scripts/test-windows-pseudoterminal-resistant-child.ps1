@@ -3,6 +3,8 @@ param()
 
 $ErrorActionPreference = "Stop"
 
+[IO.File]::WriteAllText($env:NIB_PTY_DESCENDANT_PID_FILE, [string]$PID)
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -32,5 +34,5 @@ public static class NibResistantConsoleChild
 '@
 
 [NibResistantConsoleChild]::Install()
-[IO.File]::WriteAllText($env:NIB_PTY_DESCENDANT_PID_FILE, [string]$PID)
+[IO.File]::WriteAllText($env:NIB_PTY_DESCENDANT_READY_FILE, "ready")
 Start-Sleep -Seconds 60

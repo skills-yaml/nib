@@ -543,6 +543,23 @@ must require exactly one matching marker, remove it from captured output, and ki
 complete console process tree on timeout. Windows CI runs this smoke before its longer
 compile and test phases so regressions fail fast.
 
+Exact PR CI run `31136220110` then failed the Windows smoke twice on the west-US
+hosted pool while Validate and macOS passed. The timeout probe allowed only five
+seconds for its resistant descendant to compile and install the console-close handler
+before writing its PID. On that cold runner the readiness loop expired first, so the
+probe returned normally with its private setup status instead of reaching the intended
+bounded host timeout. The smoke's generic assertion obscured that distinction.
+
+Use separate PID and post-handler readiness files. The descendant must publish its PID
+for cleanup immediately, publish readiness only after the resistant handler is
+installed, and remain alive after readiness until the bounded host kills the complete
+process tree. Give that cold-start handshake a larger but finite interval inside a
+separately bounded host invocation. Treat only the exact outer host-timeout error as
+the expected outcome; an early probe exit or any other host error must fail with its
+own diagnostic. After observing descendant readiness, the probe must publish its own
+armed signal and continuously reject a descendant exit until the host performs cleanup.
+Bound the complete timeout and cleanup sequence, not just the host invocation.
+
 ### Acceptance Criteria And Gates
 
 - [ ] The Windows helper launches from headless PowerShell without downloading a
@@ -551,6 +568,9 @@ compile and test phases so regressions fail fast.
   the helper, then still proves exact replacement and a byte-preserving current no-op.
 - [x] Deterministic repository tests bind the workflow, Task target, helper, and native
   qualification script together and reject a return to `winpty.exe`.
+- [ ] The timeout smoke distinguishes an early descendant setup exit from the expected
+  host timeout, waits for an explicit post-handler readiness signal, and proves cleanup
+  inside a finite lower and upper time window.
 - [x] `task test:installers`, `task docs:check`, and `task check` pass locally.
 - [ ] The exact committed revision passes hosted Validate, macOS, and Windows jobs, and
   a new read-only four-platform release-update qualification run passes before the
