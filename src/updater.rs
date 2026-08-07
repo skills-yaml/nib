@@ -1984,6 +1984,37 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_cleanup_replay_after_committed_state_is_idempotent() {
+        let old: &[u8] = b"old executable";
+        let candidate: &[u8] = b"candidate executable";
+        let parent = tempfile::tempdir().expect("cleanup replay parent");
+        let staging = tempfile::Builder::new()
+            .prefix(".nib-update-")
+            .tempdir_in(parent.path())
+            .expect("cleanup replay staging");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let request =
+            windows_cleanup_request_for_test(&nonce, OsStr::new("nib.exe"), old, candidate);
+        let request_path = staging.path().join(WINDOWS_CLEANUP_REQUEST);
+        write_windows_cleanup_request(&request_path, &request).expect("cleanup replay request");
+        let (request, paths) =
+            load_windows_cleanup_request(&request_path).expect("load cleanup replay request");
+        fs::write(&paths.target, candidate).expect("published candidate");
+
+        reconcile_windows_cleanup(&request, &paths).expect("first cleanup reconciliation");
+        assert_eq!(
+            fs::read(&paths.target).expect("first reconciled target"),
+            candidate
+        );
+        assert!(!paths.backup.exists());
+
+        reconcile_windows_cleanup(&request, &paths).expect("replayed cleanup reconciliation");
+        assert_eq!(fs::read(&paths.target).expect("replayed target"), candidate);
+        assert!(!paths.backup.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_new_update_is_fenced_until_prior_cleanup_converges() {
         let parent = tempfile::tempdir().expect("cleanup fence parent");
         reject_pending_windows_cleanup(parent.path()).expect("clean install directory");
