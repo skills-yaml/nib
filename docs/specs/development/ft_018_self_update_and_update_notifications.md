@@ -523,3 +523,64 @@ Affected areas are `.github/workflows/release.yml`,
 `.github/workflows/release-update-qualification.yml`,
 `scripts/qualify-release-update.sh`, `scripts/qualify-release-update.ps1`,
 `Taskfile.yml`, `tests/installers.rs`, `docs/tech/ci.md`, and `docs/tech/task.md`.
+
+## Windows In-Use Replacement Remediation (2026-08-06)
+
+### Reproduction And Scope
+
+Read-only qualification run `31141318203` proved the updater and release contract on
+Linux, macOS Intel, and macOS Apple Silicon, but the Windows job failed while the
+bootstrap process attempted to replace its own running image. `MoveFileExW` with
+`MOVEFILE_REPLACE_EXISTING` returned `Access is denied. (os error 5)` at the exact
+same-path replacement boundary. Production remains held and unapproved.
+
+Replace the unsupported overwrite with a repository-owned Windows handoff protocol.
+The verified candidate creates a cleanup worker before mutation. After a bounded
+readiness handshake, the parent renames the running target to a unique same-directory
+backup and publishes the already-verified staged candidate at the original path. A
+failed publish restores the backup before returning failure. The worker holds a real
+handle to the parent process, waits for that exact process to exit, then reconciles
+only digest-proven states: remove the old backup after a successful publish, restore it
+if the target is absent, or preserve ambiguous evidence without deleting either
+candidate. Worker and staging cleanup are bounded and cannot turn a successful update
+into an unbounded foreground wait.
+
+The private worker entrypoint runs before Clap parsing and is available only through a
+strict, updater-owned request passed in the environment. Request paths are confined to
+direct children of the target and staging directories; expected old and candidate
+SHA-256 digests bind every recovery decision. The public CLI and startup-notice policy
+do not expose or invoke the worker.
+
+Readiness publication writes and syncs a private sibling first, then atomically renames
+it to the observed readiness name without replacement. Readers can therefore observe
+only absence or the complete request-bound nonce, never a partial handshake.
+
+### Acceptance Criteria And Validation Gates
+
+- [ ] Windows never attempts to overwrite or unlink the currently running image.
+- [ ] Parent/worker readiness has a finite timeout, and mutation starts only after the
+  worker has opened the exact parent process and durably signalled readiness.
+- [ ] Successful replacement leaves the original executable path naming the verified
+  candidate before `nib update` reports success; old-image and staging cleanup
+  converges after the parent exits.
+- [ ] A publish failure rolls the same digest-proven backup back to the target, and a
+  crash between the two renames is recoverable by the worker without accepting an
+  unverified file.
+- [ ] A later updater is fenced while any prior Windows staging or backup evidence
+  remains, so two replacement/cleanup protocols cannot overlap at one target.
+- [ ] Missing, malformed, replayed, path-escaping, digest-mismatched, and ambiguous
+  worker requests fail closed and preserve recovery evidence.
+- [ ] Deterministic tests cover cleanup-state classification, publish rollback, bounded
+  readiness, and debris detection; the Windows qualification rejects leftover
+  `.nib-update-*` staging or backup paths after convergence.
+- [ ] `task test:updater`, `task test:installers`, Windows MSVC checks, `task check`,
+  `task docs:check`, and exact-revision hosted CI pass.
+- [ ] Two distinct development publications containing the repaired updater qualify
+  on all four native platforms. The first repaired publication is the bootstrap and
+  the second is the candidate; an older bootstrap cannot qualify code it does not run.
+- [ ] Only the exact held production run for the second repaired revision is approved,
+  after the final read-only job confirms production is still unchanged and held.
+
+Affected areas are `src/updater.rs`, the pre-parse startup boundary in `src/main.rs`,
+Windows updater tests, `scripts/qualify-release-update.ps1`, installer/workflow static
+tests, and the consecutive-development release evidence.

@@ -2,15 +2,25 @@ use reqwest::blocking::{Client, Response};
 use reqwest::redirect::{Attempt, Policy};
 use reqwest::Url;
 use serde::Deserialize;
+#[cfg(windows)]
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::process::Command;
+#[cfg(windows)]
+use std::process::Stdio;
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 use thiserror::Error;
 
 const OFFICIAL_REPOSITORY: &str = "skills-yaml/nib";
@@ -24,6 +34,26 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(1);
 const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_REDIRECTS: usize = 5;
+#[cfg(windows)]
+const WINDOWS_CLEANUP_REQUEST_ENV: &str = "NIB_WINDOWS_UPDATE_CLEANUP_REQUEST";
+#[cfg(windows)]
+const WINDOWS_FINALIZE_REQUEST_ENV: &str = "NIB_WINDOWS_UPDATE_FINALIZE_REQUEST";
+#[cfg(windows)]
+const WINDOWS_FINALIZE_WORKER_PID_ENV: &str = "NIB_WINDOWS_UPDATE_FINALIZE_WORKER_PID";
+#[cfg(windows)]
+const WINDOWS_CLEANUP_HELPER: &str = ".nib-update-cleanup.exe";
+#[cfg(windows)]
+const WINDOWS_CLEANUP_REQUEST: &str = "cleanup-request.json";
+#[cfg(windows)]
+const WINDOWS_CLEANUP_READY: &str = "cleanup.ready";
+#[cfg(windows)]
+const WINDOWS_FINALIZER_READY: &str = "finalizer.ready";
+#[cfg(windows)]
+const WINDOWS_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+const WINDOWS_PARENT_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(windows)]
+const WINDOWS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RELEASE_ARCHIVES: [&str; 4] = [
     "nib-linux-x86_64.tar.gz",
     "nib-macos-aarch64.tar.gz",
@@ -47,6 +77,11 @@ pub enum UpdateError {
     ResponseTooLarge { limit: usize },
     #[error("another nib update is already in progress")]
     AlreadyRunning,
+    #[cfg(windows)]
+    #[error(
+        "a prior Windows update cleanup has not converged; wait and retry or rerun the official installer"
+    )]
+    PendingWindowsCleanup,
     #[error("installed executable cannot be updated safely: {0}")]
     UnsafeInstallation(String),
     #[error("update archive is invalid: {0}")]
@@ -133,6 +168,87 @@ enum Availability {
         current: BuildIdentity,
         latest: BuildIdentity,
     },
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsCleanupState {
+    PublishedWithBackup,
+    PublishedClean,
+    RestoreBackup,
+    RolledBack,
+    Ambiguous,
+}
+
+#[cfg(any(windows, test))]
+fn classify_windows_cleanup_state(
+    target_digest: Option<&str>,
+    backup_digest: Option<&str>,
+    old_digest: &str,
+    candidate_digest: &str,
+) -> WindowsCleanupState {
+    match (target_digest, backup_digest) {
+        (Some(target), Some(backup)) if target == candidate_digest && backup == old_digest => {
+            WindowsCleanupState::PublishedWithBackup
+        }
+        (Some(target), None) if target == candidate_digest => WindowsCleanupState::PublishedClean,
+        (None, Some(backup)) if backup == old_digest => WindowsCleanupState::RestoreBackup,
+        (Some(target), None) if target == old_digest => WindowsCleanupState::RolledBack,
+        _ => WindowsCleanupState::Ambiguous,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn commit_windows_candidate(
+    staged: &Path,
+    target: &Path,
+    backup: &Path,
+    mut move_file: impl FnMut(&Path, &Path) -> Result<(), UpdateError>,
+    verify_published: impl FnOnce() -> Result<(), UpdateError>,
+) -> Result<(), UpdateError> {
+    move_file(target, backup)?;
+    if let Err(publish_error) = move_file(staged, target) {
+        return match move_file(backup, target) {
+            Ok(()) => Err(publish_error),
+            Err(rollback_error) => Err(UpdateError::Filesystem(format!(
+                "candidate publication failed ({publish_error}); backup rollback failed ({rollback_error})"
+            ))),
+        };
+    }
+
+    if let Err(publication_error) = verify_published() {
+        let rollback_result = move_file(target, staged).and_then(|()| move_file(backup, target));
+        return match rollback_result {
+            Ok(()) => Err(publication_error),
+            Err(rollback_error) => Err(UpdateError::Filesystem(format!(
+                "published candidate revalidation failed ({publication_error}); backup rollback failed ({rollback_error})"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WindowsCleanupRequest {
+    schema_version: u32,
+    parent_pid: u32,
+    nonce: String,
+    target_name: Vec<u16>,
+    staged_name: Vec<u16>,
+    backup_name: Vec<u16>,
+    old_sha256: String,
+    candidate_sha256: String,
+}
+
+#[cfg(windows)]
+struct WindowsCleanupPaths {
+    request_path: PathBuf,
+    staging: PathBuf,
+    target: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +547,8 @@ fn install_available_update(
             )))
         }
     }
+    #[cfg(windows)]
+    reject_pending_windows_cleanup(parent)?;
 
     let initial_identity = same_file::Handle::from_path(&target).map_err(|error| {
         UpdateError::UnsafeInstallation(format!("cannot identify current executable: {error}"))
@@ -480,9 +598,14 @@ fn install_available_update(
             "current executable changed during update".to_string(),
         ));
     }
-    drop(initial_identity);
     drop(final_identity);
-    replace_executable(&staged_path, &target)?;
+    #[cfg(windows)]
+    replace_executable_windows(staging, &staged_path, &target, latest, initial_identity)?;
+    #[cfg(not(windows))]
+    {
+        drop(initial_identity);
+        replace_executable(&staged_path, &target)?;
+    }
     sync_parent(parent)?;
     drop(lock);
     Ok(())
@@ -496,6 +619,31 @@ fn validate_target_path(target: &Path) -> Result<(), UpdateError> {
         return Err(UpdateError::UnsafeInstallation(
             "current executable is not a regular file".to_string(),
         ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_pending_windows_cleanup(parent: &Path) -> Result<(), UpdateError> {
+    let entries = fs::read_dir(parent).map_err(|error| {
+        UpdateError::Filesystem(format!("cannot inspect installation directory: {error}"))
+    })?;
+    for (index, entry) in entries.enumerate() {
+        if index >= 1024 {
+            return Err(UpdateError::UnsafeInstallation(
+                "installation directory contains too many entries to validate safely".to_string(),
+            ));
+        }
+        let entry = entry.map_err(|error| {
+            UpdateError::Filesystem(format!("cannot inspect installation entry: {error}"))
+        })?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nib-update-")
+        {
+            return Err(UpdateError::PendingWindowsCleanup);
+        }
     }
     Ok(())
 }
@@ -649,9 +797,14 @@ fn write_staged_binary(path: &Path, binary: &[u8]) -> Result<(), UpdateError> {
 }
 
 fn verify_staged_binary(path: &Path, expected: &BuildIdentity) -> Result<(), UpdateError> {
-    let output = Command::new(path)
-        .arg("version")
-        .env("NIB_NO_UPDATE_CHECK", "1")
+    let mut command = Command::new(path);
+    command.arg("version").env("NIB_NO_UPDATE_CHECK", "1");
+    #[cfg(windows)]
+    command
+        .env_remove(WINDOWS_CLEANUP_REQUEST_ENV)
+        .env_remove(WINDOWS_FINALIZE_REQUEST_ENV)
+        .env_remove(WINDOWS_FINALIZE_WORKER_PID_ENV);
+    let output = command
         .output()
         .map_err(|error| UpdateError::InvalidStagedBinary(error.to_string()))?;
     if !output.status.success() {
@@ -683,23 +836,21 @@ fn replace_executable(staged: &Path, target: &Path) -> Result<(), UpdateError> {
 }
 
 #[cfg(windows)]
-fn replace_executable(staged: &Path, target: &Path) -> Result<(), UpdateError> {
+fn move_file_windows(source: &Path, target: &Path) -> Result<(), UpdateError> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-    let staged_wide: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
     let status = unsafe {
         MoveFileExW(
-            staged_wide.as_ptr(),
+            source_wide.as_ptr(),
             target_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_WRITE_THROUGH,
         )
     };
     if status == 0 {
         Err(UpdateError::Filesystem(format!(
-            "cannot replace executable: {}",
+            "cannot move update file: {}",
             io::Error::last_os_error()
         )))
     } else {
@@ -712,6 +863,683 @@ fn replace_executable(_staged: &Path, _target: &Path) -> Result<(), UpdateError>
     Err(UpdateError::UnsupportedPlatform {
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
     })
+}
+
+#[cfg(windows)]
+fn replace_executable_windows(
+    staging: tempfile::TempDir,
+    staged: &Path,
+    target: &Path,
+    expected: &BuildIdentity,
+    initial_identity: same_file::Handle,
+) -> Result<(), UpdateError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    let parent = target.parent().ok_or_else(|| {
+        UpdateError::UnsafeInstallation("current executable has no parent directory".to_string())
+    })?;
+    let old_sha256 = hex_sha256_file(target)?;
+    let candidate_sha256 = hex_sha256_file(staged)?;
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let backup = parent.join(format!(".nib-update-previous-{nonce}.exe"));
+    reject_link(&backup, false)?;
+    let helper = staging.path().join(WINDOWS_CLEANUP_HELPER);
+    copy_and_sync(staged, &helper)?;
+
+    let target_name = target
+        .file_name()
+        .ok_or_else(|| UpdateError::UnsafeInstallation("invalid executable name".to_string()))?;
+    let request = WindowsCleanupRequest {
+        schema_version: 1,
+        parent_pid: std::process::id(),
+        nonce,
+        target_name: target_name.encode_wide().collect(),
+        staged_name: target_name.encode_wide().collect(),
+        backup_name: backup
+            .file_name()
+            .expect("backup has a file name")
+            .encode_wide()
+            .collect(),
+        old_sha256,
+        candidate_sha256: candidate_sha256.clone(),
+    };
+    let request_path = staging.path().join(WINDOWS_CLEANUP_REQUEST);
+    write_windows_cleanup_request(&request_path, &request)?;
+
+    let mut worker = Command::new(&helper);
+    worker
+        .env(WINDOWS_CLEANUP_REQUEST_ENV, &request_path)
+        .env_remove(WINDOWS_FINALIZE_REQUEST_ENV)
+        .env_remove(WINDOWS_FINALIZE_WORKER_PID_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    let mut worker = worker.spawn().map_err(|error| {
+        UpdateError::Filesystem(format!(
+            "cannot start Windows update cleanup worker: {error}"
+        ))
+    })?;
+    let staging_path = staging.keep();
+    if let Err(error) = wait_for_windows_worker_ready(&staging_path, &request.nonce, &mut worker) {
+        let _ = worker.kill();
+        let _ = worker.wait();
+        if let Ok((cleanup_request, cleanup_paths)) = load_windows_cleanup_request(&request_path) {
+            let _ = remove_windows_staging(&cleanup_request, &cleanup_paths, false);
+        }
+        return Err(error);
+    }
+
+    validate_target_path(target)?;
+    let commit_identity = same_file::Handle::from_path(target).map_err(|error| {
+        UpdateError::UnsafeInstallation(format!(
+            "cannot identify current executable at the Windows commit point: {error}"
+        ))
+    })?;
+    if initial_identity != commit_identity || hex_sha256_file(target)? != request.old_sha256 {
+        return Err(UpdateError::UnsafeInstallation(
+            "current executable changed before Windows replacement".to_string(),
+        ));
+    }
+    drop(initial_identity);
+    drop(commit_identity);
+
+    commit_windows_candidate(staged, target, &backup, retry_windows_move, || {
+        let published_sha256 = hex_sha256_file(target)?;
+        if published_sha256 != candidate_sha256 {
+            return Err(UpdateError::Filesystem(
+                "published executable digest does not match the verified candidate".to_string(),
+            ));
+        }
+        verify_staged_binary(target, expected)
+    })
+}
+
+#[cfg(windows)]
+pub fn run_windows_update_worker_if_requested() -> Option<i32> {
+    let cleanup_request = std::env::var_os(WINDOWS_CLEANUP_REQUEST_ENV);
+    let finalize_request = std::env::var_os(WINDOWS_FINALIZE_REQUEST_ENV);
+    let finalize_worker_pid = std::env::var_os(WINDOWS_FINALIZE_WORKER_PID_ENV);
+    match (cleanup_request, finalize_request, finalize_worker_pid) {
+        (None, None, None) => None,
+        (Some(request), None, None) => {
+            Some(if run_windows_cleanup_worker(Path::new(&request)).is_ok() {
+                0
+            } else {
+                70
+            })
+        }
+        (None, Some(request), Some(worker_pid)) => Some(
+            match worker_pid
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|pid| *pid != 0)
+                .ok_or(())
+                .and_then(|pid| run_windows_finalizer(Path::new(&request), pid).map_err(|_| ()))
+            {
+                Ok(()) => 0,
+                Err(()) => 70,
+            },
+        ),
+        _ => Some(70),
+    }
+}
+
+#[cfg(windows)]
+fn copy_and_sync(source: &Path, target: &Path) -> Result<(), UpdateError> {
+    let mut source_file = OpenOptions::new()
+        .read(true)
+        .open(source)
+        .map_err(|error| {
+            UpdateError::Filesystem(format!("cannot open verified candidate: {error}"))
+        })?;
+    let mut target_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(target)
+        .map_err(|error| {
+            UpdateError::Filesystem(format!("cannot create Windows cleanup worker: {error}"))
+        })?;
+    io::copy(&mut source_file, &mut target_file)
+        .and_then(|_| target_file.sync_all())
+        .map_err(|error| {
+            UpdateError::Filesystem(format!("cannot persist Windows cleanup worker: {error}"))
+        })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_windows_cleanup_request(
+    path: &Path,
+    request: &WindowsCleanupRequest,
+) -> Result<(), UpdateError> {
+    let bytes = serde_json::to_vec(request).map_err(|error| {
+        UpdateError::Filesystem(format!("cannot encode Windows cleanup request: {error}"))
+    })?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            UpdateError::Filesystem(format!("cannot create Windows cleanup request: {error}"))
+        })?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            UpdateError::Filesystem(format!("cannot persist Windows cleanup request: {error}"))
+        })
+}
+
+#[cfg(windows)]
+fn wait_for_windows_worker_ready(
+    staging: &Path,
+    nonce: &str,
+    worker: &mut std::process::Child,
+) -> Result<(), UpdateError> {
+    let ready = staging.join(WINDOWS_CLEANUP_READY);
+    wait_for_windows_ready(&ready, nonce, WINDOWS_WORKER_READY_TIMEOUT, || {
+        worker.try_wait().map_err(|error| {
+            UpdateError::Filesystem(format!("cannot inspect Windows cleanup worker: {error}"))
+        })
+    })
+}
+
+#[cfg(windows)]
+fn wait_for_windows_ready(
+    ready: &Path,
+    nonce: &str,
+    timeout: Duration,
+    mut child_status: impl FnMut() -> Result<Option<std::process::ExitStatus>, UpdateError>,
+) -> Result<(), UpdateError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match fs::read_to_string(ready) {
+            Ok(value) if value == nonce => return Ok(()),
+            Ok(_) => {
+                return Err(UpdateError::Filesystem(
+                    "Windows cleanup worker returned an invalid readiness token".to_string(),
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(UpdateError::Filesystem(format!(
+                    "cannot read Windows cleanup readiness: {error}"
+                )))
+            }
+        }
+        if let Some(status) = child_status()? {
+            return Err(UpdateError::Filesystem(format!(
+                "Windows cleanup worker exited before readiness with {status}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(UpdateError::Filesystem(
+                "Windows cleanup worker readiness timed out".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_cleanup_worker(request_path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+    let (request, paths) = load_windows_cleanup_request(request_path)?;
+    require_current_windows_executable(&paths.staging.join(WINDOWS_CLEANUP_HELPER))?;
+    let parent_handle = unsafe { OpenProcess(SYNCHRONIZE, 0, request.parent_pid) };
+    if parent_handle.is_null() {
+        return Err("cannot open the exact updater parent process".to_string());
+    }
+    if let Err(error) =
+        write_windows_ready_file(&paths.staging.join(WINDOWS_CLEANUP_READY), &request.nonce)
+    {
+        unsafe {
+            CloseHandle(parent_handle);
+        }
+        return Err(error);
+    }
+    let wait_status = unsafe {
+        WaitForSingleObject(
+            parent_handle,
+            WINDOWS_PARENT_EXIT_TIMEOUT.as_millis() as u32,
+        )
+    };
+    let wait_error = (wait_status == WAIT_FAILED).then(io::Error::last_os_error);
+    unsafe {
+        CloseHandle(parent_handle);
+    }
+    match wait_status {
+        WAIT_OBJECT_0 => {}
+        WAIT_TIMEOUT => {
+            return Err("updater parent did not exit within the cleanup deadline".to_string())
+        }
+        WAIT_FAILED => {
+            return Err(format!(
+                "waiting for updater parent failed: {}",
+                wait_error.expect("WAIT_FAILED captures its operating-system error")
+            ))
+        }
+        status => {
+            return Err(format!(
+                "waiting for updater parent returned status {status}"
+            ))
+        }
+    }
+
+    reconcile_windows_cleanup(&request, &paths)?;
+    start_windows_finalizer(&request, &paths)
+}
+
+#[cfg(windows)]
+fn run_windows_finalizer(request_path: &Path, worker_pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+    let (request, paths) = load_windows_cleanup_request(request_path)?;
+    require_current_windows_executable(&paths.target)?;
+    let target_digest = digest_if_regular_file(&paths.target)?
+        .ok_or_else(|| "finalizer target is missing".to_string())?;
+    if target_digest != request.old_sha256 && target_digest != request.candidate_sha256 {
+        return Err("finalizer target digest is not an approved update identity".to_string());
+    }
+    let worker_handle = unsafe { OpenProcess(SYNCHRONIZE, 0, worker_pid) };
+    if worker_handle.is_null() {
+        return Err("cannot open the exact cleanup worker process".to_string());
+    }
+    if let Err(error) =
+        write_windows_ready_file(&paths.staging.join(WINDOWS_FINALIZER_READY), &request.nonce)
+    {
+        unsafe {
+            CloseHandle(worker_handle);
+        }
+        return Err(error);
+    }
+    let wait_status = unsafe {
+        WaitForSingleObject(
+            worker_handle,
+            WINDOWS_WORKER_READY_TIMEOUT.as_millis() as u32,
+        )
+    };
+    let wait_error = (wait_status == WAIT_FAILED).then(io::Error::last_os_error);
+    unsafe {
+        CloseHandle(worker_handle);
+    }
+    match wait_status {
+        WAIT_OBJECT_0 => {}
+        WAIT_TIMEOUT => {
+            return Err("cleanup worker did not exit within the finalizer deadline".to_string())
+        }
+        WAIT_FAILED => {
+            return Err(format!(
+                "waiting for cleanup worker failed: {}",
+                wait_error.expect("WAIT_FAILED captures its operating-system error")
+            ))
+        }
+        status => {
+            return Err(format!(
+                "waiting for cleanup worker returned status {status}"
+            ))
+        }
+    }
+    remove_windows_staging(&request, &paths, true)
+}
+
+#[cfg(windows)]
+fn load_windows_cleanup_request(
+    request_path: &Path,
+) -> Result<(WindowsCleanupRequest, WindowsCleanupPaths), String> {
+    use std::os::windows::ffi::OsStringExt;
+
+    if request_path.file_name() != Some(OsStr::new(WINDOWS_CLEANUP_REQUEST)) {
+        return Err("cleanup request has an unexpected name".to_string());
+    }
+    let metadata = fs::symlink_metadata(request_path)
+        .map_err(|error| format!("cannot inspect cleanup request: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("cleanup request is not a regular file".to_string());
+    }
+    let bytes =
+        fs::read(request_path).map_err(|error| format!("cannot read cleanup request: {error}"))?;
+    if bytes.is_empty() || bytes.len() > 16 * 1024 {
+        return Err("cleanup request size is invalid".to_string());
+    }
+    let request: WindowsCleanupRequest = serde_json::from_slice(&bytes)
+        .map_err(|_| "cleanup request is not valid strict JSON".to_string())?;
+    if request.schema_version != 1
+        || request.parent_pid == 0
+        || !is_lower_hex(&request.nonce, 32)
+        || !is_lower_hex(&request.old_sha256, 64)
+        || !is_lower_hex(&request.candidate_sha256, 64)
+        || request.old_sha256 == request.candidate_sha256
+    {
+        return Err("cleanup request identity is invalid".to_string());
+    }
+
+    let target_name = OsString::from_wide(&request.target_name);
+    let staged_name = OsString::from_wide(&request.staged_name);
+    let backup_name = OsString::from_wide(&request.backup_name);
+    require_direct_windows_name(&target_name)?;
+    require_direct_windows_name(&staged_name)?;
+    require_direct_windows_name(&backup_name)?;
+    if staged_name != target_name {
+        return Err("staged and target names do not match".to_string());
+    }
+    if target_name == OsStr::new(WINDOWS_CLEANUP_HELPER)
+        || target_name == OsStr::new(WINDOWS_CLEANUP_REQUEST)
+        || target_name == OsStr::new(WINDOWS_CLEANUP_READY)
+        || target_name == OsStr::new(WINDOWS_FINALIZER_READY)
+    {
+        return Err("target name collides with a reserved updater file".to_string());
+    }
+    let expected_backup = format!(".nib-update-previous-{}.exe", request.nonce);
+    if backup_name != OsStr::new(&expected_backup) {
+        return Err("backup name is not bound to the cleanup request".to_string());
+    }
+
+    let staging = request_path
+        .parent()
+        .ok_or_else(|| "cleanup request has no staging directory".to_string())?;
+    let staging_name = staging
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "staging directory name is invalid".to_string())?;
+    if !staging_name.starts_with(".nib-update-") {
+        return Err("cleanup request is outside an updater staging directory".to_string());
+    }
+    let staging_metadata = fs::symlink_metadata(staging)
+        .map_err(|error| format!("cannot inspect staging directory: {error}"))?;
+    if staging_metadata.file_type().is_symlink() || !staging_metadata.is_dir() {
+        return Err("update staging path is not a physical directory".to_string());
+    }
+    let staging = fs::canonicalize(staging)
+        .map_err(|error| format!("cannot resolve staging directory: {error}"))?;
+    let canonical_request = fs::canonicalize(request_path)
+        .map_err(|error| format!("cannot resolve cleanup request: {error}"))?;
+    if canonical_request != staging.join(WINDOWS_CLEANUP_REQUEST) {
+        return Err("cleanup request escaped its staging directory".to_string());
+    }
+    let parent = staging
+        .parent()
+        .ok_or_else(|| "staging directory has no installation parent".to_string())?;
+    let paths = WindowsCleanupPaths {
+        request_path: canonical_request,
+        target: parent.join(&target_name),
+        staged: staging.join(&staged_name),
+        backup: parent.join(&backup_name),
+        staging,
+    };
+    Ok((request, paths))
+}
+
+#[cfg(windows)]
+fn require_direct_windows_name(name: &OsStr) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Component;
+
+    if name.encode_wide().any(|unit| unit == 0) {
+        return Err("cleanup request contains a null file-name unit".to_string());
+    }
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err("cleanup request contains a non-local file name".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn require_current_windows_executable(expected: &Path) -> Result<(), String> {
+    let current = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| format!("cannot resolve worker executable: {error}"))?;
+    let expected = fs::canonicalize(expected)
+        .map_err(|error| format!("cannot resolve expected worker executable: {error}"))?;
+    if current != expected {
+        return Err("private updater mode was launched from an unexpected path".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn digest_if_regular_file(path: &Path) -> Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("update recovery path is not a regular file".to_string())
+        }
+        Ok(_) => hex_sha256_file(path)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot inspect update recovery path: {error}")),
+    }
+}
+
+#[cfg(windows)]
+fn reconcile_windows_cleanup(
+    request: &WindowsCleanupRequest,
+    paths: &WindowsCleanupPaths,
+) -> Result<(), String> {
+    let target_digest = digest_if_regular_file(&paths.target)?;
+    let backup_digest = digest_if_regular_file(&paths.backup)?;
+    match classify_windows_cleanup_state(
+        target_digest.as_deref(),
+        backup_digest.as_deref(),
+        &request.old_sha256,
+        &request.candidate_sha256,
+    ) {
+        WindowsCleanupState::PublishedWithBackup => {
+            retry_windows_cleanup(|| fs::remove_file(&paths.backup))
+                .map_err(|error| format!("cannot remove replaced Windows image: {error}"))?;
+        }
+        WindowsCleanupState::PublishedClean | WindowsCleanupState::RolledBack => {}
+        WindowsCleanupState::RestoreBackup => {
+            retry_windows_move(&paths.backup, &paths.target).map_err(|error| error.to_string())?;
+        }
+        WindowsCleanupState::Ambiguous => {
+            return Err("Windows update recovery state is ambiguous".to_string())
+        }
+    }
+
+    let final_target = digest_if_regular_file(&paths.target)?
+        .ok_or_else(|| "Windows update recovery left the target missing".to_string())?;
+    if final_target != request.old_sha256 && final_target != request.candidate_sha256 {
+        return Err("Windows update recovery left an unverified target".to_string());
+    }
+    if digest_if_regular_file(&paths.backup)?.is_some() {
+        return Err("Windows update recovery left the old image present".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn start_windows_finalizer(
+    request: &WindowsCleanupRequest,
+    paths: &WindowsCleanupPaths,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    let mut finalizer = Command::new(&paths.target);
+    finalizer
+        .env_remove(WINDOWS_CLEANUP_REQUEST_ENV)
+        .env(WINDOWS_FINALIZE_REQUEST_ENV, &paths.request_path)
+        .env(
+            WINDOWS_FINALIZE_WORKER_PID_ENV,
+            std::process::id().to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    let mut finalizer = finalizer
+        .spawn()
+        .map_err(|error| format!("cannot start Windows staging finalizer: {error}"))?;
+    let ready = paths.staging.join(WINDOWS_FINALIZER_READY);
+    let deadline = Instant::now() + WINDOWS_WORKER_READY_TIMEOUT;
+    loop {
+        match fs::read_to_string(&ready) {
+            Ok(value) if value == request.nonce => return Ok(()),
+            Ok(_) => {
+                return Err("Windows finalizer returned an invalid readiness token".to_string())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot read Windows finalizer readiness: {error}")),
+        }
+        if let Some(status) = finalizer
+            .try_wait()
+            .map_err(|error| format!("cannot inspect Windows finalizer: {error}"))?
+        {
+            return Err(format!(
+                "Windows finalizer exited before readiness with {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            let _ = finalizer.kill();
+            let _ = finalizer.wait();
+            return Err("Windows finalizer readiness timed out".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+fn write_windows_ready_file(path: &Path, nonce: &str) -> Result<(), String> {
+    write_windows_ready_file_with_hook(path, nonce, |_| {})
+}
+
+#[cfg(windows)]
+fn write_windows_ready_file_with_hook(
+    path: &Path,
+    nonce: &str,
+    before_publish: impl FnOnce(&Path),
+) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "updater readiness file name is invalid".to_string())?;
+    let publishing = path.with_file_name(format!("{file_name}.publishing-{nonce}"));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&publishing)
+        .map_err(|error| format!("cannot create updater readiness staging file: {error}"))?;
+    file.write_all(nonce.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("cannot persist updater readiness staging file: {error}"))?;
+    drop(file);
+    before_publish(&publishing);
+    move_file_windows(&publishing, path)
+        .map_err(|error| format!("cannot publish updater readiness file: {error}"))
+}
+
+#[cfg(windows)]
+fn retry_windows_move(source: &Path, target: &Path) -> Result<(), UpdateError> {
+    let deadline = Instant::now() + WINDOWS_CLEANUP_TIMEOUT;
+    loop {
+        match move_file_windows(source, target) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn retry_windows_cleanup(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let deadline = Instant::now() + WINDOWS_CLEANUP_TIMEOUT;
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn remove_windows_staging(
+    request: &WindowsCleanupRequest,
+    paths: &WindowsCleanupPaths,
+    finalizer_ready_required: bool,
+) -> Result<(), String> {
+    require_nonce_file(
+        &paths.staging.join(WINDOWS_CLEANUP_READY),
+        &request.nonce,
+        false,
+    )?;
+    require_nonce_file(
+        &paths.staging.join(WINDOWS_FINALIZER_READY),
+        &request.nonce,
+        finalizer_ready_required,
+    )?;
+    require_optional_digest(&paths.staged, &request.candidate_sha256)?;
+    require_optional_digest(
+        &paths.staging.join(WINDOWS_CLEANUP_HELPER),
+        &request.candidate_sha256,
+    )?;
+
+    for path in [
+        paths.staging.join(WINDOWS_CLEANUP_READY),
+        paths.staging.join(WINDOWS_FINALIZER_READY),
+        paths.staged.clone(),
+        paths.staging.join(WINDOWS_CLEANUP_HELPER),
+        paths.request_path.clone(),
+    ] {
+        retry_windows_cleanup(|| fs::remove_file(&path))
+            .map_err(|error| format!("cannot remove verified Windows update file: {error}"))?;
+    }
+    retry_windows_cleanup(|| fs::remove_dir(&paths.staging))
+        .map_err(|error| format!("cannot remove empty Windows update staging directory: {error}"))
+}
+
+#[cfg(windows)]
+fn require_nonce_file(path: &Path, nonce: &str, required: bool) -> Result<(), String> {
+    match fs::read_to_string(path) {
+        Ok(value) if value == nonce => Ok(()),
+        Ok(_) => Err("updater readiness file has an invalid token".to_string()),
+        Err(error) if !required && error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot validate updater readiness file: {error}")),
+    }
+}
+
+#[cfg(windows)]
+fn require_optional_digest(path: &Path, expected: &str) -> Result<(), String> {
+    if let Some(actual) = digest_if_regular_file(path)? {
+        if actual != expected {
+            return Err("Windows update staging file has an unexpected digest".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn hex_sha256_file(path: &Path) -> Result<String, UpdateError> {
+    let mut file = OpenOptions::new().read(true).open(path).map_err(|error| {
+        UpdateError::Filesystem(format!("cannot read update executable: {error}"))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            UpdateError::Filesystem(format!("cannot hash update executable: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn sync_parent(parent: &Path) -> Result<(), UpdateError> {
@@ -966,6 +1794,380 @@ mod tests {
             extract_binary("nib-linux-x86_64.tar.gz", &encoded).unwrap(),
             b"binary"
         );
+    }
+
+    #[test]
+    fn windows_cleanup_state_requires_digest_proven_terminal_shapes() {
+        let old = "a".repeat(64);
+        let candidate = "b".repeat(64);
+        let unknown = "c".repeat(64);
+
+        assert_eq!(
+            classify_windows_cleanup_state(Some(&candidate), Some(&old), &old, &candidate),
+            WindowsCleanupState::PublishedWithBackup
+        );
+        assert_eq!(
+            classify_windows_cleanup_state(Some(&candidate), None, &old, &candidate),
+            WindowsCleanupState::PublishedClean
+        );
+        assert_eq!(
+            classify_windows_cleanup_state(None, Some(&old), &old, &candidate),
+            WindowsCleanupState::RestoreBackup
+        );
+        assert_eq!(
+            classify_windows_cleanup_state(Some(&old), None, &old, &candidate),
+            WindowsCleanupState::RolledBack
+        );
+
+        for (target, backup) in [
+            (None, None),
+            (Some(old.as_str()), Some(old.as_str())),
+            (Some(candidate.as_str()), Some(candidate.as_str())),
+            (Some(unknown.as_str()), Some(old.as_str())),
+            (Some(candidate.as_str()), Some(unknown.as_str())),
+        ] {
+            assert_eq!(
+                classify_windows_cleanup_state(target, backup, &old, &candidate),
+                WindowsCleanupState::Ambiguous
+            );
+        }
+    }
+
+    #[test]
+    fn windows_candidate_publish_rolls_back_every_failure_boundary() {
+        use std::cell::RefCell;
+
+        let staged = Path::new("staged");
+        let target = Path::new("target");
+        let backup = Path::new("backup");
+
+        let publish_calls = RefCell::new(Vec::new());
+        let publish_error = commit_windows_candidate(
+            staged,
+            target,
+            backup,
+            |source, destination| {
+                publish_calls
+                    .borrow_mut()
+                    .push((source.to_path_buf(), destination.to_path_buf()));
+                if source == staged && destination == target {
+                    Err(UpdateError::Filesystem(
+                        "injected publish failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            || panic!("failed publication must not be verified"),
+        )
+        .expect_err("candidate publication failure");
+        assert!(publish_error
+            .to_string()
+            .contains("injected publish failure"));
+        assert_eq!(
+            publish_calls.into_inner(),
+            vec![
+                (target.to_path_buf(), backup.to_path_buf()),
+                (staged.to_path_buf(), target.to_path_buf()),
+                (backup.to_path_buf(), target.to_path_buf()),
+            ]
+        );
+
+        let verify_calls = RefCell::new(Vec::new());
+        let verification_error = commit_windows_candidate(
+            staged,
+            target,
+            backup,
+            |source, destination| {
+                verify_calls
+                    .borrow_mut()
+                    .push((source.to_path_buf(), destination.to_path_buf()));
+                Ok(())
+            },
+            || {
+                Err(UpdateError::Filesystem(
+                    "injected verification failure".to_string(),
+                ))
+            },
+        )
+        .expect_err("published verification failure");
+        assert!(verification_error
+            .to_string()
+            .contains("injected verification failure"));
+        assert_eq!(
+            verify_calls.into_inner(),
+            vec![
+                (target.to_path_buf(), backup.to_path_buf()),
+                (staged.to_path_buf(), target.to_path_buf()),
+                (target.to_path_buf(), staged.to_path_buf()),
+                (backup.to_path_buf(), target.to_path_buf()),
+            ]
+        );
+
+        let rollback_error = commit_windows_candidate(
+            staged,
+            target,
+            backup,
+            |source, destination| {
+                if (source == staged && destination == target)
+                    || (source == backup && destination == target)
+                {
+                    Err(UpdateError::Filesystem("injected move failure".to_string()))
+                } else {
+                    Ok(())
+                }
+            },
+            || panic!("failed publication must not be verified"),
+        )
+        .expect_err("rollback failure must remain visible");
+        assert!(rollback_error
+            .to_string()
+            .contains("backup rollback failed"));
+    }
+
+    #[cfg(windows)]
+    fn windows_cleanup_request_for_test(
+        nonce: &str,
+        target_name: &OsStr,
+        old: &[u8],
+        candidate: &[u8],
+    ) -> WindowsCleanupRequest {
+        use std::os::windows::ffi::OsStrExt;
+
+        WindowsCleanupRequest {
+            schema_version: 1,
+            parent_pid: std::process::id(),
+            nonce: nonce.to_string(),
+            target_name: target_name.encode_wide().collect(),
+            staged_name: target_name.encode_wide().collect(),
+            backup_name: OsStr::new(&format!(".nib-update-previous-{nonce}.exe"))
+                .encode_wide()
+                .collect(),
+            old_sha256: hex_sha256(old),
+            candidate_sha256: hex_sha256(candidate),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cleanup_reconciles_published_and_interrupted_states() {
+        let old: &[u8] = b"old executable";
+        let candidate: &[u8] = b"candidate executable";
+
+        for restore_interrupted in [false, true] {
+            let parent = tempfile::tempdir().expect("cleanup parent");
+            let staging = tempfile::Builder::new()
+                .prefix(".nib-update-")
+                .tempdir_in(parent.path())
+                .expect("cleanup staging");
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            let request =
+                windows_cleanup_request_for_test(&nonce, OsStr::new("nib.exe"), old, candidate);
+            let request_path = staging.path().join(WINDOWS_CLEANUP_REQUEST);
+            write_windows_cleanup_request(&request_path, &request).expect("cleanup request");
+            let (request, paths) =
+                load_windows_cleanup_request(&request_path).expect("load cleanup request");
+            fs::write(&paths.backup, old).expect("old image backup");
+            if !restore_interrupted {
+                fs::write(&paths.target, candidate).expect("published candidate");
+            }
+
+            reconcile_windows_cleanup(&request, &paths).expect("reconcile cleanup state");
+            assert!(!paths.backup.exists());
+            let expected = if restore_interrupted { old } else { candidate };
+            assert_eq!(
+                fs::read(&paths.target).expect("reconciled target"),
+                expected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_new_update_is_fenced_until_prior_cleanup_converges() {
+        let parent = tempfile::tempdir().expect("cleanup fence parent");
+        reject_pending_windows_cleanup(parent.path()).expect("clean install directory");
+        fs::write(parent.path().join(".nib-update-stale"), b"evidence")
+            .expect("stale cleanup evidence");
+        assert!(matches!(
+            reject_pending_windows_cleanup(parent.path()),
+            Err(UpdateError::PendingWindowsCleanup)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_worker_readiness_is_bounded_and_token_bound() {
+        let directory = tempfile::tempdir().expect("readiness fixture");
+        let ready = directory.path().join("ready");
+        let started = Instant::now();
+        let timeout =
+            wait_for_windows_ready(&ready, "expected", Duration::from_millis(50), || Ok(None))
+                .expect_err("missing readiness must time out");
+        assert!(timeout.to_string().contains("readiness timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        fs::write(&ready, b"wrong").expect("wrong readiness token");
+        assert!(
+            wait_for_windows_ready(&ready, "expected", Duration::from_secs(1), || Ok(None))
+                .expect_err("wrong readiness token")
+                .to_string()
+                .contains("invalid readiness token")
+        );
+        fs::write(&ready, b"expected").expect("correct readiness token");
+        wait_for_windows_ready(&ready, "expected", Duration::from_secs(1), || Ok(None))
+            .expect("correct readiness token");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readiness_is_invisible_until_the_complete_nonce_is_synced() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().expect("readiness publication fixture");
+        let ready = directory.path().join(WINDOWS_CLEANUP_READY);
+        let nonce = "a".repeat(32);
+        let staged = Arc::new(Barrier::new(2));
+        let publish = Arc::new(Barrier::new(2));
+        let child_ready = ready.clone();
+        let child_nonce = nonce.clone();
+        let child_staged = Arc::clone(&staged);
+        let child_publish = Arc::clone(&publish);
+        let writer = thread::spawn(move || {
+            write_windows_ready_file_with_hook(&child_ready, &child_nonce, |publishing| {
+                assert_eq!(
+                    fs::read_to_string(publishing).expect("synced staged readiness"),
+                    child_nonce
+                );
+                child_staged.wait();
+                child_publish.wait();
+            })
+        });
+
+        staged.wait();
+        assert!(
+            !ready.exists(),
+            "final readiness must remain absent while publication is paused"
+        );
+        publish.wait();
+        writer
+            .join()
+            .expect("readiness writer")
+            .expect("publish readiness");
+        assert_eq!(fs::read_to_string(&ready).expect("final readiness"), nonce);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cleanup_request_rejects_traversal_unknown_fields_and_digest_replay() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let parent = tempfile::tempdir().expect("cleanup parent");
+        let old: &[u8] = b"old executable";
+        let candidate: &[u8] = b"candidate executable";
+
+        let traversal_staging = tempfile::Builder::new()
+            .prefix(".nib-update-")
+            .tempdir_in(parent.path())
+            .expect("traversal staging");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut traversal =
+            windows_cleanup_request_for_test(&nonce, OsStr::new("nib.exe"), old, candidate);
+        traversal.target_name = OsStr::new("..\\escape.exe").encode_wide().collect();
+        traversal.staged_name = traversal.target_name.clone();
+        let traversal_path = traversal_staging.path().join(WINDOWS_CLEANUP_REQUEST);
+        write_windows_cleanup_request(&traversal_path, &traversal).expect("traversal request");
+        assert!(load_windows_cleanup_request(&traversal_path).is_err());
+
+        let unknown_staging = tempfile::Builder::new()
+            .prefix(".nib-update-")
+            .tempdir_in(parent.path())
+            .expect("unknown-field staging");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let valid = windows_cleanup_request_for_test(&nonce, OsStr::new("nib.exe"), old, candidate);
+        let mut unknown = serde_json::to_value(valid).expect("request value");
+        unknown
+            .as_object_mut()
+            .expect("request object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        let unknown_path = unknown_staging.path().join(WINDOWS_CLEANUP_REQUEST);
+        fs::write(
+            &unknown_path,
+            serde_json::to_vec(&unknown).expect("unknown-field JSON"),
+        )
+        .expect("unknown-field request");
+        assert!(load_windows_cleanup_request(&unknown_path).is_err());
+
+        let replay_staging = tempfile::Builder::new()
+            .prefix(".nib-update-")
+            .tempdir_in(parent.path())
+            .expect("digest-replay staging");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut replay =
+            windows_cleanup_request_for_test(&nonce, OsStr::new("nib.exe"), old, candidate);
+        replay.candidate_sha256 = replay.old_sha256.clone();
+        let replay_path = replay_staging.path().join(WINDOWS_CLEANUP_REQUEST);
+        write_windows_cleanup_request(&replay_path, &replay).expect("digest-replay request");
+        assert!(load_windows_cleanup_request(&replay_path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_running_image_can_be_renamed_before_candidate_publication() {
+        const CHILD_ENV: &str = "NIB_TEST_WINDOWS_RUNNING_IMAGE_CHILD";
+        const READY_ENV: &str = "NIB_TEST_WINDOWS_RUNNING_IMAGE_READY";
+        const STOP_ENV: &str = "NIB_TEST_WINDOWS_RUNNING_IMAGE_STOP";
+
+        if std::env::var_os(CHILD_ENV).as_deref() == Some(OsStr::new("1")) {
+            let ready = PathBuf::from(std::env::var_os(READY_ENV).expect("child ready path"));
+            let stop = PathBuf::from(std::env::var_os(STOP_ENV).expect("child stop path"));
+            fs::write(&ready, b"ready").expect("publish child readiness");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !stop.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "parent did not release test child"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("Windows replacement fixture");
+        let source = std::env::current_exe().expect("test executable");
+        let target = directory.path().join("nib-running-test.exe");
+        let backup = directory.path().join("nib-running-test.previous.exe");
+        let ready = directory.path().join("child.ready");
+        let stop = directory.path().join("child.stop");
+        fs::copy(&source, &target).expect("copy running-image fixture");
+        let mut child = Command::new(&target)
+            .arg("windows_running_image_can_be_renamed_before_candidate_publication")
+            .env(CHILD_ENV, "1")
+            .env(READY_ENV, &ready)
+            .env(STOP_ENV, &stop)
+            .spawn()
+            .expect("start running-image fixture");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().expect("inspect fixture child") {
+                panic!("fixture child exited before readiness with {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture child readiness timed out"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        move_file_windows(&target, &backup).expect("rename running executable to backup");
+        fs::copy(&source, &target).expect("publish candidate at original path");
+        assert!(target.is_file());
+        assert!(backup.is_file());
+        fs::write(&stop, b"stop").expect("release fixture child");
+        assert!(child.wait().expect("wait fixture child").success());
+        fs::remove_file(&backup).expect("remove exited old image");
+        assert!(target.is_file());
+        assert!(!backup.exists());
     }
 
     #[cfg(unix)]

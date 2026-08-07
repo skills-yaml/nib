@@ -610,3 +610,43 @@ being treated as eventual consistency.
 
 Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, release CI
 documentation, and the exact hosted release evidence in this spec.
+
+## Windows Self-Update Release Hold (2026-08-06)
+
+### Reproduction And Release Policy
+
+Release-update qualification run `31141318203` passed Linux and both macOS jobs but
+failed Windows because the bootstrap updater tried to overwrite its running
+`nib.exe`; Windows returned access denied. The exact production publication remains
+pending on `release-prod` and must not be approved. Its four successful build jobs are
+artifact evidence only and do not override the failed native updater gate.
+
+The replacement implementation lives in the installed bootstrap binary, not in the
+downloaded candidate. Release qualification therefore requires two new consecutive
+development publications that both contain the remediation. The first becomes the
+fixed bootstrap. A distinct second revision becomes the candidate and the only
+production revision eligible for approval. Any older held production deployment and
+any held deployment for the first fixed bootstrap are obsolete and must be cancelled,
+not approved, once superseded.
+
+### Acceptance Criteria And Gates
+
+- [ ] The Windows in-use replacement remediation passes local gates, two-stage review,
+  and exact-revision hosted Validate, macOS, and Windows CI.
+- [ ] A complete nine-asset development publication establishes the first fixed
+  bootstrap revision.
+- [ ] A distinct complete nine-asset development publication establishes the fixed
+  candidate revision with no intervening successful development publication.
+- [ ] The read-only qualification validates release provenance and passes Linux,
+  macOS Intel, macOS Apple Silicon, and Windows from the fixed bootstrap to the fixed
+  candidate, including byte-preserving current no-op and bounded Windows debris
+  cleanup.
+- [ ] The final qualification job proves the candidate's exact production deployment
+  is still waiting on `release-prod` and the production rolling ref has not moved.
+- [ ] Only that exact deployment is approved. Publication is then re-read for the
+  candidate SHA, rolling tag, manifest, four archives, four checksums, and binary
+  identity before the release is announced.
+
+Affected areas are FT-018's Windows replacement implementation and tests, the Windows
+qualification script, hosted CI, two consecutive development Release Artifacts runs,
+and the exact held production deployment selected after qualification.

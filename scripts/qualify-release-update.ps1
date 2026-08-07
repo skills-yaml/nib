@@ -100,6 +100,26 @@ try {
         throw "update did not replace the bootstrap executable bytes"
     }
 
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    do {
+        $updateDebris = @(
+            Get-ChildItem -LiteralPath $installDir -Force |
+                Where-Object { $_.Name.StartsWith('.nib-update-', [StringComparison]::Ordinal) }
+        )
+        if ($updateDebris.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+    $updateDebris = @(
+        Get-ChildItem -LiteralPath $installDir -Force |
+            Where-Object { $_.Name.StartsWith('.nib-update-', [StringComparison]::Ordinal) }
+    )
+    if ($updateDebris.Count -ne 0) {
+        $debrisNames = ($updateDebris | ForEach-Object Name) -join ', '
+        throw "Windows self-update cleanup did not converge: $debrisNames"
+    }
+
     Remove-Item Env:NIB_NO_UPDATE_CHECK
     $noopOutput = (& $nibPath update 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or
