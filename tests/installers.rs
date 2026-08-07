@@ -95,6 +95,12 @@ fn release_update_qualification_is_read_only_and_native() {
     let taskfile = read_repository_text("Taskfile.yml");
     let unix = read_repository_text("scripts/qualify-release-update.sh");
     let windows = read_repository_text("scripts/qualify-release-update.ps1");
+    let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
+    let windows_pty_child = read_repository_text("scripts/start-windows-pseudoterminal-child.ps1");
+    let windows_pty_invoke = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
+    let windows_pty_test = read_repository_text("scripts/test-windows-pseudoterminal.ps1");
+    let resistant_child =
+        read_repository_text("scripts/test-windows-pseudoterminal-resistant-child.ps1");
 
     assert!(workflow.contains("  workflow_dispatch:\n"));
     assert!(!workflow.contains("\n  push:\n"));
@@ -169,11 +175,57 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(unix.contains("expected_candidate_version=$4"));
     assert!(unix.contains("candidate_identity=$(NIB_NO_UPDATE_CHECK=1"));
     assert!(unix.contains("already-current update changed the executable"));
-    assert!(windows.contains("winpty.exe"));
+    assert!(!windows.contains("winpty.exe"));
+    let windows_pty_invoke_binding =
+        "Join-Path $PSScriptRoot \"invoke-windows-pseudoterminal.ps1\"";
+    let windows_pty_child_binding =
+        "Join-Path $PSScriptRoot \"start-windows-pseudoterminal-child.ps1\"";
+    assert!(windows.contains(windows_pty_invoke_binding));
+    assert!(windows.contains("Invoke-WindowsPseudoTerminal"));
     assert!(windows.contains("ExpectedCandidateVersion"));
     assert!(windows.contains("$candidateIdentity = (& $nibPath version"));
     assert!(windows.contains("& $nibPath update"));
     assert!(windows.contains("already-current update changed the executable"));
+    assert!(taskfile.contains(
+        "  test:windows-pseudoterminal:\n    desc: Prove the inbox headless Windows console qualification host\n    platforms: [windows]\n    cmds:\n      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1\n"
+    ));
+    assert!(windows_pty_host.contains("System32\\conhost.exe"));
+    assert!(windows_pty_host.contains(windows_pty_child_binding));
+    assert!(windows_pty_host.contains("$startInfo.ArgumentList.Add(\"--headless\")"));
+    assert!(windows_pty_host.contains("$startInfo.ArgumentList.Add(\"--\")"));
+    assert!(windows_pty_host.contains("$startInfo.RedirectStandardInput = $true"));
+    assert!(windows_pty_host.contains("$startInfo.RedirectStandardOutput = $true"));
+    assert!(windows_pty_host.contains("$startInfo.RedirectStandardError = $true"));
+    assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
+    assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_EXIT_MARKER"));
+    assert!(windows_pty_host.contains("$process.Kill($true)"));
+    assert!(windows_pty_host.contains("$process.WaitForExit(5000)"));
+    assert!(windows_pty_host.contains("while ($true)"));
+    assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
+    assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_EXIT_MARKER"));
+    assert!(windows_pty_child.contains("& ([string]$request.executable) @arguments"));
+    assert!(windows_pty_child.contains("[Console]::Out.WriteLine"));
+    assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
+    assert!(windows_pty_invoke.contains("$process.Kill($true)"));
+    assert!(windows_pty_invoke.contains("$process.WaitForExit(5000)"));
+    assert!(windows_pty_test.contains(windows_pty_invoke_binding));
+    assert!(windows_pty_test.contains("Invoke-WindowsPseudoTerminal"));
+    assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
+    assert!(windows_pty_test.contains("$result.ExitCode -ne 0"));
+    assert!(windows_pty_test.contains("$exitResult.ExitCode -ne 23"));
+    assert!(windows_pty_test.contains("-TimeoutMilliseconds 7000"));
+    assert!(windows_pty_test.contains("timeout left its descendant running"));
+    assert!(windows_pty_test.contains("test-windows-pseudoterminal-resistant-child.ps1"));
+    assert!(resistant_child.contains("SetConsoleCtrlHandler"));
+    assert!(resistant_child.contains("return controlType == 2"));
+    let ci = read_repository_text(".github/workflows/ci.yml");
+    let windows_smoke = ci
+        .find("run: task test:windows-pseudoterminal")
+        .expect("Windows pseudoterminal smoke step");
+    let windows_checks = ci
+        .find("run: task check:all-targets")
+        .expect("Windows check step");
+    assert!(windows_smoke < windows_checks);
 }
 
 #[test]

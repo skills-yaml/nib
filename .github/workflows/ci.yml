@@ -80,6 +80,9 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Smoke headless Windows pseudoterminal
+        run: task test:windows-pseudoterminal
+
       - name: Check all targets and features
         run: task check:all-targets
 

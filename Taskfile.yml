@@ -104,6 +104,12 @@ tasks:
         -CandidateCommit "{{.CANDIDATE_COMMIT}}"
         -ExpectedCandidateVersion "{{.CANDIDATE_VERSION}}"
 
+  test:windows-pseudoterminal:
+    desc: Prove the inbox headless Windows console qualification host
+    platforms: [windows]
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1
+
   test:installers:
     desc: Run installer and release-transaction integration tests
     cmds:

@@ -506,3 +506,56 @@ stable rolling SHA.
 Affected areas are `.github/workflows/release.yml`, `scripts/publish-release.sh`,
 `.github/workflows/release-update-qualification.yml`, the two native qualification
 scripts, `Taskfile.yml`, `tests/installers.rs`, and release CI docs.
+
+## Headless Windows Terminal Qualification Remediation (2026-08-06)
+
+### Reproduction And Scope
+
+Qualification run `31113952334` passed Linux and both macOS runners, then failed on
+Windows before starting nib because Git for Windows' `winpty.exe` requires its own
+standard input to already be a terminal. GitHub Actions launches PowerShell with pipe
+handles, so `winpty.exe` reports `stdin is not a tty` and cannot be used to create the
+first terminal in that environment.
+
+Replace that adapter with a repository-owned bounded adapter over Windows' inbox
+headless console host. The adapter must create and drain a child console without
+interactive parent handles, capture the combined console stream, preserve the requested
+process's exit code, enforce a timeout, and release every pipe and process handle. Run
+that host behind a separately killable process boundary so a stuck operating-system
+close cannot make qualification unbounded; timeout cleanup must terminate that complete
+process tree and leave no console descendant. The normal hosted Windows CI job must
+prove that a child launched through the host observes an interactive standard error
+handle before release qualification relies on it.
+
+Hosted Windows Server 2025 duplicates the Actions runner's redirected standard handles
+into clients of a directly created pseudoconsole when startup handles remain null.
+Intermediate terminal roots retained the redirected error handle with both implicit
+console duplication and an explicit restricted handle list. Exact hosted run
+`31129873191` then proved that `STARTF_USESTDHANDLES` with
+`INVALID_HANDLE_VALUE` sentinels also leaves the PowerShell child's error stream
+non-interactive. These failed contracts must not be released.
+
+Use the Windows inbox `conhost.exe --headless` mode instead. Feed it owned redirected
+input, output, and diagnostic pipes, then launch a repository child adapter as its sole
+console client. The adapter invokes the requested process without redirection and emits
+one unpredictable completion marker containing its exact exit status. The bounded host
+must require exactly one matching marker, remove it from captured output, and kill the
+complete console process tree on timeout. Windows CI runs this smoke before its longer
+compile and test phases so regressions fail fast.
+
+### Acceptance Criteria And Gates
+
+- [ ] The Windows helper launches from headless PowerShell without downloading a
+  runtime dependency and proves the child sees interactive console output.
+- [ ] Windows qualification captures the bootstrap binary's candidate notice through
+  the helper, then still proves exact replacement and a byte-preserving current no-op.
+- [x] Deterministic repository tests bind the workflow, Task target, helper, and native
+  qualification script together and reject a return to `winpty.exe`.
+- [x] `task test:installers`, `task docs:check`, and `task check` pass locally.
+- [ ] The exact committed revision passes hosted Validate, macOS, and Windows jobs, and
+  a new read-only four-platform release-update qualification run passes before the
+  exact held production deployment is approved.
+
+Affected areas are the bounded Windows pseudoterminal host, child, and invocation
+scripts, the Windows qualification and smoke-test scripts, `Taskfile.yml`,
+`.github/workflows/ci.yml`, `tests/installers.rs`, and release/task CI docs.
