@@ -555,6 +555,13 @@ Readiness publication writes and syncs a private sibling first, then atomically 
 it to the observed readiness name without replacement. Readers can therefore observe
 only absence or the complete request-bound nonce, never a partial handshake.
 
+The first repaired development publication is release run `31145574017` at commit
+`8ff32b2ea5bd7f905bfde3f5c04eed3d77f084e8`. The distinct second repaired candidate
+adds a deterministic recovery replay regression: reconciling an already-committed,
+backup-free state more than once must remain a no-op, preserve the exact candidate
+bytes, and not recreate the old-image backup. This test-only hardening produces a new
+embedded build commit while keeping the qualified updater protocol unchanged.
+
 ### Acceptance Criteria And Validation Gates
 
 - [ ] Windows never attempts to overwrite or unlink the currently running image.
@@ -570,6 +577,8 @@ only absence or the complete request-bound nonce, never a partial handshake.
   remains, so two replacement/cleanup protocols cannot overlap at one target.
 - [ ] Missing, malformed, replayed, path-escaping, digest-mismatched, and ambiguous
   worker requests fail closed and preserve recovery evidence.
+- [ ] Replaying recovery after a digest-proven committed-clean state is idempotent:
+  the candidate bytes remain unchanged and no backup is recreated.
 - [ ] Deterministic tests cover cleanup-state classification, publish rollback, bounded
   readiness, and debris detection; the Windows qualification rejects leftover
   `.nib-update-*` staging or backup paths after convergence.
