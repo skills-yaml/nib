@@ -181,6 +181,16 @@ reconciliation. Every tagged, untagged, and immutable-ID discovery read must suc
 an ambiguous mutation is accepted only after a successful read proves its terminal
 state.
 
+Immediately after `gh release create` returns, GitHub's release list and asset views may
+briefly lag that owned draft. Initial publication therefore waits for at most 12 attempts,
+two seconds apart, for the draft and its exact uploaded nine-asset set. Once a Release
+ID is observed, every later attempt pins and directly re-proves that same immutable ID,
+exact private metadata, target commit, and transaction marker even if list discovery
+temporarily goes empty. Only absence, a missing expected asset, or a not-yet-uploaded
+expected asset is retryable. API read failure, multiple or changing IDs, ownership
+drift, and unexpected asset names fail immediately; exhausting the bound fails closed
+into normal transaction reconciliation.
+
 For rollback-mode transactions, immutable-ID recovery also classifies the retained
 rolling and backup state after a missing staging ref, so it can safely restore the
 prior release or finish an already-started forward publication. A legacy pending draft

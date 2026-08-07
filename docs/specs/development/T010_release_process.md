@@ -559,3 +559,34 @@ compile and test phases so regressions fail fast.
 Affected areas are the bounded Windows pseudoterminal host, child, and invocation
 scripts, the Windows qualification and smoke-test scripts, `Taskfile.yml`,
 `.github/workflows/ci.yml`, `tests/installers.rs`, and release/task CI docs.
+
+## GitHub Draft Asset Visibility Remediation (2026-08-07)
+
+### Reproduction And Scope
+
+Exact development Release Artifacts run `31133424264` built all four native archives
+successfully, then GitHub rewrote the private draft to an `untagged-*` identity and the
+publisher re-read its assets less than one second after `gh release create` returned.
+The immediate read did not expose the exact nine-asset set, so the transaction failed
+closed and reconciliation preserved the prior coherent `development-latest` release.
+
+Retain the immutable release-ID, transaction-marker, target-commit, channel, and draft
+ownership checks. Add a bounded wait only for initial list visibility and exact asset
+name/state visibility after draft creation. API read failures, multiple candidates,
+release-ID changes, and ownership mismatches must still fail immediately rather than
+being treated as eventual consistency.
+
+### Acceptance Criteria And Gates
+
+- [x] Draft creation tolerates a bounded interval where the exact owned draft is absent
+  from the release list or temporarily reports an incomplete asset set.
+- [x] Every retry re-proves the same immutable release ID and exact private transaction
+  ownership; ambiguous identity, failed reads, or metadata drift fail closed.
+- [x] A deterministic release-transaction regression combines an immediate
+  `untagged-*` rewrite with a temporarily incomplete asset listing and then publishes
+  coherently.
+- [ ] `task installers:check`, `task test:installers`, `task docs:check`, and
+  `task check` pass, followed by exact-revision hosted CI and development publication.
+
+Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, release CI
+documentation, and the exact hosted release evidence in this spec.
