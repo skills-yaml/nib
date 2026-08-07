@@ -219,3 +219,30 @@ coding E2E, release build, and release-binary help, version, and doctor smoke.
 The canonical lifecycle is 19 specs in `done/`, 9 in `development/`, and none in
 `backlog/`. FT-001 moved to `done/`; T006 retains its separate hosted Windows evidence
 gate. Historical lifecycle entries remain historical evidence.
+
+## 2026-08-07 - Production self-update channel is live
+
+- Type: fact
+- Source: exact hosted CI, release qualification, and production publication
+- Confidence: high
+- Review: independent spec-compliance and code-quality audits
+- Supersedes: FT-018 and T010 development status
+
+Content:
+
+The public `prod-latest` Release points to commit
+`2ecf9d23d951a293238c46d605f2f92e3db3b946` and contains `nib-release.json` plus four
+native archives and four verified checksum files. Production release run `31148222338`
+was approved only after two consecutive repaired development publications and
+four-platform self-update qualification run `31149505681` passed Linux, macOS Intel,
+macOS Apple Silicon, Windows, and final held-production revalidation.
+
+Official builds expose `nib update`, update only within their embedded rolling channel,
+and use exact commit identity rather than only package version. Windows replacement
+uses a bounded helper/worker handoff that renames the running image to a digest-bound
+backup, publishes the verified candidate, reconciles crash states, and cleans exact
+protocol evidence after process exit. A downloaded production Linux binary reported
+the exact release identity and an already-current update made no mutation.
+
+The reconciled lifecycle is 21 specs in `done/`, 10 in `development/`, and none in
+`backlog/`; FT-018 and T010 transitioned to `done/` on this evidence.

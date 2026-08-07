@@ -228,3 +228,20 @@ evidence, and FT-015's bounded-cleanup follow-up evidence.
 
 The reconciled lifecycle is now 19 specs in `done/`, 9 in `development/`, and none in
 `backlog/`. T006 remains pending its independent hosted Windows evidence reconciliation.
+
+## 2026-08-07 - FT-018 self-update production rollout completed
+
+- Type: release / validation milestone
+- Source: exact hosted CI, release qualification, and production publication
+- Confidence: high
+
+Content:
+
+Released the update-capable production build at commit
+`2ecf9d23d951a293238c46d605f2f92e3db3b946`. Two consecutive repaired development
+publications established the bootstrap and candidate; read-only run `31149505681`
+proved startup notification, exact self-replacement, current-build no-op, and cleanup
+on Linux, both macOS architectures, and Windows. Exact production run `31148222338`
+then published the coherent nine-asset `prod-latest` Release. FT-018 and T010 moved to
+`done/` after public manifest, checksum, binary identity, and no-op smoke validation.
+The resulting lifecycle is 21 done, 10 development, and 0 backlog.
