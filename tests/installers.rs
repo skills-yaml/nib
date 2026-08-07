@@ -213,11 +213,33 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
     assert!(windows_pty_test.contains("$result.ExitCode -ne 0"));
     assert!(windows_pty_test.contains("$exitResult.ExitCode -ne 23"));
-    assert!(windows_pty_test.contains("-TimeoutMilliseconds 7000"));
+    assert!(windows_pty_test.contains("NIB_PTY_DESCENDANT_READY_FILE"));
+    assert!(windows_pty_test.contains("NIB_PTY_PROBE_ARMED_FILE"));
+    assert!(windows_pty_test.contains("-TimeoutMilliseconds 20000"));
+    assert!(windows_pty_test.contains("$hostElapsedMilliseconds -lt 18000"));
+    assert!(windows_pty_test.contains("$hostElapsedMilliseconds -ge 35000"));
+    assert!(windows_pty_test.contains("$stopwatch.ElapsedMilliseconds -ge 40000"));
+    assert!(windows_pty_test.contains("Windows pseudoterminal host exceeded its bounded timeout"));
+    assert!(windows_pty_test.contains("timeout probe exited early with status"));
+    assert!(windows_pty_test.contains("ready resistant descendant"));
+    assert!(windows_pty_test.contains("if ($descendant.HasExited) { exit 44 }"));
+    assert!(windows_pty_test.contains("probe did not arm after descendant readiness"));
     assert!(windows_pty_test.contains("timeout left its descendant running"));
+    assert!(windows_pty_test.contains("$null -eq $descendantPid -and"));
     assert!(windows_pty_test.contains("test-windows-pseudoterminal-resistant-child.ps1"));
     assert!(resistant_child.contains("SetConsoleCtrlHandler"));
     assert!(resistant_child.contains("return controlType == 2"));
+    let descendant_pid = resistant_child
+        .find("NIB_PTY_DESCENDANT_PID_FILE")
+        .expect("resistant descendant PID signal");
+    let install_handler = resistant_child
+        .find("[NibResistantConsoleChild]::Install()")
+        .expect("resistant descendant handler installation");
+    let descendant_ready = resistant_child
+        .find("NIB_PTY_DESCENDANT_READY_FILE")
+        .expect("resistant descendant readiness signal");
+    assert!(descendant_pid < install_handler);
+    assert!(install_handler < descendant_ready);
     let ci = read_repository_text(".github/workflows/ci.yml");
     let windows_smoke = ci
         .find("run: task test:windows-pseudoterminal")
@@ -281,8 +303,8 @@ fn release_workflow_serializes_channels_and_rejects_stale_publication() {
         .find(r#"--force-with-lease="refs/tags/$backup_tag:""#)
         .expect("the prior release SHA must have an owned backup tag");
     let asset_validation = transaction
-        .rfind(r#"! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA""#)
-        .expect("staged release metadata and exact asset names must be validated");
+        .rfind(r#"wait_for_staged_transaction "$GITHUB_SHA""#)
+        .expect("staged release metadata and exact asset names must become visible boundedly");
     let backup_release = transaction
         .find(r#"backup_stable_release "$old_release_id""#)
         .expect("old release must remain available for rollback");
@@ -307,6 +329,16 @@ fn release_workflow_serializes_channels_and_rejects_stale_publication() {
     assert!(transaction.contains("forward-only"));
     assert!(transaction.contains("move_rolling_ref_via_api"));
     assert!(transaction.contains("--verify-tag"));
+    assert!(transaction.contains("stage_visibility_attempts=12"));
+    assert!(transaction.contains(
+        "release_is_owned_staged_transaction \"$release_id\" \"$candidate_sha\" || return 1"
+    ));
+    assert!(transaction
+        .contains("Staged release identity changed from $observed_release_id to $release_id."));
+    assert!(transaction.contains(
+        "Staged release $release_id transaction marker changed during visibility checks."
+    ));
+    assert!(transaction.contains("Failed to read staged release $release_id assets."));
     assert!(transaction.contains(r#"stage_tag="nib-release-stage-$RELEASE_CHANNEL""#));
     assert!(transaction.contains(r#"backup_tag="nib-release-backup-$RELEASE_CHANNEL""#));
     assert!(transaction.contains(r#"--jq '.assets[].name'"#));
@@ -438,6 +470,11 @@ struct ReleaseFaults {
     fail_ls_remote_read: bool,
     kill_after_old_delete: bool,
     rewrite_stage_to_untagged: bool,
+    rewrite_stage_to_untagged_on_create: bool,
+    hide_stage_list_initially: bool,
+    hide_stage_list_after_observation_once: bool,
+    delay_stage_assets_once: bool,
+    delay_stage_asset_state_once: bool,
     kill_after_untagged_rewrite: bool,
 }
 
@@ -655,6 +692,10 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
     fi
     printf '%s|uploaded|%s\n' "$asset" "$size" >> "$releases/$id.asset-metadata"
   done < "$releases/$id.assets"
+  if [ "${FAKE_REWRITE_STAGE_TO_UNTAGGED_ON_CREATE:-0}" = 1 ]; then
+    printf '%s\n' 'untagged-708ba2fca6bbe012874c' > "$releases/$id.tag"
+    printf '%s\n' 'RETAG CREATE stage untagged-708ba2fca6bbe012874c' >> "$events"
+  fi
   exit 0
 fi
 
@@ -694,7 +735,19 @@ if [[ "$endpoint" == *"releases?"* ]]; then
       body=$(cat "$releases/$id.body")
       if [[ "$tag" == untagged-* ]] && [ "$draft" = true ] &&
         grep -Fq 'channel=prod' <<<"$body"; then
-        printf '%s\n' "$id"
+        if [ "${FAKE_HIDE_STAGE_LIST_INITIALLY:-0}" = 1 ] &&
+          [ ! -e "$FAKE_GH_STATE/hidden-stage-list-initially" ]; then
+          touch "$FAKE_GH_STATE/hidden-stage-list-initially"
+          touch "$FAKE_GH_STATE/last-stage-list-empty"
+        elif [ "${FAKE_HIDE_STAGE_LIST_AFTER_OBSERVATION_ONCE:-0}" = 1 ] &&
+          [ -e "$FAKE_GH_STATE/delayed-stage-assets" ] &&
+          [ ! -e "$FAKE_GH_STATE/hidden-stage-list-after-observation" ]; then
+          touch "$FAKE_GH_STATE/hidden-stage-list-after-observation"
+          touch "$FAKE_GH_STATE/last-stage-list-empty"
+        else
+          rm -f "$FAKE_GH_STATE/last-stage-list-empty"
+          printf '%s\n' "$id"
+        fi
       fi
     done
   elif [[ "$query" == *".id | tostring"* ]]; then
@@ -775,13 +828,34 @@ case "$method" in
       exit 1
     fi
     case "$query" in
-      .tag_name) cat "$releases/$id.tag" ;;
+      .tag_name)
+        if [ "$id" = stage ] && [ -e "$FAKE_GH_STATE/last-stage-list-empty" ]; then
+          touch "$FAKE_GH_STATE/pinned-stage-revalidated"
+        fi
+        cat "$releases/$id.tag"
+        ;;
       .draft) cat "$releases/$id.draft" ;;
       .prerelease) cat "$releases/$id.prerelease" ;;
       .body) cat "$releases/$id.body" ;;
       .target_commitish) cat "$releases/$id.target" ;;
-      '.assets[].name') cat "$releases/$id.assets" ;;
-      '.assets[] | select(.state != "uploaded" or .size <= 0) | .name') awk -F '|' '$2 != "uploaded" || $3 <= 0 { print $1 }' "$releases/$id.asset-metadata" ;;
+      '.assets[].name')
+        if [ "$id" = stage ] && [ "${FAKE_DELAY_STAGE_ASSETS_ONCE:-0}" = 1 ] &&
+          [ ! -e "$FAKE_GH_STATE/delayed-stage-assets" ]; then
+          head -n 1 "$releases/$id.assets"
+          touch "$FAKE_GH_STATE/delayed-stage-assets"
+        else
+          cat "$releases/$id.assets"
+        fi
+        ;;
+      '.assets[] | select(.state != "uploaded" or .size <= 0) | .name')
+        if [ "$id" = stage ] && [ "${FAKE_DELAY_STAGE_ASSET_STATE_ONCE:-0}" = 1 ] &&
+          [ ! -e "$FAKE_GH_STATE/delayed-stage-asset-state" ]; then
+          head -n 1 "$releases/$id.assets"
+          touch "$FAKE_GH_STATE/delayed-stage-asset-state"
+        else
+          awk -F '|' '$2 != "uploaded" || $3 <= 0 { print $1 }' "$releases/$id.asset-metadata"
+        fi
+        ;;
       '.assets | length') awk 'NF { count += 1 } END { print count + 0 }' "$releases/$id.assets" ;;
       *) echo "unsupported fake gh query: $query" >&2; exit 2 ;;
     esac
@@ -959,6 +1033,19 @@ exit "$status"
     }
 
     fn run_from_ref(&self, source_ref: &str, faults: ReleaseFaults) -> Output {
+        self.run_from_ref_with_stage_visibility_delay(source_ref, faults, "0")
+    }
+
+    fn run_with_stage_visibility_delay(&self, delay: &str) -> Output {
+        self.run_from_ref_with_stage_visibility_delay("main", ReleaseFaults::default(), delay)
+    }
+
+    fn run_from_ref_with_stage_visibility_delay(
+        &self,
+        source_ref: &str,
+        faults: ReleaseFaults,
+        delay: &str,
+    ) -> Output {
         let real_git = String::from_utf8(
             Command::new("sh")
                 .args(["-c", "command -v git"])
@@ -983,6 +1070,7 @@ exit "$status"
             .env("NIB_RELEASE_GIT_BIN", &self.fake_git)
             .env("NIB_RELEASE_GH_BIN", &self.fake_gh)
             .env("NIB_RELEASE_DIST_DIR", &self.dist)
+            .env("NIB_RELEASE_STAGE_VISIBILITY_DELAY_SECONDS", delay)
             .env("FAKE_GH_STATE", &self.gh_state)
             .env(
                 "FAKE_GH_FAIL_CREATE",
@@ -1139,6 +1227,46 @@ exit "$status"
             .env(
                 "FAKE_REWRITE_STAGE_TO_UNTAGGED",
                 if faults.rewrite_stage_to_untagged {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_REWRITE_STAGE_TO_UNTAGGED_ON_CREATE",
+                if faults.rewrite_stage_to_untagged_on_create {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_DELAY_STAGE_ASSETS_ONCE",
+                if faults.delay_stage_assets_once {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_HIDE_STAGE_LIST_INITIALLY",
+                if faults.hide_stage_list_initially {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_HIDE_STAGE_LIST_AFTER_OBSERVATION_ONCE",
+                if faults.hide_stage_list_after_observation_once {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FAKE_DELAY_STAGE_ASSET_STATE_ONCE",
+                if faults.delay_stage_asset_state_once {
                     "1"
                 } else {
                     "0"
@@ -1363,6 +1491,12 @@ exit "$status"
             "advanced",
             "stage-id-lookups",
             "retagged-stage",
+            "delayed-stage-assets",
+            "delayed-stage-asset-state",
+            "hidden-stage-list-initially",
+            "hidden-stage-list-after-observation",
+            "last-stage-list-empty",
+            "pinned-stage-revalidated",
             "stage-delete-attempted",
         ] {
             let path = self.gh_state.join(name);
@@ -1469,6 +1603,32 @@ fn staged_release_transaction_publishes_complete_assets_coherently() {
 
 #[cfg(unix)]
 #[test]
+fn stage_visibility_delay_accepts_only_the_bounded_lexical_range() {
+    let boundary = ReleaseTransactionHarness::new();
+    let boundary_output = boundary.run_with_stage_visibility_delay("10");
+    assert!(
+        boundary_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&boundary_output.stderr)
+    );
+    assert_eq!(
+        boundary.remote_ref("refs/tags/prod-latest"),
+        boundary.release_sha
+    );
+
+    for invalid in ["01", "11", "9999999999999999999"] {
+        let harness = ReleaseTransactionHarness::new();
+        let output = harness.run_with_stage_visibility_delay(invalid);
+        assert_eq!(output.status.code(), Some(2), "invalid delay {invalid}");
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Invalid NIB_RELEASE_STAGE_VISIBILITY_DELAY_SECONDS value."));
+        harness.assert_prior_release_restored();
+        assert!(harness.events().is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn workflow_change_uses_forward_only_release_transaction_without_backup_ref() {
     let harness = ReleaseTransactionHarness::with_workflow_change(true);
     let output = harness.run(ReleaseFaults::default());
@@ -1526,6 +1686,47 @@ fn workflow_change_tolerates_github_rewriting_the_private_draft_tag() {
     assert!(harness
         .remote_ref("refs/tags/nib-release-stage-prod")
         .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn workflow_change_waits_for_rewritten_draft_assets_to_become_visible() {
+    let harness = ReleaseTransactionHarness::with_workflow_change(true);
+    let output = harness.run(ReleaseFaults {
+        rewrite_stage_to_untagged_on_create: true,
+        hide_stage_list_initially: true,
+        hide_stage_list_after_observation_once: true,
+        delay_stage_assets_once: true,
+        delay_stage_asset_state_once: true,
+        ..ReleaseFaults::default()
+    });
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        harness.remote_ref("refs/tags/prod-latest"),
+        harness.release_sha
+    );
+    assert_eq!(harness.release_id("prod-latest").as_deref(), Some("stage"));
+    harness.assert_complete_candidate_release("prod-latest", "false");
+    assert!(harness
+        .events()
+        .iter()
+        .any(|event| event == "RETAG CREATE stage untagged-708ba2fca6bbe012874c"));
+    assert!(harness.gh_state.join("delayed-stage-assets").exists());
+    assert!(harness.gh_state.join("delayed-stage-asset-state").exists());
+    assert!(harness
+        .gh_state
+        .join("hidden-stage-list-initially")
+        .exists());
+    assert!(harness
+        .gh_state
+        .join("hidden-stage-list-after-observation")
+        .exists());
+    assert!(harness.gh_state.join("pinned-stage-revalidated").exists());
 }
 
 #[cfg(unix)]

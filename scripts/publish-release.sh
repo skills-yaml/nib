@@ -40,6 +40,15 @@ origin=${NIB_RELEASE_ORIGIN:-origin}
 dist_dir=${NIB_RELEASE_DIST_DIR:-dist}
 stage_tag="nib-release-stage-$RELEASE_CHANNEL"
 backup_tag="nib-release-backup-$RELEASE_CHANNEL"
+stage_visibility_attempts=12
+stage_visibility_delay_seconds=${NIB_RELEASE_STAGE_VISIBILITY_DELAY_SECONDS:-2}
+case "$stage_visibility_delay_seconds" in
+  0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) ;;
+  *)
+    echo "Invalid NIB_RELEASE_STAGE_VISIBILITY_DELAY_SECONDS value." >&2
+    exit 2
+    ;;
+esac
 committed=0
 transaction_started=0
 notes="Automated $RELEASE_CHANNEL build from branch $GITHUB_REF_NAME at commit $GITHUB_SHA."
@@ -295,17 +304,74 @@ read_exact_release_tag() {
 
 release_has_expected_assets() {
   local release_id=$1
-  local actual incomplete
-  actual=$(release_asset_names "$release_id") || return 1
+  local actual incomplete name unexpected=
+  actual=$(release_asset_names "$release_id") || return 2
   if [ "$actual" != "$expected_asset_listing" ]; then
+    while IFS= read -r name; do
+      [ -z "$name" ] && continue
+      if ! printf '%s\n' "$expected_asset_listing" | grep -Fxq -- "$name"; then
+        unexpected="${unexpected}${unexpected:+, }$name"
+      fi
+    done <<<"$actual"
+    if [ -n "$unexpected" ]; then
+      echo "Release $release_id contains unexpected asset names: $unexpected" >&2
+      return 3
+    fi
     echo "Release $release_id does not contain the exact expected asset names." >&2
     return 1
   fi
-  incomplete=$(release_incomplete_asset_names "$release_id") || return 1
+  incomplete=$(release_incomplete_asset_names "$release_id") || return 2
   if [ -n "$incomplete" ]; then
     echo "Release $release_id contains incomplete or empty assets: $incomplete" >&2
     return 1
   fi
+}
+
+wait_for_staged_transaction() {
+  local candidate_sha=$1
+  local attempt release_id observed_release_id= observed_marker_body= asset_status
+  for ((attempt = 1; attempt <= stage_visibility_attempts; attempt++)); do
+    release_id=$(release_id_for_staged_transaction) || return 1
+    if [ -n "$release_id" ]; then
+      if [ -n "$observed_release_id" ] && [ "$release_id" != "$observed_release_id" ]; then
+        echo "Staged release identity changed from $observed_release_id to $release_id." >&2
+        return 1
+      fi
+      observed_release_id=$release_id
+    elif [ -n "$observed_release_id" ]; then
+      release_id=$observed_release_id
+    fi
+    if [ -n "$release_id" ]; then
+      release_is_owned_staged_transaction "$release_id" "$candidate_sha" || return 1
+      if [ -n "$observed_marker_body" ] && [ "$marker_body" != "$observed_marker_body" ]; then
+        echo "Staged release $release_id transaction marker changed during visibility checks." >&2
+        return 1
+      fi
+      observed_marker_body=$marker_body
+      if release_has_expected_assets "$release_id"; then
+        printf '%s' "$release_id"
+        return 0
+      else
+        asset_status=$?
+        if [ "$asset_status" -eq 2 ]; then
+          echo "Failed to read staged release $release_id assets." >&2
+          return 1
+        elif [ "$asset_status" -ne 1 ]; then
+          echo "Staged release $release_id exposed invalid asset metadata." >&2
+          return 1
+        fi
+      fi
+    fi
+    if [ "$attempt" -lt "$stage_visibility_attempts" ]; then
+      sleep "$stage_visibility_delay_seconds"
+    fi
+  done
+  if [ -z "$observed_release_id" ]; then
+    echo "Staged release did not become visible after $stage_visibility_attempts attempts." >&2
+  else
+    echo "Staged release $observed_release_id did not expose the exact expected assets after $stage_visibility_attempts attempts." >&2
+  fi
+  return 1
 }
 
 release_has_supported_prior_assets() {
@@ -1363,8 +1429,7 @@ if [ "$workflow_change_transaction" -eq 1 ]; then
     echo "GitHub did not create the forward-only staging tag at the candidate SHA." >&2
     exit 1
   fi
-  stage_release_id=$(release_id_for_staged_transaction)
-  if [ -z "$stage_release_id" ] || ! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA"; then
+  if ! stage_release_id=$(wait_for_staged_transaction "$GITHUB_SHA"); then
     echo "Forward-only staged release could not be resolved with the exact expected assets." >&2
     exit 1
   fi
@@ -1443,8 +1508,7 @@ if [ "$stage_sha" != "$GITHUB_SHA" ]; then
   echo "GitHub did not create the staging tag at the candidate SHA." >&2
   exit 1
 fi
-stage_release_id=$(release_id_for_staged_transaction)
-if [ -z "$stage_release_id" ] || ! release_is_staged_transaction "$stage_release_id" "$GITHUB_SHA"; then
+if ! stage_release_id=$(wait_for_staged_transaction "$GITHUB_SHA"); then
   echo "Staged draft release could not be resolved with the exact expected assets." >&2
   exit 1
 fi
