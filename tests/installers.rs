@@ -186,6 +186,8 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows.contains("$candidateIdentity = (& $nibPath version"));
     assert!(windows.contains("& $nibPath update"));
     assert!(windows.contains("already-current update changed the executable"));
+    assert!(windows.contains("Windows self-update cleanup did not converge"));
+    assert!(windows.contains(".Name.StartsWith('.nib-update-'"));
     assert!(taskfile.contains(
         "  test:windows-pseudoterminal:\n    desc: Prove the inbox headless Windows console qualification host\n    platforms: [windows]\n    cmds:\n      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1\n"
     ));

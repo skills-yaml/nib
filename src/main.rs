@@ -156,6 +156,11 @@ pub struct TuiArgs {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if let Some(status) = updater::run_windows_update_worker_if_requested() {
+        process::exit(status);
+    }
+
     #[cfg(debug_assertions)]
     if let Some(status) = mcp_test_fixture::run_if_requested() {
         process::exit(status);
