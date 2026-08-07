@@ -1,6 +1,6 @@
 # T010: Release Process
 
-**Status:** Development
+**Status:** Done
 
 ## Problem Statement
 
@@ -90,7 +90,7 @@ contains the portable archive basename expected by the Unix and PowerShell insta
   committed coherently or rolled back with lease protection.
 - [x] Local regressions cover source advance after tag preparation and failed asset
   publication/rollback ordering.
-- [ ] The exact current workflow revision completes a development-channel dispatch
+- [x] The exact current workflow revision completes a development-channel dispatch
   and publishes all expected archives/checksums after it is committed.
 
 ### Affected Areas
@@ -121,12 +121,12 @@ transaction and remote gates below are authoritative for completion.
 
 An exact-current-SHA GitHub run can occur only after commit/publication. The current
 checksum delta is covered locally and does not change the previously verified build
-matrix or release mechanism, but the remote gate remains open rather than being
-claimed against an older SHA.
+matrix or release mechanism, but the remote gate remained open at that snapshot rather
+than being claimed against an older SHA.
 
 The transaction remediation below supersedes the earlier local race description. Its
 known GitHub API limitation is governed by the selected exclusive-writer contract; the
-exact-current remote run remains open.
+exact-current remote run remained open at that snapshot.
 
 ## Final Transaction Review Remediation (2026-07-15)
 
@@ -216,25 +216,24 @@ backup-only crash shape where the restored stable Release contains an older vali
 transaction marker. Static workflow assertions cover branch provenance, permission
 scope, and every pinned action commit.
 
-### Remaining Gates
+### Historical Remaining Gates (2026-07-15 Snapshot)
 
 - [x] Adopt and document the exclusive-writer policy for rolling Releases, serialize
   the publication job through `release-prod` / `release-development`, and keep release
   mutation authority out of personal tokens, apps, and other workflows.
-- [ ] Run the exact committed workflow revision successfully for the development channel
+- [x] Run the exact committed workflow revision successfully for the development channel
   and inspect its complete published artifact set.
 
-## Remaining Implementation Plan
+## Completed Implementation Plan
 
-1. Commit the exact workflow revision, dispatch the development channel, inspect every
-   published archive/checksum pair, and rerun the canonical gates.
+The exact workflow revision was committed, both channels ran, every published
+archive/checksum pair was inspected, and the canonical gates passed. Final immutable
+run evidence is recorded below.
 
-## Current Risks
+## Residual Risk
 
 - Violating the exclusive-writer authority policy reintroduces a GitHub API race that
   the rolling Release endpoints cannot close with compare-and-swap.
-- The exact current remote workflow revision has not run; local harness results do not
-  substitute for that external evidence.
 
 ## CI Portability Remediation (2026-07-20)
 
@@ -262,7 +261,7 @@ through Task.
 - [x] `task installers:check` no longer invokes undeclared `rg` tooling.
 - [x] The Unix and PowerShell installers are still checked for the canonical repository
   and checksum handling.
-- [ ] The exact PR revision passes the hosted `Validate` job from a clean runner.
+- [x] The exact PR revision passes the hosted `Validate` job from a clean runner.
 
 ### Affected Areas
 
@@ -296,7 +295,7 @@ native canonical-alias regression.
 - [x] Windows CI retains the runner's default temporary environment.
 - [x] Native test fixtures keep an MCP error-producing child alive until its response is
   consumed and accept every bounded cleanup-deadline diagnostic emitted by the runtime.
-- [ ] The exact PR revision passes the hosted macOS and Windows jobs.
+- [x] The exact PR revision passes the hosted macOS and Windows jobs.
 
 ### Affected Areas And Validation
 
@@ -324,7 +323,7 @@ embedded shell commands. Do not change the release workflow or publication behav
   Unix and Windows checkouts.
 - [x] A deterministic regression covers CRLF canonicalization without weakening any
   workflow-content or transaction-order assertion.
-- [ ] The exact PR revision passes the full hosted Windows job and PR matrix.
+- [x] The exact PR revision passes the full hosted Windows job and PR matrix.
 
 ### Affected Areas And Validation
 
@@ -365,7 +364,7 @@ coherent.
   accepting a legacy predecessor.
 - [x] The 23-test local installer/release harness passes success, failure, process-loss,
   stale-source, retag, read-error, rollback, and forward-repair paths.
-- [ ] An exact committed development-channel run publishes and validates the nine-asset
+- [x] An exact committed development-channel run publishes and validates the nine-asset
   release before FT-018 production rollout.
 
 ### Affected Areas And Validation Gates
@@ -418,7 +417,7 @@ not add a PAT, another GitHub App, or a second publisher.
   rerun, leaving one coherent rolling ref/Release pair.
 - [x] Ordinary releases retain the existing rollback transaction and its fault matrix.
 - [x] `task installers:check` and all 25 installer/release transaction tests pass.
-- [ ] The exact committed production run passes and publishes the nine-asset Release.
+- [x] The exact committed production run passes and publishes the nine-asset Release.
 
 ### Affected Areas And Risk
 
@@ -444,7 +443,7 @@ expanded an empty array under `set -u`. Reproduce the runner shell locally with 
 - [x] Release-manifest commit and digest normalization use portable `tr` conversion.
 - [x] The fake Git-refs API avoids empty-array expansion for DELETE requests.
 - [x] All 25 installer/release tests pass under Bash 3.2.57 and the default local shell.
-- [ ] The exact committed PR revision passes hosted macOS, Windows, and Validate jobs.
+- [x] The exact committed PR revision passes hosted macOS, Windows, and Validate jobs.
 
 Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, and
 `docs/tech/ci.md`. Validation gates are the Bash 3.2 installer suite,
@@ -488,18 +487,18 @@ stable rolling SHA.
 
 ### Acceptance Criteria And Gates
 
-- [ ] Two distinct exact-revision development publications complete with nine coherent
+- [x] Two distinct exact-revision development publications complete with nine coherent
   assets before production promotion.
-- [ ] The qualification workflow runs only from `development`, has only `actions: read`
+- [x] The qualification workflow runs only from `development`, has only `actions: read`
   and `contents: read`, and pins every third-party action to a reviewed commit.
-- [ ] All four release platforms prove the first binary notices and self-replaces with
+- [x] All four release platforms prove the first binary notices and self-replaces with
   the second exact development build, then reports a byte-preserving current no-op.
-- [ ] The exact candidate SHA is present on both `main` and `development`, its production
+- [x] The exact candidate SHA is present on both `main` and `development`, its production
   publication remains held by `release-prod`, and that same run is approved only after
   canonical local, hosted CI, and four-platform update qualification gates pass.
-- [ ] Documentation-only and agent-memory-only pushes do not republish unchanged
+- [x] Documentation-only and agent-memory-only pushes do not republish unchanged
   binaries; post-rollout evidence can be reconciled without moving a qualified channel.
-- [ ] Draft upload requires an explicitly created, exact-SHA staging ref; publication
+- [x] Draft upload requires an explicitly created, exact-SHA staging ref; publication
   and rerun recovery preserve immutable-ID ownership if GitHub rewrites that private
   draft to `untagged-*`, without changing the prior rolling release.
 
@@ -562,17 +561,17 @@ Bound the complete timeout and cleanup sequence, not just the host invocation.
 
 ### Acceptance Criteria And Gates
 
-- [ ] The Windows helper launches from headless PowerShell without downloading a
+- [x] The Windows helper launches from headless PowerShell without downloading a
   runtime dependency and proves the child sees interactive console output.
-- [ ] Windows qualification captures the bootstrap binary's candidate notice through
+- [x] Windows qualification captures the bootstrap binary's candidate notice through
   the helper, then still proves exact replacement and a byte-preserving current no-op.
 - [x] Deterministic repository tests bind the workflow, Task target, helper, and native
   qualification script together and reject a return to `winpty.exe`.
-- [ ] The timeout smoke distinguishes an early descendant setup exit from the expected
+- [x] The timeout smoke distinguishes an early descendant setup exit from the expected
   host timeout, waits for an explicit post-handler readiness signal, and proves cleanup
   inside a finite lower and upper time window.
 - [x] `task test:installers`, `task docs:check`, and `task check` pass locally.
-- [ ] The exact committed revision passes hosted Validate, macOS, and Windows jobs, and
+- [x] The exact committed revision passes hosted Validate, macOS, and Windows jobs, and
   a new read-only four-platform release-update qualification run passes before the
   exact held production deployment is approved.
 
@@ -605,7 +604,7 @@ being treated as eventual consistency.
 - [x] A deterministic release-transaction regression combines an immediate
   `untagged-*` rewrite with a temporarily incomplete asset listing and then publishes
   coherently.
-- [ ] `task installers:check`, `task test:installers`, `task docs:check`, and
+- [x] `task installers:check`, `task test:installers`, `task docs:check`, and
   `task check` pass, followed by exact-revision hosted CI and development publication.
 
 Affected areas are `scripts/publish-release.sh`, `tests/installers.rs`, release CI
@@ -617,9 +616,11 @@ documentation, and the exact hosted release evidence in this spec.
 
 Release-update qualification run `31141318203` passed Linux and both macOS jobs but
 failed Windows because the bootstrap updater tried to overwrite its running
-`nib.exe`; Windows returned access denied. The exact production publication remains
-pending on `release-prod` and must not be approved. Its four successful build jobs are
-artifact evidence only and do not override the failed native updater gate.
+`nib.exe`; Windows returned access denied. At that point, the exact production
+publication was pending on `release-prod` and was not eligible for approval. Its four
+successful build jobs were artifact evidence only and did not override the failed
+native updater gate. That obsolete run was later cancelled before the repaired
+candidate was promoted.
 
 The replacement implementation lives in the installed bootstrap binary, not in the
 downloaded candidate. Release qualification therefore requires two new consecutive
@@ -631,22 +632,44 @@ not approved, once superseded.
 
 ### Acceptance Criteria And Gates
 
-- [ ] The Windows in-use replacement remediation passes local gates, two-stage review,
+- [x] The Windows in-use replacement remediation passes local gates, two-stage review,
   and exact-revision hosted Validate, macOS, and Windows CI.
-- [ ] A complete nine-asset development publication establishes the first fixed
+- [x] A complete nine-asset development publication establishes the first fixed
   bootstrap revision.
-- [ ] A distinct complete nine-asset development publication establishes the fixed
+- [x] A distinct complete nine-asset development publication establishes the fixed
   candidate revision with no intervening successful development publication.
-- [ ] The read-only qualification validates release provenance and passes Linux,
+- [x] The read-only qualification validates release provenance and passes Linux,
   macOS Intel, macOS Apple Silicon, and Windows from the fixed bootstrap to the fixed
   candidate, including byte-preserving current no-op and bounded Windows debris
   cleanup.
-- [ ] The final qualification job proves the candidate's exact production deployment
+- [x] The final qualification job proves the candidate's exact production deployment
   is still waiting on `release-prod` and the production rolling ref has not moved.
-- [ ] Only that exact deployment is approved. Publication is then re-read for the
+- [x] Only that exact deployment is approved. Publication is then re-read for the
   candidate SHA, rolling tag, manifest, four archives, four checksums, and binary
   identity before the release is announced.
 
 Affected areas are FT-018's Windows replacement implementation and tests, the Windows
 qualification script, hosted CI, two consecutive development Release Artifacts runs,
 and the exact held production deployment selected after qualification.
+
+## Final Production Evidence (2026-08-07)
+
+This section supersedes earlier remaining-gate and pending-release statements.
+
+The release pipeline completed its production rollout at exact candidate commit
+`2ecf9d23d951a293238c46d605f2f92e3db3b946`:
+
+- Development runs `31145574017` and `31148235010` are consecutive successful repaired
+  publications with nine coherent assets each.
+- Exact candidate CI runs `31148222357` and `31148234996` passed Validate, macOS, and
+  Windows; the latter includes the native headless-terminal and updater regressions.
+- Manual read-only qualification run `31149505681` passed immutable provenance, Linux,
+  both macOS architectures, Windows self-replacement and cleanup, and the final
+  production-hold revalidation.
+- Production run `31148222338` was approved only after qualification and completed the
+  staged transaction successfully. `prod-latest` is a non-draft, non-prerelease
+  Release at the exact candidate commit with a strict prod manifest, four positive-size
+  archives, and four verified checksums.
+- Public Linux smoke reported `nib 0.1.0 (prod - 2ecf9d23...)`; an immediate
+  `nib update` reported already current. The follow-up reconciliation changes only
+  `docs/**` and `agents/memory/**`, which the release workflow explicitly ignores.

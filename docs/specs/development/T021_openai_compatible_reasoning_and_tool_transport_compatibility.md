@@ -6,7 +6,7 @@
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
 [T007: Configuration and Doctor](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
-[T010: Release Process](../development/T010_release_process.md)
+[T010: Release Process](../done/T010_release_process.md)
 
 ## Summary
 
