@@ -26,6 +26,11 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task test:windows-pseudoterminal` — prove the bounded inbox Windows headless-console
   adapter creates an interactive child terminal and preserves output and exit status
 - `task test:installers` — run installer and release-transaction integration tests
+- `task test:llm-live:catalog` — discover and reconcile a provider's live model catalog
+- `task test:llm-live:canary` — run paid qualification against provider defaults and
+  the approved OpenRouter allowlist
+- `task test:llm-live:full` — run paid qualification against every eligible direct-
+  provider model and the approved OpenRouter allowlist
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold
 - `task build` — build the locked optimized release binary (optionally for `TARGET`)
@@ -33,6 +38,41 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   and verify a detached supervised descendant is reaped before terminal publication
 - `task fix` — apply Rust formatting and Clippy fixes
 - `task installers:check` — validate installer syntax, repository defaults, and checksum logic
+
+## Live LLM qualification
+
+The three `test:llm-live:*` tasks are intentionally excluded from `task check`,
+`task test`, `task dev`, coverage, and ordinary CI. They invoke the ignored
+`llm_live::live_llm_qualification` integration test and can make authenticated network
+requests. Catalog mode requires the network acknowledgement and makes no generation
+requests. Canary and full runs can incur provider charges and additionally require the
+cost acknowledgement:
+
+```bash
+NIB_LIVE_TESTS=1 \
+NIB_LIVE_PROVIDER=openai \
+task test:llm-live:catalog
+```
+
+`NIB_LIVE_PROVIDER` accepts `openai`, `anthropic`, `google`, `grok`, `meta`,
+`openrouter`, or `all`, and defaults to `all`. `NIB_LIVE_RESULTS_DIR` optionally
+selects the sanitized JSON/Markdown report directory; the default is
+`target/llm-live/<mode>`. Provider credentials are read only from the environment:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`,
+`META_API_KEY`, and `OPENROUTER_API_KEY`. Meta additionally requires the reviewed
+`NIB_LIVE_META_BASE_URL` until a stable public catalog root is verified.
+
+Use dedicated low-privilege test accounts with provider-side spend limits. Do not put
+credentials in Task variables, command arguments, `.env` files, or repository config.
+OpenRouter execution is restricted to approved entries in its exact-ID allowlist; a
+full run does not expand to OpenRouter's complete catalog. Pending entries fail paid
+OpenRouter modes before generation.
+
+For canary or full mode, also set `NIB_LIVE_ACK_COSTS=1`. Providers without complete
+catalog pricing additionally require `NIB_LIVE_ALLOW_UNPRICED=1` and a provider-side
+hard spend cap. Request and output ceilings can be narrowed with
+`NIB_LIVE_MAX_REQUESTS` and `NIB_LIVE_MAX_OUTPUT_TOKENS`; reaching a ceiling fails the
+run rather than reducing its denominator.
 
 ## Adding new tasks
 

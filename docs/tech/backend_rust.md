@@ -26,7 +26,9 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - `src/auth.rs`, `src/chat.rs`, `src/run.rs`, and command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
 - `src/llm/`: The `LlmClient` traits and provider implementations (OpenAI, Anthropic,
-  Gemini, Grok, OpenRouter, Meta, Mock).
+  Gemini, Grok, OpenRouter, Meta, Mock). Provider wire metadata remains in the Rust
+  registry; source-attributed model defaults are embedded from
+  `src/llm/default_models.toml`.
 - `src/tools/`: The `ToolRegistry` and `ToolExecutor`, encompassing permissions, approval gates, and actual implementations.
 - `src/sandbox/`: Hybrid sandbox execution logic (bwrap invocation, boundaries, named profiles).
 - `src/session/`: indexed session, plan, event, memory, and profile-scoped persistence logic.
@@ -53,3 +55,33 @@ The runtime does not infer capabilities from model names, silently disable reaso
 or retry a rejected request with different API semantics. Responses uses `store: false`
 for nib's local-first state contract, which is distinct from provider-side retention
 policy or Zero Data Retention eligibility.
+
+### Provider Model Catalog
+
+The bundled model catalog is a strict, versioned TOML data file rather than a Rust
+allowlist. Startup validates that every registered provider has one unique ordered
+model list, that its default appears in that list, and that source and verification
+metadata are present. A malformed bundled catalog fails immediately during registry
+access so releases cannot silently ship incomplete defaults.
+
+`llm.providers.<id>.models` is an optional per-project replacement for bundled picker
+suggestions. Omission inherits the bundled list; an explicit list, including an empty
+list, replaces it. The independently configured `model` stays free-form and is added
+to the effective picker when absent. Auth and catalog updates preserve user overrides
+and existing selected models.
+
+### Live Provider Qualification
+
+`tests/llm_live.rs` is an ignored, credential-gated integration target for mutable
+provider compatibility evidence. Its catalog clients discover account-visible models,
+its dry-run planner fixes the request/attempt/output-token denominator before generation,
+and every generation scenario uses the production registry, configuration validation,
+factory, adapter, stream terminal handling, and private tool-continuation path. Direct
+providers qualify the live catalog; OpenRouter qualifies only the approval-gated
+exact-ID fixture under `tests/fixtures/llm_live/`.
+
+The typed `LlmRequest` carries an optional `max_output_tokens` ceiling so the harness can
+bound paid output through every production transport. Ordinary runtime callers retain
+their previous provider default when the field is omitted. Live JSON and Markdown
+reports are bounded, pseudonymize private model IDs, scan configured sensitive values,
+and publish without overwriting an existing report.

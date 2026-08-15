@@ -647,6 +647,7 @@ mod tests {
             "openai".to_string(),
             nib::config::ProviderEntry {
                 model: "gpt-4o".to_string(),
+                models: None,
                 api_key: None,
                 api_keys: Vec::new(),
                 base_url: None,

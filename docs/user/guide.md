@@ -116,7 +116,10 @@ active_provider = "openai"
 context_length = 128000
 
 [llm.providers.openai]
-model = "gpt-5.6-luna"
+model = "gpt-5.6-sol"
+# Optional replacement for nib's bundled /model suggestions. Model selection is not
+# restricted to this list, and the selected model is always shown in the picker.
+models = ["gpt-5.6-sol", "gpt-5.6-terra", "my-gateway/model"]
 api_key = "replace-or-use-OPENAI_API_KEY"
 api_keys = []
 api = "responses"              # responses | chat_completions
@@ -196,6 +199,24 @@ request_timeout_secs = 30
 [mcp.servers.example.env]
 MODE = "production"
 ```
+
+The bundled provider catalog is maintained in `src/llm/default_models.toml`. Its
+verified defaults and picker suggestions are:
+
+| Provider | Default | Bundled suggestions |
+| --- | --- | --- |
+| OpenAI | `gpt-5.6-sol` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` |
+| Anthropic | `claude-opus-5` | `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
+| Google Gemini | `gemini-3.6-flash` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` |
+| xAI Grok | `grok-4.5` | `grok-4.5`, `grok-4.3`, `grok-build-0.1` |
+| OpenRouter | `openai/gpt-5.6-sol` | `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`, `google/gemini-3.6-flash`, `x-ai/grok-4.5` |
+| Meta | `muse-spark-1.1` | `muse-spark-1.1` |
+| Mock | `mock-model` | `mock-model` |
+
+The list is advisory rather than an allowlist. Omit `models` to inherit the bundled
+suggestions, set it to an ordered list to replace them for that provider, or set it to
+`[]` to show only the selected `model`. nib never rewrites an existing selected model
+when its bundled catalog changes.
 
 `terminal.backend` is `local` in this release. `profiles.default` selects a workspace
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary

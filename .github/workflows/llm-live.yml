@@ -1,0 +1,215 @@
+name: Live LLM Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider to qualify
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - openai
+          - anthropic
+          - google
+          - grok
+          - meta
+          - openrouter
+      mode:
+        description: Qualification depth
+        required: true
+        default: catalog
+        type: choice
+        options:
+          - catalog
+          - canary
+          - full
+  schedule:
+    - cron: "19 4 * * 3" # Wednesday catalog inventory on the default branch.
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare live matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.matrix.outputs.mode }}
+      providers: ${{ steps.matrix.outputs.providers }}
+    steps:
+      - name: Resolve requested mode and providers
+        id: matrix
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          REQUESTED_MODE: ${{ inputs.mode }}
+          REQUESTED_PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+
+          all_providers='["openai","anthropic","google","grok","meta","openrouter"]'
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            mode="$REQUESTED_MODE"
+            provider="$REQUESTED_PROVIDER"
+          else
+            mode="catalog"
+            provider="all"
+          fi
+
+          case "$mode" in
+            catalog | canary | full) ;;
+            *) echo "Unsupported live qualification mode" >&2; exit 1 ;;
+          esac
+
+          case "$provider" in
+            all) providers="$all_providers" ;;
+            openai | anthropic | google | grok | meta | openrouter)
+              providers="[\"$provider\"]"
+              ;;
+            *) echo "Unsupported live qualification provider" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "mode=$mode"
+            echo "providers=$providers"
+          } >> "$GITHUB_OUTPUT"
+
+  qualify:
+    name: ${{ matrix.provider }} / ${{ needs.prepare.outputs.mode }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment:
+      name: llm-live-${{ matrix.provider }}
+    concurrency:
+      group: llm-live-${{ matrix.provider }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ fromJSON(needs.prepare.outputs.providers) }}
+    env:
+      NIB_LIVE_TESTS: "1"
+      NIB_LIVE_ACK_COSTS: ${{ needs.prepare.outputs.mode == 'catalog' && '0' || '1' }}
+      NIB_LIVE_PROVIDER: ${{ matrix.provider }}
+      NIB_LIVE_RESULTS_DIR: target/llm-live/${{ matrix.provider }}
+      NIB_LIVE_ALLOW_UNPRICED: ${{ vars.NIB_LIVE_ALLOW_UNPRICED || '0' }}
+      NIB_LIVE_MAX_REQUESTS: ${{ vars.NIB_LIVE_MAX_REQUESTS || '10000' }}
+      NIB_LIVE_MAX_OUTPUT_TOKENS: ${{ vars.NIB_LIVE_MAX_OUTPUT_TOKENS || '64' }}
+      RUST_LOG: warn
+      RUST_LOG_STYLE: never
+      RUST_BACKTRACE: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run live qualification
+        shell: bash
+        env:
+          PROVIDER_API_KEY: ${{ secrets.LLM_API_KEY }}
+          META_BASE_URL: ${{ secrets.NIB_LIVE_META_BASE_URL }}
+        run: |
+          set -euo pipefail
+          case "$NIB_LIVE_PROVIDER" in
+            openai) export OPENAI_API_KEY="$PROVIDER_API_KEY" ;;
+            anthropic) export ANTHROPIC_API_KEY="$PROVIDER_API_KEY" ;;
+            google) export GOOGLE_API_KEY="$PROVIDER_API_KEY" ;;
+            grok) export XAI_API_KEY="$PROVIDER_API_KEY" ;;
+            meta)
+              export META_API_KEY="$PROVIDER_API_KEY"
+              export NIB_LIVE_META_BASE_URL="$META_BASE_URL"
+              ;;
+            openrouter) export OPENROUTER_API_KEY="$PROVIDER_API_KEY" ;;
+            *) echo "Unsupported provider" >&2; exit 1 ;;
+          esac
+          unset PROVIDER_API_KEY META_BASE_URL
+          task test:llm-live:${{ needs.prepare.outputs.mode }}
+
+      - name: Verify sanitized reports exist
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find "$NIB_LIVE_RESULTS_DIR" -maxdepth 1 -type f -name '*.json' | wc -l)" -ge 1
+          test "$(find "$NIB_LIVE_RESULTS_DIR" -maxdepth 1 -type f -name '*.md' | wc -l)" -ge 1
+
+      - name: Upload sanitized live reports
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: llm-live-${{ matrix.provider }}-${{ needs.prepare.outputs.mode }}-${{ github.run_attempt }}
+          path: ${{ env.NIB_LIVE_RESULTS_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    name: Aggregate live qualification
+    if: always()
+    needs:
+      - prepare
+      - qualify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download provider reports
+        if: needs.qualify.result != 'skipped'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: llm-live-*-${{ needs.prepare.outputs.mode }}-${{ github.run_attempt }}
+          path: llm-live-results
+          merge-multiple: false
+
+      - name: Publish aggregate summary and enforce result
+        shell: bash
+        env:
+          MODE: ${{ needs.prepare.outputs.mode }}
+          PROVIDERS: ${{ needs.prepare.outputs.providers }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          QUALIFY_RESULT: ${{ needs.qualify.result }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Live LLM qualification"
+            echo
+            echo "- Mode: \`${MODE:-unresolved}\`"
+            echo "- Providers: \`${PROVIDERS:-unresolved}\`"
+            echo "- Prepare job: \`$PREPARE_RESULT\`"
+            echo "- Provider matrix: \`$QUALIFY_RESULT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PREPARE_RESULT" != "success" ] || [ "$QUALIFY_RESULT" != "success" ]; then
+            echo "One or more provider qualifications were missing, blocked, or failed." >&2
+            exit 1
+          fi
+
+          expected_count="$(jq 'length' <<<"$PROVIDERS")"
+          mapfile -t reports < <(find llm-live-results -type f -name '*.json' | sort)
+          if [ "${#reports[@]}" -ne "$expected_count" ]; then
+            echo "Expected $expected_count provider reports, found ${#reports[@]}." >&2
+            exit 1
+          fi
+          for report in "${reports[@]}"; do
+            jq -e --arg mode "$MODE" '
+              .schema_version == 1 and
+              .mode == $mode and
+              .complete == true and
+              .passed == true and
+              (.providers | length) == 1 and
+              .providers[0].complete == true and
+              .providers[0].passed == true
+            ' "$report" >/dev/null
+          done

@@ -26,9 +26,45 @@ Follows skm project structure.
 
 See .github/workflows/ci.yml and release.yml (modeled directly on skm).
 
+## Protected live LLM qualification
+
+`.github/workflows/llm-live.yml` is separate from ordinary CI because it uses external
+provider credentials and can incur cost. It has no pull-request or fork trigger and
+keeps repository permissions read-only. It supports:
+
+- manual runs selecting `catalog`, `canary`, or `full` and either one provider or all
+  providers;
+- a Wednesday catalog-only inventory on the repository's default branch.
+
+Paid canary/full schedules stay disabled until an exact-revision manual full matrix has
+passed and maintainers have approved provider budgets, the Meta catalog endpoint, and
+the OpenRouter allowlist. After that gate, enabling a paid schedule is a separate
+reviewed workflow change.
+
+The provider matrix covers `openai`, `anthropic`, `google`, `grok`, `meta`, and
+`openrouter`, does not fail fast, and serializes overlapping runs independently for
+each provider. Each job has a bounded timeout and uses a protected GitHub environment
+named `llm-live-<provider>`. Configure only that provider's credential in each protected
+environment under the common secret name `LLM_API_KEY`; the job maps it to the exact
+provider variable only for the test process. The `llm-live-meta` environment also requires
+`NIB_LIVE_META_BASE_URL` as an environment secret until Meta has a verified default
+catalog root. Environment protection rules should restrict approvals and secret access
+to trusted default-branch scheduled runs and authorized manual operators.
+
+The workflow forces HTTP debug logging off, runs one provider per isolated matrix job,
+and uploads harness-produced sanitized JSON/Markdown reports only after the harness and
+file-presence gate succeed. Reports have a seven-day retention period. A final aggregate
+job parses every JSON report and fails unless the expected provider count, schema, mode,
+completeness, and pass fields are exact; missing credentials, blocked catalogs, budgets,
+incomplete results, and provider failures therefore cannot produce a green aggregate
+result. The harness suppresses report publication when its sensitive-value scan fails.
+
+Ordinary `.github/workflows/ci.yml` continues to run only deterministic,
+credential-free checks. It must not invoke any `task test:llm-live:*` target.
+
 ## Taskfile
 See root Taskfile.yml for Rust check, test, coverage, documentation, installer, build,
-and managed-process smoke tasks.
+managed-process smoke, and explicitly opted-in live LLM qualification tasks.
 
 ## Install & Update
 

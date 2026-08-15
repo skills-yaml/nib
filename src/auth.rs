@@ -75,7 +75,7 @@ fn run_auth_wizard_with_input(
         let api_key = read_password().trim().to_string();
 
         let descriptor = provider_descriptor(&provider).expect("provider validated above");
-        let default_model = descriptor.default_model;
+        let default_model = descriptor.default_model();
         print!("Default model [{}]: ", default_model);
         io::stdout().flush().unwrap();
         let mut model_input = String::new();
