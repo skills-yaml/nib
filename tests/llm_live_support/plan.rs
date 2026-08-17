@@ -863,7 +863,8 @@ mod tests {
     #[test]
     fn selected_matrix_is_complete_exact_expiring_and_fingerprinted() {
         let today = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
-        let matrix = SelectedMatrix::parse(SELECTED_MODELS, today).unwrap();
+        let selected_models = SELECTED_MODELS.replace("\r\n", "\n");
+        let matrix = SelectedMatrix::parse(&selected_models, today).unwrap();
         let evidence = matrix.evidence();
         assert_eq!(evidence.suite_id, "nib-llm-core-v1");
         assert_eq!(evidence.matrix_sha256.len(), 64);
@@ -871,20 +872,20 @@ mod tests {
         assert_eq!(evidence.conditional_task_count, 1);
         assert_ne!(
             evidence.matrix_sha256,
-            SelectedMatrix::parse(&format!("{SELECTED_MODELS}\n"), today)
+            SelectedMatrix::parse(&format!("{selected_models}\n"), today)
                 .unwrap()
                 .evidence()
                 .matrix_sha256
         );
 
         assert!(SelectedMatrix::parse(
-            &SELECTED_MODELS.replace("meta = [\"muse-spark-1.1\"]\n", ""),
+            &selected_models.replace("meta = [\"muse-spark-1.1\"]\n", ""),
             today
         )
         .unwrap_err()
         .contains("exactly every network provider"));
         assert!(SelectedMatrix::parse(
-            &SELECTED_MODELS.replace(
+            &selected_models.replace(
                 "openai = [\"gpt-5.6-sol\"]",
                 "openai = [\"gpt-5.6-sol\", \"gpt-5.6-sol\"]"
             ),
@@ -893,7 +894,7 @@ mod tests {
         .unwrap_err()
         .contains("duplicate model IDs"));
         assert!(SelectedMatrix::parse(
-            &SELECTED_MODELS.replace(
+            &selected_models.replace(
                 "\"complete_text\",\n  \"streamed_text\"",
                 "\"complete_text\",\n  \"complete_text\",\n  \"streamed_text\""
             ),
@@ -902,12 +903,12 @@ mod tests {
         .unwrap_err()
         .contains("duplicate scenarios"));
         assert!(SelectedMatrix::parse(
-            &SELECTED_MODELS.replace("gpt-5.6-sol\"]", "gpt-*\"]"),
+            &selected_models.replace("gpt-5.6-sol\"]", "gpt-*\"]"),
             today
         )
         .is_err());
         assert!(SelectedMatrix::parse(
-            &SELECTED_MODELS.replace("expires_at = \"2027-02-17\"", "expires_at = \"2026-08-16\""),
+            &selected_models.replace("expires_at = \"2027-02-17\"", "expires_at = \"2026-08-16\""),
             today
         )
         .unwrap_err()

@@ -9,6 +9,7 @@ mod llm_live_support;
 fn repository_text(relative: &str) -> String {
     std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
         .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 #[test]
