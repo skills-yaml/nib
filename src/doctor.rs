@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
-use nib::config::{config_paths, load_nib_config_full_with_source, NibConfig};
+use nib::config::{
+    config_paths, load_nib_config_full_with_source, update_nib_config_conditionally,
+    ConfigMutation, LlmApiMode, NibConfig, ProviderEntry, ReasoningEffort,
+};
 use nib::context::select_profile_skills;
 use nib::daemons::cron::Cron;
 use nib::daemons::curator::{Curator, CuratorPolicy};
@@ -30,11 +33,41 @@ impl ApprovalHandler for DoctorDenyApproval {
     }
 }
 
+#[derive(clap::Args, Debug, Default)]
+pub struct DoctorArgs {
+    /// Apply narrowly scoped, deterministic configuration repairs before validation
+    #[arg(long)]
+    pub fix: bool,
+}
+
+#[cfg(test)]
 pub fn run_doctor(project: &Path) -> bool {
+    run_doctor_inner(project, false)
+}
+
+pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
+    run_doctor_inner(project, args.fix)
+}
+
+fn run_doctor_inner(project: &Path, fix: bool) -> bool {
     println!("nib doctor");
     println!("==========");
     println!("Build: {}", crate::version::version_display());
     println!("LLM runtime: native Rust");
+
+    if fix {
+        print!("Applying requested fixes... ");
+        match repair_openai_transport(project) {
+            Ok(true) => println!("FIXED (OpenAI now uses Responses)"),
+            Ok(false) => println!("OK (no eligible fixes needed)"),
+            Err(error) => {
+                println!("FAILED ({error})");
+                println!("==========");
+                println!("Doctor summary: Some checks FAILED.");
+                return false;
+            }
+        }
+    }
 
     let mut all_passed = true;
 
@@ -56,6 +89,15 @@ pub fn run_doctor(project: &Path) -> bool {
                     println!("  FAILED: {error}");
                     all_passed = false;
                 }
+            }
+            if openai_transport_repair_needed(&config) {
+                println!(
+                    "  FAILED: OpenAI agent transport is not ready: canonical Chat Completions with provider-default or enabled reasoning can reject nib's required function tools"
+                );
+                println!(
+                    "  Action: Run `nib doctor --fix` to switch this provider to the Responses API, then retry in a new agent turn"
+                );
+                all_passed = false;
             }
             for provider in nib::llm::registry::PROVIDERS {
                 let name = provider.id;
@@ -369,6 +411,68 @@ pub fn run_doctor(project: &Path) -> bool {
     }
 
     all_passed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalOpenAiBase {
+    RegisteredDefault,
+    Root,
+    ChatCompletions,
+}
+
+fn canonical_openai_base(entry: &ProviderEntry) -> Option<CanonicalOpenAiBase> {
+    let Some(configured) = entry.base_url.as_deref() else {
+        return Some(CanonicalOpenAiBase::RegisteredDefault);
+    };
+    let parsed = reqwest::Url::parse(configured.trim()).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("api.openai.com")
+        || parsed.port_or_known_default() != Some(443)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    match parsed.path().trim_end_matches('/') {
+        "/v1" => Some(CanonicalOpenAiBase::Root),
+        "/v1/chat/completions" => Some(CanonicalOpenAiBase::ChatCompletions),
+        _ => None,
+    }
+}
+
+fn openai_transport_repair_needed(config: &NibConfig) -> bool {
+    if config.llm.get_active_provider() != "openai" {
+        return false;
+    }
+    let Some(entry) = config.llm.providers.get("openai") else {
+        return false;
+    };
+    entry.resolved_api_mode() == LlmApiMode::ChatCompletions
+        && entry.reasoning_effort != Some(ReasoningEffort::None)
+        && canonical_openai_base(entry).is_some()
+}
+
+fn repair_openai_transport(project: &Path) -> Result<bool, String> {
+    update_nib_config_conditionally(project, |config| {
+        if !openai_transport_repair_needed(config) {
+            return Ok(ConfigMutation::Unchanged(false));
+        }
+        let entry = config
+            .llm
+            .providers
+            .get_mut("openai")
+            .ok_or_else(|| "active OpenAI provider disappeared during repair".to_string())?;
+        let base = canonical_openai_base(entry)
+            .ok_or_else(|| "OpenAI endpoint changed during repair".to_string())?;
+        entry.api = Some(LlmApiMode::Responses);
+        if base == CanonicalOpenAiBase::ChatCompletions {
+            entry.base_url = Some("https://api.openai.com/v1".to_string());
+        }
+        Ok(ConfigMutation::Changed(true))
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn active_provider_diagnostic_lines(config: &NibConfig) -> Result<Vec<String>, String> {
@@ -791,5 +895,114 @@ mod tests {
             active_provider_diagnostic_lines(&config).expect_err("embedded URL credentials");
         assert!(error.contains("embedded credentials"), "{error}");
         assert!(!error.contains("doctor-secret"), "{error}");
+    }
+
+    #[test]
+    fn doctor_transport_repair_predicate_is_narrow_and_model_agnostic() {
+        let mut config = NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "future-model-without-family-heuristics".to_string(),
+                api: None,
+                reasoning_effort: None,
+                ..ProviderEntry::default()
+            },
+        );
+        assert!(openai_transport_repair_needed(&config));
+
+        config
+            .llm
+            .providers
+            .get_mut("openai")
+            .unwrap()
+            .reasoning_effort = Some(ReasoningEffort::None);
+        assert!(!openai_transport_repair_needed(&config));
+
+        let entry = config.llm.providers.get_mut("openai").unwrap();
+        entry.reasoning_effort = Some(ReasoningEffort::Medium);
+        entry.base_url = Some("https://gateway.example.test/v1".to_string());
+        assert!(!openai_transport_repair_needed(&config));
+
+        let entry = config.llm.providers.get_mut("openai").unwrap();
+        entry.base_url = Some("https://api.openai.com/v1/chat/completions".to_string());
+        entry.api = Some(LlmApiMode::Responses);
+        assert!(!openai_transport_repair_needed(&config));
+    }
+
+    #[test]
+    fn doctor_transport_repair_is_atomic_preserving_and_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = NibConfig::default();
+        config.skills.enabled = false;
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gpt-5.6-luna".to_string(),
+                models: Some(vec![
+                    "gpt-5.6-luna".to_string(),
+                    "private-model".to_string(),
+                ]),
+                api_key: Some("doctor-fix-secret".to_string()),
+                api_keys: vec!["rotating-doctor-fix-secret".to_string()],
+                base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
+                api: None,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+            },
+        );
+        save_nib_config_full(dir.path(), &mut config).expect("save legacy config");
+        let before_revision = config.revision;
+
+        assert!(repair_openai_transport(dir.path()).expect("repair config"));
+        let repaired = nib::config::load_nib_config_full(dir.path()).expect("repaired config");
+        let entry = &repaired.llm.providers["openai"];
+        assert_eq!(entry.api, Some(LlmApiMode::Responses));
+        assert_eq!(entry.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(entry.model, "gpt-5.6-luna");
+        assert_eq!(
+            entry.models.as_deref(),
+            Some(["gpt-5.6-luna".to_string(), "private-model".to_string()].as_slice())
+        );
+        assert_eq!(entry.api_key.as_deref(), Some("doctor-fix-secret"));
+        assert_eq!(entry.api_keys, ["rotating-doctor-fix-secret".to_string()]);
+        assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(repaired.revision, before_revision + 1);
+
+        assert!(!repair_openai_transport(dir.path()).expect("idempotent repair"));
+        let unchanged = nib::config::load_nib_config_full(dir.path()).expect("unchanged config");
+        assert_eq!(unchanged.revision, repaired.revision);
+    }
+
+    #[test]
+    fn doctor_transport_repair_never_writes_custom_gateways() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = NibConfig::default();
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gateway-model".to_string(),
+                api: Some(LlmApiMode::ChatCompletions),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                base_url: Some("https://gateway.example.test/v1".to_string()),
+                ..ProviderEntry::default()
+            },
+        );
+        save_nib_config_full(dir.path(), &mut config).expect("save custom gateway");
+        let revision = config.revision;
+
+        assert!(!repair_openai_transport(dir.path()).expect("skip custom gateway"));
+        let unchanged = nib::config::load_nib_config_full(dir.path()).expect("unchanged config");
+        assert_eq!(unchanged.revision, revision);
+        assert_eq!(
+            unchanged.llm.providers["openai"].api,
+            Some(LlmApiMode::ChatCompletions)
+        );
+        assert_eq!(
+            unchanged.llm.providers["openai"].base_url.as_deref(),
+            Some("https://gateway.example.test/v1")
+        );
     }
 }

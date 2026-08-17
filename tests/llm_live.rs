@@ -6,6 +6,32 @@
 
 mod llm_live_support;
 
+fn repository_text(relative: &str) -> String {
+    std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
+        .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
+        .replace("\r\n", "\n")
+}
+
+#[test]
+fn selected_live_ci_contract_is_protected_and_reported() {
+    let workflow = repository_text(".github/workflows/llm-live.yml");
+    let taskfile = repository_text("Taskfile.yml");
+
+    assert!(workflow.contains("          - selected\n"));
+    assert!(workflow.contains("catalog | canary | selected | full"));
+    assert!(workflow.contains("NIB_LIVE_SCHEDULE_MODE"));
+    assert!(workflow.contains(".schema_version == 2"));
+    assert!(workflow.contains(".selected_suite.matrix_sha256"));
+    assert!(workflow.contains(".not_applicable_scenarios[]"));
+    assert!(workflow.contains("      - name: Upload sanitized live reports\n        if: always()"));
+    assert!(workflow.contains("          if-no-files-found: ignore\n"));
+    assert!(!workflow.contains("\n  pull_request:"));
+    assert!(!workflow.contains("\n  push:"));
+    assert!(taskfile.contains("  test:llm-live:offline:\n"));
+    assert!(taskfile.contains("  test:llm-live:selected:\n"));
+    assert!(taskfile.contains("MODE: selected"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicit live-network acknowledgement and may incur provider costs"]
 async fn live_llm_qualification() {

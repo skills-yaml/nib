@@ -259,6 +259,9 @@ mod tests {
         assert!(LiveMode::parse("canary")
             .unwrap()
             .makes_generation_requests());
+        assert!(LiveMode::parse("selected")
+            .unwrap()
+            .makes_generation_requests());
         assert!(LiveMode::parse("full").unwrap().makes_generation_requests());
         assert!(LiveMode::parse("smoke").is_err());
     }

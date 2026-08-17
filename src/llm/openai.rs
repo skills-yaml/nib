@@ -246,7 +246,37 @@ impl OpenAiCompatClient {
         )
     }
 
-    fn request_error(&self, error: &str) -> String {
+    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+        crate::llm::error::LlmErrorContext::new(
+            self.provider.clone(),
+            CHAT_TRANSPORT,
+            Some(self.model.clone()),
+            self.diagnostic_secrets.clone(),
+        )
+    }
+
+    fn protocol_error(&self, kind: &str, detail: &str) -> crate::llm::LlmError {
+        crate::llm::LlmError::provider_protocol(
+            &self.provider,
+            CHAT_TRANSPORT,
+            Some(&self.model),
+            crate::llm::LlmErrorPhase::TerminalValidation,
+            self.contextual_error(kind, detail),
+            &self.diagnostic_secrets,
+        )
+    }
+
+    fn rejected_request(&self, detail: &str) -> crate::llm::LlmError {
+        crate::llm::LlmError::request_rejected(
+            &self.provider,
+            CHAT_TRANSPORT,
+            Some(&self.model),
+            self.contextual_error("request rejected", detail),
+            &self.diagnostic_secrets,
+        )
+    }
+
+    fn request_error(&self, error: &str) -> crate::llm::LlmError {
         let safe_credential_error = error == "provider request requires at least one credential"
             || (error.starts_with("all ") && error.contains("credential(s) exhausted"));
         let detail = if safe_credential_error {
@@ -254,7 +284,13 @@ impl OpenAiCompatClient {
         } else {
             "request failed before a valid HTTP response"
         };
-        self.contextual_error("request failed", detail)
+        crate::llm::LlmError::transport(
+            &self.provider,
+            CHAT_TRANSPORT,
+            Some(&self.model),
+            self.contextual_error("request failed", detail),
+            &self.diagnostic_secrets,
+        )
     }
 
     async fn http_error(
@@ -262,16 +298,23 @@ impl OpenAiCompatClient {
         status: StatusCode,
         response: reqwest::Response,
         requests_tools_with_reasoning: bool,
-    ) -> String {
+    ) -> crate::llm::LlmError {
         let body = crate::llm::read_bounded_error_response(
             response,
             "OpenAI-compatible API error response",
         )
         .await;
-        let detail = match body {
-            Ok(body) => structured_chat_error_detail(&body),
-            Err(error) if error.contains("byte limit") => error,
-            Err(_) => "provider error response could not be read".to_string(),
+        let (structured, detail) = match body {
+            Ok(body) => {
+                let structured = serde_json::from_str::<Value>(&body).ok();
+                let detail = structured_chat_error_detail(&body);
+                (structured, detail)
+            }
+            Err(error) if error.contains("byte limit") => (None, error),
+            Err(_) => (
+                None,
+                "provider error response could not be read".to_string(),
+            ),
         };
         let guidance = if requests_tools_with_reasoning
             && matches!(
@@ -282,19 +325,27 @@ impl OpenAiCompatClient {
         } else {
             ""
         };
-        self.contextual_error(
-            &format!("error HTTP {}", status.as_u16()),
-            &format!("{detail}{guidance}"),
+        crate::llm::LlmError::http(
+            &self.provider,
+            CHAT_TRANSPORT,
+            Some(&self.model),
+            status,
+            structured.as_ref(),
+            self.contextual_error(
+                &format!("error HTTP {}", status.as_u16()),
+                &format!("{detail}{guidance}"),
+            ),
+            &self.diagnostic_secrets,
         )
     }
 
-    fn completion_read_error(&self, error: &str) -> String {
+    fn completion_read_error(&self, error: &str) -> crate::llm::LlmError {
         let detail = if error.contains("byte limit") || error.starts_with("invalid ") {
             error
         } else {
             "completion response could not be read"
         };
-        self.contextual_error("protocol failure", detail)
+        self.protocol_error("protocol failure", detail)
     }
 }
 
@@ -522,12 +573,12 @@ fn truncate_diagnostic(value: &str, max_bytes: usize) -> String {
 
 #[async_trait]
 impl LlmClient for OpenAiCompatClient {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
         let scope = request.scope.clone();
         let body = self
             .request_body(request, false)
-            .map_err(|error| self.contextual_error("request rejected", &error))?;
+            .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
         let resp = crate::llm::send_with_retry(
@@ -552,28 +603,36 @@ impl LlmClient for OpenAiCompatClient {
                 .await
                 .map_err(|error| self.completion_read_error(&error))?;
         if let Some(failure) = chat_protocol_failure(&data) {
-            return Err(self.contextual_error(
-                failure.context_kind(),
-                &failure.detail(requests_tools_with_reasoning),
+            return Err(crate::llm::LlmError::provider_rejected(
+                &self.provider,
+                CHAT_TRANSPORT,
+                Some(&self.model),
+                crate::llm::LlmErrorPhase::TerminalValidation,
+                Some(&data),
+                self.contextual_error(
+                    failure.context_kind(),
+                    &failure.detail(requests_tools_with_reasoning),
+                ),
+                &self.diagnostic_secrets,
             ));
         }
         let mut response = parse_openai_response(&data).map_err(|_| {
-            self.contextual_error(
+            self.protocol_error(
                 "protocol failure",
                 "completion response did not satisfy the Chat Completions schema",
             )
         })?;
         attach_chat_continuation(&mut response, &data, &self.provider, &self.model, scope)
-            .map_err(|error| self.contextual_error("protocol failure", &error))?;
+            .map_err(|error| self.protocol_error("protocol failure", &error))?;
         Ok(response)
     }
 
-    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, String> {
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
         let scope = request.scope.clone();
         let body = self
             .request_body(request, true)
-            .map_err(|error| self.contextual_error("request rejected", &error))?;
+            .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
         let resp = crate::llm::send_with_retry(
@@ -597,7 +656,7 @@ impl LlmClient for OpenAiCompatClient {
             crate::llm::MAX_LLM_STREAM_BYTES,
             "OpenAI-compatible stream response",
         )
-        .map_err(|error| self.contextual_error("protocol failure", &error))?;
+        .map_err(|error| self.protocol_error("protocol failure", &error))?;
 
         let provider = self.provider.clone();
         let model = self.model.clone();
@@ -650,18 +709,27 @@ impl LlmClient for OpenAiCompatClient {
                             return;
                         }
                         if event.event == "error" {
-                            let failure = serde_json::from_str::<Value>(&event.data)
-                                .ok()
-                                .and_then(|data| chat_protocol_failure(&data))
+                            let structured = serde_json::from_str::<Value>(&event.data).ok();
+                            let failure = structured
+                                .as_ref()
+                                .and_then(chat_protocol_failure)
                                 .unwrap_or_else(ChatProtocolFailure::in_band_error);
                             fail_chat_stream(
                                 &tx,
                                 &mut completion_tx,
-                                contextual_chat_error(
+                                crate::llm::LlmError::provider_rejected(
                                     &provider,
-                                    &model,
-                                    failure.context_kind(),
-                                    &failure.detail(requests_tools_with_reasoning),
+                                    CHAT_TRANSPORT,
+                                    Some(&model),
+                                    crate::llm::LlmErrorPhase::Stream,
+                                    structured.as_ref(),
+                                    contextual_chat_error(
+                                        &provider,
+                                        &model,
+                                        failure.context_kind(),
+                                        &failure.detail(requests_tools_with_reasoning),
+                                        &diagnostic_secrets,
+                                    ),
                                     &diagnostic_secrets,
                                 ),
                             )
@@ -690,11 +758,19 @@ impl LlmClient for OpenAiCompatClient {
                                     fail_chat_stream(
                                         &tx,
                                         &mut completion_tx,
-                                        contextual_chat_error(
+                                        crate::llm::LlmError::provider_rejected(
                                             &provider,
-                                            &model,
-                                            failure.context_kind(),
-                                            &failure.detail(requests_tools_with_reasoning),
+                                            CHAT_TRANSPORT,
+                                            Some(&model),
+                                            crate::llm::LlmErrorPhase::Stream,
+                                            Some(&data),
+                                            contextual_chat_error(
+                                                &provider,
+                                                &model,
+                                                failure.context_kind(),
+                                                &failure.detail(requests_tools_with_reasoning),
+                                                &diagnostic_secrets,
+                                            ),
                                             &diagnostic_secrets,
                                         ),
                                     )
@@ -898,13 +974,20 @@ impl LlmClient for OpenAiCompatClient {
                         fail_chat_stream(
                             &tx,
                             &mut completion_tx,
-                            contextual_chat_error(
+                            crate::llm::LlmError::transport(
                                 &provider,
-                                &model,
-                                "stream transport failed",
-                                &error,
+                                CHAT_TRANSPORT,
+                                Some(&model),
+                                contextual_chat_error(
+                                    &provider,
+                                    &model,
+                                    "stream transport failed",
+                                    &error,
+                                    &diagnostic_secrets,
+                                ),
                                 &diagnostic_secrets,
-                            ),
+                            )
+                            .with_phase(crate::llm::LlmErrorPhase::Stream),
                         )
                         .await;
                         return;
@@ -942,15 +1025,17 @@ impl LlmClient for OpenAiCompatClient {
             }
         });
 
-        Ok(LlmStream::with_private_completion(rx, completion_rx))
+        Ok(LlmStream::with_private_completion(rx, completion_rx)
+            .with_error_context(self.error_context()))
     }
 }
 
 async fn fail_chat_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, String>>,
-    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, String>>>,
-    error: String,
+    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
+    error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
+    let error = error.into();
     let _ = crate::llm::send_stream_event(public_tx, Err(error.clone())).await;
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
@@ -1343,6 +1428,8 @@ mod tests {
             .await
             .expect_err("HTTP-200 provider error must fail");
 
+        assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::TerminalValidation);
         assert!(error.contains("provider failure"));
         assert!(error.contains("in-band error"));
         assert!(error.contains("api = \"responses\""));
@@ -1487,6 +1574,8 @@ mod tests {
                 .finish()
                 .await
                 .expect_err("in-band stream error must fail");
+            assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
+            assert_eq!(error.phase, crate::llm::LlmErrorPhase::Stream);
             assert!(error.contains("in-band error"));
             assert!(!error.contains(remote_secret));
         }
@@ -1519,6 +1608,8 @@ mod tests {
             .await
             .expect_err("reasoning/tool error must fail");
 
+        assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::Stream);
         assert!(error.contains("api = \"responses\""));
         assert!(error.contains("reasoning_effort = \"none\""));
         assert!(!error.contains(remote_secret));
@@ -1687,6 +1778,9 @@ mod tests {
             .await
             .expect_err("completion must reject HTTP errors");
         assert!(error.contains("Chat Completions API error HTTP 401"));
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
+        assert_eq!(error.http_status, Some(401));
         assert!(!error.contains("bad key"));
 
         let (base_url, _) = serve_once("403 Forbidden", "text/plain", "forbidden");
@@ -1701,7 +1795,65 @@ mod tests {
             .await
             .expect_err("stream must reject HTTP errors");
         assert!(error.contains("Chat Completions API error HTTP 403"));
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
+        assert_eq!(error.http_status, Some(403));
         assert!(!error.contains("forbidden"));
+    }
+
+    #[tokio::test]
+    async fn every_openai_compatible_provider_keeps_complete_and_stream_error_classes_equal() {
+        for provider in ["openai", "grok", "openrouter", "meta"] {
+            let (base_url, _) = serve_once(
+                "401 Unauthorized",
+                "application/json",
+                json!({"error": {"code": "invalid_api_key", "message": "private"}}).to_string(),
+            );
+            let client = OpenAiCompatClient::configured(
+                provider.to_string(),
+                "fixture-model".to_string(),
+                vec!["fixture-key".to_string()],
+                base_url,
+                None,
+            );
+            let messages = [json!({"role": "user", "content": "inspect"})];
+            let complete_error = client
+                .complete(LlmRequest::new(&messages, None, 0.0))
+                .await
+                .expect_err("completion authentication error");
+
+            let (base_url, _) = serve_once(
+                "401 Unauthorized",
+                "application/json",
+                json!({"error": {"code": "invalid_api_key", "message": "private"}}).to_string(),
+            );
+            let client = OpenAiCompatClient::configured(
+                provider.to_string(),
+                "fixture-model".to_string(),
+                vec!["fixture-key".to_string()],
+                base_url,
+                None,
+            );
+            let stream_error = client
+                .stream(LlmRequest::new(&messages, None, 0.0))
+                .await
+                .expect_err("stream authentication error");
+
+            assert_eq!(
+                complete_error.class,
+                crate::llm::LlmErrorClass::Authentication
+            );
+            assert_eq!(stream_error.class, complete_error.class);
+            assert_eq!(
+                complete_error.phase,
+                crate::llm::LlmErrorPhase::HttpResponse
+            );
+            assert_eq!(stream_error.phase, complete_error.phase);
+            assert_eq!(complete_error.provider, provider);
+            assert_eq!(stream_error.provider, provider);
+            assert_eq!(complete_error.transport, CHAT_TRANSPORT);
+            assert_eq!(stream_error.transport, CHAT_TRANSPORT);
+        }
     }
 
     #[tokio::test]

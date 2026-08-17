@@ -244,6 +244,23 @@ nib config validate
 nib doctor
 ```
 
+For an active provider named exactly `openai`, doctor treats canonical OpenAI
+Chat Completions with provider-default or enabled reasoning as not ready for nib's
+required function-tool loops. The ordinary check explains the conflict without
+changing configuration. Repair it explicitly with:
+
+```bash
+nib doctor --fix
+```
+
+The repair changes only that provider's API mode to Responses and normalizes an exact
+canonical `/v1/chat/completions` URL to the `/v1` root. It preserves the model, model
+list, credentials, reasoning effort, provider selection, and unrelated settings, then
+reruns the complete doctor suite. It does not issue a provider request, retry the
+failed turn, or modify custom gateways or any non-OpenAI provider. Explicit
+`chat_completions` with `reasoning_effort = "none"` remains an acknowledged operator
+choice and is not rewritten. Repeating `nib doctor --fix` is a no-op.
+
 Responses requests use `store: false`. This keeps opaque response continuation data in
 memory for only the active nib run and out of session audit records; it is not a claim
 that the API provider offers Zero Data Retention. Provider continuation data is not
@@ -275,7 +292,8 @@ The main sections are:
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
 
 Run `nib doctor` after manual configuration changes. It validates local readiness and
-credential presence, not live provider connectivity.
+credential presence, not live provider connectivity. `--fix` only applies the bounded
+local OpenAI transport repair described above; it is not a live capability probe.
 
 ## Use
 
@@ -318,18 +336,34 @@ Chat commands:
 
 Agent questions share chat's input stream: answer with the displayed option number or
 typed text, then continue entering chat commands after the agent turn completes.
+Model text, tool lifecycle events, and reconciliation status stream while each turn is
+running.
 
 ### TUI
 
 ```bash
 nib tui
 nib tui --run "Inspect the failing tests and fix them"
+nib tui --session <id>
+nib tui --auth
 ```
 
-The second form starts an agent run in the background. Streamed model output and tool
-lifecycle events appear live. Calls that still require interactive approval open a
-modal showing the tool and arguments; press `Y` to approve, `N` or `Esc` to deny.
-`ask_question` opens a selectable or typed-response modal and resumes the same loop.
+The TUI opens with a composer for repeated agent turns in the active session. It
+supports the same `/model`, `/providers`, `/session`, `/clear`, `/skills`, `/mcp`,
+`/help`, and exit commands as chat. `--run` submits an initial goal; `--session`
+resumes an existing session, and `--auth` runs authentication before raw mode starts.
+
+Streamed model output and tool lifecycle events appear live. Calls that still require
+interactive approval open a modal showing the tool and arguments; press `Y` to
+approve, `N` or `Esc` to deny. `ask_question` opens a selectable or typed-response
+modal and resumes the same loop.
+
+The composer has focus initially. Press `Enter` to submit, `Tab` to focus the session
+browser, and `Esc` to clear the draft. In the session browser, use arrow keys to
+select, `Enter` to inspect, `R` to resume the selected session, and `Tab` to return to
+the composer. `Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or
+`/quit` also exits. Presentation differs between line mode and the TUI, but their
+interactive agent and management capabilities are shared.
 
 ### Skills
 
@@ -516,6 +550,46 @@ skills, profile paths, persistence, daemons, the command shell, and sandbox capa
 It creates missing profile directories and temporary write probes, but does not call
 provider APIs or run destructive cleanup. It exits nonzero for required checks that
 fail.
+
+### LLM Failure Reports
+
+When a provider request fails, nib reports one local incident instead of the provider's
+free-form message. The report includes the safe provider/transport/model context,
+failure class and phase, HTTP status when available, retry disposition, one recovery
+action, and the session ID. For example:
+
+```text
+LLM request failed [LLM-AUTH]
+Cause: authentication during HTTP response
+Provider: openai (responses), model: gpt-5
+HTTP: 401; retry: not retryable
+Action: Refresh this provider's credential with `nib auth`, then retry.
+Session: <id>
+```
+
+Incident codes and default recovery actions are:
+
+| Code | Meaning | First action |
+| --- | --- | --- |
+| `LLM-CONFIG` | Invalid or incomplete local configuration | Run `nib config validate` or `nib auth`. |
+| `LLM-AUTH` | Credential rejected | Refresh that provider with `nib auth`. |
+| `LLM-RATE` | Provider rate limit | Respect the bounded delay when shown, otherwise retry later. |
+| `LLM-QUOTA` | Exact quota or billing rejection | Check provider account quota and billing controls. |
+| `LLM-MODEL` | Configured model unavailable | Verify `/model` and provider configuration. |
+| `LLM-REQUEST` | Unsupported request combination | Run `nib doctor` and inspect transport, reasoning, and tool settings. |
+| `LLM-UNAVAILABLE` | Transient provider retries exhausted | Retry later. |
+| `LLM-TRANSPORT` | Connection or response transport failed | Check endpoint and network reachability. |
+| `LLM-PROTOCOL` | Unsafe, malformed, or incomplete provider envelope | Run `nib doctor` before retrying. |
+| `LLM-REJECTED` | Valid but unclassified provider rejection | Run `nib doctor`; nib does not guess from remote prose. |
+| `LLM-CANCELLED` | Request cancelled locally | Start a new turn when ready. |
+
+Provider response bodies, remote messages, prompt echoes, credentials, continuations,
+and arbitrary metadata are intentionally omitted. The stable outcome and safe typed
+fields are available in the session's reconciliation event under
+`.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
+persisted. `nib doctor` shows the resolved local provider and transport without making
+a paid provider request. Chat remains available for another command after a safely
+reconciled failure; `nib run` exits nonzero.
 
 Official release builds update within their embedded rolling channel:
 

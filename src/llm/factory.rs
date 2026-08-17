@@ -146,13 +146,21 @@ pub(crate) fn create_client_with_sensitive_values(
 
     let client: Arc<dyn LlmClient> = match resolved.adapter {
         ResolvedAdapter::Mock => unreachable!("mock returned before credential resolution"),
-        ResolvedAdapter::Anthropic { endpoint } => Arc::new(AnthropicClient::with_base_url(
-            model,
-            credentials,
-            endpoint,
-        )?),
+        ResolvedAdapter::Anthropic { endpoint } => {
+            Arc::new(AnthropicClient::configured_with_diagnostic_secrets(
+                model,
+                credentials,
+                diagnostic_secrets,
+                endpoint,
+            )?)
+        }
         ResolvedAdapter::Google { api_root } => {
-            Arc::new(GeminiClient::with_base_url(model, credentials, api_root)?)
+            Arc::new(GeminiClient::configured_with_diagnostic_secrets(
+                model,
+                credentials,
+                diagnostic_secrets,
+                api_root,
+            )?)
         }
         ResolvedAdapter::OpenAiCompatible {
             api_mode: LlmApiMode::ChatCompletions,

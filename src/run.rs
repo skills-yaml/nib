@@ -84,12 +84,11 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
                 ));
             }
             if summary.is_failure() {
-                return Err(format!(
-                    "agent run failed for session {}: {}",
-                    sid, summary.outcome
-                ));
+                return Err(summary.user_failure_report().unwrap_or_else(|| {
+                    format!("Agent run failed: {}\nSession: {sid}", summary.outcome)
+                }));
             }
-            println!("[green]Agent run completed for session {}[/green]", sid);
+            println!("Agent run completed for session {}", sid);
             if let Some(msg) = summary.last_message {
                 println!("Last: {}", msg.chars().take(300).collect::<String>());
             }
@@ -161,10 +160,12 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.role == "assistant"));
+        let message_count = session.messages.len();
+        let session_id = session.id.clone();
 
         let error = run_agent(&RunArgs {
             goal: "fail provider selection".to_string(),
-            session: Some(session.id),
+            session: Some(session_id.clone()),
             max_steps: 1,
             mode: "execute".to_string(),
             provider: Some("not-a-provider".to_string()),
@@ -172,7 +173,24 @@ mod tests {
             yes: true,
         })
         .expect_err("unsupported provider");
-        assert!(error.contains("unsupported LLM provider"));
+        assert!(error.contains("LLM request failed [LLM-CONFIG]"), "{error}");
+        assert!(error.contains("Provider: not-a-provider"), "{error}");
+        assert!(error.contains("Retry: not attempted"), "{error}");
+        assert!(
+            error.contains("Action: Run `nib config validate`"),
+            "{error}"
+        );
+        assert!(error.contains(&format!("Session: {session_id}")), "{error}");
+        assert!(!error.contains("unsupported LLM provider"), "{error}");
+        assert_eq!(
+            store
+                .load(&session_id)
+                .expect("configuration failure session")
+                .messages
+                .len(),
+            message_count,
+            "configuration failures must not become assistant content"
+        );
     }
 
     #[test]

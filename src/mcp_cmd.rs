@@ -45,22 +45,42 @@ pub fn run_mcp_cmd(args: &McpArgs, project_root: &Path) -> Result<(), String> {
 }
 
 pub fn list_mcp_servers(project_root: &Path) -> Result<(), String> {
+    println!("{}", format_mcp_servers(project_root)?);
+    Ok(())
+}
+
+pub fn format_mcp_servers(project_root: &Path) -> Result<String, String> {
     let cfg = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
     let servers = &cfg.mcp.servers;
 
     if servers.is_empty() {
-        println!("No MCP servers configured.");
-        return Ok(());
+        return Ok("No MCP servers configured.".to_string());
     }
 
-    println!("Configured MCP Servers:");
+    let mut output = String::from("Configured MCP Servers:");
     for (name, entry) in servers {
-        println!("  - {}: {} {}", name, entry.command, entry.args.join(" "));
+        output.push_str(&format!(
+            "\n  - {}: {} {}",
+            name,
+            entry.command,
+            entry.args.join(" ")
+        ));
     }
-    Ok(())
+    Ok(output)
 }
 
 pub fn add_mcp_server(
+    project_root: &Path,
+    name: &str,
+    command: &str,
+    args: &[String],
+) -> Result<(), String> {
+    add_mcp_server_quiet(project_root, name, command, args)?;
+    println!("Successfully added MCP server '{}'.", name);
+    Ok(())
+}
+
+pub fn add_mcp_server_quiet(
     project_root: &Path,
     name: &str,
     command: &str,
@@ -80,11 +100,16 @@ pub fn add_mcp_server(
         Ok(())
     })
     .map_err(|error| error.to_string())?;
-    println!("Successfully added MCP server '{}'.", name);
     Ok(())
 }
 
 pub fn remove_mcp_server(project_root: &Path, name: &str) -> Result<(), String> {
+    remove_mcp_server_quiet(project_root, name)?;
+    println!("Successfully removed MCP server '{}'.", name);
+    Ok(())
+}
+
+pub fn remove_mcp_server_quiet(project_root: &Path, name: &str) -> Result<(), String> {
     update_nib_config(project_root, |config| {
         config
             .mcp
@@ -94,7 +119,6 @@ pub fn remove_mcp_server(project_root: &Path, name: &str) -> Result<(), String> 
             .ok_or_else(|| format!("MCP server '{name}' not found"))
     })
     .map_err(|error| error.to_string())?;
-    println!("Successfully removed MCP server '{}'.", name);
     Ok(())
 }
 

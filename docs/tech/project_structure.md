@@ -33,6 +33,7 @@ nib/
 │   ├── context_cmd.rs           # Context inspection command
 │   ├── doctor.rs                # Runtime health checks
 │   ├── fs_security.rs           # Shared filesystem identity/link checks
+│   ├── interactive.rs           # Shared chat/TUI commands and interaction effects
 │   ├── mcp_cmd.rs               # MCP configuration command
 │   ├── mcp_test_fixture.rs      # Debug-only MCP subprocess fixture
 │   ├── run.rs                   # One-shot agent command
@@ -62,7 +63,9 @@ nib/
 - `src/fs_security.rs` — Shared filesystem identity and no-link primitives. Security-sensitive persistence and execution code should reuse this module.
 - `src/config/`, `src/profile/`, `src/session/`, and `src/daemons/` — Configuration plus profile-scoped session, memory, and durable workload state.
 - `src/integrations/` — Normalized gateways, bounded MCP framing, outbound/inbound MCP, and session worktree integration.
-- `src/main.rs`, top-level command modules, `src/console.rs`, and `src/tui/` — Presentation and dispatch layers. They should stay relatively thin.
+- `src/interactive.rs` — Presentation-neutral chat/TUI command grammar, session
+  selection, model selection, management effects, and stream-event display mapping.
+- `src/main.rs`, top-level command modules, `src/console.rs`, and `src/tui/` — Presentation and dispatch layers. They should stay relatively thin and reuse `src/interactive.rs` for shared capabilities.
 - `docs/specs/` — Product truth. Never implement major behavior without a corresponding spec or task plan.
 - `docs/tech/` — Engineering conventions. Keep them up to date as the project evolves.
 

@@ -1,0 +1,30 @@
+version = 1
+suite_id = "nib-llm-core-v1"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-17"
+expires_at = "2027-02-17"
+
+# Every selected model must complete these provider-neutral tasks on every production
+# transport registered for that provider.
+required_scenarios = [
+  "complete_text",
+  "streamed_text",
+  "single_tool_continuation",
+]
+
+# Conditional tasks run only when authoritative catalog metadata positively advertises
+# the capability. A claimed capability that fails its task fails the profile.
+conditional_scenarios = ["parallel_tool_continuation"]
+
+[providers]
+openai = ["gpt-5.6-sol"]
+anthropic = ["claude-opus-5"]
+google = ["gemini-3.6-flash"]
+grok = ["grok-4.5"]
+meta = ["muse-spark-1.1"]
+openrouter = [
+  "openai/gpt-5.6-sol",
+  "anthropic/claude-opus-5",
+  "google/gemini-3.6-flash",
+  "x-ai/grok-4.5",
+]

@@ -1,6 +1,9 @@
 use super::config::LiveSettings;
 use super::plan::RunPlan;
-use super::{CatalogModel, CatalogSnapshot, Classification, LiveMode, ScenarioId, TransportId};
+use super::{
+    CatalogModel, CatalogSnapshot, Classification, LiveMode, ScenarioId, SelectedSuiteEvidence,
+    TransportId,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -8,7 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SAFE_MODEL_REF_BYTES: usize = 512;
 
@@ -34,6 +37,7 @@ pub(super) struct ProfileReport {
     pub advertised: bool,
     pub classification: Classification,
     pub scenarios: Vec<ScenarioReport>,
+    pub not_applicable_scenarios: Vec<ScenarioId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +68,8 @@ pub(super) struct QualificationReport {
     mode: LiveMode,
     started_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_suite: Option<SelectedSuiteEvidence>,
     providers: Vec<ProviderReport>,
     complete: bool,
     passed: bool,
@@ -76,6 +82,7 @@ impl QualificationReport {
         started_at: DateTime<Utc>,
         completed_at: DateTime<Utc>,
         providers: Vec<ProviderReport>,
+        selected_suite: Option<SelectedSuiteEvidence>,
     ) -> Self {
         let complete = !providers.is_empty() && providers.iter().all(|provider| provider.complete);
         let passed = complete && providers.iter().all(|provider| provider.passed);
@@ -87,6 +94,7 @@ impl QualificationReport {
             mode,
             started_at,
             completed_at,
+            selected_suite,
             providers,
             complete,
             passed,
@@ -258,6 +266,7 @@ pub(super) fn profile_report(
     transport: TransportId,
     advertised: bool,
     scenarios: Vec<ScenarioReport>,
+    not_applicable_scenarios: Vec<ScenarioId>,
     classification: Classification,
 ) -> ProfileReport {
     ProfileReport {
@@ -266,6 +275,7 @@ pub(super) fn profile_report(
         advertised,
         classification,
         scenarios,
+        not_applicable_scenarios,
     }
 }
 
@@ -347,6 +357,17 @@ fn markdown_summary(report: &QualificationReport) -> String {
         "# Live LLM qualification {}\n\n- Revision: `{}`\n- Mode: `{:?}`\n- Complete: `{}`\n- Passed: `{}`\n\n",
         report.run_id, report.source_revision, report.mode, report.complete, report.passed
     );
+    if let Some(suite) = &report.selected_suite {
+        output.push_str(&format!(
+            "- Selected suite: `{}`\n- Matrix SHA-256: `{}`\n- Matrix review: `{}` through `{}`\n- Required tasks: `{}`\n- Conditional tasks: `{}`\n\n",
+            suite.suite_id,
+            suite.matrix_sha256,
+            suite.reviewed_at,
+            suite.expires_at,
+            suite.required_task_count,
+            suite.conditional_task_count
+        ));
+    }
     for provider in &report.providers {
         output.push_str(&format!(
             "## {}\n\n- Catalog: {} models across {} page(s)\n- Planned logical requests: {}\n- Maximum attempts: {}\n- Complete: `{}`\n- Passed: `{}`\n\n",
@@ -368,6 +389,15 @@ fn markdown_summary(report: &QualificationReport) -> String {
                 profile.transport.as_str(),
                 profile.classification
             ));
+            for scenario in &profile.scenarios {
+                output.push_str(&format!(
+                    "  - `{:?}`: `{}` ({} ms)\n",
+                    scenario.scenario, scenario.passed, scenario.duration_ms
+                ));
+            }
+            for scenario in &profile.not_applicable_scenarios {
+                output.push_str(&format!("  - `{:?}`: `not_applicable`\n", scenario));
+            }
         }
         output.push('\n');
     }
@@ -577,6 +607,34 @@ mod tests {
         assert!(report.catalog_drift);
         assert!(!report.complete);
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn selected_report_records_suite_provenance_and_task_results() {
+        let now = Utc::now();
+        let report = QualificationReport::new(
+            "run".to_string(),
+            LiveMode::Selected,
+            now,
+            now,
+            Vec::new(),
+            Some(SelectedSuiteEvidence {
+                suite_id: "nib-llm-core-v1".to_string(),
+                matrix_sha256: "a".repeat(64),
+                owner: "nib-maintainers".to_string(),
+                reviewed_at: "2026-08-17".to_string(),
+                expires_at: "2027-02-17".to_string(),
+                required_task_count: 3,
+                conditional_task_count: 1,
+            }),
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["selected_suite"]["suite_id"], "nib-llm-core-v1");
+        assert_eq!(json["selected_suite"]["required_task_count"], 3);
+        let markdown = markdown_summary(&report);
+        assert!(markdown.contains("Selected suite: `nib-llm-core-v1`"));
+        assert!(markdown.contains(&"a".repeat(64)));
     }
 
     #[test]

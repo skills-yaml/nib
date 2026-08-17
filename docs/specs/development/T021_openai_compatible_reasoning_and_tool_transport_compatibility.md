@@ -310,6 +310,13 @@ boundary, and would not remove the need for explicit capability and audit semant
 No automatic configuration rewrite changes an existing provider's API mode or
 reasoning effort.
 
+T027 adds one explicit preflight exception to this rollout policy: an operator may run
+`nib doctor --fix` to migrate an eligible canonical OpenAI Chat Completions entry to
+Responses. Ordinary doctor and runtime execution still never rewrite configuration,
+no rejected request is retried, custom gateways remain excluded, and the selected
+model and reasoning effort are preserved. This reconciles the existing no-fallback
+rule with a deterministic operator-requested repair.
+
 ## Acceptance Criteria
 
 - [x] A credential-free fixture reproduces the reported Chat Completions tools plus
@@ -453,3 +460,6 @@ done.
 - [OpenAI GPT-5.1 model reference](https://developers.openai.com/api/docs/models/gpt-5.1)
   demonstrates why Chat Completions, reasoning, and function support cannot be rejected
   globally from the provider name alone.
+- [T027: Doctor-Guided OpenAI Transport Repair](../done/T027_doctor_guided_openai_transport_repair.md)
+  owns the explicit configuration repair while preserving this spec's runtime
+  no-fallback contract.

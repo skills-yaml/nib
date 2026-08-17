@@ -78,14 +78,19 @@ task build
 3. **Start an interactive session:**
    ```bash
    nib chat
+   # or use the full-screen interface
+   nib tui
    ```
 
-   Inside the chat, you can use slash commands:
+   Both interactive interfaces use the same slash commands:
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
    - `/skills` - Manage installed skills
    - `/mcp` - Manage MCP servers
    - `/quit` - Exit the session
+
+   `nib chat --session <id>` and `nib tui --session <id>` resume the same
+   profile-scoped session. Add `--auth` to either command to run authentication first.
 
 Mutating work remains on a `nib/session/*` worktree branch until you review and merge
 it. `nib run --yes` bypasses interactive plan and tool prompts and should be limited to

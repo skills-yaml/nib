@@ -24,9 +24,10 @@ on:
         options:
           - catalog
           - canary
+          - selected
           - full
   schedule:
-    - cron: "19 4 * * 3" # Wednesday catalog inventory on the default branch.
+    - cron: "19 4 * * 3" # Wednesday catalog inventory, or selected after rollout approval.
 
 permissions:
   contents: read
@@ -48,6 +49,7 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
           REQUESTED_MODE: ${{ inputs.mode }}
           REQUESTED_PROVIDER: ${{ inputs.provider }}
+          SCHEDULE_MODE: ${{ vars.NIB_LIVE_SCHEDULE_MODE || 'catalog' }}
         run: |
           set -euo pipefail
 
@@ -56,12 +58,16 @@ jobs:
             mode="$REQUESTED_MODE"
             provider="$REQUESTED_PROVIDER"
           else
-            mode="catalog"
+            mode="$SCHEDULE_MODE"
             provider="all"
+            case "$mode" in
+              catalog | selected) ;;
+              *) echo "Scheduled qualification mode must be catalog or selected" >&2; exit 1 ;;
+            esac
           fi
 
           case "$mode" in
-            catalog | canary | full) ;;
+            catalog | canary | selected | full) ;;
             *) echo "Unsupported live qualification mode" >&2; exit 1 ;;
           esac
 
@@ -146,12 +152,12 @@ jobs:
           test "$(find "$NIB_LIVE_RESULTS_DIR" -maxdepth 1 -type f -name '*.md' | wc -l)" -ge 1
 
       - name: Upload sanitized live reports
-        if: success()
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: llm-live-${{ matrix.provider }}-${{ needs.prepare.outputs.mode }}-${{ github.run_attempt }}
           path: ${{ env.NIB_LIVE_RESULTS_DIR }}
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7
 
   aggregate:
@@ -204,12 +210,43 @@ jobs:
           fi
           for report in "${reports[@]}"; do
             jq -e --arg mode "$MODE" '
-              .schema_version == 1 and
+              .schema_version == 2 and
               .mode == $mode and
               .complete == true and
               .passed == true and
               (.providers | length) == 1 and
               .providers[0].complete == true and
-              .providers[0].passed == true
+              .providers[0].passed == true and
+              (if $mode == "selected" then
+                (.selected_suite.suite_id | length) > 0 and
+                (.selected_suite.matrix_sha256 | test("^[0-9a-f]{64}$")) and
+                .selected_suite.required_task_count >= 3
+              else
+                .selected_suite == null
+              end)
             ' "$report" >/dev/null
           done
+
+          if [ "$MODE" = "selected" ]; then
+            mapfile -t matrix_hashes < <(jq -r '.selected_suite.matrix_sha256' "${reports[@]}" | sort -u)
+            if [ "${#matrix_hashes[@]}" -ne 1 ]; then
+              echo "Selected provider reports do not share one matrix fingerprint." >&2
+              exit 1
+            fi
+            {
+              echo
+              echo "- Suite: \`$(jq -r '.selected_suite.suite_id' "${reports[0]}")\`"
+              echo "- Matrix SHA-256: \`${matrix_hashes[0]}\`"
+              for report in "${reports[@]}"; do
+                provider="$(jq -r '.providers[0].provider' "$report")"
+                echo
+                echo "### $provider"
+                jq -r '
+                  .providers[0].profiles[] |
+                  "- `\(.model_ref)` / `\(.transport)`: " +
+                  (([.scenarios[] | "`\(.scenario)=\(.passed)`"] +
+                    [.not_applicable_scenarios[] | "`\(.)=not_applicable`"]) | join(", "))
+                ' "$report"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

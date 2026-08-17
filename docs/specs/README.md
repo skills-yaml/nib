@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **21 done, 12 development, and 0 backlog**.
+The current lifecycle is **23 done, 13 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -48,6 +48,10 @@ T023 is in development for credential-gated live qualification across every acco
 direct-provider model and a reviewed exact-ID OpenRouter allowlist.
 T024 is in development for source-controlled curated provider model defaults and
 user-configurable per-provider picker lists.
+T025 completed interactive chat/TUI capability parity. T026 is in development for
+actionable, redaction-safe LLM failure propagation and native console/TUI presentation.
+T027 completed a doctor-diagnosed, explicitly invoked repair of canonical OpenAI
+tool/reasoning workloads that still use Chat Completions.
 FT-018 completed the verified self-update command, bounded update notices, Windows
 in-use replacement, and four-platform production rollout.
 
@@ -77,6 +81,9 @@ work or narrower guarantees.
 - [T022: Provider-Neutral LLM Contract and Adapter Conformance](development/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
 - [T023: Live LLM Provider and Model Integration Qualification](development/T023_live_llm_provider_model_integration_qualification.md)
 - [T024: Configurable Provider Model Catalog and Curated Defaults](development/T024_configurable_provider_model_catalog_and_curated_defaults.md)
+- [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
+- [T026: Actionable, Redaction-Safe LLM Failure Reporting](development/T026_actionable_redaction_safe_llm_failure_reporting.md)
+- [T027: Doctor-Guided OpenAI Transport Repair](done/T027_doctor_guided_openai_transport_repair.md)
 
 ### Feature specs
 
