@@ -4736,6 +4736,7 @@ fn persist_subagent_outcome_internal(
                     "tool_call_count": summary.tool_call_count,
                     "final_state": summary.final_state.as_str(),
                     "outcome": summary.outcome,
+                    "failure": summary.failure,
                     "bound_reached": summary.bound_reached,
                     "trace": summary.trace,
                 });

@@ -1,6 +1,6 @@
 use crate::config::NibConfig;
 use crate::context::budget::bound_single_turn_input;
-use crate::llm::{LlmClient, LlmRequest};
+use crate::llm::{LlmClient, LlmError, LlmErrorPhase, LlmRequest};
 use crate::session::{SessionError, SessionEvent, SessionStore};
 use chrono::Utc;
 use serde_json::json;
@@ -54,18 +54,24 @@ pub async fn maybe_compress_session(
     session_id: &str,
     llm: &Arc<dyn LlmClient>,
     cfg: &NibConfig,
-) -> Result<Option<CompressionReport>, String> {
+) -> Result<Option<CompressionReport>, LlmError> {
     if !cfg.compression.enabled {
         return Ok(None);
     }
     if !(0.0..=1.0).contains(&cfg.compression.threshold) || cfg.compression.threshold == 0.0 {
-        return Err("compression.threshold must be in (0, 1]".to_string());
+        return Err(
+            LlmError::configuration("compression.threshold must be in (0, 1]")
+                .with_phase(LlmErrorPhase::Compression),
+        );
     }
     if !(0.0..1.0).contains(&cfg.compression.target_ratio)
         || cfg.compression.target_ratio == 0.0
         || cfg.compression.target_ratio >= cfg.compression.threshold
     {
-        return Err("compression.target_ratio must be in (0, compression.threshold)".to_string());
+        return Err(LlmError::configuration(
+            "compression.target_ratio must be in (0, compression.threshold)",
+        )
+        .with_phase(LlmErrorPhase::Compression));
     }
 
     let session = match store
@@ -144,7 +150,8 @@ pub async fn maybe_compress_session(
             bounded.tools.as_deref(),
             0.3,
         ))
-        .await?;
+        .await
+        .map_err(|error| error.with_phase(LlmErrorPhase::Compression))?;
     let summary_content = response
         .content
         .filter(|content| !content.trim().is_empty())

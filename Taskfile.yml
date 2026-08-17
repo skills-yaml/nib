@@ -78,6 +78,12 @@ tasks:
       - cargo test --bin nib updater::tests -- --test-threads=1
       - cargo test --test updater -- --test-threads=1
 
+  test:doctor:
+    desc: Run doctor diagnosis and repair tests
+    cmds:
+      - cargo test --bin nib doctor::tests -- --test-threads=1
+      - cargo test --test doctor_cli -- --test-threads=1
+
   qualify:release-update:unix:
     desc: Qualify a published development self-update on a native Unix runner
     platforms: [linux, darwin]
@@ -115,6 +121,11 @@ tasks:
     cmds:
       - cargo test --test installers -- --test-threads=1
 
+  test:llm-live:offline:
+    desc: Run credential-free live LLM harness, matrix, planner, and report tests
+    cmds:
+      - cargo test --test llm_live -- --test-threads=1
+
   test:llm-live:catalog:
     desc: Discover and reconcile live provider model catalogs (explicit opt-in)
     summary: |
@@ -138,6 +149,19 @@ tasks:
       - task: test:llm-live
         vars:
           MODE: canary
+
+  test:llm-live:selected:
+    desc: Qualify the reviewed selected provider/model task matrix (paid, explicit opt-in)
+    summary: |
+      Run the ignored live LLM qualification test in selected mode.
+      Requires NIB_LIVE_TESTS=1 and NIB_LIVE_ACK_COSTS=1. The exact provider/model
+      list and task suite come from tests/fixtures/llm_live/selected_models.toml.
+      Set NIB_LIVE_PROVIDER to one provider or all, and optionally set
+      NIB_LIVE_RESULTS_DIR to choose the sanitized report directory.
+    cmds:
+      - task: test:llm-live
+        vars:
+          MODE: selected
 
   test:llm-live:full:
     desc: Qualify every eligible live provider model and approved OpenRouter entry (paid, explicit opt-in)

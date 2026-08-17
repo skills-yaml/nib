@@ -63,7 +63,7 @@ of that inventory, controlled live calls through production code, and a safe rep
 
 ## Decision
 
-Create a separate live LLM qualification harness with three explicit modes:
+Create a separate live LLM qualification harness with four explicit modes:
 
 1. **Catalog:** discover, paginate, normalize, deduplicate, and classify models from
    catalog metadata without making generation requests. Entries whose catalogs expose
@@ -71,7 +71,10 @@ Create a separate live LLM qualification harness with three explicit modes:
 2. **Canary:** run the qualification scenarios against each provider's configured
    default model and every OpenRouter allowlist entry. This is a fast credential and
    endpoint health signal.
-3. **Full:** run the applicable scenarios against every text-generation model in the
+3. **Selected:** run the reviewed core nib task suite against every exact model in the
+   external selected matrix for all six providers. This is the bounded CI regression
+   signal and never substitutes another model for a missing selection.
+4. **Full:** run the applicable scenarios against every text-generation model in the
    completed account-visible catalog for OpenAI, Anthropic, Gemini, Grok, and Meta, and
    against every OpenRouter allowlist entry.
 
@@ -346,6 +349,55 @@ positive parallel-tools claim record `not_applicable`. T022 fixtures remain resp
 for malformed, duplicate, missing, foreign, and replayed correlation cases; the live
 test does not intentionally send invalid paid requests.
 
+### Selected Nib Task Suite and Model Matrix
+
+The bounded CI regression suite is repository-owned external configuration at
+`tests/fixtures/llm_live/selected_models.toml`. It is data rather than Rust source so a
+maintainer can update model selection through ordinary review without changing harness
+logic. The file has a strict versioned schema, suite ID, owner, review/expiry dates,
+required and conditional scenario sets, and an exact non-empty model list for every
+network provider. Wildcards, aliases such as `latest`, duplicate IDs, unknown providers,
+unknown scenarios, expired reviews, and an omitted provider fail before network I/O.
+
+The initial `nib-llm-core-v1` suite defines the tasks nib's LLM layer must complete:
+
+1. `complete_text`: return a bounded non-streamed answer containing the run nonce and
+   an authoritative successful terminal status.
+2. `streamed_text`: emit ordered text deltas containing a distinct nonce and exactly one
+   authoritative terminal outcome.
+3. `single_tool_continuation`: emit one schema-valid inert tool call, preserve the exact
+   neutral call/result correlation through the provider-native continuation path, and
+   return the final receipt nonce. This is required for every selected model because it
+   is the minimum agent execution profile.
+4. `parallel_tool_continuation`: preserve two distinct tool call/result correlations and
+   finish with the receipt nonce. This is conditional and runs only when authoritative
+   catalog metadata positively advertises parallel tool calls; a claimed capability
+   that fails the task fails the profile.
+
+`selected` mode executes the three required tasks on every configured provider/model
+and production transport. It adds the conditional task where advertised. Exact selected
+IDs must be present in the same run's live catalog; there is no fallback to a provider
+default, alias, family, or replacement. Selected OpenRouter IDs must also be present and
+approved in the reviewed OpenRouter allowlist, so the matrix cannot bypass its separate
+cost/capability policy.
+
+The initial selected model set tracks the bundled default for each direct provider and
+the four proposed OpenRouter family representatives, which remain blocked by the
+separate approval gate:
+
+- OpenAI: `gpt-5.6-sol`
+- Anthropic: `claude-opus-5`
+- Google: `gemini-3.6-flash`
+- Grok/xAI: `grok-4.5`
+- Meta: `muse-spark-1.1`
+- OpenRouter: `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`,
+  `google/gemini-3.6-flash`, and `x-ai/grok-4.5`
+
+Each selected JSON/Markdown report records the suite ID, SHA-256 matrix fingerprint,
+review/expiry dates, and task counts. Provider artifacts from an aggregate run must have
+the same fingerprint. This makes historical evidence attributable to the exact selected
+list even after the external configuration changes.
+
 ### Classification and Pass Rules
 
 Each catalog entry and transport profile ends in exactly one bounded local enum:
@@ -486,20 +538,24 @@ URL-safe Base64 with and without padding.
 
 Add canonical tasks with stable names:
 
+- `task test:llm-live:offline`
 - `task test:llm-live:catalog`
 - `task test:llm-live:canary`
+- `task test:llm-live:selected`
 - `task test:llm-live:full`
 
 The ordinary `task check`, `task test`, `task dev`, coverage, and PR workflows must not
-invoke these tasks. Catalog/allowlist parsers and all orchestration logic that can be
-tested without credentials remain part of ordinary deterministic tests.
+invoke credentialed modes. Catalog/allowlist/matrix parsers and all orchestration logic
+that can be tested without credentials remain part of ordinary deterministic tests and
+are also exposed through the focused `offline` target.
 
 Add `.github/workflows/llm-live.yml` with:
 
-- `workflow_dispatch` inputs for provider and mode;
-- a catalog-only scheduled inventory run using protected credentials where the
-  provider requires authentication, with generation structurally disabled;
-- a weekly full run on the default branch;
+- `workflow_dispatch` inputs for provider and mode, including `selected`;
+- a scheduled inventory run using protected credentials where the provider requires
+  authentication, defaulting to catalog-only with generation structurally disabled;
+- a reviewed post-rollout switch that may change the default-branch schedule from
+  `catalog` to the bounded `selected` matrix, but never to unbounded `full`;
 - one isolated job per provider with matrix fail-fast disabled;
 - environment-scoped secrets, read-only repository permissions, no fork/PR trigger,
   bounded job timeouts, and one concurrency group per provider;
@@ -546,12 +602,14 @@ exact-revision live acceptance matrix passes.
 6. Add completeness and advertised-model reconciliation, catalog drift comparison,
    cost/request/token/deadline guards, atomic sanitized artifacts, and deterministic
    local tests for every failure class.
-7. Add the three Task targets and the protected manual/scheduled GitHub workflow.
-8. Validate and review the initial OpenRouter exact-ID allowlist against the live
+7. Add the five Task targets and the protected manual/scheduled GitHub workflow.
+8. Add the strict selected task/model matrix, selected planner mode, report provenance,
+   and deterministic validation for every provider, task, and exact model selection.
+9. Validate and review the initial OpenRouter exact-ID allowlist against the live
    catalog.
-9. Run catalog, canary, then full provider matrices; fix adapter defects rather than
-   weakening assertions or excluding failing eligible models.
-10. Perform independent spec-compliance and technical/security reviews, run canonical
+10. Run catalog, canary, selected, then full provider matrices; fix adapter defects
+    rather than weakening assertions or excluding failing eligible models.
+11. Perform independent spec-compliance and technical/security reviews, run canonical
     deterministic gates, record exact live evidence, and only then move T023 to done.
 
 ## Rollout Plan
@@ -577,10 +635,11 @@ models to be removed from coverage.
 
 ### Phase 4: Scheduled Monitoring
 
-Enable the weekly full workflow only after one exact-revision aggregate pass. Review
-catalog additions/removals, budget changes, and OpenRouter allowlist expiry through
-ordinary repository review. Live failures alert through the workflow result and summary;
-automatic runtime fallback remains prohibited.
+Enable the weekly selected workflow only after one exact-revision aggregate pass and the
+external credential/budget/approval gates. Keep full qualification manual. Review catalog
+additions/removals, selected-matrix and budget changes, and OpenRouter allowlist expiry
+through ordinary repository review. Live failures alert through the workflow result and
+summary; automatic runtime fallback remains prohibited.
 
 ## Alternatives Considered
 
@@ -706,7 +765,7 @@ can classify a transport as unsupported.
 ### Safety, Bounds, and Reporting
 
 - [ ] Local catalog execution requires explicit live-network acknowledgement; local
-  canary/full execution additionally requires paid-cost acknowledgement. Ordinary
+  canary/selected/full execution additionally requires paid-cost acknowledgement. Ordinary
   `task check`, `task test`, coverage, PR, and fork workflows make zero live LLM calls.
 - [ ] Dedicated test credentials, safe endpoint validation, request/token/attempt/
   concurrency/deadline/cost ceilings, and no-semantic-retry behavior are enforced.
@@ -722,8 +781,16 @@ can classify a transport as unsupported.
 
 ### Automation and Evidence
 
-- [ ] The three documented Task targets exist, are stable, and are described in
+- [ ] The five documented Task targets exist, are stable, and are described in
   `docs/tech/task.md`.
+- [ ] `selected_models.toml` strictly defines all six providers, exact model IDs, the
+  three mandatory nib task scenarios, conditional parallel-tool coverage, ownership,
+  review/expiry dates, and no wildcard or implicit fallback.
+- [ ] Selected mode fails before generation when the matrix is invalid/expired, a
+  selected model is absent from the live catalog, an OpenRouter selection is not
+  separately approved, or the complete request budget cannot cover the matrix.
+- [ ] Selected reports include the suite ID and matrix fingerprint; the aggregate job
+  rejects missing/mismatched provenance and reports every provider/model/task result.
 - [ ] The protected manual/scheduled workflow uses isolated provider jobs, fail-fast
   disabled, read-only repository permissions, environment secrets, concurrency and
   timeout bounds, no PR/fork trigger, sanitized short-retention artifacts, and a strict
@@ -745,6 +812,7 @@ can classify a transport as unsupported.
 
 - `tests/llm_live.rs` and live-only support modules/fixtures
 - `tests/fixtures/llm_live/openrouter_models.toml`
+- `tests/fixtures/llm_live/selected_models.toml`
 - provider catalog fixtures and report/redaction fixtures
 - `src/llm/registry.rs`, `src/llm/factory.rs`, and T022 provider interfaces only where
   minimal testable catalog/override hooks are required
@@ -760,10 +828,13 @@ can classify a transport as unsupported.
 - Deterministic catalog and pagination fixtures for all six providers
 - Deterministic model/profile classification and completeness matrices
 - Deterministic OpenRouter allowlist schema/catalog reconciliation tests
+- Deterministic selected-suite schema, exact-model/catalog, scenario, expiry, and
+  fingerprint tests
 - Deterministic dry-run budget/request/token/attempt planning tests
 - Deterministic report bounds, pseudonymization, atomic-write, redaction, and artifact
   suppression tests
 - Prohibition tests proving ordinary Task/CI targets cannot select live tests
+- `task test:llm-live:offline`
 - Manual catalog and canary runs for each provider
 - Exact-revision full live matrix for every direct-provider catalog plus the OpenRouter
   allowlist
@@ -800,11 +871,43 @@ The first implementation slice is present and intentionally remains in developme
 - Reports are versioned, bounded, pseudonymize private catalog IDs, record catalog
   hashes and plan ceilings, detect post-generation catalog drift, scan raw and encoded
   configured secrets, and publish atomically without replacing prior evidence.
-- The three explicit Task targets and the separate protected GitHub Actions workflow
+- The original three explicit Task targets and the separate protected GitHub Actions workflow
   are implemented. The workflow has no pull-request trigger, scopes one credential to
-  one provider execution step, disables fail-fast, uploads only passing sanitized
-  artifacts, and strictly aggregates their JSON results. Paid scheduling remains
+  one provider execution step, disables fail-fast, uploads only harness-published
+  sanitized artifacts (including failed semantic evidence), and strictly aggregates
+  their JSON results. Paid scheduling remains
   disabled.
+
+The selected-suite slice added on 2026-08-17 also remains in development:
+
+- `task test:llm-live:selected` validates the strict external
+  `selected_models.toml` matrix and executes the three core nib tasks on every exact
+  configured model/production transport, with conditional parallel-tool coverage;
+- `task test:llm-live:offline` provides a credential-free focused gate for the parsers,
+  matrix, planner, reports, and protected workflow contract;
+- the initial matrix selects one bundled default for every direct provider and four
+  OpenRouter family representatives, and records ownership plus review/expiry dates;
+- exact live catalog membership is mandatory and selected OpenRouter IDs remain subject
+  to the separate approved allowlist, so current unapproved entries still fail closed;
+- JSON report schema 2 and Markdown summaries record suite/fingerprint/task provenance,
+  while the aggregate workflow rejects mismatched fingerprints and lists each selected
+  model/transport/task result; and
+- the paid Wednesday selected schedule is externally enableable only through
+  `NIB_LIVE_SCHEDULE_MODE=selected` after the existing manual-pass, credential, budget,
+  Meta endpoint, and OpenRouter approval gates. Catalog remains the default.
+
+Credential-free validation for this slice on 2026-08-17:
+
+- `task test:llm-live:offline` passed 32 tests with the live network entrypoint ignored;
+- `task docs:check`, `task check:all-targets`, `task build`, strict TOML/YAML parsing,
+  the selected paid-cost precondition, and `git diff --check` passed;
+- An earlier `task test` attempt reached 734 passing library tests before two assertions
+  in the concurrently developed T026 scheduled-provider-failure reporting slice failed;
+  those assertions were subsequently corrected.
+- An earlier `task check` attempt reached three T026-only Clippy findings in
+  `src/llm/error.rs` and `src/llm/mod.rs`; those findings were corrected without lint
+  suppression, and the combined-tree `task check` passed on 2026-08-17. No
+  selected-suite lint finding was emitted.
 
 Credential-free validation completed on 2026-08-06:
 
@@ -823,7 +926,7 @@ Completion evidence is still blocked on external and prerequisite work, so no un
 acceptance item is being claimed prematurely:
 
 - no provider credentials, dedicated budget-capped accounts, or supported-region Meta
-  endpoint were available in this workspace, so no catalog/canary/full live result was
+  endpoint were available in this workspace, so no catalog/canary/selected/full live result was
   generated;
 - every initial OpenRouter entry is `approved = false` pending an authenticated catalog,
   capability, regional-availability, and price review; paid OpenRouter modes therefore

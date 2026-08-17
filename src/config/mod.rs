@@ -1568,14 +1568,39 @@ pub fn save_nib_config_full(project_root: &Path, cfg: &mut NibConfig) -> Result<
     Ok(())
 }
 
+/// Result of a locked configuration edit that may intentionally avoid a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMutation<T> {
+    /// Return the operation result without validating, writing, or advancing revision.
+    Unchanged(T),
+    /// Validate and atomically commit the edited configuration.
+    Changed(T),
+}
+
 pub fn update_nib_config<T>(
     project_root: &Path,
     operation: impl FnOnce(&mut NibConfig) -> Result<T, String>,
 ) -> Result<T, ConfigError> {
+    update_nib_config_conditionally(project_root, |config| {
+        operation(config).map(ConfigMutation::Changed)
+    })
+}
+
+/// Edit the latest configuration under its lock and commit only when requested.
+///
+/// Returning [`ConfigMutation::Unchanged`] discards any in-memory edits made by the
+/// operation and leaves both the file and its revision untouched.
+pub fn update_nib_config_conditionally<T>(
+    project_root: &Path,
+    operation: impl FnOnce(&mut NibConfig) -> Result<ConfigMutation<T>, String>,
+) -> Result<T, ConfigError> {
     with_config_lock(project_root, |paths, directory| {
         let mut loaded = load_nib_config_with_source_unlocked(paths, directory)?;
         let revision = loaded.config.revision;
-        let output = operation(&mut loaded.config).map_err(ConfigError::Operation)?;
+        let output = match operation(&mut loaded.config).map_err(ConfigError::Operation)? {
+            ConfigMutation::Unchanged(output) => return Ok(output),
+            ConfigMutation::Changed(output) => output,
+        };
         loaded.config.revision = revision.checked_add(1).ok_or_else(|| {
             ConfigError::Operation("configuration revision overflowed".to_string())
         })?;

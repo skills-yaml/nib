@@ -28,7 +28,17 @@ pub(super) async fn execute_provider_plan(
                 &profile.model,
                 profile.transport,
                 profile.advertised,
-                Vec::new(),
+                profile
+                    .required_scenarios
+                    .iter()
+                    .map(|scenario| ScenarioReport {
+                        scenario: *scenario,
+                        passed: false,
+                        duration_ms: 0,
+                        safe_error_class: Some("provider_timeout".to_string()),
+                    })
+                    .collect(),
+                profile.not_applicable_scenarios.iter().copied().collect(),
                 Classification::Unknown,
             )
         } else {
@@ -55,12 +65,17 @@ async fn execute_profile(
                 &profile.model,
                 profile.transport,
                 profile.advertised,
-                vec![ScenarioReport {
-                    scenario: ScenarioId::CompleteText,
-                    passed: false,
-                    duration_ms: 0,
-                    safe_error_class: Some(safe_error_class),
-                }],
+                profile
+                    .required_scenarios
+                    .iter()
+                    .map(|scenario| ScenarioReport {
+                        scenario: *scenario,
+                        passed: false,
+                        duration_ms: 0,
+                        safe_error_class: Some(safe_error_class.clone()),
+                    })
+                    .collect(),
+                profile.not_applicable_scenarios.iter().copied().collect(),
                 classification,
             );
         }
@@ -110,14 +125,18 @@ async fn execute_profile(
             }),
             Err(error) => {
                 let (next_classification, safe_error_class) = classify_error(&error);
-                classification = next_classification;
+                if classification == Classification::Qualified {
+                    classification = next_classification;
+                }
                 scenario_reports.push(ScenarioReport {
                     scenario: *scenario,
                     passed: false,
                     duration_ms,
                     safe_error_class: Some(safe_error_class),
                 });
-                break;
+                if settings.mode != super::LiveMode::Selected {
+                    break;
+                }
             }
         }
     }
@@ -129,6 +148,7 @@ async fn execute_profile(
         profile.transport,
         profile.advertised,
         scenario_reports,
+        profile.not_applicable_scenarios.iter().copied().collect(),
         classification,
     )
 }
@@ -189,7 +209,8 @@ async fn complete_text(
     let scope = scope(run_id, "complete")?;
     let response = client
         .complete(live_request(&messages, None, scope, settings))
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
     validate_text_response(response, &nonce)
 }
 
@@ -206,12 +227,13 @@ async fn streamed_text(
     let scope = scope(run_id, "stream")?;
     let mut stream = client
         .stream(live_request(&messages, None, scope, settings))
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
     let mut public_text = String::new();
     let mut terminal_count = 0usize;
     let mut terminal_seen = false;
     while let Some(event) = stream.recv().await {
-        let event = event?;
+        let event = event.map_err(|error| error.to_string())?;
         if terminal_seen {
             return Err("stream emitted an event after its terminal event".to_string());
         }
@@ -235,7 +257,7 @@ async fn streamed_text(
     if terminal_count != 1 || !public_text.contains(&nonce) {
         return Err("stream did not produce one nonce-bearing terminal result".to_string());
     }
-    let response = stream.finish().await?;
+    let response = stream.finish().await.map_err(|error| error.to_string())?;
     validate_text_response(response, &nonce)?;
     Ok(())
 }
@@ -274,7 +296,8 @@ async fn tool_continuation(
             scope.clone(),
             settings,
         ))
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
     if response.terminal_status != LlmTerminalStatus::Completed {
         return Err("tool qualification request was not completed".to_string());
     }
@@ -319,7 +342,8 @@ async fn tool_continuation(
         .complete(
             live_request(&follow_up, None, scope, settings).with_continuation(Some(continuation)),
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
     validate_text_response(final_response, &receipt)
 }
 

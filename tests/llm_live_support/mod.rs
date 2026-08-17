@@ -27,6 +27,7 @@ const NETWORK_PROVIDERS: [&str; 6] = [
 enum LiveMode {
     Catalog,
     Canary,
+    Selected,
     Full,
 }
 
@@ -35,8 +36,9 @@ impl LiveMode {
         match value {
             "catalog" => Ok(Self::Catalog),
             "canary" => Ok(Self::Canary),
+            "selected" => Ok(Self::Selected),
             "full" => Ok(Self::Full),
-            _ => Err("NIB_LIVE_MODE must be catalog, canary, or full".to_string()),
+            _ => Err("NIB_LIVE_MODE must be catalog, canary, selected, or full".to_string()),
         }
     }
 
@@ -263,6 +265,17 @@ enum ScenarioId {
     ParallelToolContinuation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SelectedSuiteEvidence {
+    suite_id: String,
+    matrix_sha256: String,
+    owner: String,
+    reviewed_at: String,
+    expires_at: String,
+    required_task_count: usize,
+    conditional_task_count: usize,
+}
+
 impl ScenarioId {
     fn logical_requests(self) -> usize {
         match self {
@@ -278,6 +291,7 @@ struct ModelProfile {
     transport: TransportId,
     advertised: bool,
     required_scenarios: BTreeSet<ScenarioId>,
+    not_applicable_scenarios: BTreeSet<ScenarioId>,
     projected_cost_ceiling_usd: Option<f64>,
 }
 
@@ -301,11 +315,15 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
     let started_at = Utc::now();
     let run_id = uuid::Uuid::new_v4().to_string();
     let allowlist = plan::OpenRouterAllowlist::load_default()?;
+    let selected_matrix = (settings.mode == LiveMode::Selected)
+        .then(plan::SelectedMatrix::load_default)
+        .transpose()?;
     let mut provider_reports = Vec::new();
 
     for provider in &settings.providers {
         let snapshot = catalog::fetch_catalog(provider, &settings).await?;
-        let run_plan = plan::build_plan(&settings, &snapshot, &allowlist)?;
+        let run_plan =
+            plan::build_plan(&settings, &snapshot, &allowlist, selected_matrix.as_ref())?;
         let mut report = if settings.mode == LiveMode::Catalog {
             report::catalog_provider_report(&run_id, &snapshot, &run_plan)
         } else {
@@ -326,6 +344,7 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
         started_at,
         Utc::now(),
         provider_reports,
+        selected_matrix.as_ref().map(plan::SelectedMatrix::evidence),
     );
     report::publish(&settings, report)
 }

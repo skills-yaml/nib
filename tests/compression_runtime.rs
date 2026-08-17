@@ -12,7 +12,7 @@ struct SummaryLlm;
 
 #[async_trait]
 impl LlmClient for SummaryLlm {
-    async fn complete(&self, _request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+    async fn complete(&self, _request: LlmRequest<'_>) -> Result<LlmResponse, nib::llm::LlmError> {
         Ok(LlmResponse::text(format!(
             "Dense retained facts: {}",
             "verified context ".repeat(80)

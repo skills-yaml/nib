@@ -106,6 +106,7 @@ pub struct GeminiClient {
     client: Client,
     model: String,
     api_keys: Vec<String>,
+    diagnostic_secrets: Vec<String>,
     base_url: String,
 }
 
@@ -124,10 +125,21 @@ impl GeminiClient {
         api_keys: Vec<String>,
         base_url: impl AsRef<str>,
     ) -> Result<Self, String> {
+        let diagnostic_secrets = api_keys.clone();
+        Self::configured_with_diagnostic_secrets(model, api_keys, diagnostic_secrets, base_url)
+    }
+
+    pub(crate) fn configured_with_diagnostic_secrets(
+        model: String,
+        api_keys: Vec<String>,
+        diagnostic_secrets: Vec<String>,
+        base_url: impl AsRef<str>,
+    ) -> Result<Self, String> {
         Ok(Self {
             client: Client::new(),
             model,
             api_keys,
+            diagnostic_secrets,
             base_url: normalize_gemini_api_root(base_url.as_ref())?,
         })
     }
@@ -175,14 +187,46 @@ impl GeminiClient {
         }
         Ok(body)
     }
+
+    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+        crate::llm::error::LlmErrorContext::new(
+            "google",
+            GEMINI_TRANSPORT,
+            Some(self.model.clone()),
+            self.diagnostic_secrets.clone(),
+        )
+    }
+
+    fn request_error(&self, message: impl AsRef<str>) -> crate::llm::LlmError {
+        crate::llm::LlmError::request_rejected(
+            "google",
+            GEMINI_TRANSPORT,
+            Some(&self.model),
+            message,
+            &self.diagnostic_secrets,
+        )
+    }
+
+    fn protocol_error(&self, message: impl AsRef<str>) -> crate::llm::LlmError {
+        crate::llm::LlmError::provider_protocol(
+            "google",
+            GEMINI_TRANSPORT,
+            Some(&self.model),
+            crate::llm::LlmErrorPhase::TerminalValidation,
+            message,
+            &self.diagnostic_secrets,
+        )
+    }
 }
 
 #[async_trait]
 impl LlmClient for GeminiClient {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
-        validate_gemini_request(&request)?;
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
         let scope = request.scope.clone();
-        let body = self.request_body(request)?;
+        let body = self
+            .request_body(request)
+            .map_err(|error| self.request_error(error))?;
         let response = crate::llm::send_with_retry(
             |credential_index| {
                 let url = format!(
@@ -197,13 +241,35 @@ impl LlmClient for GeminiClient {
             },
             self.api_keys.len(),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            crate::llm::LlmError::transport(
+                "google",
+                GEMINI_TRANSPORT,
+                Some(&self.model),
+                "Gemini request failed before a valid HTTP response",
+                &self.diagnostic_secrets,
+            )
+        })?;
         if !response.status().is_success() {
-            return Err(safe_gemini_http_error(response).await);
+            return Err(
+                safe_gemini_http_error(response, &self.model, &self.diagnostic_secrets).await,
+            );
         }
-        let data =
-            crate::llm::read_bounded_json_response(response, "Gemini completion response").await?;
-        let mut completed = parse_gemini_response(&data)?;
+        let data = crate::llm::read_bounded_json_response(response, "Gemini completion response")
+            .await
+            .map_err(|error| self.protocol_error(error))?;
+        let mut completed = parse_gemini_response(&data).map_err(|error| {
+            crate::llm::LlmError::provider_rejected(
+                "google",
+                GEMINI_TRANSPORT,
+                Some(&self.model),
+                crate::llm::LlmErrorPhase::TerminalValidation,
+                Some(&data),
+                error,
+                &self.diagnostic_secrets,
+            )
+        })?;
         if let Some(calls) = completed
             .tool_calls
             .as_ref()
@@ -212,21 +278,23 @@ impl LlmClient for GeminiClient {
             let model_content = data["candidates"][0]
                 .get("content")
                 .cloned()
-                .ok_or_else(|| "Gemini response function calls are missing content".to_string())?;
-            completed.continuation = Some(gemini_continuation(
-                &self.model,
-                scope,
-                model_content,
-                calls,
-            )?);
+                .ok_or_else(|| {
+                    self.protocol_error("Gemini response function calls are missing content")
+                })?;
+            completed.continuation = Some(
+                gemini_continuation(&self.model, scope, model_content, calls)
+                    .map_err(|error| self.protocol_error(error))?,
+            );
         }
         Ok(completed)
     }
 
-    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, String> {
-        validate_gemini_request(&request)?;
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
         let continuation_scope = request.scope.clone();
-        let body = self.request_body(request)?;
+        let body = self
+            .request_body(request)
+            .map_err(|error| self.request_error(error))?;
         let response = crate::llm::send_with_retry(
             |credential_index| {
                 let url = format!(
@@ -241,19 +309,32 @@ impl LlmClient for GeminiClient {
             },
             self.api_keys.len(),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            crate::llm::LlmError::transport(
+                "google",
+                GEMINI_TRANSPORT,
+                Some(&self.model),
+                "Gemini request failed before a valid HTTP response",
+                &self.diagnostic_secrets,
+            )
+        })?;
         if !response.status().is_success() {
-            return Err(safe_gemini_http_error(response).await);
+            return Err(
+                safe_gemini_http_error(response, &self.model, &self.diagnostic_secrets).await,
+            );
         }
         crate::llm::ensure_response_content_length(
             &response,
             crate::llm::MAX_LLM_STREAM_BYTES,
             "Gemini stream response",
-        )?;
+        )
+        .map_err(|error| self.protocol_error(error))?;
 
         let (public_tx, public_rx) = mpsc::channel(100);
         let (completion_tx, completion_rx) = oneshot::channel();
         let model = self.model.clone();
+        let sensitive_values = self.diagnostic_secrets.clone();
         tokio::spawn(async move {
             use eventsource_stream::{EventStreamError, Eventsource};
             use futures_util::StreamExt;
@@ -281,7 +362,19 @@ impl LlmClient for GeminiClient {
                 let event = match event_result {
                     Ok(event) => event,
                     Err(EventStreamError::Transport(error)) => {
-                        fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                        fail_gemini_stream(
+                            &public_tx,
+                            &mut completion_tx,
+                            crate::llm::LlmError::transport(
+                                "google",
+                                GEMINI_TRANSPORT,
+                                Some(&model),
+                                error,
+                                &sensitive_values,
+                            )
+                            .with_phase(crate::llm::LlmErrorPhase::Stream),
+                        )
+                        .await;
                         return;
                     }
                     Err(EventStreamError::Utf8(_) | EventStreamError::Parser(_)) => {
@@ -312,6 +405,23 @@ impl LlmClient for GeminiClient {
                         return;
                     }
                 };
+                if data.get("error").is_some() {
+                    fail_gemini_stream(
+                        &public_tx,
+                        &mut completion_tx,
+                        crate::llm::LlmError::provider_rejected(
+                            "google",
+                            GEMINI_TRANSPORT,
+                            Some(&model),
+                            crate::llm::LlmErrorPhase::Stream,
+                            Some(&data),
+                            "Gemini stream reported a provider error",
+                            &sensitive_values,
+                        ),
+                    )
+                    .await;
+                    return;
+                }
                 if let Some(parts) = data
                     .get("candidates")
                     .and_then(Value::as_array)
@@ -399,7 +509,8 @@ impl LlmClient for GeminiClient {
                 .await;
             }
         });
-        Ok(LlmStream::with_private_completion(public_rx, completion_rx))
+        Ok(LlmStream::with_private_completion(public_rx, completion_rx)
+            .with_error_context(self.error_context()))
     }
 }
 
@@ -460,17 +571,35 @@ pub(crate) fn normalize_gemini_api_root(base_url: &str) -> Result<String, String
     })
 }
 
-async fn safe_gemini_http_error(response: Response) -> String {
-    let status = response.status().as_u16();
+async fn safe_gemini_http_error(
+    response: Response,
+    model: &str,
+    sensitive_values: &[String],
+) -> crate::llm::LlmError {
+    let status = response.status();
     let body_read =
         crate::llm::read_bounded_error_response(response, "Gemini API error response").await;
-    if body_read.is_err() {
+    let structured = body_read
+        .as_ref()
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(body).ok());
+    let safe_message = if body_read.is_err() {
         format!(
-            "Gemini API request failed with HTTP {status}; the error response could not be read safely"
+            "Gemini API request failed with HTTP {}; the error response could not be read safely",
+            status.as_u16()
         )
     } else {
-        format!("Gemini API request failed with HTTP {status}")
-    }
+        format!("Gemini API request failed with HTTP {}", status.as_u16())
+    };
+    crate::llm::LlmError::http(
+        "google",
+        GEMINI_TRANSPORT,
+        Some(model),
+        status,
+        structured.as_ref(),
+        safe_message,
+        sensitive_values,
+    )
 }
 
 fn is_gemini_refusal_reason(reason: &str) -> bool {
@@ -565,10 +694,11 @@ fn complete_gemini_stream(
 }
 
 async fn fail_gemini_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, String>>,
-    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, String>>>,
-    error: String,
+    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
+    error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
+    let error = error.into();
     let _ = crate::llm::send_stream_event(public_tx, Err(error.clone())).await;
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
@@ -1300,6 +1430,8 @@ mod tests {
             .await
             .expect_err("completion must reject HTTP error");
         assert_eq!(error, "Gemini API request failed with HTTP 401");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
         assert!(!error.contains(SENTINEL));
 
         let (base_url, _) = serve_once("403 Forbidden", "text/plain", SENTINEL);
@@ -1312,7 +1444,29 @@ mod tests {
             .await
             .expect_err("stream must reject HTTP error");
         assert_eq!(error, "Gemini API request failed with HTTP 403");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
         assert!(!error.contains(SENTINEL));
+
+        const INACTIVE: &str = "inactive-google-credential";
+        let (base_url, _) = serve_once("401 Unauthorized", "text/plain", "private");
+        let error = GeminiClient::configured_with_diagnostic_secrets(
+            format!("model-{INACTIVE}"),
+            vec!["active-key".to_string()],
+            vec!["active-key".to_string(), INACTIVE.to_string()],
+            base_url,
+        )
+        .expect("configured Gemini client")
+        .complete(LlmRequest::new(
+            &[json!({"role": "user", "content": "x"})],
+            None,
+            0.0,
+        ))
+        .await
+        .expect_err("diagnostic redaction fixture");
+        let report = error.user_report(None);
+        assert!(report.contains("model-[REDACTED]"), "{report}");
+        assert!(!report.contains(INACTIVE), "{report}");
     }
 
     #[tokio::test]
@@ -1333,6 +1487,8 @@ mod tests {
             .expect("Gemini stream response");
         let error = stream.finish().await.expect_err("provider stream error");
         assert_eq!(error, "Gemini stream reported a provider error");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::Stream);
         assert!(!error.contains(SENTINEL));
     }
 

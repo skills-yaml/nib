@@ -56,6 +56,23 @@ or retry a rejected request with different API semantics. Responses uses `store:
 for nib's local-first state contract, which is distinct from provider-side retention
 policy or Zero Data Retention eligibility.
 
+### LLM Failure Boundary
+
+`LlmClient::complete`, `LlmClient::stream`, and `LlmStream` return the canonical
+provider-neutral `LlmError`. Adapters classify only local request state, numeric HTTP
+status, and exact allowlisted structural codes. Complete and streaming failures retain
+the registered provider, transport, redacted model, phase, retry disposition, optional
+HTTP status, and a stable incident class; provider messages and arbitrary response
+metadata are never part of the public or durable record.
+
+The agent keeps `AgentRunSummary.outcome` as a stable machine token and stores the
+optional structured failure separately in reconciliation evidence. Operational LLM
+failures are lifecycle events, not assistant messages, so later context cannot mistake
+them for model-authored content. Console, TUI, gateway, delegated, and durable observers
+derive their bounded report and recovery action from the typed class instead of parsing
+diagnostic text. Internal compatibility messages are redacted and bounded in memory but
+are skipped during serialization.
+
 ### Provider Model Catalog
 
 The bundled model catalog is a strict, versioned TOML data file rather than a Rust

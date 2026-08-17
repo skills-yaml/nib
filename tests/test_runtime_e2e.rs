@@ -11,7 +11,9 @@ use nib::context::compression::{maybe_compress_session, CompressionReport};
 use nib::context::format_context_for_prompt;
 use nib::context::skills::load_relevant_skills;
 use nib::integrations::mcp::McpManager;
-use nib::llm::{LlmClient, LlmRequest, LlmResponse, StreamEvent};
+use nib::llm::{
+    LlmClient, LlmErrorClass, LlmErrorPhase, LlmRequest, LlmResponse, RetryDisposition, StreamEvent,
+};
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
 use nib::session::{Plan, PlanStep, SessionError, SessionStore};
@@ -798,11 +800,22 @@ async fn responses_planner_failure_reconciles_without_executing_tools_or_persist
     .expect("failed provider turn still reconciles the agent run");
 
     assert!(summary.is_failure(), "{}", summary.outcome);
-    assert!(summary.outcome.starts_with("planning_failed:"));
-    assert!(summary.outcome.contains("Responses API did not complete"));
-    assert!(!summary.outcome.contains("inactive-provider-secret"));
-    assert!(!summary.outcome.contains("provider rejected"));
-    assert!(summary.outcome.len() < 8 * 1024);
+    assert_eq!(summary.outcome, "planning_failed");
+    let failure = summary
+        .failure
+        .as_ref()
+        .expect("structured planner failure");
+    assert_eq!(failure.class, LlmErrorClass::ProviderRejected);
+    assert_eq!(failure.phase, LlmErrorPhase::Planning);
+    assert_eq!(failure.provider, "openai");
+    assert_eq!(failure.transport, "responses");
+    let report = summary.user_failure_report().expect("safe planner report");
+    assert!(report.contains("LLM-REJECTED"));
+    assert!(report.contains("Cause: provider rejected during planning"));
+    assert!(report.contains("Session: responses-planner-failure"));
+    assert!(!report.contains("Responses API did not complete"));
+    assert!(!report.contains("inactive-provider-secret"));
+    assert!(!report.contains("provider-supplied detail omitted"));
     assert_eq!(summary.tool_call_count, 0);
     assert_eq!(summary.final_state, AgentState::Done);
     let request = request_rx
@@ -817,9 +830,9 @@ async fn responses_planner_failure_reconciles_without_executing_tools_or_persist
     assert!(persisted.tool_calls.is_empty());
     assert!(persisted.events.iter().any(|event| {
         event.kind == "reconciliation"
-            && event.details["outcome"]
-                .as_str()
-                .is_some_and(|outcome| outcome.starts_with("planning_failed:"))
+            && event.details["outcome"] == "planning_failed"
+            && event.details["failure"]["class"] == "provider_rejected"
+            && event.details["failure"]["phase"] == "planning"
             && event.details["continue"] == false
     }));
     let persisted_json = serde_json::to_string(&persisted).unwrap();
@@ -886,14 +899,22 @@ async fn compression_provider_failure_blocks_the_plan_and_reconciles_terminally(
     .expect("compression failure reconciles");
 
     assert!(summary.is_failure(), "{}", summary.outcome);
-    assert!(summary.outcome.starts_with("compression_failed:"));
-    assert!(
-        summary.outcome.contains("Responses API HTTP 500"),
-        "{}",
-        summary.outcome
-    );
-    assert!(!summary.outcome.contains(SECRET));
-    assert!(!summary.outcome.contains("compression provider echoed"));
+    assert_eq!(summary.outcome, "compression_failed");
+    let failure = summary
+        .failure
+        .as_ref()
+        .expect("structured compression failure");
+    assert_eq!(failure.class, LlmErrorClass::ProviderUnavailable);
+    assert_eq!(failure.phase, LlmErrorPhase::Compression);
+    assert_eq!(failure.http_status, Some(500));
+    assert_eq!(failure.retry, RetryDisposition::Exhausted);
+    let report = summary
+        .user_failure_report()
+        .expect("safe compression report");
+    assert!(report.contains("LLM-UNAVAILABLE"));
+    assert!(report.contains("HTTP: 500; retry: exhausted"));
+    assert!(!report.contains(SECRET));
+    assert!(!report.contains("compression provider echoed"));
     assert_eq!(summary.tool_call_count, 0);
     assert_eq!(summary.final_state, AgentState::Done);
     assert_trace_contains_in_order(
@@ -1059,10 +1080,16 @@ async fn responses_runtime_transport_failure_blocks_the_approved_plan_without_to
     .expect("failed runtime provider turn still reconciles the agent run");
 
     assert!(summary.is_failure());
-    assert!(summary.outcome.starts_with("llm_stream_failed:"));
-    assert!(summary.outcome.contains("Responses API did not complete"));
-    assert!(!summary.outcome.contains("fixture-runtime-secret"));
-    assert!(!summary.outcome.contains("provider rejected"));
+    assert_eq!(summary.outcome, "llm_stream_failed");
+    let failure = summary.failure.as_ref().expect("structured stream failure");
+    assert_eq!(failure.class, LlmErrorClass::ProviderRejected);
+    assert_eq!(failure.phase, LlmErrorPhase::Stream);
+    let report = summary.user_failure_report().expect("safe stream report");
+    assert!(report.contains("LLM-REJECTED"));
+    assert!(report.contains("Cause: provider rejected during stream"));
+    assert!(!report.contains("Responses API did not complete"));
+    assert!(!report.contains("fixture-runtime-secret"));
+    assert!(!report.contains("provider-supplied detail omitted"));
     assert_eq!(summary.tool_call_count, 0);
     assert_eq!(summary.final_state, AgentState::Done);
     for _ in 0..2 {
@@ -1593,7 +1620,7 @@ struct RecordingCompressor {
 
 #[async_trait]
 impl LlmClient for RecordingCompressor {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, nib::llm::LlmError> {
         self.prompts.lock().unwrap().push(request.messages.to_vec());
         Ok(LlmResponse::text(
             "Retain the verified path, decisions, and current progress.",

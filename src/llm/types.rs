@@ -441,6 +441,10 @@ pub enum StreamEvent {
     Reconciled {
         outcome: String,
     },
+    Failure {
+        failure: crate::llm::LlmError,
+        session_id: Option<String>,
+    },
     End(String),
 }
 

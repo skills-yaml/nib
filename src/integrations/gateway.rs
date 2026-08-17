@@ -555,10 +555,12 @@ pub async fn dispatch_gateway_request(
     )
     .await?;
     if summary.is_failure() {
-        return Err(format!(
-            "gateway agent run failed for session {}: {}",
-            summary.session_id, summary.outcome
-        ));
+        return Err(summary.user_failure_report().unwrap_or_else(|| {
+            format!(
+                "Agent run failed: {}\nSession: {}",
+                summary.outcome, summary.session_id
+            )
+        }));
     }
     let text = summary
         .last_message

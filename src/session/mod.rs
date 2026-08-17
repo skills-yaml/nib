@@ -426,6 +426,7 @@ fn validate_role_transition(previous: Option<&str>, next: &str) -> Result<(), Se
     let allowed = matches!(
         (previous, next),
         (None, "user")
+            | (Some("user"), "user")
             | (Some("user"), "assistant")
             | (Some("assistant"), "user")
             | (Some("assistant"), "tool")
@@ -1702,6 +1703,31 @@ mod tests {
             attempts: 0,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn adjacent_user_turns_are_valid_after_a_run_without_an_assistant_message() {
+        let dir = tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let session = store.create_session_with_id("adjacent-user-turns");
+
+        store
+            .try_append_message(&session.id, "user", "first request")
+            .expect("first user turn");
+        store
+            .try_append_message(&session.id, "user", "retry request")
+            .expect("a reconciled run may accept the next user turn directly");
+
+        let persisted = store.load(&session.id).expect("persisted session");
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .map(|message| message.role.as_str())
+                .collect::<Vec<_>>(),
+            ["user", "user"]
+        );
+        persisted.validate().expect("valid persisted sequence");
     }
 
     #[test]
