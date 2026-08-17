@@ -204,6 +204,17 @@ impl OpenAiCompatClient {
             "messages": messages,
             "temperature": request.temperature,
         });
+        if let Some(max_output_tokens) = request.max_output_tokens {
+            if max_output_tokens == 0 {
+                return Err("max_output_tokens must be greater than zero".to_string());
+            }
+            let field = if self.provider == "openai" {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            body[field] = json!(max_output_tokens);
+        }
         if stream {
             body["stream"] = json!(true);
         }
@@ -1217,7 +1228,10 @@ mod tests {
             );
             assert_eq!(client.endpoint(), expected_endpoint);
             let body = client
-                .request_body(LlmRequest::new(&messages, Some(&tools), 0.2), false)
+                .request_body(
+                    LlmRequest::new(&messages, Some(&tools), 0.2).with_max_output_tokens(37),
+                    false,
+                )
                 .expect("valid Chat request");
             assert_eq!(body["model"], model);
             assert!(body.get("messages").is_some());
@@ -1225,6 +1239,13 @@ mod tests {
             assert!(body.get("input").is_none());
             assert!(body.get("store").is_none());
             assert!(body.get("include").is_none());
+            if provider == "openai" {
+                assert_eq!(body["max_completion_tokens"], 37);
+                assert!(body.get("max_tokens").is_none());
+            } else {
+                assert_eq!(body["max_tokens"], 37);
+                assert!(body.get("max_completion_tokens").is_none());
+            }
         }
     }
 

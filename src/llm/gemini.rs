@@ -137,6 +137,7 @@ impl GeminiClient {
             messages,
             tools,
             temperature,
+            max_output_tokens,
             reasoning_effort: _,
             scope,
             continuation,
@@ -153,6 +154,12 @@ impl GeminiClient {
             "contents": contents,
             "generationConfig": {"temperature": temperature},
         });
+        if let Some(max_output_tokens) = max_output_tokens {
+            if max_output_tokens == 0 {
+                return Err("max_output_tokens must be greater than zero".to_string());
+            }
+            body["generationConfig"]["maxOutputTokens"] = json!(max_output_tokens);
+        }
         if let Some(system) = messages
             .iter()
             .find(|message| message.get("role") == Some(&json!("system")))
@@ -1123,6 +1130,7 @@ mod tests {
                     })]),
                     0.4,
                 )
+                .with_max_output_tokens(47)
                 .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
             )
             .await
@@ -1141,6 +1149,7 @@ mod tests {
         assert!(request
             .to_ascii_lowercase()
             .contains("x-goog-api-key: gemini-test-key"));
+        assert!(request.contains("\"maxOutputTokens\":47"));
         assert!(request.contains("\"systemInstruction\""));
         assert!(request.contains("\"functionDeclarations\""));
         assert!(request.contains("\"role\":\"model\""));

@@ -116,6 +116,7 @@ impl AnthropicClient {
             messages: request_messages,
             tools,
             temperature,
+            max_output_tokens,
             reasoning_effort: _,
             scope,
             continuation,
@@ -149,11 +150,14 @@ impl AnthropicClient {
         }
         let mut body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": max_output_tokens.unwrap_or(4096),
             "temperature": temperature,
             "system": system,
             "messages": messages,
         });
+        if max_output_tokens == Some(0) {
+            return Err("max_output_tokens must be greater than zero".to_string());
+        }
         if stream {
             body["stream"] = json!(true);
         }
@@ -1053,6 +1057,7 @@ mod tests {
                     })]),
                     0.3,
                 )
+                .with_max_output_tokens(43)
                 .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
             )
             .await
@@ -1073,6 +1078,7 @@ mod tests {
             .to_ascii_lowercase()
             .contains("x-api-key: anthropic-test-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
+        assert!(request.contains("\"max_tokens\":43"));
         assert!(request.contains("\"system\":\"follow project rules\""));
         assert!(request.contains("\"input_schema\""));
         assert!(!request.contains("\"stream\":true"));

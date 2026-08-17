@@ -184,6 +184,7 @@ impl OpenAiResponsesClient {
             messages,
             tools,
             temperature: _,
+            max_output_tokens,
             reasoning_effort,
             scope,
             continuation,
@@ -206,6 +207,15 @@ impl OpenAiResponsesClient {
             "store": false,
             "stream": stream,
         });
+        if let Some(max_output_tokens) = max_output_tokens {
+            if max_output_tokens == 0 {
+                return Err(self.contextual_error(
+                    "request rejected",
+                    "max_output_tokens must be greater than zero",
+                ));
+            }
+            body["max_output_tokens"] = json!(max_output_tokens);
+        }
         if let Some(effort) = reasoning_effort.or(self.reasoning_effort) {
             body["reasoning"] = json!({"effort": effort.as_str()});
         }
@@ -1090,6 +1100,7 @@ mod tests {
             .complete(
                 LlmRequest::new(&messages, Some(&tools), 0.75)
                     .with_reasoning_effort(Some(ReasoningEffort::Medium))
+                    .with_max_output_tokens(41)
                     .with_scope(scope.clone()),
             )
             .await
@@ -1117,6 +1128,7 @@ mod tests {
         let body = request_json(&request);
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], false);
+        assert_eq!(body["max_output_tokens"], 41);
         assert_eq!(body["reasoning"]["effort"], "medium");
         assert_eq!(
             body["include"],

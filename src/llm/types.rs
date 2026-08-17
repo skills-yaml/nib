@@ -85,6 +85,7 @@ pub struct LlmRequest<'a> {
     pub messages: &'a [Value],
     pub tools: Option<&'a [Value]>,
     pub temperature: f64,
+    pub max_output_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub scope: Option<LlmRequestScope>,
     pub continuation: Option<ProviderContinuation>,
@@ -96,6 +97,7 @@ impl<'a> LlmRequest<'a> {
             messages,
             tools,
             temperature,
+            max_output_tokens: None,
             reasoning_effort: None,
             scope: None,
             continuation: None,
@@ -104,6 +106,14 @@ impl<'a> LlmRequest<'a> {
 
     pub fn with_reasoning_effort(mut self, effort: Option<ReasoningEffort>) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    /// Applies a hard provider request-side output ceiling.
+    ///
+    /// Adapters serialize this through their native field and reject zero before I/O.
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
         self
     }
 
@@ -124,6 +134,7 @@ impl fmt::Debug for LlmRequest<'_> {
             .field("message_count", &self.messages.len())
             .field("tool_count", &self.tools.map_or(0, <[Value]>::len))
             .field("temperature", &self.temperature)
+            .field("max_output_tokens", &self.max_output_tokens)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("scope", &self.scope)
             .field("continuation", &self.continuation)

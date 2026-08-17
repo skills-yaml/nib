@@ -115,6 +115,61 @@ tasks:
     cmds:
       - cargo test --test installers -- --test-threads=1
 
+  test:llm-live:catalog:
+    desc: Discover and reconcile live provider model catalogs (explicit opt-in)
+    summary: |
+      Run the ignored live LLM qualification test in catalog mode.
+      Requires NIB_LIVE_TESTS=1. It performs catalog reads but no paid generation.
+      Set NIB_LIVE_PROVIDER to one provider or all, and optionally set
+      NIB_LIVE_RESULTS_DIR to choose the sanitized report directory.
+    cmds:
+      - task: test:llm-live
+        vars:
+          MODE: catalog
+
+  test:llm-live:canary:
+    desc: Qualify live provider defaults and the approved OpenRouter allowlist (paid, explicit opt-in)
+    summary: |
+      Run the ignored live LLM qualification test in canary mode.
+      Requires NIB_LIVE_TESTS=1 and NIB_LIVE_ACK_COSTS=1. Set
+      NIB_LIVE_PROVIDER to one provider or all, and optionally set
+      NIB_LIVE_RESULTS_DIR to choose the sanitized report directory.
+    cmds:
+      - task: test:llm-live
+        vars:
+          MODE: canary
+
+  test:llm-live:full:
+    desc: Qualify every eligible live provider model and approved OpenRouter entry (paid, explicit opt-in)
+    summary: |
+      Run the ignored live LLM qualification test in full mode.
+      Requires NIB_LIVE_TESTS=1 and NIB_LIVE_ACK_COSTS=1. Set
+      NIB_LIVE_PROVIDER to one provider or all, and optionally set
+      NIB_LIVE_RESULTS_DIR to choose the sanitized report directory.
+    cmds:
+      - task: test:llm-live
+        vars:
+          MODE: full
+
+  test:llm-live:
+    internal: true
+    requires:
+      vars:
+        - MODE
+    preconditions:
+      - sh: test "${NIB_LIVE_TESTS:-}" = "1"
+        msg: Set NIB_LIVE_TESTS=1 to acknowledge that this task makes real network calls.
+      - sh: test "{{.MODE}}" = "catalog" || test "${NIB_LIVE_ACK_COSTS:-}" = "1"
+        msg: Set NIB_LIVE_ACK_COSTS=1 to acknowledge provider usage and possible charges.
+    cmds:
+      - |
+        provider="${NIB_LIVE_PROVIDER:-all}"
+        results_dir="${NIB_LIVE_RESULTS_DIR:-target/llm-live/{{.MODE}}}"
+        NIB_LIVE_MODE="{{.MODE}}" \
+        NIB_LIVE_PROVIDER="$provider" \
+        NIB_LIVE_RESULTS_DIR="$results_dir" \
+          cargo test --test llm_live live_llm_qualification -- --ignored --exact --nocapture
+
   build:
     desc: Build optimized release binary (supports cross TARGET)
     cmds:

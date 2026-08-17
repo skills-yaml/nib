@@ -127,8 +127,8 @@ fn run_chat_with_input(
                         r#"[dim]
 Commands (chat):
   /model           List models for current provider and select by number or type exact name
-  /model <name>    Directly set model (must be valid for the active provider)
-                   Model always belongs to the active provider.
+  /model <name>    Set an exact model ID for the active provider
+                   The ID may be outside the configured suggestion list.
   /providers       List configured providers
   /session         Show current session ID
   /clear           Start fresh session (new history)
@@ -215,23 +215,6 @@ Commands (chat):
                     };
 
                     if new_model.is_empty() {
-                        continue;
-                    }
-
-                    // Validate against current provider (or allow free for openrouter / mock)
-                    let is_valid = available.iter().any(|m| m == &new_model)
-                        || provider_name == "openrouter" && new_model.contains('/')
-                        || provider_name == "mock"
-                        || available.is_empty();
-
-                    if !is_valid {
-                        println!(
-                            "[red]Model '{}' not valid for provider '{}'.[/red]",
-                            new_model, provider_name
-                        );
-                        if !available.is_empty() {
-                            println!("Available: {}", available.join(", "));
-                        }
                         continue;
                     }
 
@@ -497,6 +480,39 @@ mod tests {
         assert_eq!(config.llm.providers["mock"].model, "custom-mock");
         assert!(config.mcp.servers.is_empty());
         restore_env("NIB_SKILLS_DIR", previous_skills_dir);
+    }
+
+    #[test]
+    #[serial]
+    fn chat_accepts_exact_model_outside_provider_suggestions_without_mutating_override() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("openai".to_string(), "gpt-5.6-sol".to_string(), None);
+        config.llm.providers.get_mut("openai").unwrap().models =
+            Some(vec!["gateway/reviewed".to_string()]);
+        config.skills.enabled = false;
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        save_nib_config_full(project.path(), &mut config).expect("OpenAI config");
+        let _cwd = CurrentDirGuard::enter(project.path());
+
+        run_chat_with_input(
+            &ChatArgs {
+                session: None,
+                auth: false,
+            },
+            Cursor::new(b"/model gateway/future-model\n/quit\n"),
+        )
+        .expect("scripted exact model selection");
+
+        let config = load_nib_config_full(project.path()).expect("updated config");
+        assert_eq!(config.llm.providers["openai"].model, "gateway/future-model");
+        assert_eq!(
+            config.llm.providers["openai"].models.as_deref(),
+            Some(["gateway/reviewed".to_string()].as_slice())
+        );
     }
 
     #[test]
