@@ -245,3 +245,43 @@ on Linux, both macOS architectures, and Windows. Exact production run `311482223
 then published the coherent nine-asset `prod-latest` Release. FT-018 and T010 moved to
 `done/` after public manifest, checksum, binary identity, and no-op smoke validation.
 The resulting lifecycle is 21 done, 10 development, and 0 backlog.
+
+## 2026-08-19 - T029 self-update channel switching implemented locally
+
+- Type: implementation / validation milestone
+- Source: T029 and local canonical gates
+- Confidence: high
+- Review: spec-compliance and code-quality/security self-review
+
+Content:
+
+Official managed builds now accept `nib update --channel prod|development`, with
+`production` and `dev` aliases. Target manifest, archive, checksum, and staged embedded
+identity remain bound to the selected compile-time channel; explicit cross-channel
+requests replace same-commit builds so the installed binary durably owns subsequent
+channel selection. Option-free updates and unmanaged installer guidance are unchanged.
+
+Focused updater tests, `task docs:check`, post-review `task check`, independent
+`task test`, 84.00 percent runtime line coverage (65,480/77,952), the locked optimized
+build, and diff validation passed locally. The first coverage attempt exposed a
+transient unrelated Linux managed-process recovery failure; the exact test passed in
+both normal suites and the final instrumented rerun. T029 remains in development
+pending exact native hosted CI and a real managed cross-channel round trip.
+
+## 2026-08-19 - T029 development channel release published
+
+- Type: release / validation milestone
+- Source: PR #21, hosted CI, release run, and public artifact smoke
+- Confidence: high
+- Review: hosted Linux, Windows, macOS, and release transaction
+
+Content:
+
+PR #21 passed hosted CI and merged to `development` as
+`c7ee849c669c9e93ec96281a602f928ae31a23cb`. Release run `32256869402` published the
+complete nine-asset `development-latest` prerelease for all four supported native
+targets. A public Linux archive passed its checksum, reported the exact development
+identity, switched through `nib update --channel prod` to production commit `79ea99d`,
+and then completed an option-free production no-op. T029 remains in development until
+the new command is published to production and the reverse production-to-development
+switch is proven.

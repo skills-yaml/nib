@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **23 done, 13 development, and 0 backlog**.
+The current lifecycle is **23 done, 14 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -52,6 +52,8 @@ T025 completed interactive chat/TUI capability parity. T026 is in development fo
 actionable, redaction-safe LLM failure propagation and native console/TUI presentation.
 T027 completed a doctor-diagnosed, explicitly invoked repair of canonical OpenAI
 tool/reasoning workloads that still use Chat Completions.
+T029 is in development for explicit, verified switching between production and
+development self-update channels from an already managed installation.
 FT-018 completed the verified self-update command, bounded update notices, Windows
 in-use replacement, and four-platform production rollout.
 
@@ -84,6 +86,7 @@ work or narrower guarantees.
 - [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
 - [T026: Actionable, Redaction-Safe LLM Failure Reporting](development/T026_actionable_redaction_safe_llm_failure_reporting.md)
 - [T027: Doctor-Guided OpenAI Transport Repair](done/T027_doctor_guided_openai_transport_repair.md)
+- [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
 
 ### Feature specs
 

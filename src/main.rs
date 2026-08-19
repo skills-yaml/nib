@@ -44,7 +44,7 @@ mod cli_tests {
     #[test]
     fn update_command_is_public_and_worker_commands_skip_startup_checks() {
         let update = Cli::try_parse_from(["nib", "update"]).expect("update command");
-        assert!(matches!(update.command, Some(Commands::Update)));
+        assert!(matches!(update.command, Some(Commands::Update(_))));
         assert!(!startup_update_check_is_eligible(&update.command));
 
         let version = Cli::try_parse_from(["nib", "version"]).expect("version command");
@@ -52,6 +52,25 @@ mod cli_tests {
 
         let server = Cli::try_parse_from(["nib", "mcp-server"]).expect("MCP server command");
         assert!(!startup_update_check_is_eligible(&server.command));
+    }
+
+    #[test]
+    fn update_channel_accepts_canonical_values_and_bounded_aliases() {
+        for (value, expected) in [
+            ("prod", updater::UpdateChannel::Prod),
+            ("production", updater::UpdateChannel::Prod),
+            ("development", updater::UpdateChannel::Development),
+            ("dev", updater::UpdateChannel::Development),
+        ] {
+            let parsed = Cli::try_parse_from(["nib", "update", "--channel", value])
+                .expect("valid update channel");
+            let Some(Commands::Update(args)) = parsed.command else {
+                panic!("expected update command");
+            };
+            assert_eq!(args.channel, Some(expected));
+        }
+
+        assert!(Cli::try_parse_from(["nib", "update", "--channel", "nightly"]).is_err());
     }
 
     #[test]
@@ -89,8 +108,8 @@ enum Commands {
     /// Show the installed version
     Version,
 
-    /// Update this installed release to the current channel build
-    Update,
+    /// Update this installed release, optionally switching release channels
+    Update(updater::UpdateArgs),
 
     /// Start an interactive chat session
     Chat(chat::ChatArgs),
@@ -211,7 +230,7 @@ fn main() {
 
     match &cli.command {
         Some(Commands::Version) => version::show_version(),
-        Some(Commands::Update) => match updater::run_update() {
+        Some(Commands::Update(args)) => match updater::run_update(args) {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("Update error: {error}");
@@ -433,7 +452,7 @@ fn startup_update_check_is_eligible(command: &Option<Commands>) -> bool {
     !matches!(
         command,
         Some(
-            Commands::Update
+            Commands::Update(_)
                 | Commands::McpServer
                 | Commands::McpStdioRelay
                 | Commands::TaskWorker { .. }
