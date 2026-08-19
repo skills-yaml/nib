@@ -1,8 +1,12 @@
 //! Ratatui session browser with live agent lifecycle rendering.
 
+use crate::interactive::{
+    display_stream_event, execute_interactive_command, parse_interactive_command, resolve_session,
+    set_active_model, InteractiveEffect, ModelSelection, StreamDisplay,
+};
 use crate::llm::types::StreamEvent;
 use crate::session::SessionStore;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -36,94 +40,10 @@ const SESSION_DETAIL_TRUNCATED_MARKER: &str = "\n[session detail truncated]\n";
 
 impl LiveOutput {
     fn apply(&mut self, event: StreamEvent) {
-        match event {
-            StreamEvent::Content(content) => self.push_raw(&content),
-            StreamEvent::ToolCallChunk {
-                name: Some(name), ..
-            } if !name.is_empty() => {
-                self.push_status(format!("[tool call] {name}"));
-            }
-            StreamEvent::ToolCallChunk { .. } => {}
-            StreamEvent::StateTransition { state } => {
-                self.push_status(format!("[state] {state}"));
-            }
-            StreamEvent::PlanGenerated { step_count } => {
-                let noun = if step_count == 1 { "step" } else { "steps" };
-                self.push_status(format!("[plan] generated {step_count} {noun}"));
-            }
-            StreamEvent::ApprovalRequired {
-                tool_name,
-                arguments,
-            } => {
-                self.push_status(format!(
-                    "[approval required] {tool_name} {}",
-                    inline_json(&arguments)
-                ));
-            }
-            StreamEvent::QuestionRequired { question, options } => {
-                let options = if options.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (options: {})", options.join(" | "))
-                };
-                self.push_status(format!("[question] {question}{options}"));
-            }
-            StreamEvent::ToolStarted {
-                tool_name,
-                arguments,
-            } => {
-                self.push_status(format!(
-                    "[tool started] {tool_name} {}",
-                    inline_json(&arguments)
-                ));
-            }
-            StreamEvent::TerminalOutput {
-                tool_name,
-                stream,
-                chunk,
-                background_task_id,
-            } => {
-                let task = background_task_id
-                    .as_deref()
-                    .map(|id| format!(" task={id}"))
-                    .unwrap_or_default();
-                self.push_status(format!(
-                    "[terminal {stream}] {tool_name}{task}: {}",
-                    chunk.trim_end_matches(['\r', '\n'])
-                ));
-            }
-            StreamEvent::ToolCompleted {
-                tool_name,
-                success,
-                output,
-                error,
-            } => {
-                let status = if success { "ok" } else { "failed" };
-                let detail = match (output.as_ref(), error.as_deref()) {
-                    (Some(output), Some(error)) => {
-                        format!("{}; error: {error}", inline_json(output))
-                    }
-                    (Some(output), None) => inline_json(output),
-                    (None, Some(error)) => error.to_string(),
-                    (None, None) => "no result".to_string(),
-                };
-                self.push_status(format!("[tool completed] {tool_name}: {status} - {detail}"));
-            }
-            StreamEvent::Compression {
-                before_tokens,
-                after_tokens,
-                summarized_through,
-            } => {
-                self.push_status(format!(
-                    "[compression] {before_tokens} -> {after_tokens} tokens; summarized through message {summarized_through}"
-                ));
-            }
-            StreamEvent::Reconciled { outcome } => {
-                self.push_status(format!("[reconciled] {outcome}"));
-            }
-            StreamEvent::End(reason) => {
-                self.push_status(format!("[stream ended] {reason}"));
-            }
+        match display_stream_event(event) {
+            Some(StreamDisplay::Content(content)) => self.push_raw(&content),
+            Some(StreamDisplay::Status(status)) => self.push_status(status),
+            None => {}
         }
     }
 
@@ -155,10 +75,6 @@ impl LiveOutput {
         self.text.push_str(OMITTED_OUTPUT_MARKER);
         self.text.push_str(&tail);
     }
-}
-
-fn inline_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn bottom_scroll(text: &str, width: u16, height: u16) -> u16 {
@@ -380,6 +296,129 @@ struct PendingQuestion {
     selected_option: usize,
 }
 
+const MAX_COMPOSER_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiFocus {
+    Composer,
+    Sessions,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Composer {
+    input: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ComposerAction {
+    Pending,
+    Submit(String),
+    FocusSessions,
+}
+
+fn composer_action_for_key(composer: &mut Composer, code: KeyCode) -> ComposerAction {
+    match code {
+        KeyCode::Char(character)
+            if composer.input.len().saturating_add(character.len_utf8()) <= MAX_COMPOSER_BYTES =>
+        {
+            composer.input.push(character);
+            ComposerAction::Pending
+        }
+        KeyCode::Backspace => {
+            composer.input.pop();
+            ComposerAction::Pending
+        }
+        KeyCode::Enter => {
+            let submitted = composer.input.trim().to_string();
+            if submitted.is_empty() {
+                ComposerAction::Pending
+            } else {
+                composer.input.clear();
+                ComposerAction::Submit(submitted)
+            }
+        }
+        KeyCode::Tab => ComposerAction::FocusSessions,
+        KeyCode::Esc => {
+            composer.input.clear();
+            ComposerAction::Pending
+        }
+        _ => ComposerAction::Pending,
+    }
+}
+
+struct PendingModelSelection {
+    selection: ModelSelection,
+    response: String,
+    selected_option: usize,
+}
+
+impl PendingModelSelection {
+    fn new(selection: ModelSelection) -> Self {
+        let selected_option = selection
+            .available
+            .iter()
+            .position(|model| model == &selection.current)
+            .unwrap_or(0);
+        Self {
+            selection,
+            response: String::new(),
+            selected_option,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModelAction {
+    Pending,
+    Submit(String),
+    Cancel,
+}
+
+fn model_action_for_key(model: &mut PendingModelSelection, code: KeyCode) -> ModelAction {
+    match code {
+        KeyCode::Char(character)
+            if model.response.len().saturating_add(character.len_utf8()) <= MAX_COMPOSER_BYTES =>
+        {
+            model.response.push(character);
+            ModelAction::Pending
+        }
+        KeyCode::Backspace => {
+            model.response.pop();
+            ModelAction::Pending
+        }
+        KeyCode::Up => {
+            model.selected_option = model.selected_option.saturating_sub(1);
+            ModelAction::Pending
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if !model.selection.available.is_empty() {
+                model.selected_option = (model.selected_option + 1)
+                    .min(model.selection.available.len().saturating_sub(1));
+            }
+            ModelAction::Pending
+        }
+        KeyCode::Enter => {
+            let response = model.response.trim();
+            if let Ok(index) = response.parse::<usize>() {
+                if index > 0 {
+                    if let Some(selected) = model.selection.available.get(index - 1) {
+                        return ModelAction::Submit(selected.clone());
+                    }
+                }
+            }
+            if !response.is_empty() {
+                ModelAction::Submit(response.to_string())
+            } else if let Some(selected) = model.selection.available.get(model.selected_option) {
+                ModelAction::Submit(selected.clone())
+            } else {
+                ModelAction::Pending
+            }
+        }
+        KeyCode::Esc => ModelAction::Cancel,
+        _ => ModelAction::Pending,
+    }
+}
+
 impl PendingQuestion {
     fn new(request: TuiQuestionRequest) -> Self {
         Self {
@@ -491,6 +530,54 @@ fn handle_pending_interaction_key(
         return true;
     }
     false
+}
+
+fn render_model_selection(frame: &mut ratatui::Frame<'_>, pending: &PendingModelSelection) {
+    let modal_area = centered_rect(75, 60, frame.area());
+    let mut text = vec![
+        Line::from(Span::styled(
+            format!("Select model for {}", pending.selection.provider),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    if pending.selection.available.is_empty() {
+        text.push(Line::from(
+            "No configured suggestions; enter an exact model ID.",
+        ));
+    } else {
+        for (index, model) in pending.selection.available.iter().enumerate() {
+            let selected = if index == pending.selected_option {
+                "> "
+            } else {
+                "  "
+            };
+            let current = if model == &pending.selection.current {
+                " (current)"
+            } else {
+                ""
+            };
+            text.push(Line::from(format!(
+                "{selected}{}. {model}{current}",
+                index + 1
+            )));
+        }
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("Model: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(pending.response.clone()),
+    ]));
+    text.push(Line::from("Enter select  Esc cancel"));
+    let modal = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Model Selection "),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(ratatui::widgets::Clear, modal_area);
+    frame.render_widget(modal, modal_area);
 }
 
 struct TuiAgentWorker {
@@ -650,13 +737,28 @@ fn reap_finished_worker(
     Ok(())
 }
 
-pub fn run_tui(project_root: &Path, run_goal: Option<String>) -> io::Result<()> {
+pub fn run_tui(
+    project_root: &Path,
+    run_goal: Option<String>,
+    requested_session: Option<String>,
+) -> io::Result<()> {
     let store = SessionStore::for_project(project_root).map_err(io::Error::other)?;
+    let resolution =
+        resolve_session(&store, requested_session.as_deref()).map_err(io::Error::other)?;
+    let active_session_id = resolution.session_id().to_string();
+    let session_notice = resolution.notice();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let terminal = ratatui::init();
-    let result = draw_loop(terminal, project_root, store, run_goal);
+    let result = draw_loop(
+        terminal,
+        project_root,
+        store,
+        run_goal,
+        active_session_id,
+        session_notice,
+    );
     ratatui::restore();
     disable_raw_mode()?;
     execute!(stdout, LeaveAlternateScreen)?;
@@ -668,6 +770,8 @@ fn draw_loop(
     project_root: &Path,
     store: SessionStore,
     run_goal: Option<String>,
+    mut active_session_id: String,
+    session_notice: String,
 ) -> io::Result<()> {
     let mut selected = 0usize;
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
@@ -675,15 +779,15 @@ fn draw_loop(
     let (stream_tx, mut stream_rx) =
         tokio::sync::mpsc::channel::<crate::llm::types::StreamEvent>(100);
     let mut live_output = LiveOutput::default();
+    live_output.push_status(session_notice);
     let mut worker = if let Some(goal) = run_goal {
-        let sid = store.try_create_session().map_err(io::Error::other)?.id;
         Some(spawn_tui_agent_worker(
             project_root.to_path_buf(),
-            sid,
+            active_session_id.clone(),
             goal,
             approval_tx.clone(),
             question_tx.clone(),
-            stream_tx,
+            stream_tx.clone(),
         )?)
     } else {
         None
@@ -691,7 +795,10 @@ fn draw_loop(
 
     let mut pending_approval: Option<TuiApprovalRequest> = None;
     let mut pending_question: Option<PendingQuestion> = None;
+    let mut pending_model: Option<PendingModelSelection> = None;
     let mut session_detail: Option<SessionDetail> = None;
+    let mut composer = Composer::default();
+    let mut focus = TuiFocus::Composer;
 
     let loop_result = loop {
         drain_stream_events(&mut stream_rx, &mut live_output);
@@ -721,12 +828,16 @@ fn draw_loop(
             Ok(ids) => ids,
             Err(error) => break Err(error),
         };
+        if selected >= ids.len() && !ids.is_empty() {
+            selected = ids.len() - 1;
+        }
         if let Err(error) = terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Min(3),
                     Constraint::Length(10),
+                    Constraint::Length(3),
                     Constraint::Length(3),
                 ])
                 .split(f.area());
@@ -737,8 +848,9 @@ fn draw_loop(
                 ids.iter()
                     .enumerate()
                     .map(|(i, id)| {
-                        let mark = if i == selected { "▶ " } else { "  " };
-                        ListItem::new(format!("{mark}{id}"))
+                        let selected_mark = if i == selected { "▶" } else { " " };
+                        let active_mark = if id == &active_session_id { "*" } else { " " };
+                        ListItem::new(format!("{selected_mark}{active_mark} {id}"))
                     })
                     .collect()
             };
@@ -765,16 +877,29 @@ fn draw_loop(
                 .wrap(ratatui::widgets::Wrap { trim: true });
             f.render_widget(stream_para, chunks[1]);
 
-            let help = Paragraph::new(Line::from(vec![
-                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" select  "),
-                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" detail  "),
-                Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" quit"),
-            ]))
-            .block(Block::default().borders(Borders::ALL));
-            f.render_widget(help, chunks[2]);
+            let input_title = if worker.is_some() {
+                format!(" Active session: {active_session_id} | agent running ")
+            } else {
+                format!(" Active session: {active_session_id} | message or /help ")
+            };
+            let composer_style = if focus == TuiFocus::Composer {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let input = Paragraph::new(composer.input.as_str())
+                .style(composer_style)
+                .block(Block::default().title(input_title).borders(Borders::ALL));
+            f.render_widget(input, chunks[2]);
+
+            let help_text = match focus {
+                TuiFocus::Composer => "Enter send  Tab sessions  Esc clear  Ctrl+C cancel/quit",
+                TuiFocus::Sessions => {
+                    "↑/↓ select  Enter detail  r resume  Tab composer  Ctrl+C quit"
+                }
+            };
+            let help = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
+            f.render_widget(help, chunks[3]);
             if let Some(req) = &pending_approval {
                 let modal_area = centered_rect(60, 20, f.area());
                 let text = vec![
@@ -845,6 +970,8 @@ fn draw_loop(
                     .wrap(ratatui::widgets::Wrap { trim: true });
                 f.render_widget(ratatui::widgets::Clear, modal_area);
                 f.render_widget(modal, modal_area);
+            } else if let Some(model) = &pending_model {
+                render_model_selection(f, model);
             } else if let Some(detail) = &session_detail {
                 render_session_detail(f, detail);
             }
@@ -865,6 +992,28 @@ fn draw_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                let control_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                let control_q = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                if control_c && worker.is_some() {
+                    if let Err(error) = shutdown_agent_worker(
+                        &mut worker,
+                        &mut pending_approval,
+                        &mut pending_question,
+                        &approval_rx,
+                        &question_rx,
+                        &mut stream_rx,
+                        &mut live_output,
+                    ) {
+                        break Err(error);
+                    }
+                    live_output.push_status("[cancelled] active agent run".to_string());
+                    continue;
+                }
+                if control_c || control_q {
+                    break Ok(());
+                }
                 if handle_pending_interaction_key(
                     &mut pending_approval,
                     &mut pending_question,
@@ -872,25 +1021,118 @@ fn draw_loop(
                 ) {
                     continue;
                 }
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
-                    break Ok(());
+                if let Some(model) = pending_model.as_mut() {
+                    match model_action_for_key(model, key.code) {
+                        ModelAction::Pending => {}
+                        ModelAction::Cancel => {
+                            pending_model = None;
+                            live_output.push_status("Model selection cancelled.".to_string());
+                        }
+                        ModelAction::Submit(selected) => {
+                            pending_model = None;
+                            match set_active_model(project_root, &selected) {
+                                Ok(output) => live_output.push_status(output),
+                                Err(error) => {
+                                    live_output.push_status(format!("[command error] {error}"))
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
                 if session_detail.is_some() {
                     handle_session_detail_key(&mut session_detail, key.code);
                     continue;
                 }
-                match key.code {
-                    KeyCode::Down if !ids.is_empty() => {
-                        selected = (selected + 1).min(ids.len() - 1);
-                    }
-                    KeyCode::Up if selected > 0 => selected -= 1,
-                    KeyCode::Enter if !ids.is_empty() => {
-                        session_detail = match load_session_detail(&ids[selected], &store) {
-                            Ok(detail) => Some(detail),
-                            Err(error) => break Err(error),
-                        };
-                    }
-                    _ => {}
+                match focus {
+                    TuiFocus::Sessions => match key.code {
+                        KeyCode::Tab => focus = TuiFocus::Composer,
+                        KeyCode::Down if !ids.is_empty() => {
+                            selected = (selected + 1).min(ids.len() - 1);
+                        }
+                        KeyCode::Up if selected > 0 => selected -= 1,
+                        KeyCode::Enter if !ids.is_empty() => {
+                            session_detail = match load_session_detail(&ids[selected], &store) {
+                                Ok(detail) => Some(detail),
+                                Err(error) => break Err(error),
+                            };
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R')
+                            if !ids.is_empty() && worker.is_none() =>
+                        {
+                            active_session_id = ids[selected].clone();
+                            live_output
+                                .push_status(format!("Resumed session {active_session_id}."));
+                            focus = TuiFocus::Composer;
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') if worker.is_some() => {
+                            live_output.push_status(
+                                "Agent is still running; cancel it or wait before resuming another session."
+                                    .to_string(),
+                            );
+                        }
+                        _ => {}
+                    },
+                    TuiFocus::Composer => match composer_action_for_key(&mut composer, key.code) {
+                        ComposerAction::Pending => {}
+                        ComposerAction::FocusSessions => focus = TuiFocus::Sessions,
+                        ComposerAction::Submit(submitted) => {
+                            let parsed = match parse_interactive_command(&submitted) {
+                                Ok(parsed) => parsed,
+                                Err(error) => {
+                                    live_output.push_status(format!("[command error] {error}"));
+                                    continue;
+                                }
+                            };
+                            if worker.is_some() {
+                                if parsed == Some(crate::interactive::InteractiveCommand::Quit) {
+                                    break Ok(());
+                                }
+                                composer.input = submitted;
+                                live_output.push_status(
+                                    "Agent is still running; cancel it or wait before submitting."
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                            if let Some(command) = parsed {
+                                match execute_interactive_command(
+                                    command,
+                                    project_root,
+                                    &store,
+                                    &active_session_id,
+                                ) {
+                                    Ok(InteractiveEffect::Quit) => break Ok(()),
+                                    Ok(InteractiveEffect::Output(output)) => {
+                                        live_output.push_status(output)
+                                    }
+                                    Ok(InteractiveEffect::SessionChanged {
+                                        session_id,
+                                        output,
+                                    }) => {
+                                        active_session_id = session_id;
+                                        live_output.push_status(output);
+                                    }
+                                    Ok(InteractiveEffect::SelectModel(selection)) => {
+                                        pending_model = Some(PendingModelSelection::new(selection));
+                                    }
+                                    Err(error) => {
+                                        live_output.push_status(format!("[command error] {error}"))
+                                    }
+                                }
+                            } else {
+                                live_output.push_status(format!("[user] {submitted}"));
+                                worker = Some(spawn_tui_agent_worker(
+                                    project_root.to_path_buf(),
+                                    active_session_id.clone(),
+                                    submitted,
+                                    approval_tx.clone(),
+                                    question_tx.clone(),
+                                    stream_tx.clone(),
+                                )?);
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -959,6 +1201,68 @@ mod tests {
             )]),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn composer_accepts_chat_text_commands_and_focus_switching() {
+        let mut composer = Composer::default();
+        for character in "/providers".chars() {
+            assert_eq!(
+                composer_action_for_key(&mut composer, KeyCode::Char(character)),
+                ComposerAction::Pending
+            );
+        }
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Enter),
+            ComposerAction::Submit("/providers".to_string())
+        );
+        assert!(composer.input.is_empty());
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Tab),
+            ComposerAction::FocusSessions
+        );
+
+        composer.input = "x".repeat(MAX_COMPOSER_BYTES);
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Char('y')),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input.len(), MAX_COMPOSER_BYTES);
+    }
+
+    #[test]
+    fn model_picker_accepts_selection_exact_ids_and_cancel() {
+        let selection = ModelSelection {
+            provider: "mock".to_string(),
+            current: "mock-a".to_string(),
+            available: vec!["mock-a".to_string(), "mock-b".to_string()],
+        };
+        let mut picker = PendingModelSelection::new(selection.clone());
+        assert_eq!(picker.selected_option, 0);
+        assert_eq!(
+            model_action_for_key(&mut picker, KeyCode::Down),
+            ModelAction::Pending
+        );
+        assert_eq!(
+            model_action_for_key(&mut picker, KeyCode::Enter),
+            ModelAction::Submit("mock-b".to_string())
+        );
+
+        let mut exact = PendingModelSelection::new(selection);
+        for character in "gateway/custom".chars() {
+            assert_eq!(
+                model_action_for_key(&mut exact, KeyCode::Char(character)),
+                ModelAction::Pending
+            );
+        }
+        assert_eq!(
+            model_action_for_key(&mut exact, KeyCode::Enter),
+            ModelAction::Submit("gateway/custom".to_string())
+        );
+        assert_eq!(
+            model_action_for_key(&mut exact, KeyCode::Esc),
+            ModelAction::Cancel
+        );
     }
 
     #[test]
@@ -1124,6 +1428,22 @@ mod tests {
             StreamEvent::Reconciled {
                 outcome: "completed".to_string(),
             },
+            StreamEvent::Failure {
+                failure: crate::llm::LlmError::new(
+                    crate::llm::LlmErrorClass::Authentication,
+                    crate::llm::LlmErrorPhase::HttpResponse,
+                    crate::llm::RetryDisposition::NotRetryable,
+                    crate::llm::LlmErrorMetadata::new(
+                        "openai",
+                        "responses",
+                        Some("gpt-test"),
+                        Some(401),
+                        &[],
+                    ),
+                    "credential rejected",
+                ),
+                session_id: Some("failure-session".to_string()),
+            },
             StreamEvent::End("stop".to_string()),
         ];
 
@@ -1143,6 +1463,10 @@ mod tests {
             "[tool completed] run_terminal: failed - exit 1",
             "[compression] 1000 -> 250 tokens; summarized through message 4",
             "[reconciled] completed",
+            "LLM request failed [LLM-AUTH]",
+            "Provider: openai (responses), model: gpt-test",
+            "Action: Refresh this provider's credential with `nib auth`, then retry.",
+            "Session: failure-session",
             "[stream ended] stop",
         ] {
             assert!(output.text.contains(expected), "missing: {expected}");
@@ -1380,5 +1704,46 @@ mod tests {
             .find("[stream ended] cancelled_by_user")
             .expect("end event was drained");
         assert!(reconciled < ended);
+    }
+
+    #[test]
+    fn repeated_tui_workers_reuse_the_same_active_session() {
+        let directory = tempdir().expect("tempdir");
+        save_config(directory.path(), &mock_config()).expect("save mock config");
+        let store = SessionStore::for_project(directory.path()).expect("session store");
+        let session = store.create_session();
+        let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
+        let (question_tx, _question_rx) = mpsc::channel::<TuiQuestionRequest>();
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
+
+        for goal in ["first TUI turn", "second TUI turn"] {
+            let mut worker = spawn_tui_agent_worker(
+                directory.path().to_path_buf(),
+                session.id.clone(),
+                goal.to_string(),
+                approval_tx.clone(),
+                question_tx.clone(),
+                stream_tx.clone(),
+            )
+            .expect("spawn TUI worker");
+            let request = approval_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("worker reached plan approval");
+            assert_eq!(request.call.tool_name, "approve_plan");
+            request.reply.send(ApprovalDecision::denied()).unwrap();
+            while !worker.is_finished() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            worker.join().expect("join TUI worker");
+            while stream_rx.try_recv().is_ok() {}
+        }
+
+        let persisted = store.load(&session.id).expect("reused session");
+        for goal in ["first TUI turn", "second TUI turn"] {
+            assert!(persisted
+                .messages
+                .iter()
+                .any(|message| message.role == "user" && message.content == goal));
+        }
     }
 }

@@ -88,6 +88,7 @@ const MAX_CONTEXT_LENGTH: usize = 4_000_000;
 const MAX_AGENT_TURNS: u32 = 10_000;
 const MAX_TERMINAL_TIMEOUT_SECS: u64 = 3_600;
 const MAX_PROVIDERS: usize = 64;
+const MAX_PROVIDER_MODELS: usize = 128;
 const MAX_PROFILES: usize = 64;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_MODEL_BYTES: usize = 512;
@@ -594,6 +595,8 @@ pub fn is_openai_compatible_provider(name: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     pub api_key: Option<String>,
     #[serde(default)]
     pub api_keys: Vec<String>,
@@ -735,6 +738,32 @@ impl NibConfig {
                 issues.push(format!(
                     "llm.providers.{name}.model must be at most {MAX_MODEL_BYTES} bytes and contain no NUL"
                 ));
+            }
+            if let Some(models) = &provider.models {
+                if models.len() > MAX_PROVIDER_MODELS {
+                    issues.push(format!(
+                        "llm.providers.{name}.models must contain at most {MAX_PROVIDER_MODELS} entries"
+                    ));
+                }
+                if models.iter().any(|model| model.trim().is_empty()) {
+                    issues.push(format!(
+                        "llm.providers.{name}.models must not contain empty model identifiers"
+                    ));
+                }
+                if models
+                    .iter()
+                    .any(|model| model.len() > MAX_MODEL_BYTES || model.contains('\0'))
+                {
+                    issues.push(format!(
+                        "llm.providers.{name}.models entries must be at most {MAX_MODEL_BYTES} bytes and contain no NUL"
+                    ));
+                }
+                let unique_models = models.iter().collect::<HashSet<_>>();
+                if unique_models.len() != models.len() {
+                    issues.push(format!(
+                        "llm.providers.{name}.models must not contain duplicate model identifiers"
+                    ));
+                }
             }
             if let Some(url) = &provider.base_url {
                 if url.trim().is_empty() {
@@ -1383,16 +1412,22 @@ impl LlmConfig {
 
     pub fn get_available_models(&self, provider: Option<&str>) -> Vec<String> {
         let active = self.get_active_provider();
-        let p = provider.unwrap_or(active.as_str());
-        crate::llm::registry::provider_descriptor(p)
-            .map(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .map(|model| model.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let provider_id = provider.unwrap_or(active.as_str());
+        let configured = self.providers.get(provider_id);
+        let descriptor = crate::llm::registry::provider_descriptor(provider_id);
+        let mut models = configured
+            .and_then(|entry| entry.models.clone())
+            .or_else(|| descriptor.map(|provider| provider.models().to_vec()))
+            .unwrap_or_default();
+        let selected_model = configured
+            .map(|entry| entry.model.as_str())
+            .or_else(|| descriptor.map(|provider| provider.default_model()));
+        if let Some(selected_model) = selected_model {
+            if !models.iter().any(|model| model == selected_model) {
+                models.insert(0, selected_model.to_string());
+            }
+        }
+        models
     }
 
     pub fn update_model_for_active(&mut self, new_model: String) {
@@ -1404,6 +1439,7 @@ impl LlmConfig {
                 "mock".to_string(),
                 ProviderEntry {
                     model: new_model,
+                    models: None,
                     api_key: None,
                     api_keys: Vec::new(),
                     base_url: None,
@@ -1435,6 +1471,7 @@ impl LlmConfig {
             .entry(provider.clone())
             .or_insert_with(|| ProviderEntry {
                 model: model.clone(),
+                models: None,
                 api_key: None,
                 api_keys: Vec::new(),
                 base_url: None,
@@ -1531,14 +1568,39 @@ pub fn save_nib_config_full(project_root: &Path, cfg: &mut NibConfig) -> Result<
     Ok(())
 }
 
+/// Result of a locked configuration edit that may intentionally avoid a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMutation<T> {
+    /// Return the operation result without validating, writing, or advancing revision.
+    Unchanged(T),
+    /// Validate and atomically commit the edited configuration.
+    Changed(T),
+}
+
 pub fn update_nib_config<T>(
     project_root: &Path,
     operation: impl FnOnce(&mut NibConfig) -> Result<T, String>,
 ) -> Result<T, ConfigError> {
+    update_nib_config_conditionally(project_root, |config| {
+        operation(config).map(ConfigMutation::Changed)
+    })
+}
+
+/// Edit the latest configuration under its lock and commit only when requested.
+///
+/// Returning [`ConfigMutation::Unchanged`] discards any in-memory edits made by the
+/// operation and leaves both the file and its revision untouched.
+pub fn update_nib_config_conditionally<T>(
+    project_root: &Path,
+    operation: impl FnOnce(&mut NibConfig) -> Result<ConfigMutation<T>, String>,
+) -> Result<T, ConfigError> {
     with_config_lock(project_root, |paths, directory| {
         let mut loaded = load_nib_config_with_source_unlocked(paths, directory)?;
         let revision = loaded.config.revision;
-        let output = operation(&mut loaded.config).map_err(ConfigError::Operation)?;
+        let output = match operation(&mut loaded.config).map_err(ConfigError::Operation)? {
+            ConfigMutation::Unchanged(output) => return Ok(output),
+            ConfigMutation::Changed(output) => output,
+        };
         loaded.config.revision = revision.checked_add(1).ok_or_else(|| {
             ConfigError::Operation("configuration revision overflowed".to_string())
         })?;
@@ -1976,6 +2038,7 @@ mod tests {
                 "openai".to_string(),
                 ProviderEntry {
                     model: "gpt-4o".to_string(),
+                    models: Some(vec!["gpt-4o".to_string(), "gateway/new-model".to_string()]),
                     api_key: Some("sk-test".to_string()),
                     api_keys: vec!["sk-backup".to_string()],
                     base_url: None,
@@ -2005,11 +2068,109 @@ api_key = "fixture"
         .expect("legacy provider");
 
         assert_eq!(provider.api, None);
+        assert_eq!(provider.models, None);
         assert_eq!(provider.reasoning_effort, None);
         assert_eq!(provider.resolved_api_mode(), LlmApiMode::ChatCompletions);
         let serialized = toml::to_string(&provider).expect("serialize legacy provider");
         assert!(!serialized.contains("api ="));
         assert!(!serialized.contains("reasoning_effort"));
+        assert!(!serialized.contains("models"));
+    }
+
+    #[test]
+    fn available_models_use_bundled_defaults_and_keep_selected_custom_models() {
+        let bundled = LlmConfig::default().get_available_models(Some("openai"));
+        assert_eq!(bundled, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+
+        let configured = LlmConfig {
+            active_provider: Some("openai".to_string()),
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderEntry {
+                    model: "gateway/future-model".to_string(),
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            configured.get_available_models(None),
+            [
+                "gateway/future-model",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_model_list_replaces_bundled_suggestions_in_order() {
+        let configured = LlmConfig {
+            active_provider: Some("openai".to_string()),
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderEntry {
+                    model: "gateway/selected".to_string(),
+                    models: Some(vec![
+                        "gateway/first".to_string(),
+                        "gateway/second".to_string(),
+                    ]),
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            configured.get_available_models(None),
+            ["gateway/selected", "gateway/first", "gateway/second"]
+        );
+
+        let mut empty_override = configured;
+        empty_override.providers.get_mut("openai").unwrap().model = "gateway/second".to_string();
+        assert_eq!(
+            empty_override.get_available_models(None),
+            ["gateway/first", "gateway/second"]
+        );
+        empty_override.providers.get_mut("openai").unwrap().models = Some(Vec::new());
+        assert_eq!(
+            empty_override.get_available_models(None),
+            ["gateway/second"]
+        );
+    }
+
+    #[test]
+    fn configured_model_list_is_bounded_and_rejects_invalid_entries() {
+        let mut config = NibConfig::default();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "gpt-5.6-sol".to_string(),
+                models: Some(
+                    (0..MAX_PROVIDER_MODELS)
+                        .map(|index| format!("model-{index}"))
+                        .chain(std::iter::once("model-0".to_string()))
+                        .chain(std::iter::once(String::new()))
+                        .chain(std::iter::once("x".repeat(MAX_MODEL_BYTES + 1)))
+                        .chain(std::iter::once("model\0unsafe".to_string()))
+                        .collect(),
+                ),
+                ..ProviderEntry::default()
+            },
+        );
+
+        let error = config
+            .validate()
+            .expect_err("invalid configured model list")
+            .to_string();
+        for expected in [
+            "at most 128 entries",
+            "empty model",
+            "at most 512 bytes and contain no NUL",
+            "duplicate model",
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
     }
 
     #[test]
@@ -2131,6 +2292,7 @@ api_key = "fixture"
                 "openai".to_string(),
                 ProviderEntry {
                     model: "gpt-4o".to_string(),
+                    models: Some(vec!["gateway/model-a".to_string()]),
                     ..ProviderEntry::default()
                 },
             )]),
@@ -2142,6 +2304,10 @@ api_key = "fixture"
             Some("fixture".to_string()),
         );
         assert_eq!(legacy.providers["openai"].api, None);
+        assert_eq!(
+            legacy.providers["openai"].models.as_deref(),
+            Some(["gateway/model-a".to_string()].as_slice())
+        );
     }
 
     #[test]

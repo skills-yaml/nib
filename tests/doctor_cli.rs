@@ -1,4 +1,7 @@
-use nib::config::{config_paths, save_nib_config_full, McpServerEntry, NibConfig};
+use nib::config::{
+    config_paths, load_nib_config_full, save_nib_config_full, LlmApiMode, McpServerEntry,
+    NibConfig, ProviderEntry, ReasoningEffort,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -92,4 +95,107 @@ fn doctor_cli_initializes_configured_mcp_server() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Protocol initialize/list OK"));
+}
+
+#[test]
+fn doctor_cli_diagnoses_and_fixes_canonical_openai_chat_transport() {
+    let project = tempfile::tempdir().expect("project");
+    let home = tempfile::tempdir().expect("home");
+    initialize_git(project.path());
+    let mut config = NibConfig::default();
+    config.skills.enabled = false;
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "gpt-5.6-luna".to_string(),
+            models: Some(vec!["gpt-5.6-luna".to_string()]),
+            api_key: Some("doctor-cli-secret".to_string()),
+            api_keys: Vec::new(),
+            base_url: None,
+            api: None,
+            reasoning_effort: None,
+        },
+    );
+    save_nib_config_full(project.path(), &mut config).expect("save config");
+
+    let diagnosis = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .arg("doctor")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("run doctor diagnosis");
+    let diagnosis_stdout = String::from_utf8_lossy(&diagnosis.stdout);
+    assert!(!diagnosis.status.success());
+    assert!(diagnosis_stdout.contains("OpenAI agent transport is not ready"));
+    assert!(diagnosis_stdout.contains("nib doctor --fix"));
+    assert!(!diagnosis_stdout.contains("doctor-cli-secret"));
+
+    let repair = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .args(["doctor", "--fix"])
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("run doctor repair");
+    let repair_stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(
+        repair.status.success(),
+        "doctor repair failed:\n{}\n{}",
+        repair_stdout,
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(repair_stdout.contains("FIXED (OpenAI now uses Responses)"));
+    assert!(repair_stdout.contains("API mode: responses"));
+    assert!(repair_stdout.contains("Endpoint path: /v1/responses"));
+    assert!(!repair_stdout.contains("doctor-cli-secret"));
+
+    let repaired = load_nib_config_full(project.path()).expect("load repaired config");
+    let entry = &repaired.llm.providers["openai"];
+    assert_eq!(entry.api, Some(LlmApiMode::Responses));
+    assert_eq!(entry.model, "gpt-5.6-luna");
+    assert_eq!(entry.api_key.as_deref(), Some("doctor-cli-secret"));
+    assert_eq!(entry.reasoning_effort, None);
+}
+
+#[test]
+fn doctor_fix_preserves_explicit_chat_without_reasoning() {
+    let project = tempfile::tempdir().expect("project");
+    let home = tempfile::tempdir().expect("home");
+    initialize_git(project.path());
+    let mut config = NibConfig::default();
+    config.skills.enabled = false;
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "chat-compatible-model".to_string(),
+            api_key: Some("doctor-none-secret".to_string()),
+            api: Some(LlmApiMode::ChatCompletions),
+            reasoning_effort: Some(ReasoningEffort::None),
+            ..ProviderEntry::default()
+        },
+    );
+    save_nib_config_full(project.path(), &mut config).expect("save config");
+    let revision = config.revision;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .args(["doctor", "--fix"])
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("run doctor no-op repair");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("OK (no eligible fixes needed)"));
+    assert!(!stdout.contains("doctor-none-secret"));
+
+    let unchanged = load_nib_config_full(project.path()).expect("load unchanged config");
+    assert_eq!(unchanged.revision, revision);
+    assert_eq!(
+        unchanged.llm.providers["openai"].api,
+        Some(LlmApiMode::ChatCompletions)
+    );
 }

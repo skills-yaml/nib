@@ -26,9 +26,52 @@ Follows skm project structure.
 
 See .github/workflows/ci.yml and release.yml (modeled directly on skm).
 
+## Protected live LLM qualification
+
+`.github/workflows/llm-live.yml` is separate from ordinary CI because it uses external
+provider credentials and can incur cost. It has no pull-request or fork trigger and
+keeps repository permissions read-only. It supports:
+
+- manual runs selecting `catalog`, `canary`, `selected`, or `full` and either one
+  provider or all providers;
+- a Wednesday inventory on the repository's default branch. It defaults to `catalog`;
+  after the paid-run rollout gate, maintainers can set the reviewed repository variable
+  `NIB_LIVE_SCHEDULE_MODE=selected` to run the bounded selected matrix automatically.
+
+Paid canary/selected/full schedules stay disabled until an exact-revision manual full matrix has
+passed and maintainers have approved provider budgets, the Meta catalog endpoint, and
+the OpenRouter allowlist. The selected schedule uses the exact versioned provider/model
+and task suite in `tests/fixtures/llm_live/selected_models.toml`; configuration review,
+expiry, and protected environments remain mandatory.
+
+The provider matrix covers `openai`, `anthropic`, `google`, `grok`, `meta`, and
+`openrouter`, does not fail fast, and serializes overlapping runs independently for
+each provider. Each job has a bounded timeout and uses a protected GitHub environment
+named `llm-live-<provider>`. Configure only that provider's credential in each protected
+environment under the common secret name `LLM_API_KEY`; the job maps it to the exact
+provider variable only for the test process. The `llm-live-meta` environment also requires
+`NIB_LIVE_META_BASE_URL` as an environment secret until Meta has a verified default
+catalog root. Environment protection rules should restrict approvals and secret access
+to trusted default-branch scheduled runs and authorized manual operators.
+
+The workflow forces HTTP debug logging off, runs one provider per isolated matrix job,
+and uploads any harness-published sanitized JSON/Markdown report even when a semantic
+qualification fails, so failed task evidence remains diagnosable. A failed or suppressed
+publication never becomes a passing artifact. Reports have a seven-day retention period. A final aggregate
+job parses every JSON report and fails unless the expected provider count, schema, mode,
+completeness, and pass fields are exact. Selected aggregates additionally require one
+suite ID and matrix fingerprint across all provider artifacts, and the GitHub summary
+lists each selected model/transport/task outcome. Missing credentials, blocked catalogs,
+budgets, incomplete results, and provider failures therefore cannot produce a green
+aggregate result. The harness suppresses report publication when its sensitive-value
+scan fails.
+
+Ordinary `.github/workflows/ci.yml` continues to run only deterministic,
+credential-free checks. It must not invoke any `task test:llm-live:*` target.
+
 ## Taskfile
 See root Taskfile.yml for Rust check, test, coverage, documentation, installer, build,
-and managed-process smoke tasks.
+managed-process smoke, and explicitly opted-in live LLM qualification tasks.
 
 ## Install & Update
 
@@ -124,6 +167,10 @@ development-channel run and its published artifacts are inspected.
 Official release builds expose `nib update`. It compares the embedded build commit with
 the selected rolling channel manifest, reports a successful no-op when current, and
 otherwise downloads, verifies, smokes, and safely replaces the current executable.
+`nib update --channel prod|development` explicitly selects the other compile-time
+controlled rolling channel; the verified replacement binary's embedded identity makes
+that selection authoritative for later option-free updates and startup checks. A
+different requested channel is installed even when both channels name the same commit.
 Local/source builds remain installer-managed. Eligible user-facing commands perform a
 bounded, read-only startup check; `NIB_NO_UPDATE_CHECK=1` disables it, and protocol or
 worker commands never emit update notices.

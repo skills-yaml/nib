@@ -117,14 +117,14 @@ fn invalid_persisted_role_and_index_sequences_are_rejected() {
   "id": "bad-role",
   "messages": [
     {"index": 0, "role": "user", "content": "one"},
-    {"index": 1, "role": "user", "content": "two"}
+    {"index": 1, "role": "tool", "content": "tool without assistant authority"}
   ]
 }"#,
     )
     .expect("write invalid roles");
     let role_error = store
         .load_result("bad-role")
-        .expect_err("duplicate role must fail");
+        .expect_err("user-to-tool transition must fail");
     assert!(role_error.to_string().contains("role transition"));
 
     let index_path = store.sessions_dir().join("bad-index.json");
@@ -167,7 +167,7 @@ fn save_rejects_invalid_message_indices_and_roles_without_replacing_disk_state()
     );
 
     let mut invalid_role = store.load(&session.id).expect("valid session");
-    invalid_role.messages[1].role = "user".to_string();
+    invalid_role.messages[1].role = "tool".to_string();
     assert!(store.save(&mut invalid_role).is_err());
     assert_eq!(fs::read(&path).expect("session after role error"), original);
 }
@@ -674,11 +674,15 @@ fn invalid_role_transition_is_rejected_without_losing_audit_state() {
         .try_append_message(&session.id, "user", "first")
         .expect("first user message");
     let error = store
-        .try_append_message(&session.id, "user", "invalid duplicate")
-        .expect_err("duplicate user role must fail");
+        .try_append_message(&session.id, "tool", "tool without assistant authority")
+        .expect_err("user-to-tool transition must fail");
     assert!(error.to_string().contains("role transition"));
 
-    store.append_message(&session.id, "user", "audited duplicate");
+    store.append_message(
+        &session.id,
+        "tool",
+        "audited tool without assistant authority",
+    );
     store
         .try_append_message(&session.id, "assistant", "response")
         .expect("assistant response");

@@ -261,3 +261,13 @@ until executed.
   isolation boundary.
 - Windows and macOS configuration identity/recovery behavior remains unexecuted; fixes
   must preserve strict corruption propagation and fail-closed publication.
+
+## Doctor-Guided OpenAI Transport Repair (2026-08-17)
+
+[T027](../done/T027_doctor_guided_openai_transport_repair.md) extends runtime-readiness
+diagnosis with an explicitly invoked `nib doctor --fix` repair for one narrowly
+eligible canonical OpenAI transport configuration. The mutation re-evaluates current
+state under the existing configuration lock, commits atomically, and performs no write
+when no repair is needed, so idempotent runs do not advance the revision. Ordinary
+doctor remains read-only, custom gateways remain excluded, and neither mode performs a
+live provider capability probe.

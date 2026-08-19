@@ -116,7 +116,10 @@ active_provider = "openai"
 context_length = 128000
 
 [llm.providers.openai]
-model = "gpt-5.6-luna"
+model = "gpt-5.6-sol"
+# Optional replacement for nib's bundled /model suggestions. Model selection is not
+# restricted to this list, and the selected model is always shown in the picker.
+models = ["gpt-5.6-sol", "gpt-5.6-terra", "my-gateway/model"]
 api_key = "replace-or-use-OPENAI_API_KEY"
 api_keys = []
 api = "responses"              # responses | chat_completions
@@ -197,6 +200,24 @@ request_timeout_secs = 30
 MODE = "production"
 ```
 
+The bundled provider catalog is maintained in `src/llm/default_models.toml`. Its
+verified defaults and picker suggestions are:
+
+| Provider | Default | Bundled suggestions |
+| --- | --- | --- |
+| OpenAI | `gpt-5.6-sol` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` |
+| Anthropic | `claude-opus-5` | `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
+| Google Gemini | `gemini-3.6-flash` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` |
+| xAI Grok | `grok-4.5` | `grok-4.5`, `grok-4.3`, `grok-build-0.1` |
+| OpenRouter | `openai/gpt-5.6-sol` | `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`, `google/gemini-3.6-flash`, `x-ai/grok-4.5` |
+| Meta | `muse-spark-1.1` | `muse-spark-1.1` |
+| Mock | `mock-model` | `mock-model` |
+
+The list is advisory rather than an allowlist. Omit `models` to inherit the bundled
+suggestions, set it to an ordered list to replace them for that provider, or set it to
+`[]` to show only the selected `model`. nib never rewrites an existing selected model
+when its bundled catalog changes.
+
 `terminal.backend` is `local` in this release. `profiles.default` selects a workspace
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
 network settings apply only to sandboxed terminal processes, not LLM HTTP, web tools,
@@ -222,6 +243,23 @@ nib config show
 nib config validate
 nib doctor
 ```
+
+For an active provider named exactly `openai`, doctor treats canonical OpenAI
+Chat Completions with provider-default or enabled reasoning as not ready for nib's
+required function-tool loops. The ordinary check explains the conflict without
+changing configuration. Repair it explicitly with:
+
+```bash
+nib doctor --fix
+```
+
+The repair changes only that provider's API mode to Responses and normalizes an exact
+canonical `/v1/chat/completions` URL to the `/v1` root. It preserves the model, model
+list, credentials, reasoning effort, provider selection, and unrelated settings, then
+reruns the complete doctor suite. It does not issue a provider request, retry the
+failed turn, or modify custom gateways or any non-OpenAI provider. Explicit
+`chat_completions` with `reasoning_effort = "none"` remains an acknowledged operator
+choice and is not rewritten. Repeating `nib doctor --fix` is a no-op.
 
 Responses requests use `store: false`. This keeps opaque response continuation data in
 memory for only the active nib run and out of session audit records; it is not a claim
@@ -254,7 +292,8 @@ The main sections are:
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
 
 Run `nib doctor` after manual configuration changes. It validates local readiness and
-credential presence, not live provider connectivity.
+credential presence, not live provider connectivity. `--fix` only applies the bounded
+local OpenAI transport repair described above; it is not a live capability probe.
 
 ## Use
 
@@ -297,18 +336,34 @@ Chat commands:
 
 Agent questions share chat's input stream: answer with the displayed option number or
 typed text, then continue entering chat commands after the agent turn completes.
+Model text, tool lifecycle events, and reconciliation status stream while each turn is
+running.
 
 ### TUI
 
 ```bash
 nib tui
 nib tui --run "Inspect the failing tests and fix them"
+nib tui --session <id>
+nib tui --auth
 ```
 
-The second form starts an agent run in the background. Streamed model output and tool
-lifecycle events appear live. Calls that still require interactive approval open a
-modal showing the tool and arguments; press `Y` to approve, `N` or `Esc` to deny.
-`ask_question` opens a selectable or typed-response modal and resumes the same loop.
+The TUI opens with a composer for repeated agent turns in the active session. It
+supports the same `/model`, `/providers`, `/session`, `/clear`, `/skills`, `/mcp`,
+`/help`, and exit commands as chat. `--run` submits an initial goal; `--session`
+resumes an existing session, and `--auth` runs authentication before raw mode starts.
+
+Streamed model output and tool lifecycle events appear live. Calls that still require
+interactive approval open a modal showing the tool and arguments; press `Y` to
+approve, `N` or `Esc` to deny. `ask_question` opens a selectable or typed-response
+modal and resumes the same loop.
+
+The composer has focus initially. Press `Enter` to submit, `Tab` to focus the session
+browser, and `Esc` to clear the draft. In the session browser, use arrow keys to
+select, `Enter` to inspect, `R` to resume the selected session, and `Tab` to return to
+the composer. `Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or
+`/quit` also exits. Presentation differs between line mode and the TUI, but their
+interactive agent and management capabilities are shared.
 
 ### Skills
 
@@ -496,19 +551,77 @@ It creates missing profile directories and temporary write probes, but does not 
 provider APIs or run destructive cleanup. It exits nonzero for required checks that
 fail.
 
+### LLM Failure Reports
+
+When a provider request fails, nib reports one local incident instead of the provider's
+free-form message. The report includes the safe provider/transport/model context,
+failure class and phase, HTTP status when available, retry disposition, one recovery
+action, and the session ID. For example:
+
+```text
+LLM request failed [LLM-AUTH]
+Cause: authentication during HTTP response
+Provider: openai (responses), model: gpt-5
+HTTP: 401; retry: not retryable
+Action: Refresh this provider's credential with `nib auth`, then retry.
+Session: <id>
+```
+
+Incident codes and default recovery actions are:
+
+| Code | Meaning | First action |
+| --- | --- | --- |
+| `LLM-CONFIG` | Invalid or incomplete local configuration | Run `nib config validate` or `nib auth`. |
+| `LLM-AUTH` | Credential rejected | Refresh that provider with `nib auth`. |
+| `LLM-RATE` | Provider rate limit | Respect the bounded delay when shown, otherwise retry later. |
+| `LLM-QUOTA` | Exact quota or billing rejection | Check provider account quota and billing controls. |
+| `LLM-MODEL` | Configured model unavailable | Verify `/model` and provider configuration. |
+| `LLM-REQUEST` | Unsupported request combination | Run `nib doctor` and inspect transport, reasoning, and tool settings. |
+| `LLM-UNAVAILABLE` | Transient provider retries exhausted | Retry later. |
+| `LLM-TRANSPORT` | Connection or response transport failed | Check endpoint and network reachability. |
+| `LLM-PROTOCOL` | Unsafe, malformed, or incomplete provider envelope | Run `nib doctor` before retrying. |
+| `LLM-REJECTED` | Valid but unclassified provider rejection | Run `nib doctor`; nib does not guess from remote prose. |
+| `LLM-CANCELLED` | Request cancelled locally | Start a new turn when ready. |
+
+Provider response bodies, remote messages, prompt echoes, credentials, continuations,
+and arbitrary metadata are intentionally omitted. The stable outcome and safe typed
+fields are available in the session's reconciliation event under
+`.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
+persisted. `nib doctor` shows the resolved local provider and transport without making
+a paid provider request. Chat remains available for another command after a safely
+reconciled failure; `nib run` exits nonzero.
+
 Official release builds update within their embedded rolling channel:
 
 ```bash
 nib update
 ```
 
+To explicitly switch an already managed installation between rolling channels, select
+the target channel once:
+
+```bash
+# Follow the development prerelease channel
+nib update --channel development
+
+# Return to the stable production channel
+nib update --channel prod
+```
+
+`production` and `dev` are accepted aliases. A switch validates the target channel's
+manifest, checksum, archive, and staged binary through the same replacement protocol as
+an ordinary update. The installed replacement embeds the selected channel, so later
+startup checks and option-free `nib update` calls follow it without a project or global
+configuration setting. Because rolling channels have no semantic ordering, an explicit
+switch may install a different or historically older exact commit.
+
 When the installed commit is current, the command exits successfully and reports that
 nib is already up to date. Otherwise it downloads the platform archive and checksum,
 requires both to agree with the bounded `nib-release.json` manifest, verifies the staged
 binary's channel/version/commit identity, and replaces the executable. It never switches
-between `prod-latest` and `development-latest`, invokes `sudo`, changes `PATH`, or
-updates a local/source build. If the current installation is unmanaged or not writable,
-rerun the installer for the intended channel.
+channels unless `--channel` is present, invokes `sudo`, changes `PATH`, or updates a
+local/source build. If the current installation is unmanaged or not writable, rerun the
+installer for the intended channel.
 
 Ordinary user-facing launches perform a one-second best-effort manifest check and print
 one stderr notice when a different channel commit is available. Checks never install an

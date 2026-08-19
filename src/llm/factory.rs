@@ -146,13 +146,21 @@ pub(crate) fn create_client_with_sensitive_values(
 
     let client: Arc<dyn LlmClient> = match resolved.adapter {
         ResolvedAdapter::Mock => unreachable!("mock returned before credential resolution"),
-        ResolvedAdapter::Anthropic { endpoint } => Arc::new(AnthropicClient::with_base_url(
-            model,
-            credentials,
-            endpoint,
-        )?),
+        ResolvedAdapter::Anthropic { endpoint } => {
+            Arc::new(AnthropicClient::configured_with_diagnostic_secrets(
+                model,
+                credentials,
+                diagnostic_secrets,
+                endpoint,
+            )?)
+        }
         ResolvedAdapter::Google { api_root } => {
-            Arc::new(GeminiClient::with_base_url(model, credentials, api_root)?)
+            Arc::new(GeminiClient::configured_with_diagnostic_secrets(
+                model,
+                credentials,
+                diagnostic_secrets,
+                api_root,
+            )?)
         }
         ResolvedAdapter::OpenAiCompatible {
             api_mode: LlmApiMode::ChatCompletions,
@@ -227,7 +235,7 @@ fn resolve_provider(
     let model = entry
         .map(|entry| entry.model.clone())
         .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| descriptor.default_model.to_string());
+        .unwrap_or_else(|| descriptor.default_model().to_string());
     let reasoning_label = entry.and_then(|entry| entry.reasoning_effort).map_or_else(
         || "provider_default".to_string(),
         |effort| effort.to_string(),
@@ -581,7 +589,7 @@ fn require_credentials(credentials: Vec<String>, provider: &str) -> Result<Vec<S
 #[cfg(test)]
 fn default_model(provider: &str) -> String {
     provider_descriptor(provider)
-        .map_or("mock-model", |provider| provider.default_model)
+        .map_or("mock-model", |provider| provider.default_model())
         .to_string()
 }
 

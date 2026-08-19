@@ -2643,6 +2643,7 @@ async fn run_schedule_worker(
                     "occurrence": occurrence,
                     "session_id": job.session_id,
                     "outcome": summary.outcome,
+                    "failure": summary.failure,
                     "steps_taken": summary.steps_taken,
                     "mode": "plan",
                 });
@@ -2948,7 +2949,9 @@ fn classify_agent_run_outcome(
         {
             Ok(summary)
         }
-        Ok(summary) => Err(summary.outcome.clone()),
+        Ok(summary) => Err(summary
+            .user_failure_report()
+            .unwrap_or_else(|| summary.outcome.clone())),
         Err(error) => Err(error),
     }
 }
@@ -3774,13 +3777,15 @@ mod tests {
             tool_call_count: 0,
             final_state: crate::agent::state::AgentState::Done,
             outcome: "planning_failed: bounded provider error".to_string(),
+            failure: None,
             bound_reached: false,
             trace: Vec::new(),
         };
-        assert_eq!(
-            classify_agent_run_outcome(Ok(failed)).unwrap_err(),
-            "planning_failed: bounded provider error"
-        );
+        let legacy = classify_agent_run_outcome(Ok(failed)).unwrap_err();
+        assert!(legacy.starts_with("LLM request failed [LLM-REJECTED]"));
+        assert!(legacy.contains("Provider: unknown (legacy)"));
+        assert!(legacy.contains("Session: scheduled-provider-failure"));
+        assert!(!legacy.contains("bounded provider error"));
 
         let refused = crate::agent::AgentRunSummary {
             session_id: "scheduled-provider-refusal".to_string(),
@@ -3789,6 +3794,7 @@ mod tests {
             tool_call_count: 0,
             final_state: crate::agent::state::AgentState::Done,
             outcome: "model_refusal".to_string(),
+            failure: None,
             bound_reached: false,
             trace: Vec::new(),
         };
@@ -3804,6 +3810,7 @@ mod tests {
             tool_call_count: 0,
             final_state: crate::agent::state::AgentState::Done,
             outcome: "plan_ready".to_string(),
+            failure: None,
             bound_reached: false,
             trace: Vec::new(),
         };
@@ -3883,6 +3890,7 @@ mod tests {
                 tool_call_count,
                 final_state,
                 outcome: outcome.to_string(),
+                failure: None,
                 bound_reached,
                 trace: Vec::new(),
             };
@@ -4188,10 +4196,17 @@ mod tests {
         assert_eq!(failed.record.status, "failed");
         assert_eq!(failed.record.completed_occurrences, 0);
         let error = failed.record.error.expect("failed schedule error");
-        assert!(error.starts_with("planning_failed:"), "{error}");
-        assert!(error.contains("Responses API did not complete"), "{error}");
+        assert!(
+            error.starts_with("LLM request failed [LLM-REJECTED]"),
+            "{error}"
+        );
+        assert!(error.contains("Provider: openai (responses)"), "{error}");
+        assert!(error.contains("model: fixture-reasoning-model"), "{error}");
+        assert!(error.contains("Retry: not retryable"), "{error}");
+        assert!(error.contains("Action: Run `nib doctor`"), "{error}");
+        assert!(error.contains("Session: origin"), "{error}");
         assert!(!error.contains(SECRET), "{error}");
-        assert!(!error.contains("provider rejected"), "{error}");
+        assert!(!error.contains("Responses API did not complete"), "{error}");
 
         let session = session_store
             .load("origin")
@@ -4217,9 +4232,10 @@ mod tests {
             record.action == "wake_agent_loop"
                 && record.outcome == "failed"
                 && record.detail.as_deref().is_some_and(|detail| {
-                    detail.contains("Responses API did not complete")
+                    detail.contains("LLM request failed [LLM-REJECTED]")
+                        && detail.contains("Action: Run `nib doctor`")
                         && !detail.contains(SECRET)
-                        && !detail.contains("provider rejected")
+                        && !detail.contains("Responses API did not complete")
                 })
         }));
     }

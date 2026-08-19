@@ -64,9 +64,15 @@ fn is_compression_request(messages: &[serde_json::Value]) -> bool {
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
         if request.continuation.is_some() {
-            return Err("Mock requests do not support provider continuations".to_string());
+            return Err(crate::llm::LlmError::request_rejected(
+                "mock",
+                "mock",
+                Some("mock-model"),
+                "Mock requests do not support provider continuations",
+                &[],
+            ));
         }
 
         let messages = request.messages;
@@ -128,9 +134,9 @@ impl LlmClient for MockLlmClient {
                         format!("failed to start managed-process smoke child: {error}")
                     })?;
                 if !status.success() {
-                    return Err(format!(
-                        "managed-process smoke child exited with status {status}"
-                    ));
+                    return Err(
+                        format!("managed-process smoke child exited with status {status}").into(),
+                    );
                 }
                 return Ok(LlmResponse::text("Managed-process smoke child completed."));
             }
@@ -353,17 +359,30 @@ mod tests {
         let client = MockLlmClient::new();
         let messages = [json!({"role": "user", "content": "x"})];
 
-        let error = client
+        let complete_error = client
             .complete(request_with_continuation(&messages))
             .await
             .expect_err("completion must reject a provider continuation");
-        assert_eq!(error, "Mock requests do not support provider continuations");
+        assert_eq!(
+            complete_error,
+            "Mock requests do not support provider continuations"
+        );
 
-        let error = client
+        let stream_error = client
             .stream(request_with_continuation(&messages))
             .await
             .expect_err("default stream must reject a provider continuation");
-        assert_eq!(error, "Mock requests do not support provider continuations");
+        assert_eq!(
+            stream_error,
+            "Mock requests do not support provider continuations"
+        );
+        assert_eq!(
+            complete_error.class,
+            crate::llm::LlmErrorClass::UnsupportedRequest
+        );
+        assert_eq!(stream_error.class, complete_error.class);
+        assert_eq!(complete_error.phase, crate::llm::LlmErrorPhase::Request);
+        assert_eq!(stream_error.phase, complete_error.phase);
     }
 
     #[test]

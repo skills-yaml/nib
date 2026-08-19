@@ -89,6 +89,7 @@ pub struct AnthropicClient {
     client: Client,
     model: String,
     api_keys: Vec<String>,
+    diagnostic_secrets: Vec<String>,
     base_url: String,
 }
 
@@ -103,10 +104,21 @@ impl AnthropicClient {
         api_keys: Vec<String>,
         base_url: impl AsRef<str>,
     ) -> Result<Self, String> {
+        let diagnostic_secrets = api_keys.clone();
+        Self::configured_with_diagnostic_secrets(model, api_keys, diagnostic_secrets, base_url)
+    }
+
+    pub(crate) fn configured_with_diagnostic_secrets(
+        model: String,
+        api_keys: Vec<String>,
+        diagnostic_secrets: Vec<String>,
+        base_url: impl AsRef<str>,
+    ) -> Result<Self, String> {
         Ok(Self {
             client: Client::new(),
             model,
             api_keys,
+            diagnostic_secrets,
             base_url: normalize_anthropic_endpoint(base_url.as_ref())?,
         })
     }
@@ -116,6 +128,7 @@ impl AnthropicClient {
             messages: request_messages,
             tools,
             temperature,
+            max_output_tokens,
             reasoning_effort: _,
             scope,
             continuation,
@@ -149,11 +162,14 @@ impl AnthropicClient {
         }
         let mut body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": max_output_tokens.unwrap_or(4096),
             "temperature": temperature,
             "system": system,
             "messages": messages,
         });
+        if max_output_tokens == Some(0) {
+            return Err("max_output_tokens must be greater than zero".to_string());
+        }
         if stream {
             body["stream"] = json!(true);
         }
@@ -162,14 +178,46 @@ impl AnthropicClient {
         }
         Ok(body)
     }
+
+    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+        crate::llm::error::LlmErrorContext::new(
+            "anthropic",
+            ANTHROPIC_TRANSPORT,
+            Some(self.model.clone()),
+            self.diagnostic_secrets.clone(),
+        )
+    }
+
+    fn request_error(&self, message: impl AsRef<str>) -> crate::llm::LlmError {
+        crate::llm::LlmError::request_rejected(
+            "anthropic",
+            ANTHROPIC_TRANSPORT,
+            Some(&self.model),
+            message,
+            &self.diagnostic_secrets,
+        )
+    }
+
+    fn protocol_error(&self, message: impl AsRef<str>) -> crate::llm::LlmError {
+        crate::llm::LlmError::provider_protocol(
+            "anthropic",
+            ANTHROPIC_TRANSPORT,
+            Some(&self.model),
+            crate::llm::LlmErrorPhase::TerminalValidation,
+            message,
+            &self.diagnostic_secrets,
+        )
+    }
 }
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
-        validate_anthropic_request(&request)?;
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
         let scope = request.scope.clone();
-        let body = self.request_body(request, false)?;
+        let body = self
+            .request_body(request, false)
+            .map_err(|error| self.request_error(error))?;
 
         let resp = crate::llm::send_with_retry_for(
             |credential_index| {
@@ -182,15 +230,37 @@ impl LlmClient for AnthropicClient {
             self.api_keys.len(),
             crate::llm::is_anthropic_transient_status,
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            crate::llm::LlmError::transport(
+                "anthropic",
+                ANTHROPIC_TRANSPORT,
+                Some(&self.model),
+                "Anthropic request failed before a valid HTTP response",
+                &self.diagnostic_secrets,
+            )
+        })?;
 
         if !resp.status().is_success() {
-            return Err(safe_anthropic_http_error(resp).await);
+            return Err(
+                safe_anthropic_http_error(resp, &self.model, &self.diagnostic_secrets).await,
+            );
         }
 
-        let data =
-            crate::llm::read_bounded_json_response(resp, "Anthropic completion response").await?;
-        let mut response = parse_anthropic_response(&data)?;
+        let data = crate::llm::read_bounded_json_response(resp, "Anthropic completion response")
+            .await
+            .map_err(|error| self.protocol_error(error))?;
+        let mut response = parse_anthropic_response(&data).map_err(|error| {
+            crate::llm::LlmError::provider_rejected(
+                "anthropic",
+                ANTHROPIC_TRANSPORT,
+                Some(&self.model),
+                crate::llm::LlmErrorPhase::TerminalValidation,
+                Some(&data),
+                error,
+                &self.diagnostic_secrets,
+            )
+        })?;
         if let Some(calls) = response
             .tool_calls
             .as_ref()
@@ -200,21 +270,21 @@ impl LlmClient for AnthropicClient {
                 .get("content")
                 .and_then(Value::as_array)
                 .cloned()
-                .ok_or_else(|| "Anthropic response is missing content".to_string())?;
-            response.continuation = Some(anthropic_continuation(
-                &self.model,
-                scope,
-                assistant_content,
-                calls,
-            )?);
+                .ok_or_else(|| self.protocol_error("Anthropic response is missing content"))?;
+            response.continuation = Some(
+                anthropic_continuation(&self.model, scope, assistant_content, calls)
+                    .map_err(|error| self.protocol_error(error))?,
+            );
         }
         Ok(response)
     }
 
-    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, String> {
-        validate_anthropic_request(&request)?;
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
         let continuation_scope = request.scope.clone();
-        let body = self.request_body(request, true)?;
+        let body = self
+            .request_body(request, true)
+            .map_err(|error| self.request_error(error))?;
 
         let resp = crate::llm::send_with_retry_for(
             |credential_index| {
@@ -227,21 +297,34 @@ impl LlmClient for AnthropicClient {
             self.api_keys.len(),
             crate::llm::is_anthropic_transient_status,
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            crate::llm::LlmError::transport(
+                "anthropic",
+                ANTHROPIC_TRANSPORT,
+                Some(&self.model),
+                "Anthropic request failed before a valid HTTP response",
+                &self.diagnostic_secrets,
+            )
+        })?;
 
         if !resp.status().is_success() {
-            return Err(safe_anthropic_http_error(resp).await);
+            return Err(
+                safe_anthropic_http_error(resp, &self.model, &self.diagnostic_secrets).await,
+            );
         }
         crate::llm::ensure_response_content_length(
             &resp,
             crate::llm::MAX_LLM_STREAM_BYTES,
             "Anthropic stream response",
-        )?;
+        )
+        .map_err(|error| self.protocol_error(error))?;
 
         let (public_tx, public_rx) = mpsc::channel(100);
         let (completion_tx, completion_rx) = oneshot::channel();
 
         let model = self.model.clone();
+        let sensitive_values = self.diagnostic_secrets.clone();
         tokio::spawn(async move {
             use eventsource_stream::{EventStreamError, Eventsource};
             use futures_util::StreamExt;
@@ -269,7 +352,19 @@ impl LlmClient for AnthropicClient {
                 let event = match event_res {
                     Ok(event) => event,
                     Err(EventStreamError::Transport(error)) => {
-                        fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                        fail_anthropic_stream(
+                            &public_tx,
+                            &mut completion_tx,
+                            crate::llm::LlmError::transport(
+                                "anthropic",
+                                ANTHROPIC_TRANSPORT,
+                                Some(&model),
+                                error,
+                                &sensitive_values,
+                            )
+                            .with_phase(crate::llm::LlmErrorPhase::Stream),
+                        )
+                        .await;
                         return;
                     }
                     Err(EventStreamError::Utf8(_) | EventStreamError::Parser(_)) => {
@@ -302,16 +397,25 @@ impl LlmClient for AnthropicClient {
                     }
                 };
 
+                if is_anthropic_error_envelope(&event.event, &data) {
+                    fail_anthropic_stream(
+                        &public_tx,
+                        &mut completion_tx,
+                        crate::llm::LlmError::provider_rejected(
+                            "anthropic",
+                            ANTHROPIC_TRANSPORT,
+                            Some(&model),
+                            crate::llm::LlmErrorPhase::Stream,
+                            Some(&data),
+                            "Anthropic stream reported a provider error",
+                            &sensitive_values,
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+
                 if event.event == "message_stop" {
-                    if is_anthropic_error_envelope(&event.event, &data) {
-                        fail_anthropic_stream(
-                            &public_tx,
-                            &mut completion_tx,
-                            "Anthropic stream reported a provider error".to_string(),
-                        )
-                        .await;
-                        return;
-                    }
                     let Some(reason) = finish_reason.take() else {
                         fail_anthropic_stream(
                             &public_tx,
@@ -418,7 +522,8 @@ impl LlmClient for AnthropicClient {
             }
         });
 
-        Ok(LlmStream::with_private_completion(public_rx, completion_rx))
+        Ok(LlmStream::with_private_completion(public_rx, completion_rx)
+            .with_error_context(self.error_context()))
     }
 }
 
@@ -517,17 +622,35 @@ fn anthropic_tool_definitions(tools: &[Value]) -> Result<Vec<Value>, String> {
         .collect()
 }
 
-async fn safe_anthropic_http_error(response: Response) -> String {
-    let status = response.status().as_u16();
+async fn safe_anthropic_http_error(
+    response: Response,
+    model: &str,
+    sensitive_values: &[String],
+) -> crate::llm::LlmError {
+    let status = response.status();
     let body_read =
         crate::llm::read_bounded_error_response(response, "Anthropic API error response").await;
-    if body_read.is_err() {
+    let structured = body_read
+        .as_ref()
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(body).ok());
+    let safe_message = if body_read.is_err() {
         format!(
-            "Anthropic API request failed with HTTP {status}; the error response could not be read safely"
+            "Anthropic API request failed with HTTP {}; the error response could not be read safely",
+            status.as_u16()
         )
     } else {
-        format!("Anthropic API request failed with HTTP {status}")
-    }
+        format!("Anthropic API request failed with HTTP {}", status.as_u16())
+    };
+    crate::llm::LlmError::http(
+        "anthropic",
+        ANTHROPIC_TRANSPORT,
+        Some(model),
+        status,
+        structured.as_ref(),
+        safe_message,
+        sensitive_values,
+    )
 }
 
 fn anthropic_terminal_status(
@@ -596,10 +719,11 @@ fn complete_anthropic_stream(
 }
 
 async fn fail_anthropic_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, String>>,
-    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, String>>>,
-    error: String,
+    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
+    error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
+    let error = error.into();
     let _ = crate::llm::send_stream_event(public_tx, Err(error.clone())).await;
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
@@ -1053,6 +1177,7 @@ mod tests {
                     })]),
                     0.3,
                 )
+                .with_max_output_tokens(43)
                 .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
             )
             .await
@@ -1073,6 +1198,7 @@ mod tests {
             .to_ascii_lowercase()
             .contains("x-api-key: anthropic-test-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
+        assert!(request.contains("\"max_tokens\":43"));
         assert!(request.contains("\"system\":\"follow project rules\""));
         assert!(request.contains("\"input_schema\""));
         assert!(!request.contains("\"stream\":true"));
@@ -1267,6 +1393,8 @@ mod tests {
             .await
             .expect_err("completion must reject HTTP error");
         assert_eq!(error, "Anthropic API request failed with HTTP 401");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
         assert!(!error.contains(SENTINEL));
 
         let (base_url, _) = serve_once("403 Forbidden", "text/plain", SENTINEL);
@@ -1279,7 +1407,29 @@ mod tests {
             .await
             .expect_err("stream must reject HTTP error");
         assert_eq!(error, "Anthropic API request failed with HTTP 403");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Authentication);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
         assert!(!error.contains(SENTINEL));
+
+        const INACTIVE: &str = "inactive-anthropic-credential";
+        let (base_url, _) = serve_once("401 Unauthorized", "text/plain", "private");
+        let error = AnthropicClient::configured_with_diagnostic_secrets(
+            format!("model-{INACTIVE}"),
+            vec!["active-key".to_string()],
+            vec!["active-key".to_string(), INACTIVE.to_string()],
+            base_url,
+        )
+        .expect("configured Anthropic client")
+        .complete(LlmRequest::new(
+            &[json!({"role": "user", "content": "x"})],
+            None,
+            0.0,
+        ))
+        .await
+        .expect_err("diagnostic redaction fixture");
+        let report = error.user_report(None);
+        assert!(report.contains("model-[REDACTED]"), "{report}");
+        assert!(!report.contains(INACTIVE), "{report}");
     }
 
     #[tokio::test]
@@ -1302,6 +1452,8 @@ mod tests {
             .expect("Anthropic stream response");
         let error = stream.finish().await.expect_err("provider stream error");
         assert_eq!(error, "Anthropic stream reported a provider error");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
+        assert_eq!(error.phase, crate::llm::LlmErrorPhase::Stream);
         assert!(!error.contains(SENTINEL));
     }
 

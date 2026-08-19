@@ -1,6 +1,6 @@
 # FT-018: Self-Update Command and Update Availability Notices
 
-**Status:** Development
+**Status:** Done
 
 ## Summary
 
@@ -28,7 +28,7 @@ that directs the user to `nib update`; startup checks never install software.
   receive explicit reinstall guidance from `nib update` and do not emit automatic update
   notices.
 - The repository release workflow remains the exclusive rolling-release writer defined
-  by [T010](../development/T010_release_process.md).
+  by [T010](T010_release_process.md).
 
 ## Problem
 
@@ -276,7 +276,7 @@ mutation capability accidentally.
 - `README.md`, `docs/user/guide.md`, `docs/tech/ci.md`, and
   `docs/tech/project_structure.md` — command, notification, opt-out, release manifest,
   and updater architecture documentation.
-- [T010](../development/T010_release_process.md) — coordinated release evidence and
+- [T010](T010_release_process.md) — coordinated release evidence and
   exact-current remote rollout gate; its lifecycle state remains independently owned.
 
 The agent loop, tool permission model, sessions, durable tasks, MCP protocol, and
@@ -362,29 +362,29 @@ causes `nib update` to fail with installer guidance; it never guesses from parti
 
 ## Acceptance Criteria
 
-- [ ] `nib update` is visible in CLI help on supported release targets.
-- [ ] When the installed commit equals the validated channel manifest, `nib update`
+- [x] `nib update` is visible in CLI help on supported release targets.
+- [x] When the installed commit equals the validated channel manifest, `nib update`
   exits zero, prints `nib is already up to date`, downloads no archive, and leaves the
   executable untouched.
-- [ ] When a different valid channel build exists, `nib update` downloads only the
+- [x] When a different valid channel build exists, `nib update` downloads only the
   correct platform archive, validates the manifest/checksum/archive digests, smokes the
   staged identity, replaces the executable safely, and reports both identities.
-- [ ] Local, unknown, unsupported, non-writable, and ambiguous installations fail
+- [x] Local, unknown, unsupported, non-writable, and ambiguous installations fail
   without mutation and provide actionable official-installer guidance.
-- [ ] Download, checksum, extraction, smoke, race, or replacement failure cannot leave
+- [x] Download, checksum, extraction, smoke, race, or replacement failure cannot leave
   the target path missing, partially written, or pointing at an unverified binary.
-- [ ] Concurrent update attempts serialize and cannot overwrite a newer verified
+- [x] Concurrent update attempts serialize and cannot overwrite a newer verified
   installation with stale downloaded state.
-- [ ] Every eligible user-facing launch performs a bounded availability check and emits
+- [x] Every eligible user-facing launch performs a bounded availability check and emits
   at most one interactive stderr notice when a different validated commit exists.
-- [ ] Startup checks never install, never alter exit status, stay silent for current or
+- [x] Startup checks never install, never alter exit status, stay silent for current or
   unavailable state, honor `NIB_NO_UPDATE_CHECK=1`, and cannot contaminate MCP or other
   machine-readable output.
-- [ ] The rolling release transaction publishes and validates `nib-release.json`
+- [x] The rolling release transaction publishes and validates `nib-release.json`
   coherently with the existing four archives and four checksum assets.
-- [ ] User and technical docs describe the command, rolling-channel identity, automatic
+- [x] User and technical docs describe the command, rolling-channel identity, automatic
   check, opt-out, failure behavior, bootstrap limitation, and manual recovery path.
-- [ ] All local, hosted cross-platform, release, documentation, coverage, and consecutive
+- [x] All local, hosted cross-platform, release, documentation, coverage, and consecutive
   development self-update gates pass on exact committed revisions.
 
 ## Risks And Tradeoffs
@@ -409,9 +409,8 @@ causes `nib update` to fail with installer guidance; it never guesses from parti
 
 ## Dependencies
 
-- T010 remains the authoritative release publication and recovery contract. FT-018 can
-  be developed locally while T010 is in development, but remote rollout cannot complete
-  until the exact manifest-producing release workflow is green.
+- T010 is the completed authoritative release publication and recovery contract. Its
+  exact manifest-producing development and production workflows are green.
 - Existing release build metadata must continue embedding the exact channel and commit.
 - The four current platform archives and `.sha256` assets remain the installation unit.
 
@@ -451,17 +450,21 @@ versioned releases require separate follow-up decisions if they enter scope.
 - macOS cross-check reaches `ring` but cannot compile on this Linux host because an
   Apple compiler/SDK is unavailable; this is an environment gate, not updater evidence.
 
-### Remaining Gates
+### Historical Remaining Gates
+
+These items describe the 2026-08-01 implementation snapshot; the production evidence
+below closes them.
 
 - The four overlapping T021/T022 Clippy findings and eight stale provider-continuation
   fixtures are repaired locally; the canonical `task check` gate passes.
-- Workflow-changing production publication now uses T010's marked forward-only mode so
+- Workflow-changing production publication used T010's marked forward-only mode so
   the Actions token never creates a backup ref at an older workflow revision. The local
-  25-test release harness covers success and process-loss recovery; hosted publication
-  remains required.
-- Native macOS and Windows executable replacement remains unexecuted.
-- A manifest-producing development release and a second release that exercises actual
-  notification and self-replacement have not run. The spec remains in Development.
+  25-test release harness covered success and process-loss recovery; hosted publication
+  was still required at that snapshot.
+- Native macOS and Windows executable replacement had not yet executed.
+- A manifest-producing development release and a second release exercising actual
+  notification and self-replacement had not yet run, so the spec remained in
+  Development at that snapshot.
 
 ## Hosted Consecutive-Development Qualification (2026-08-06)
 
@@ -500,23 +503,23 @@ rolling channel unchanged until the complete candidate has been validated.
 
 ### Acceptance Criteria And Validation Gates
 
-- [ ] The first exact-revision development release succeeds and publishes the complete
+- [x] The first exact-revision development release succeeds and publishes the complete
   manifest plus four archive/checksum pairs.
-- [ ] A distinct second exact-revision development release succeeds with the same
+- [x] A distinct second exact-revision development release succeeds with the same
   complete asset contract.
-- [ ] Native Linux, macOS Intel, macOS Apple Silicon, and Windows jobs each observe the
+- [x] Native Linux, macOS Intel, macOS Apple Silicon, and Windows jobs each observe the
   second-build startup notice from the first binary, replace that executable through
   `nib update`, verify the second full commit identity, and prove a checksum-stable
   already-current update.
-- [ ] The qualification workflow is manual-only, development-only, read-only, pinned to
+- [x] The qualification workflow is manual-only, development-only, read-only, pinned to
   immutable action revisions, and consumes artifacts only from the supplied successful
   bootstrap run.
-- [ ] The candidate SHA exactly matches `main`, `development-latest`, the successful
+- [x] The candidate SHA exactly matches `main`, `development-latest`, the successful
   candidate development run, and a still-unapproved `release-prod` run; the bootstrap
   is its ancestor and no successful development publication occurred between the two.
-- [ ] Documentation-only and agent-memory-only reconciliation commits do not publish a
+- [x] Documentation-only and agent-memory-only reconciliation commits do not publish a
   new binary after the exact qualified production revision.
-- [ ] `task installers:check`, `task test:installers`, `task test:updater`, `task check`,
+- [x] `task installers:check`, `task test:installers`, `task test:updater`, `task check`,
   and hosted CI pass on the exact second revision before production promotion.
 
 Affected areas are `.github/workflows/release.yml`,
@@ -564,32 +567,57 @@ embedded build commit while keeping the qualified updater protocol unchanged.
 
 ### Acceptance Criteria And Validation Gates
 
-- [ ] Windows never attempts to overwrite or unlink the currently running image.
-- [ ] Parent/worker readiness has a finite timeout, and mutation starts only after the
+- [x] Windows never attempts to overwrite or unlink the currently running image.
+- [x] Parent/worker readiness has a finite timeout, and mutation starts only after the
   worker has opened the exact parent process and durably signalled readiness.
-- [ ] Successful replacement leaves the original executable path naming the verified
+- [x] Successful replacement leaves the original executable path naming the verified
   candidate before `nib update` reports success; old-image and staging cleanup
   converges after the parent exits.
-- [ ] A publish failure rolls the same digest-proven backup back to the target, and a
+- [x] A publish failure rolls the same digest-proven backup back to the target, and a
   crash between the two renames is recoverable by the worker without accepting an
   unverified file.
-- [ ] A later updater is fenced while any prior Windows staging or backup evidence
+- [x] A later updater is fenced while any prior Windows staging or backup evidence
   remains, so two replacement/cleanup protocols cannot overlap at one target.
-- [ ] Missing, malformed, replayed, path-escaping, digest-mismatched, and ambiguous
+- [x] Missing, malformed, replayed, path-escaping, digest-mismatched, and ambiguous
   worker requests fail closed and preserve recovery evidence.
-- [ ] Replaying recovery after a digest-proven committed-clean state is idempotent:
+- [x] Replaying recovery after a digest-proven committed-clean state is idempotent:
   the candidate bytes remain unchanged and no backup is recreated.
-- [ ] Deterministic tests cover cleanup-state classification, publish rollback, bounded
+- [x] Deterministic tests cover cleanup-state classification, publish rollback, bounded
   readiness, and debris detection; the Windows qualification rejects leftover
   `.nib-update-*` staging or backup paths after convergence.
-- [ ] `task test:updater`, `task test:installers`, Windows MSVC checks, `task check`,
+- [x] `task test:updater`, `task test:installers`, Windows MSVC checks, `task check`,
   `task docs:check`, and exact-revision hosted CI pass.
-- [ ] Two distinct development publications containing the repaired updater qualify
+- [x] Two distinct development publications containing the repaired updater qualify
   on all four native platforms. The first repaired publication is the bootstrap and
   the second is the candidate; an older bootstrap cannot qualify code it does not run.
-- [ ] Only the exact held production run for the second repaired revision is approved,
+- [x] Only the exact held production run for the second repaired revision is approved,
   after the final read-only job confirms production is still unchanged and held.
 
 Affected areas are `src/updater.rs`, the pre-parse startup boundary in `src/main.rs`,
 Windows updater tests, `scripts/qualify-release-update.ps1`, installer/workflow static
 tests, and the consecutive-development release evidence.
+
+## Production Rollout Evidence (2026-08-07)
+
+This section supersedes earlier remaining-gate and pending-release statements.
+
+- First repaired development release run `31145574017` published commit
+  `8ff32b2ea5bd7f905bfde3f5c04eed3d77f084e8` with the complete nine-asset contract.
+- Distinct candidate development release run `31148235010` published commit
+  `2ecf9d23d951a293238c46d605f2f92e3db3b946` next, with no intervening successful
+  development publication. Both release manifests and all archive checksums were
+  re-read successfully.
+- Candidate CI runs `31148222357` and `31148234996` passed Validate, macOS, and native
+  Windows jobs. Local `task check`, `task docs:check`, and `task test:updater` passed,
+  and independent spec-compliance and code-quality reviews returned PASS.
+- Read-only qualification run `31149505681` passed provenance validation, Linux,
+  macOS Intel, macOS Apple Silicon, Windows, and the final held-production check. The
+  Windows job exercised the repaired in-use handoff and rejected leftover
+  `.nib-update-*` debris.
+- Only exact candidate production run `31148222338` was approved. It published the
+  non-draft, non-prerelease `prod-latest` Release at the candidate commit with
+  `nib-release.json`, four archives, and four matching checksums.
+- A downloaded production Linux binary reported the full candidate identity, and
+  `nib update` reported the build already current without mutation. The docs/memory
+  reconciliation is restricted to release-workflow ignored paths so it cannot publish
+  a different binary after this qualified revision.

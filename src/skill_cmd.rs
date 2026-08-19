@@ -85,18 +85,23 @@ pub fn run_skill_cmd(args: &SkillArgs, project_root: &Path) -> Result<(), String
 }
 
 pub fn list_skills(project_root: &Path) -> Result<(), String> {
+    println!("{}", format_installed_skills(project_root)?);
+    Ok(())
+}
+
+pub fn format_installed_skills(project_root: &Path) -> Result<String, String> {
     let skills = installed_skills(project_root)?;
-    println!("Installed Skills:");
+    let mut output = String::from("Installed Skills:");
     if skills.is_empty() {
-        println!("  No skills found.");
+        output.push_str("\n  No skills found.");
     }
     for skill in skills {
-        println!(
-            "  [{}] {} - {}",
+        output.push_str(&format!(
+            "\n  [{}] {} - {}",
             skill.location, skill.name, skill.description
-        );
+        ));
     }
-    Ok(())
+    Ok(output)
 }
 
 fn global_skills_dir() -> Result<PathBuf, String> {

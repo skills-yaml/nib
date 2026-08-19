@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use nib::{mcp_cmd, skill_cmd};
 use std::path::PathBuf;
 use std::process;
 
@@ -8,11 +9,9 @@ mod config_cmd;
 mod console;
 mod context_cmd;
 mod doctor;
-mod mcp_cmd;
 #[cfg(debug_assertions)]
 mod mcp_test_fixture;
 mod run;
-mod skill_cmd;
 mod task_cmd;
 mod updater;
 mod version;
@@ -45,7 +44,7 @@ mod cli_tests {
     #[test]
     fn update_command_is_public_and_worker_commands_skip_startup_checks() {
         let update = Cli::try_parse_from(["nib", "update"]).expect("update command");
-        assert!(matches!(update.command, Some(Commands::Update)));
+        assert!(matches!(update.command, Some(Commands::Update(_))));
         assert!(!startup_update_check_is_eligible(&update.command));
 
         let version = Cli::try_parse_from(["nib", "version"]).expect("version command");
@@ -54,6 +53,54 @@ mod cli_tests {
         let server = Cli::try_parse_from(["nib", "mcp-server"]).expect("MCP server command");
         assert!(!startup_update_check_is_eligible(&server.command));
     }
+
+    #[test]
+    fn update_channel_accepts_canonical_values_and_bounded_aliases() {
+        for (value, expected) in [
+            ("prod", updater::UpdateChannel::Prod),
+            ("production", updater::UpdateChannel::Prod),
+            ("development", updater::UpdateChannel::Development),
+            ("dev", updater::UpdateChannel::Development),
+        ] {
+            let parsed = Cli::try_parse_from(["nib", "update", "--channel", value])
+                .expect("valid update channel");
+            let Some(Commands::Update(args)) = parsed.command else {
+                panic!("expected update command");
+            };
+            assert_eq!(args.channel, Some(expected));
+        }
+
+        assert!(Cli::try_parse_from(["nib", "update", "--channel", "nightly"]).is_err());
+    }
+
+    #[test]
+    fn tui_accepts_chat_equivalent_session_and_auth_entry_options() {
+        let parsed = Cli::try_parse_from([
+            "nib",
+            "tui",
+            "--run",
+            "inspect",
+            "--session",
+            "session-1",
+            "--auth",
+        ])
+        .expect("TUI parity options");
+        let Some(Commands::Tui(args)) = parsed.command else {
+            panic!("expected TUI command");
+        };
+        assert_eq!(args.run.as_deref(), Some("inspect"));
+        assert_eq!(args.session.as_deref(), Some("session-1"));
+        assert!(args.auth);
+    }
+
+    #[test]
+    fn doctor_accepts_explicit_fix_mode() {
+        let parsed = Cli::try_parse_from(["nib", "doctor", "--fix"]).expect("doctor repair option");
+        let Some(Commands::Doctor(args)) = parsed.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.fix);
+    }
 }
 
 #[derive(Subcommand)]
@@ -61,8 +108,8 @@ enum Commands {
     /// Show the installed version
     Version,
 
-    /// Update this installed release to the current channel build
-    Update,
+    /// Update this installed release, optionally switching release channels
+    Update(updater::UpdateArgs),
 
     /// Start an interactive chat session
     Chat(chat::ChatArgs),
@@ -80,7 +127,7 @@ enum Commands {
     Config(config_cmd::ConfigArgs),
 
     /// Validate config, providers, sandbox, and sessions
-    Doctor,
+    Doctor(doctor::DoctorArgs),
 
     /// Quick demo of tool executor (dev)
     #[command(name = "demo-tool")]
@@ -153,6 +200,14 @@ pub struct TuiArgs {
     /// Optional goal to run immediately in the background
     #[arg(long)]
     pub run: Option<String>,
+
+    /// Resume an existing session for subsequent TUI turns
+    #[arg(short, long)]
+    pub session: Option<String>,
+
+    /// Run the auth wizard before starting the TUI
+    #[arg(long)]
+    pub auth: bool,
 }
 
 fn main() {
@@ -175,7 +230,7 @@ fn main() {
 
     match &cli.command {
         Some(Commands::Version) => version::show_version(),
-        Some(Commands::Update) => match updater::run_update() {
+        Some(Commands::Update(args)) => match updater::run_update(args) {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("Update error: {error}");
@@ -190,7 +245,7 @@ fn main() {
         }
         Some(Commands::Run(args)) => {
             if let Err(error) = run::run_agent(args) {
-                eprintln!("Run error: {error}");
+                eprintln!("{error}");
                 process::exit(1);
             }
         }
@@ -212,8 +267,8 @@ fn main() {
                 process::exit(1);
             }
         }
-        Some(Commands::Doctor) => {
-            if !doctor::run_doctor(&project) {
+        Some(Commands::Doctor(args)) => {
+            if !doctor::run_doctor_with_args(&project, args) {
                 process::exit(1);
             }
         }
@@ -286,7 +341,20 @@ fn main() {
             process::exit(if result.success { 0 } else { 1 });
         }
         Some(Commands::Tui(args)) => {
-            if let Err(e) = nib::tui::run_tui(&project, args.run.clone()) {
+            let needs_auth = match nib::config::load_nib_config_full(&project) {
+                Ok(config) => args.auth || config.llm.providers.is_empty(),
+                Err(error) => {
+                    eprintln!("TUI error: {error}");
+                    process::exit(1);
+                }
+            };
+            if needs_auth {
+                if let Err(error) = auth::run_auth_wizard() {
+                    eprintln!("Auth error: {error}");
+                    process::exit(1);
+                }
+            }
+            if let Err(e) = nib::tui::run_tui(&project, args.run.clone(), args.session.clone()) {
                 eprintln!("TUI error: {e}");
                 process::exit(1);
             }
@@ -384,7 +452,7 @@ fn startup_update_check_is_eligible(command: &Option<Commands>) -> bool {
     !matches!(
         command,
         Some(
-            Commands::Update
+            Commands::Update(_)
                 | Commands::McpServer
                 | Commands::McpStdioRelay
                 | Commands::TaskWorker { .. }

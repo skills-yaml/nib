@@ -8,6 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 pub mod anthropic;
+pub mod error;
 pub mod factory;
 pub mod gemini;
 pub mod mock;
@@ -16,6 +17,7 @@ pub mod registry;
 pub mod responses;
 pub mod types;
 
+pub use error::{LlmError, LlmErrorClass, LlmErrorMetadata, LlmErrorPhase, RetryDisposition};
 pub use factory::{create_client, provider_ready};
 pub use mock::MockLlmClient;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -84,7 +86,7 @@ pub(crate) fn ensure_stream_event_size(bytes: usize, label: &'static str) -> Res
 }
 
 pub(crate) async fn next_stream_item_or_closed<S>(
-    sender: &Sender<Result<StreamEvent, String>>,
+    sender: &Sender<Result<StreamEvent, LlmStreamFailure>>,
     stream: &mut S,
 ) -> Option<S::Item>
 where
@@ -98,19 +100,44 @@ where
 }
 
 pub(crate) async fn send_stream_event(
-    sender: &Sender<Result<StreamEvent, String>>,
-    event: Result<StreamEvent, String>,
+    sender: &Sender<Result<StreamEvent, LlmStreamFailure>>,
+    event: Result<StreamEvent, LlmStreamFailure>,
 ) -> bool {
     sender.send(event).await.is_ok()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum LlmStreamFailure {
+    Protocol(String),
+    Typed(LlmError),
+}
+
+impl From<String> for LlmStreamFailure {
+    fn from(message: String) -> Self {
+        Self::Protocol(message)
+    }
+}
+
+impl From<&str> for LlmStreamFailure {
+    fn from(message: &str) -> Self {
+        Self::Protocol(message.to_string())
+    }
+}
+
+impl From<LlmError> for LlmStreamFailure {
+    fn from(error: LlmError) -> Self {
+        Self::Typed(error)
+    }
+}
+
 pub struct LlmStream {
-    receiver: Receiver<Result<StreamEvent, String>>,
-    private_completion: Option<oneshot::Receiver<Result<LlmResponse, String>>>,
+    receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+    private_completion: Option<oneshot::Receiver<Result<LlmResponse, LlmStreamFailure>>>,
+    error_context: Option<error::LlmErrorContext>,
     content: String,
     tool_calls: ToolCallAccumulator,
     finish_reason: Option<String>,
-    stream_error: Option<String>,
+    stream_error: Option<LlmError>,
     exhausted: bool,
 }
 
@@ -118,6 +145,7 @@ impl std::fmt::Debug for LlmStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmStream")
             .field("private_completion", &self.private_completion.is_some())
+            .field("error_context", &self.error_context)
             .field("content_bytes", &self.content.len())
             .field("finish_reason", &self.finish_reason)
             .field("has_error", &self.stream_error.is_some())
@@ -127,10 +155,13 @@ impl std::fmt::Debug for LlmStream {
 }
 
 impl LlmStream {
-    pub(crate) fn from_public_receiver(receiver: Receiver<Result<StreamEvent, String>>) -> Self {
+    pub(crate) fn from_public_receiver(
+        receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+    ) -> Self {
         Self {
             receiver,
             private_completion: None,
+            error_context: None,
             content: String::new(),
             tool_calls: ToolCallAccumulator::default(),
             finish_reason: None,
@@ -140,13 +171,18 @@ impl LlmStream {
     }
 
     pub(crate) fn with_private_completion(
-        receiver: Receiver<Result<StreamEvent, String>>,
-        completion: oneshot::Receiver<Result<LlmResponse, String>>,
+        receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+        completion: oneshot::Receiver<Result<LlmResponse, LlmStreamFailure>>,
     ) -> Self {
         Self {
             private_completion: Some(completion),
             ..Self::from_public_receiver(receiver)
         }
+    }
+
+    pub(crate) fn with_error_context(mut self, context: error::LlmErrorContext) -> Self {
+        self.error_context = Some(context);
+        self
     }
 
     fn from_response(response: LlmResponse) -> Self {
@@ -183,8 +219,12 @@ impl LlmStream {
         Self::with_private_completion(rx, completion_rx)
     }
 
-    pub async fn recv(&mut self) -> Option<Result<StreamEvent, String>> {
-        let next = self.receiver.recv().await;
+    pub async fn recv(&mut self) -> Option<Result<StreamEvent, Box<LlmError>>> {
+        let next = self
+            .receiver
+            .recv()
+            .await
+            .map(|result| result.map_err(|error| Box::new(self.stream_failure(error))));
         match &next {
             Some(Ok(event)) => {
                 self.tool_calls.push(event);
@@ -196,7 +236,7 @@ impl LlmStream {
             }
             Some(Err(error)) => {
                 if self.stream_error.is_none() {
-                    self.stream_error = Some(error.clone());
+                    self.stream_error = Some((**error).clone());
                 }
             }
             None => self.exhausted = true,
@@ -204,7 +244,7 @@ impl LlmStream {
         next
     }
 
-    pub async fn finish(mut self) -> Result<LlmResponse, String> {
+    pub async fn finish(mut self) -> Result<LlmResponse, LlmError> {
         while !self.exhausted {
             if self.recv().await.is_none() {
                 break;
@@ -216,12 +256,23 @@ impl LlmStream {
         if let Some(completion) = self.private_completion.take() {
             return completion
                 .await
-                .map_err(|_| "provider stream ended without a private completion".to_string())?;
+                .map_err(|_| {
+                    self.stream_failure("provider stream ended without a private completion".into())
+                })?
+                .map_err(|error| self.stream_failure(error));
         }
-        let finish_reason = self
-            .finish_reason
-            .ok_or_else(|| "provider stream ended before a terminal event".to_string())?;
-        let tool_calls = self.tool_calls.finish()?;
+        let finish_reason = match self.finish_reason.take() {
+            Some(reason) => reason,
+            None => {
+                return Err(
+                    self.stream_failure("provider stream ended before a terminal event".into())
+                )
+            }
+        };
+        let tool_calls = match std::mem::take(&mut self.tool_calls).finish() {
+            Ok(tool_calls) => tool_calls,
+            Err(error) => return Err(self.stream_failure(error.into())),
+        };
         Ok(LlmResponse {
             terminal_status: LlmTerminalStatus::Completed,
             content: (!self.content.trim().is_empty()).then_some(self.content),
@@ -229,6 +280,16 @@ impl LlmStream {
             finish_reason,
             continuation: None,
         })
+    }
+
+    fn stream_failure(&self, failure: LlmStreamFailure) -> LlmError {
+        match failure {
+            LlmStreamFailure::Typed(error) => error,
+            LlmStreamFailure::Protocol(message) => match self.error_context.as_ref() {
+                Some(context) => context.protocol(LlmErrorPhase::Stream, message),
+                None => LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Stream, message),
+            },
+        }
     }
 }
 
@@ -426,9 +487,9 @@ where
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String>;
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, LlmError>;
 
-    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, String> {
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
         let response = self.complete(request).await?;
         Ok(LlmStream::from_response(response))
     }

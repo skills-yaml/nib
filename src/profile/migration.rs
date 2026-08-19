@@ -530,7 +530,7 @@ mod tests {
   "id": "z-invalid",
   "messages": [
     {"index": 0, "role": "user", "content": "one"},
-    {"index": 1, "role": "user", "content": "two"}
+    {"index": 1, "role": "tool", "content": "tool without assistant authority"}
   ]
 }"#,
         )

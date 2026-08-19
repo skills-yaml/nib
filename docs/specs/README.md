@@ -23,13 +23,14 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **19 done, 12 development, and 0 backlog**.
+The current lifecycle is **23 done, 14 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
 cleanup within the documented non-malicious-same-UID boundary. T006 remains pending
-separate hosted Windows evidence reconciliation. T010 retains its exact-current remote
-release run. FT-015 retains Windows worktree cleanup/runtime validation and the FT-017
+separate hosted Windows evidence reconciliation. T010 completed its exact-current
+development and production release evidence. FT-015 retains Windows worktree
+cleanup/runtime validation and the FT-017
 platform authority boundary;
 managed Git preflight and Unix namespace-detachment criteria are locally complete under
 the same threat boundary. T020 and FT-016 have complete local stdio MCP lifecycle,
@@ -43,8 +44,18 @@ configuration plus Responses function-tool support.
 T022 is in development for a typed provider-neutral LLM contract, distinct provider
 adapters composed from shared wire codecs, native correlated tool continuation, safe
 terminal/error normalization, and provider conformance gates.
-FT-018 is in development for a verified self-update command and bounded update notices
-on ordinary user-facing launches.
+T023 is in development for credential-gated live qualification across every account-visible
+direct-provider model and a reviewed exact-ID OpenRouter allowlist.
+T024 is in development for source-controlled curated provider model defaults and
+user-configurable per-provider picker lists.
+T025 completed interactive chat/TUI capability parity. T026 is in development for
+actionable, redaction-safe LLM failure propagation and native console/TUI presentation.
+T027 completed a doctor-diagnosed, explicitly invoked repair of canonical OpenAI
+tool/reasoning workloads that still use Chat Completions.
+T029 is in development for explicit, verified switching between production and
+development self-update channels from an already managed installation.
+FT-018 completed the verified self-update command, bounded update notices, Windows
+in-use replacement, and four-platform production rollout.
 
 Each audited file has an `Implementation Reconciliation (2026-07-15)` section that
 supersedes older proposal text. Later dated remediation sections and their unchecked
@@ -63,13 +74,19 @@ work or narrower guarantees.
 - [T007: Configuration and Doctor](development/T007_configuration_schema_alignment_and_nib_doctor_validation.md)
 - [T008: End-to-End Validation](done/T008_end_to_end_tests_and_sequence_diagram_validation.md)
 - [T009: Rust Module Layout and TOML Config](done/T009_rust_module_layout_and_toml_config.md)
-- [T010: Release Process](development/T010_release_process.md)
+- [T010: Release Process](done/T010_release_process.md)
 - [T011: End-User Documentation](done/T011_end_user_documentation.md)
 - [T012: Toolset Expansion](done/T012_toolset_expansion.md)
 - [T018: ratatui Approval Flow](done/T018_ratatui_tui_approval.md)
 - [T020: MCP Client Integration](development/T020_mcp_client_integration.md)
 - [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
 - [T022: Provider-Neutral LLM Contract and Adapter Conformance](development/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
+- [T023: Live LLM Provider and Model Integration Qualification](development/T023_live_llm_provider_model_integration_qualification.md)
+- [T024: Configurable Provider Model Catalog and Curated Defaults](development/T024_configurable_provider_model_catalog_and_curated_defaults.md)
+- [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
+- [T026: Actionable, Redaction-Safe LLM Failure Reporting](development/T026_actionable_redaction_safe_llm_failure_reporting.md)
+- [T027: Doctor-Guided OpenAI Transport Repair](done/T027_doctor_guided_openai_transport_repair.md)
+- [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
 
 ### Feature specs
 
@@ -86,7 +103,7 @@ work or narrower guarantees.
 - [FT-015: Subagent Delegation](development/ft_015_subagent_delegation.md)
 - [FT-016: MCP Server Exposure](development/ft_016_mcp_server_exposure.md)
 - [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
-- [FT-018: Self-Update Command and Update Availability Notices](development/ft_018_self_update_and_update_notifications.md)
+- [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
 
 ## Current Local Validation (2026-07-16)
 

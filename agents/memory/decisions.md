@@ -242,3 +242,21 @@ completed plans fail closed and are reconciled rather than inheriting stale auth
 Audit evidence is mandatory even for otherwise sessionless executor calls, but the
 profile-scoped implicit session is evidence-only. Operational authority for plans,
 schedules, and background work must always come from an explicit trusted session.
+
+## 2026-08-19 - Make self-update channel switching explicit and binary-owned
+
+- Type: decision
+- Source: user + T029
+- Confidence: high
+- Review: none
+- Supersedes: FT-018 channel switching non-goal
+
+Content:
+
+Official managed builds may explicitly switch between the production and development
+rolling channels with `nib update --channel prod|development`. The selected channel is
+not stored in project or global configuration; the fully verified replacement binary's
+embedded identity controls subsequent option-free updates and startup notices. A
+different requested channel must replace the binary even when both manifests name the
+same commit. Local/source, unsupported, non-writable, and ambiguous installations
+remain installer-managed, and repository/tag selection remains compile-time controlled.

@@ -7,7 +7,10 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-pub async fn generate_plan(llm: &Arc<dyn LlmClient>, goal: &str) -> Result<Plan, String> {
+pub async fn generate_plan(
+    llm: &Arc<dyn LlmClient>,
+    goal: &str,
+) -> Result<Plan, crate::llm::LlmError> {
     generate_plan_with_events(llm, goal, None).await
 }
 
@@ -15,7 +18,7 @@ pub async fn generate_plan_with_events(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
     event_tx: Option<&Sender<StreamEvent>>,
-) -> Result<Plan, String> {
+) -> Result<Plan, crate::llm::LlmError> {
     generate_plan_with_events_bounded(llm, goal, event_tx, 128_000).await
 }
 
@@ -24,7 +27,7 @@ pub async fn generate_plan_with_events_bounded(
     goal: &str,
     event_tx: Option<&Sender<StreamEvent>>,
     context_length: usize,
-) -> Result<Plan, String> {
+) -> Result<Plan, crate::llm::LlmError> {
     let context = RuntimeContextSections {
         agents: String::new(),
         task: goal.to_string(),
@@ -44,7 +47,7 @@ pub async fn generate_plan_with_context_events_bounded(
     session: Option<&crate::session::Session>,
     event_tx: Option<&Sender<StreamEvent>>,
     context_length: usize,
-) -> Result<Plan, String> {
+) -> Result<Plan, crate::llm::LlmError> {
     generate_plan_with_context_events_bounded_scoped(
         llm,
         goal,
@@ -65,9 +68,9 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
     event_tx: Option<&Sender<StreamEvent>>,
     context_length: usize,
     scope: Option<LlmRequestScope>,
-) -> Result<Plan, String> {
+) -> Result<Plan, crate::llm::LlmError> {
     if goal.trim().is_empty() {
-        return Err("cannot plan an empty goal".to_string());
+        return Err("cannot plan an empty goal".into());
     }
 
     let tools = json!([{
@@ -108,13 +111,13 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
         LlmRequest::new(&bounded.messages, bounded.tools.as_deref(), 0.3).with_scope(scope);
     let mut stream = llm.stream(request).await?;
     while let Some(result) = stream.recv().await {
-        let event = result?;
+        let event = result.map_err(|error| *error)?;
         if let Some(tx) = event_tx.filter(|_| matches!(&event, StreamEvent::Content(_))) {
             let _ = tx.send(event).await;
         }
     }
     let completed = stream.finish().await?;
-    plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default())
+    plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default()).map_err(Into::into)
 }
 
 pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<Plan, String> {
@@ -194,7 +197,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmClient for RecordingPlannerLlm {
-        async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, String> {
+        async fn complete(
+            &self,
+            request: LlmRequest<'_>,
+        ) -> Result<LlmResponse, crate::llm::LlmError> {
             *self.request.lock().expect("request lock") = Some((
                 request.messages.to_vec(),
                 request.tools.map(<[Value]>::to_vec),
