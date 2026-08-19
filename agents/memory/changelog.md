@@ -286,7 +286,7 @@ and then completed an option-free production no-op. T029 remains in development 
 the new command is published to production and the reverse production-to-development
 switch is proven.
 
-## 2026-08-19 - Interactive plain/TUI parity completed locally
+## 2026-08-19 - Interactive plain/TUI parity completed
 
 - Type: implementation / validation milestone
 - Source: user + T028 + T030
@@ -302,8 +302,10 @@ current-session-first, and late events remain bound to their launch session. `ni
 `nib chat` use one automatic interactive launcher with `--plain` and `--tui` overrides;
 `nib tui` is a compatibility alias and `nib run` remains one-shot.
 
-T028 moved to `done`. T030 remains in development pending exact hosted Windows and
-macOS validation. Local evidence includes green `task check`, independent `task test`,
+T028 moved to `done`. T030 moved to `done` after hosted PR run `32312998166` passed the
+exact implementation revision on Linux, macOS, and Windows, including both native
+release-binary smoke jobs and the Windows pseudoterminal probe. Local evidence includes
+green `task check`, independent `task test`,
 `task check:all-targets`, all five documentation checks, 84.18 percent runtime line
 coverage (67,105/79,718), the locked release build, and Linux release-binary smoke for
 plain/TUI selection, approval, question, completion, session switching, cancellation,
