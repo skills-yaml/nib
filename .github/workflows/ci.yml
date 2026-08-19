@@ -61,6 +61,9 @@ jobs:
       - name: Build release binary
         run: task build
 
+      - name: Smoke unified interactive launcher
+        run: task smoke:interactive
+
       - name: Smoke managed-process owner loss
         run: task smoke:managed-process
 

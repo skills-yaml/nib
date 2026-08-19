@@ -15,4 +15,4 @@ nib auth
 
 echo ""
 echo "First-time setup complete."
-echo "Next: cd to a project and run 'nib chat' or 'nib run \"your goal\"'"
+echo "Next: cd to a project and run 'nib' or 'nib run \"your goal\"'"

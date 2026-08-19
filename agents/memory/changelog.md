@@ -267,3 +267,46 @@ build, and diff validation passed locally. The first coverage attempt exposed a
 transient unrelated Linux managed-process recovery failure; the exact test passed in
 both normal suites and the final instrumented rerun. T029 remains in development
 pending exact native hosted CI and a real managed cross-channel round trip.
+
+## 2026-08-19 - T029 development channel release published
+
+- Type: release / validation milestone
+- Source: PR #21, hosted CI, release run, and public artifact smoke
+- Confidence: high
+- Review: hosted Linux, Windows, macOS, and release transaction
+
+Content:
+
+PR #21 passed hosted CI and merged to `development` as
+`c7ee849c669c9e93ec96281a602f928ae31a23cb`. Release run `32256869402` published the
+complete nine-asset `development-latest` prerelease for all four supported native
+targets. A public Linux archive passed its checksum, reported the exact development
+identity, switched through `nib update --channel prod` to production commit `79ea99d`,
+and then completed an option-free production no-op. T029 remains in development until
+the new command is published to production and the reverse production-to-development
+switch is proven.
+
+## 2026-08-19 - Interactive plain/TUI parity completed locally
+
+- Type: implementation / validation milestone
+- Source: user + T028 + T030
+- Confidence: high
+- Review: independent spec-compliance and code-quality self-reviews
+
+Content:
+
+Plain and full-screen interaction now share one command registry, bounded completion,
+session projection, strict preview-confirm switching, model/provider, skill, MCP,
+approval, question, streaming, cancellation, and reconciliation contracts. The TUI is
+current-session-first, and late events remain bound to their launch session. `nib` and
+`nib chat` use one automatic interactive launcher with `--plain` and `--tui` overrides;
+`nib tui` is a compatibility alias and `nib run` remains one-shot.
+
+T028 moved to `done`. T030 remains in development pending exact hosted Windows and
+macOS validation. Local evidence includes green `task check`, independent `task test`,
+`task check:all-targets`, all five documentation checks, 84.18 percent runtime line
+coverage (67,105/79,718), the locked release build, and Linux release-binary smoke for
+plain/TUI selection, approval, question, completion, session switching, cancellation,
+workload routing, and terminal restoration. One independent-suite attempt hit an
+unrelated namespace-recovery timing assertion; that exact test passed in the preceding
+canonical suite, the clean rerun, and the instrumented coverage suite.

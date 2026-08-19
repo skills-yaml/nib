@@ -121,7 +121,7 @@ option.
       update behavior.
 - [ ] `nib update --channel development` from a managed production build validates and
       installs only the `development-latest` artifact set.
-- [ ] `nib update --channel prod` from a managed development build validates and
+- [x] `nib update --channel prod` from a managed development build validates and
       installs only the `prod-latest` artifact set.
 - [x] `production` and `dev` aliases resolve to the canonical channels, while unknown
       values are rejected by CLI parsing before updater execution.
@@ -210,8 +210,9 @@ model, sessions, LLM transports, tools, and TUI are not modified.
 ## Completion State
 
 Development. The CLI, target-channel routing, same-commit switching, safety boundaries,
-tests, and documentation are implemented and locally validated. Native hosted and real
-managed cross-channel evidence remain required before transition to `done`.
+tests, and documentation are implemented and validated. The development release and a
+real development-to-production switch are proven. Production publication and the
+production-to-development direction remain required before transition to `done`.
 
 ## Development Validation Snapshot (2026-08-19)
 
@@ -244,3 +245,24 @@ managed cross-channel evidence remain required before transition to `done`.
   download/verification slice was separated for deterministic target-channel path
   testing; unmanaged identity is still rejected before transport construction, and no
   configuration or arbitrary release URL was introduced.
+
+## Development Release Evidence (2026-08-19)
+
+- PR [#21](https://github.com/skills-yaml/nib/pull/21) passed exact-head Linux,
+  Windows, and macOS CI in run
+  [32254879268](https://github.com/skills-yaml/nib/actions/runs/32254879268) before
+  merging to `development` as `c7ee849c669c9e93ec96281a602f928ae31a23cb`.
+- Development release run
+  [32256869402](https://github.com/skills-yaml/nib/actions/runs/32256869402) built,
+  packaged, checksummed, and published the Linux, Windows, macOS Intel, and macOS Apple
+  Silicon artifacts. The public nine-asset `development-latest` Release is a prerelease
+  whose strict manifest names the exact merge commit.
+- A freshly downloaded Linux archive passed its published SHA-256 checksum, reported
+  `development` and the exact merge commit, and documented the bounded channel values.
+  From that managed executable, `nib update --channel prod` reported an exact
+  development-to-production switch to `79ea99d`; the replacement reported its embedded
+  production identity and a subsequent option-free `nib update` was a successful no-op.
+- The current production binary predates this option, so the reverse managed
+  production-to-development switch cannot be exercised until the production release is
+  approved and published. That direction and final startup-following evidence remain
+  open.

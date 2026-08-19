@@ -50,7 +50,7 @@ User / Workload Owner
         │
         ▼
 ┌──────────────────────────────┐
-│         CLI (Rust) / TUI     │  (clap / ratatui)
+│ Unified Interactive Launcher │  (clap; plain / ratatui modes)
 └──────────────┬───────────────┘
                │
                ▼
@@ -128,12 +128,15 @@ User / Workload Owner
 - `src/sandbox/worktree.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
 - `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, events, tool audit, profile-scoped persistence, and bounded profile memory.
 - `src/tools/{mod.rs,classifier.rs,models.rs,registry.rs,executor.rs,core.rs,delegation.rs}` — Tool contracts and metadata, classification, the central approval/policy/sandbox gate, built-in tools, and linked-subagent lifecycle.
-- `src/tui/mod.rs` — Ratatui session browser and streamed interactive execution UI.
+- `src/tui/mod.rs` — Current-session-first Ratatui renderer, terminal preflight and
+  restoration boundary, overlays, completion, and streamed execution UI.
 
 ### Binary Module Map
 
-- `src/main.rs` — Clap command model, runtime setup, hidden worker/relay entry points, and top-level dispatch.
-- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, interactive chat, and one-shot agent execution.
+- `src/main.rs` — Clap command model, no-subcommand interactive dispatch, compatibility
+  aliases, runtime setup, and hidden worker/relay entry points.
+- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, the unified
+  interactive launcher with its plain renderer, and unchanged one-shot execution.
 - `src/console.rs` — Shared blocking/async console input plus approval and question handlers used by CLI flows.
 - `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.
 - `src/mcp_cmd.rs`, `src/skill_cmd.rs`, and `src/task_cmd.rs` — MCP server configuration, skill inventory/install/remove operations, and durable task management.
@@ -145,7 +148,10 @@ User / Workload Owner
 
 1. **Intake / Activation**
    - User creates or resumes a session in the selected profile store.
-   - Console/TUI input enters directly; external messaging adapters authenticate and receive provider traffic before passing a payload to the normalized gateway.
+   - The interactive launcher resolves plain or TUI presentation before authentication,
+     session creation, or workload execution. Native input then enters through the
+     selected renderer; external messaging adapters authenticate and receive provider
+     traffic before passing a payload to the normalized gateway.
    - Context + prompt builder assembles AGENTS.md, project documentation, skills,
      profile memory, workload state, recent history, and tool schemas within one
      aggregate model-context budget.
@@ -168,14 +174,15 @@ User / Workload Owner
    - Reconciliation advances or blocks the persisted plan and records the final outcome.
 
 5. **Visibility**
-   - CLI/TUI shows live session history, tool calls (with boundaries/approvals), and loop state.
+   - The selected plain or TUI renderer shows live session history, tool calls (with
+     boundaries/approvals), and loop state.
 
 ### Sequence Diagram of Interactions
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant C as CLI / Chat
+    participant C as Interactive CLI
     participant L as Agent Loop
     participant Cx as Context Engine
     participant M as MCP Manager
