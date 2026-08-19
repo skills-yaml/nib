@@ -317,53 +317,88 @@ In a normal Git checkout, edits remain in a `nib/session/*` branch under
 `.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
 running inside a linked worktree, edits remain in that worktree.
 
-### Interactive Chat
+### Interactive Session
 
 ```bash
-nib chat
-nib chat --session <id>
-nib chat --auth
+nib                              # automatic TUI/plain selection
+nib --session <id>
+nib --auth
+nib --run "Inspect the failing tests"
+nib --plain                      # force line-oriented presentation
+nib --tui                        # force the full-screen presentation
 ```
 
-Chat commands:
+`nib` is the canonical interactive launcher. It selects the full-screen TUI when input
+and output are terminals with supported capabilities and otherwise uses plain mode.
+`--plain` and `--tui` are mutually exclusive explicit overrides. `nib chat` accepts
+the same options and launches the same product; `nib tui` remains a compatibility
+alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
+
+Both presentation modes expose these commands:
 
 - `/model` or `/model <name>` lists or selects a model.
 - `/providers` lists configured providers.
-- `/session` prints the active session; `/clear` switches to a new session.
+- `/session` opens bounded preview-and-confirm session selection; `/clear` switches to
+  a new session.
 - `/skills list|install|remove` manages skills.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
 
-Agent questions share chat's input stream: answer with the displayed option number or
-typed text, then continue entering chat commands after the agent turn completes.
-Model text, tool lifecycle events, and reconciliation status stream while each turn is
-running.
+#### Plain mode
 
-### TUI
+Plain mode presents the interactive session as a line-oriented prompt. Agent questions
+share its input stream: answer with the displayed option number or typed text, then
+continue entering commands after the agent turn completes. Model text, tool lifecycle
+events, and reconciliation status stream while each turn is running.
+
+An incomplete slash-command prefix opens a bounded numbered completion prompt sourced
+from the shared command registry. Select a command or fixed subcommand by number; plain
+mode asks separately for any required free-form argument. `/session` accepts a
+displayed number or exact session ID, shows the shared bounded preview, and requires
+`y` confirmation before the active session changes. Cancelling either prompt leaves
+the active session unchanged, and incomplete slash commands never become agent goals.
+
+#### Full-screen TUI
 
 ```bash
-nib tui
-nib tui --run "Inspect the failing tests and fix them"
-nib tui --session <id>
-nib tui --auth
+nib --tui
+nib --tui --run "Inspect the failing tests and fix them"
+nib --tui --session <id>
+nib tui                            # compatibility alias
 ```
 
-The TUI opens with a composer for repeated agent turns in the active session. It
-supports the same `/model`, `/providers`, `/session`, `/clear`, `/skills`, `/mcp`,
-`/help`, and exit commands as chat. `--run` submits an initial goal; `--session`
-resumes an existing session, and `--auth` runs authentication before raw mode starts.
+The TUI opens on the active session timeline, with its bounded persisted conversation,
+plan, tool, and lifecycle history above the composer. Historical sessions are not a
+permanent pane. It supports the same `/model`, `/providers`, `/session`, `/clear`,
+`/skills`, `/mcp`, `/help`, and exit commands as plain mode. `--run` submits an initial goal;
+`--session` hydrates an existing session before input is accepted, and `--auth` runs
+authentication before raw mode starts.
 
 Streamed model output and tool lifecycle events appear live. Calls that still require
 interactive approval open a modal showing the tool and arguments; press `Y` to
 approve, `N` or `Esc` to deny. `ask_question` opens a selectable or typed-response
 modal and resumes the same loop.
 
-The composer has focus initially. Press `Enter` to submit, `Tab` to focus the session
-browser, and `Esc` to clear the draft. In the session browser, use arrow keys to
-select, `Enter` to inspect, `R` to resume the selected session, and `Tab` to return to
-the composer. `Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or
-`/quit` also exits. Presentation differs between line mode and the TUI, but their
-interactive agent and management capabilities are shared.
+The composer has focus initially. A slash-command prefix opens bounded completion from
+the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
+insert, and `Esc` to close completion without clearing the draft. `Enter` retains its
+normal submit behavior; unknown and incomplete slash commands remain in the composer
+and show an error instead of becoming agent goals.
+
+Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
+and typing an exact session ID can preview an older session omitted from the bounded
+list. `Enter` first loads that exact preview when present, then opens a separate
+confirmation naming the current and target sessions; `Esc` cancels without changing
+the session. A confirmed resume re-reads persisted state
+and replaces the complete visible timeline; it cannot mix the previous session's live
+events into the resumed one. A missing or corrupt target leaves the current session
+active. Switching is rejected while an agent worker is running. `/clear` uses the same
+full-view replacement boundary for its new session.
+
+Approval, question, model, and session overlays take input before command completion.
+`Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or `/quit` also
+exits. Presentation differs between plain mode and the TUI, but their agent, session,
+completion, and management capabilities are shared.
 
 ### Skills
 
@@ -588,8 +623,8 @@ and arbitrary metadata are intentionally omitted. The stable outcome and safe ty
 fields are available in the session's reconciliation event under
 `.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
 persisted. `nib doctor` shows the resolved local provider and transport without making
-a paid provider request. Chat remains available for another command after a safely
-reconciled failure; `nib run` exits nonzero.
+a paid provider request. The interactive session remains available for another command
+after a safely reconciled failure; `nib run` exits nonzero.
 
 Official release builds update within their embedded rolling channel:
 

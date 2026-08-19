@@ -260,3 +260,21 @@ embedded identity controls subsequent option-free updates and startup notices. A
 different requested channel must replace the binary even when both manifests name the
 same commit. Local/source, unsupported, non-writable, and ambiguous installations
 remain installer-managed, and repository/tag selection remains compile-time controlled.
+
+## 2026-08-19 - Treat plain and TUI as presentations of one interactive product
+
+- Type: decision
+- Source: user + T028 + T030
+- Confidence: high
+- Review: none
+- Supersedes: 2026-06-20 chat-only `/model` capability and the separate chat/TUI product model
+
+Content:
+
+The line-oriented and full-screen interfaces must expose the same interactive agent,
+session, command, model/provider, skill, MCP, approval, question, cancellation, and
+reconciliation capabilities. Presentation and controls may remain native to each mode.
+`nib` is the canonical interactive launcher, automatically selecting the TUI on a
+capable terminal and plain mode otherwise; `--plain` and `--tui` force a presentation.
+`nib chat` uses the same launcher, `nib tui` remains a compatibility alias, and
+`nib run` retains its separate one-shot automation contract.

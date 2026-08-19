@@ -40,6 +40,7 @@ tasks:
       - sh -n scripts/first-time-setup.sh
       - bash -n scripts/publish-release.sh
       - bash -n scripts/qualify-release-update.sh
+      - bash -n scripts/check-interactive-release.sh
       - bash -n scripts/check-managed-process-release.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.ps1
@@ -204,6 +205,13 @@ tasks:
     cmds:
       - task: build
       - scripts/check-managed-process-release.sh
+
+  smoke:interactive:
+    desc: Exercise the release interactive launcher in redirected and Linux PTY modes
+    platforms: [linux]
+    cmds:
+      - task: build
+      - scripts/check-interactive-release.sh
 
   dev:
     desc: Quick dev check (Rust-only core)
