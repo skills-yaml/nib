@@ -167,6 +167,10 @@ development-channel run and its published artifacts are inspected.
 Official release builds expose `nib update`. It compares the embedded build commit with
 the selected rolling channel manifest, reports a successful no-op when current, and
 otherwise downloads, verifies, smokes, and safely replaces the current executable.
+`nib update --channel prod|development` explicitly selects the other compile-time
+controlled rolling channel; the verified replacement binary's embedded identity makes
+that selection authoritative for later option-free updates and startup checks. A
+different requested channel is installed even when both channels name the same commit.
 Local/source builds remain installer-managed. Eligible user-facing commands perform a
 bounded, read-only startup check; `NIB_NO_UPDATE_CHECK=1` disables it, and protocol or
 worker commands never emit update notices.

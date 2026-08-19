@@ -43,6 +43,17 @@ production or development channel with:
 nib update
 ```
 
+An official managed installation can explicitly switch rolling channels. The verified
+replacement binary remembers the new channel for later option-free updates:
+
+```bash
+nib update --channel development
+nib update --channel prod
+```
+
+`production` and `dev` are accepted aliases. Local/source builds and unmanaged
+installations must still use the installer for the intended channel.
+
 **Windows (PowerShell)**
 
 ```powershell

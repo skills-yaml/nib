@@ -1,3 +1,4 @@
+use clap::{Args, ValueEnum};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::{Attempt, Policy};
 use reqwest::Url;
@@ -61,6 +62,21 @@ const RELEASE_ARCHIVES: [&str; 4] = [
     "nib-windows-x86_64.zip",
 ];
 
+#[derive(Debug, Clone, Args)]
+pub struct UpdateArgs {
+    /// Switch to a release channel before following it for future updates
+    #[arg(long, value_enum)]
+    pub channel: Option<UpdateChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UpdateChannel {
+    #[value(alias = "production")]
+    Prod,
+    #[value(alias = "dev")]
+    Development,
+}
+
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error(
@@ -118,6 +134,15 @@ impl ReleaseChannel {
         match self {
             Self::Prod => "prod-latest",
             Self::Development => "development-latest",
+        }
+    }
+}
+
+impl From<UpdateChannel> for ReleaseChannel {
+    fn from(value: UpdateChannel) -> Self {
+        match value {
+            UpdateChannel::Prod => Self::Prod,
+            UpdateChannel::Development => Self::Development,
         }
     }
 }
@@ -349,23 +374,32 @@ impl Transport {
     }
 }
 
-pub fn run_update() -> Result<String, UpdateError> {
+pub fn run_update(args: &UpdateArgs) -> Result<String, UpdateError> {
     let current = managed_current_identity()?;
+    let target_channel = args
+        .channel
+        .map(ReleaseChannel::from)
+        .unwrap_or(current.channel);
     let transport = Transport::update()?;
-    let manifest = fetch_manifest(&transport, current.channel)?;
-    match classify(current, &manifest)? {
+    let manifest = fetch_manifest(&transport, target_channel)?;
+    match classify(current, target_channel, &manifest)? {
         Availability::Current(identity) => {
             Ok(format!("nib is already up to date: {}", identity.display()))
         }
         Availability::Available { current, latest } => {
-            install_available_update(&transport, &manifest, &current, &latest)?;
-            Ok(format!(
-                "Updated nib: {} -> {}",
-                current.display(),
-                latest.display()
-            ))
+            install_available_update(&transport, &manifest, &latest)?;
+            Ok(completed_update_message(&current, &latest))
         }
     }
+}
+
+fn completed_update_message(current: &BuildIdentity, latest: &BuildIdentity) -> String {
+    let action = if current.channel != latest.channel {
+        "Switched nib channel"
+    } else {
+        "Updated nib"
+    };
+    format!("{action}: {} -> {}", current.display(), latest.display())
 }
 
 pub fn maybe_print_startup_notice() {
@@ -381,7 +415,8 @@ pub fn maybe_print_startup_notice() {
     let Ok(manifest) = fetch_manifest(&transport, current.channel) else {
         return;
     };
-    let Ok(availability) = classify(current, &manifest) else {
+    let channel = current.channel;
+    let Ok(availability) = classify(current, channel, &manifest) else {
         return;
     };
     if let Some(notice) = startup_notice(&availability) {
@@ -459,7 +494,7 @@ fn parse_manifest(
     }
     if manifest.channel != expected_channel.as_str() || manifest.tag != expected_channel.tag() {
         return Err(UpdateError::InvalidRelease(
-            "manifest channel or tag does not match the installed channel".to_string(),
+            "manifest channel or tag does not match the selected channel".to_string(),
         ));
     }
     if !is_valid_version(&manifest.version) {
@@ -497,10 +532,11 @@ fn parse_manifest(
 
 fn classify(
     current: BuildIdentity,
+    target_channel: ReleaseChannel,
     manifest: &ReleaseManifest,
 ) -> Result<Availability, UpdateError> {
     let latest = BuildIdentity {
-        channel: current.channel,
+        channel: target_channel,
         version: manifest.version.clone(),
         commit: manifest.commit.clone(),
     };
@@ -510,16 +546,16 @@ fn classify(
                 "the current commit has conflicting package versions".to_string(),
             ));
         }
-        Ok(Availability::Current(current))
-    } else {
-        Ok(Availability::Available { current, latest })
+        if current.channel == latest.channel {
+            return Ok(Availability::Current(current));
+        }
     }
+    Ok(Availability::Available { current, latest })
 }
 
 fn install_available_update(
     transport: &Transport,
     manifest: &ReleaseManifest,
-    current: &BuildIdentity,
     latest: &BuildIdentity,
 ) -> Result<(), UpdateError> {
     let target = std::env::current_exe().map_err(|error| {
@@ -556,24 +592,7 @@ fn install_available_update(
     let asset_name = current_asset_name().ok_or_else(|| UpdateError::UnsupportedPlatform {
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
     })?;
-    let asset = manifest.assets.get(asset_name).ok_or_else(|| {
-        UpdateError::InvalidRelease("manifest omitted this platform archive".to_string())
-    })?;
-    let archive = transport.fetch(current.channel, asset_name, MAX_ARCHIVE_BYTES)?;
-    if archive.len() as u64 != asset.size {
-        return Err(UpdateError::InvalidArchive(
-            "downloaded archive size does not match the manifest".to_string(),
-        ));
-    }
-    let checksum_name = format!("{asset_name}.sha256");
-    let checksum = transport.fetch(current.channel, &checksum_name, MAX_CHECKSUM_BYTES)?;
-    let checksum_digest = parse_checksum(&checksum, asset_name)?;
-    let archive_digest = hex_sha256(&archive);
-    if checksum_digest != asset.sha256 || archive_digest != asset.sha256 {
-        return Err(UpdateError::InvalidArchive(
-            "manifest, checksum asset, and archive digest do not agree".to_string(),
-        ));
-    }
+    let archive = fetch_verified_archive(transport, manifest, latest, asset_name)?;
 
     let binary = extract_binary(asset_name, &archive)?;
     let staging = tempfile::Builder::new()
@@ -609,6 +628,33 @@ fn install_available_update(
     sync_parent(parent)?;
     drop(lock);
     Ok(())
+}
+
+fn fetch_verified_archive(
+    transport: &Transport,
+    manifest: &ReleaseManifest,
+    latest: &BuildIdentity,
+    asset_name: &str,
+) -> Result<Vec<u8>, UpdateError> {
+    let asset = manifest.assets.get(asset_name).ok_or_else(|| {
+        UpdateError::InvalidRelease("manifest omitted this platform archive".to_string())
+    })?;
+    let archive = transport.fetch(latest.channel, asset_name, MAX_ARCHIVE_BYTES)?;
+    if archive.len() as u64 != asset.size {
+        return Err(UpdateError::InvalidArchive(
+            "downloaded archive size does not match the manifest".to_string(),
+        ));
+    }
+    let checksum_name = format!("{asset_name}.sha256");
+    let checksum = transport.fetch(latest.channel, &checksum_name, MAX_CHECKSUM_BYTES)?;
+    let checksum_digest = parse_checksum(&checksum, asset_name)?;
+    let archive_digest = hex_sha256(&archive);
+    if checksum_digest != asset.sha256 || archive_digest != asset.sha256 {
+        return Err(UpdateError::InvalidArchive(
+            "manifest, checksum asset, and archive digest do not agree".to_string(),
+        ));
+    }
+    Ok(archive)
 }
 
 fn validate_target_path(target: &Path) -> Result<(), UpdateError> {
@@ -1701,7 +1747,7 @@ mod tests {
         )
         .expect("current manifest");
         assert!(matches!(
-            classify(current.clone(), &current_manifest),
+            classify(current.clone(), ReleaseChannel::Prod, &current_manifest),
             Ok(Availability::Current(_))
         ));
         let next_manifest = parse_manifest(
@@ -1710,7 +1756,7 @@ mod tests {
         )
         .expect("next manifest");
         assert!(matches!(
-            classify(current, &next_manifest),
+            classify(current, ReleaseChannel::Prod, &next_manifest),
             Ok(Availability::Available { .. })
         ));
         let available = classify(
@@ -1719,6 +1765,7 @@ mod tests {
                 version: "0.1.0".to_string(),
                 commit: current_commit,
             },
+            ReleaseChannel::Prod,
             &next_manifest,
         )
         .expect("available update");
@@ -1732,6 +1779,86 @@ mod tests {
             commit: latest_commit,
         }))
         .is_none());
+    }
+
+    #[test]
+    fn channel_switch_is_available_even_when_commit_is_unchanged() {
+        let commit = "1".repeat(40);
+        let current = BuildIdentity {
+            channel: ReleaseChannel::Prod,
+            version: "0.1.0".to_string(),
+            commit: commit.clone(),
+        };
+        let development_manifest = parse_manifest(
+            &manifest(ReleaseChannel::Development, &commit),
+            ReleaseChannel::Development,
+        )
+        .expect("development manifest");
+
+        let availability = classify(
+            current.clone(),
+            ReleaseChannel::Development,
+            &development_manifest,
+        )
+        .expect("channel switch");
+        assert_eq!(
+            availability,
+            Availability::Available {
+                current,
+                latest: BuildIdentity {
+                    channel: ReleaseChannel::Development,
+                    version: "0.1.0".to_string(),
+                    commit,
+                },
+            }
+        );
+        let Availability::Available { current, latest } = availability else {
+            panic!("expected channel switch");
+        };
+        assert_eq!(
+            completed_update_message(&current, &latest),
+            "Switched nib channel: 0.1.0 (prod, 1111111) -> 0.1.0 (development, 1111111)"
+        );
+    }
+
+    #[test]
+    fn within_channel_update_retains_update_output() {
+        let current = BuildIdentity {
+            channel: ReleaseChannel::Prod,
+            version: "0.1.0".to_string(),
+            commit: "1".repeat(40),
+        };
+        let latest = BuildIdentity {
+            channel: ReleaseChannel::Prod,
+            version: "0.2.0".to_string(),
+            commit: "2".repeat(40),
+        };
+
+        assert_eq!(
+            completed_update_message(&current, &latest),
+            "Updated nib: 0.1.0 (prod, 1111111) -> 0.2.0 (prod, 2222222)"
+        );
+    }
+
+    #[test]
+    fn same_commit_with_conflicting_version_fails_for_channel_switch() {
+        let commit = "1".repeat(40);
+        let current = BuildIdentity {
+            channel: ReleaseChannel::Prod,
+            version: "0.1.0".to_string(),
+            commit: commit.clone(),
+        };
+        let mut manifest = parse_manifest(
+            &manifest(ReleaseChannel::Development, &commit),
+            ReleaseChannel::Development,
+        )
+        .expect("development manifest");
+        manifest.version = "0.2.0".to_string();
+
+        assert!(matches!(
+            classify(current, ReleaseChannel::Development, &manifest),
+            Err(UpdateError::InvalidRelease(_))
+        ));
     }
 
     #[test]
@@ -2218,13 +2345,13 @@ mod tests {
     }
 
     #[test]
-    fn bounded_transport_fetches_a_local_manifest() {
+    fn bounded_transport_fetches_the_requested_channel_manifest() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("local server");
         let address = listener.local_addr().expect("server address");
-        let body = manifest(ReleaseChannel::Prod, &"1".repeat(40));
+        let body = manifest(ReleaseChannel::Development, &"1".repeat(40));
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request");
-            consume_request(&mut stream);
+            let path = read_request_path(&mut stream);
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2232,17 +2359,88 @@ mod tests {
             )
             .expect("response headers");
             stream.write_all(&body).expect("response body");
+            path
         });
         let base = Url::parse(&format!("http://{address}/")).expect("base URL");
         let transport = Transport::for_test(base, Duration::from_secs(2));
-        let fetched = fetch_manifest(&transport, ReleaseChannel::Prod).expect("manifest fetch");
+        let fetched = fetch_manifest(&transport, ReleaseChannel::Development)
+            .expect("development manifest fetch");
         assert_eq!(fetched.commit, "1".repeat(40));
-        server.join().expect("server");
+        assert_eq!(
+            server.join().expect("server"),
+            "/development-latest/nib-release.json"
+        );
     }
 
-    fn consume_request(stream: &mut TcpStream) {
+    #[test]
+    fn verified_archive_and_checksum_follow_the_target_channel() {
+        let asset_name = current_asset_name().expect("supported test platform");
+        let archive = b"target-channel-archive".to_vec();
+        let digest = hex_sha256(&archive);
+        let checksum = format!("{digest}  {asset_name}\n").into_bytes();
+        let mut parsed_manifest = parse_manifest(
+            &manifest(ReleaseChannel::Development, &"2".repeat(40)),
+            ReleaseChannel::Development,
+        )
+        .expect("development manifest");
+        parsed_manifest.assets.insert(
+            asset_name.to_string(),
+            ReleaseAsset {
+                sha256: digest,
+                size: archive.len() as u64,
+            },
+        );
+        let latest = BuildIdentity {
+            channel: ReleaseChannel::Development,
+            version: parsed_manifest.version.clone(),
+            commit: parsed_manifest.commit.clone(),
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("local server");
+        let address = listener.local_addr().expect("server address");
+        let archive_response = archive.clone();
+        let server = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for response in [archive_response, checksum] {
+                let (mut stream, _) = listener.accept().expect("request");
+                paths.push(read_request_path(&mut stream));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .expect("response headers");
+                stream.write_all(&response).expect("response body");
+            }
+            paths
+        });
+        let base = Url::parse(&format!("http://{address}/")).expect("base URL");
+        let transport = Transport::for_test(base, Duration::from_secs(2));
+
+        assert_eq!(
+            fetch_verified_archive(&transport, &parsed_manifest, &latest, asset_name)
+                .expect("verified target-channel archive"),
+            archive
+        );
+        assert_eq!(
+            server.join().expect("server"),
+            [
+                format!("/development-latest/{asset_name}"),
+                format!("/development-latest/{asset_name}.sha256"),
+            ]
+        );
+    }
+
+    fn read_request_path(stream: &mut TcpStream) -> String {
         let mut bytes = [0u8; 2048];
-        let _ = stream.read(&mut bytes).expect("read request");
+        let count = stream.read(&mut bytes).expect("read request");
+        let request = std::str::from_utf8(&bytes[..count]).expect("HTTP request UTF-8");
+        request
+            .lines()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().nth(1))
+            .expect("HTTP request path")
+            .to_string()
     }
 
     #[test]

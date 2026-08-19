@@ -597,13 +597,31 @@ Official release builds update within their embedded rolling channel:
 nib update
 ```
 
+To explicitly switch an already managed installation between rolling channels, select
+the target channel once:
+
+```bash
+# Follow the development prerelease channel
+nib update --channel development
+
+# Return to the stable production channel
+nib update --channel prod
+```
+
+`production` and `dev` are accepted aliases. A switch validates the target channel's
+manifest, checksum, archive, and staged binary through the same replacement protocol as
+an ordinary update. The installed replacement embeds the selected channel, so later
+startup checks and option-free `nib update` calls follow it without a project or global
+configuration setting. Because rolling channels have no semantic ordering, an explicit
+switch may install a different or historically older exact commit.
+
 When the installed commit is current, the command exits successfully and reports that
 nib is already up to date. Otherwise it downloads the platform archive and checksum,
 requires both to agree with the bounded `nib-release.json` manifest, verifies the staged
 binary's channel/version/commit identity, and replaces the executable. It never switches
-between `prod-latest` and `development-latest`, invokes `sudo`, changes `PATH`, or
-updates a local/source build. If the current installation is unmanaged or not writable,
-rerun the installer for the intended channel.
+channels unless `--channel` is present, invokes `sudo`, changes `PATH`, or updates a
+local/source build. If the current installation is unmanaged or not writable, rerun the
+installer for the intended channel.
 
 Ordinary user-facing launches perform a one-second best-effort manifest check and print
 one stderr notice when a different channel commit is available. Checks never install an

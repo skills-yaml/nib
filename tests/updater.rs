@@ -15,6 +15,17 @@ fn update_command_is_documented_in_cli_help() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(stdout.contains("update"));
     assert!(stdout.contains("Update this installed release"));
+
+    let update_output = nib()
+        .args(["update", "--help"])
+        .env("NIB_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run nib update help");
+    assert!(update_output.status.success());
+    let update_help = String::from_utf8(update_output.stdout).expect("UTF-8 update help");
+    assert!(update_help.contains("--channel <CHANNEL>"));
+    assert!(update_help.contains("prod"));
+    assert!(update_help.contains("development"));
 }
 
 #[test]
@@ -25,6 +36,21 @@ fn local_build_update_fails_before_network_or_mutation() {
         .env("NIB_NO_UPDATE_CHECK", "1")
         .output()
         .expect("run nib update");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 update error");
+    assert!(stderr.contains("not self-update managed"));
+    assert!(!stderr.contains("release request failed"));
+}
+
+#[test]
+fn local_build_channel_switch_fails_before_network_or_mutation() {
+    let output = nib()
+        .args(["update", "--channel", "development"])
+        .env("NIB_UPDATE_BASE_URL", "http://127.0.0.1:1/")
+        .env("NIB_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run nib update channel switch");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 update error");
