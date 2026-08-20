@@ -1,6 +1,6 @@
 # T030: Unified Interactive CLI and Plain-Mode Fallback
 
-**Status:** Development
+**Status:** Done
 **Related:** [T025](../done/T025_interactive_chat_tui_capability_parity.md), [T028](../done/T028_current_session_first_tui_and_slash_command_completion.md), [FT-011](../done/ft_011_llm_streaming_and_tui.md)
 
 ## Summary
@@ -288,7 +288,7 @@ code-quality review retained the existing Clap/Ratatui/Crossterm stack, kept wor
 state out of presentation selection, removed duplicate terminal setup, and hardened
 restoration so a failed explicit restore remains eligible for the guard's drop retry.
 
-## Local Validation Evidence (2026-08-19)
+## Validation Evidence (2026-08-19)
 
 - `task installers:check` passed, including syntax validation for the new smoke helper.
 - `cargo test --test interactive_cli -- --test-threads=1` passed all three executable-
@@ -302,10 +302,14 @@ restoration so a failed explicit restore remains eligible for the guard's drop r
   binary matrix, including approval, question, cancellation, and restoration probes.
 - `task docs:check` and `git diff --check` passed after documentation reconciliation.
 
-Hosted Windows and macOS jobs remain required before moving this spec to `done`. Their
-ordinary `task test` runs include the platform-neutral mode and executable fallback
-tests; Windows additionally runs its bounded pseudo-terminal adapter test. This local
-implementation run does not claim those native hosted results.
+Hosted PR run [32312998166](https://github.com/skills-yaml/nib/actions/runs/32312998166)
+passed the exact implementation revision `cdc7df8cd5314f2624e3471eddae80195258b2c3`
+on Linux, macOS, and Windows. The macOS and Windows jobs both passed all-target checks,
+the complete test suite, the optimized release build, and release-binary smoke;
+Windows also passed its bounded headless pseudoterminal adapter probe. The Linux
+validation job passed the canonical checks, independent tests, runtime coverage,
+optimized build, unified interactive launcher smoke, and managed-process owner-loss
+smoke. This native evidence closes the remaining completion gate.
 
 ## Validation Gates
 
@@ -378,7 +382,7 @@ execution.
 
 ## Completion State
 
-Development. Implementation, local acceptance, canonical gates, Linux terminal smoke,
-documentation, and the two-stage review are complete. Keep T030 in development until
-the hosted Windows and macOS jobs confirm the native mode-selection boundary; only then
-may it transition to `done`.
+Done. Implementation, local acceptance, canonical gates, Linux terminal smoke,
+documentation, and the two-stage review are complete. Hosted PR run `32312998166`
+confirmed the exact implementation revision on Linux, macOS, and Windows, including
+native release-binary smoke and the Windows pseudoterminal boundary.
