@@ -5,17 +5,17 @@ use crate::interactive::{
     execute_interactive_command_in_state, format_interaction_chrome, interactive_completions,
     interactive_session_candidate, interactive_session_selection, parse_interactive_command,
     parse_queue_line, path_completions, persist_queued_follow_up, project_session_activities,
-    resolve_session, set_active_model, steer_unavailable_message, take_next_queued_follow_up,
-    validate_interactive_session_target, ActivityEntry, ActivityKind, InteractiveCompletion,
-    InteractiveEffect, InteractiveSessionCandidate, InteractiveSessionSelection, ModelSelection,
-    StreamDisplay,
+    queue_disposition_message, resolve_session, set_active_model, steer_unavailable_message,
+    take_next_queued_follow_up, unicode_display_width, validate_interactive_session_target,
+    wrapped_line_count, ActivityEntry, ActivityKind, InteractiveCompletion, InteractiveEffect,
+    InteractiveSessionCandidate, InteractiveSessionSelection, ModelSelection, StreamDisplay,
 };
 use crate::llm::types::StreamEvent;
 use crate::session::SessionStore;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -382,6 +382,71 @@ const MAX_COMPOSER_BYTES: usize = 16 * 1024;
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Composer {
     input: String,
+    cursor: usize,
+}
+
+impl Composer {
+    #[cfg(test)]
+    fn from_text(input: impl Into<String>) -> Self {
+        let input = input.into();
+        Self {
+            cursor: input.len(),
+            input,
+        }
+    }
+
+    fn set_text(&mut self, input: String) {
+        self.cursor = input.len();
+        self.input = input;
+    }
+
+    fn clamp_cursor(&mut self) {
+        if self.cursor > self.input.len() {
+            self.cursor = self.input.len();
+        }
+        while self.cursor > 0 && !self.input.is_char_boundary(self.cursor) {
+            self.cursor -= 1;
+        }
+    }
+
+    fn move_left(&mut self) {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        self.clamp_cursor();
+    }
+
+    fn move_right(&mut self) {
+        self.clamp_cursor();
+        if self.cursor >= self.input.len() {
+            return;
+        }
+        self.cursor += 1;
+        while self.cursor < self.input.len() && !self.input.is_char_boundary(self.cursor) {
+            self.cursor += 1;
+        }
+    }
+
+    fn insert_str(&mut self, text: &str) {
+        self.clamp_cursor();
+        if self.input.len().saturating_add(text.len()) > MAX_COMPOSER_BYTES {
+            return;
+        }
+        self.input.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    fn backspace(&mut self) {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.cursor;
+        self.move_left();
+        self.input.replace_range(self.cursor..end, "");
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -396,22 +461,32 @@ fn composer_action_for_key(
     modifiers: KeyModifiers,
 ) -> ComposerAction {
     match code {
-        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if composer.input.len().saturating_add(1) <= MAX_COMPOSER_BYTES {
-                composer.input.push('\n');
-            }
+        KeyCode::Left => {
+            composer.move_left();
             ComposerAction::Pending
         }
-        KeyCode::Char(character)
-            if !modifiers.contains(KeyModifiers::CONTROL)
-                && composer.input.len().saturating_add(character.len_utf8())
-                    <= MAX_COMPOSER_BYTES =>
-        {
-            composer.input.push(character);
+        KeyCode::Right => {
+            composer.move_right();
+            ComposerAction::Pending
+        }
+        KeyCode::Home => {
+            composer.cursor = 0;
+            ComposerAction::Pending
+        }
+        KeyCode::End => {
+            composer.cursor = composer.input.len();
+            ComposerAction::Pending
+        }
+        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
+            composer.insert_str("\n");
+            ComposerAction::Pending
+        }
+        KeyCode::Char(character) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            composer.insert_str(&character.to_string());
             ComposerAction::Pending
         }
         KeyCode::Backspace => {
-            composer.input.pop();
+            composer.backspace();
             ComposerAction::Pending
         }
         KeyCode::Enter => {
@@ -419,6 +494,7 @@ fn composer_action_for_key(
                 ComposerAction::Pending
             } else {
                 let submitted = std::mem::take(&mut composer.input);
+                composer.cursor = 0;
                 ComposerAction::Submit(submitted)
             }
         }
@@ -476,7 +552,7 @@ impl CompletionMenu {
             }
             KeyCode::Tab => {
                 if let Some(completion) = self.suggestions.get(self.selected) {
-                    composer.input = completion.insertion.clone();
+                    composer.set_text(completion.insertion.clone());
                 }
                 self.dismissed_for_input = Some(composer.input.clone());
                 self.suggestions.clear();
@@ -892,13 +968,16 @@ fn replace_active_session(
     output: String,
     active_session_id: &mut String,
     timeline: &mut ActiveTimeline,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let previous = active_session_id.clone();
+    let disposition = queue_disposition_message(store, &previous, "switched sessions")?;
     let mut replacement = ActiveTimeline::load(store, &session_id)
         .map_err(|error| format!("created session could not be loaded: {error}"))?;
     replacement.push_status(output);
+    replacement.push_status(disposition.clone());
     *timeline = replacement;
     *active_session_id = session_id;
-    Ok(())
+    Ok(disposition)
 }
 
 fn render_session_switcher(
@@ -1275,9 +1354,19 @@ pub fn run_tui(
     })();
     let restoration = restore_guard.restore();
     match (result, restoration) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(notice), Ok(())) => {
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
+            Ok(())
+        }
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
+        (Ok(notice), Err(error)) => {
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
+            Err(error)
+        }
         (Err(error), Err(restoration)) => Err(io::Error::other(format!(
             "{error}; terminal restoration also failed: {restoration}"
         ))),
@@ -1353,9 +1442,64 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
-fn composer_height(composer: &Composer) -> u16 {
-    let lines = composer.input.split('\n').count().max(1);
-    u16::try_from(lines.saturating_add(1).min(6)).unwrap_or(6)
+fn composer_height(composer: &Composer, width: u16) -> u16 {
+    let visual = wrapped_line_count(&composer.input, width.max(1)).clamp(2, 6);
+    u16::try_from(visual).unwrap_or(6)
+}
+
+fn composer_cursor_cell(input: &str, cursor: usize, width: u16) -> (u16, u16) {
+    let width = usize::from(width.max(1));
+    let cursor = cursor.min(input.len());
+    let prefix = &input[..cursor];
+    let mut row = 0u16;
+    let mut col = 0usize;
+    for character in prefix.chars() {
+        if character == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+            continue;
+        }
+        let glyph = unicode_display_width(&character.to_string()).max(1);
+        if col.saturating_add(glyph) > width {
+            row = row.saturating_add(1);
+            col = glyph;
+        } else {
+            col += glyph;
+        }
+    }
+    (
+        u16::try_from(col.min(width.saturating_sub(1))).unwrap_or(0),
+        row,
+    )
+}
+
+fn tui_report_cancelled_run(
+    store: &SessionStore,
+    session_id: &str,
+    timeline: &mut ActiveTimeline,
+) -> Result<String, String> {
+    timeline.push_status("[cancelled] active agent run".to_string());
+    let message = queue_disposition_message(store, session_id, "cancelled")?;
+    timeline.push_status(message.clone());
+    Ok(message)
+}
+
+fn tui_exit_disposition(store: &SessionStore, session_id: &str) -> Result<String, String> {
+    queue_disposition_message(store, session_id, "exited")
+}
+
+fn tui_complete_session_switch(
+    store: &SessionStore,
+    switcher: &SessionSwitcher,
+    worker_active: bool,
+    active_session_id: &mut String,
+    timeline: &mut ActiveTimeline,
+) -> Result<String, String> {
+    let previous = active_session_id.clone();
+    let disposition = queue_disposition_message(store, &previous, "switched sessions")?;
+    activate_selected_session(store, switcher, worker_active, active_session_id, timeline)?;
+    timeline.push_status(disposition.clone());
+    Ok(disposition)
 }
 
 fn render_current_session_view(
@@ -1367,7 +1511,7 @@ fn render_current_session_view(
     pending_approval: Option<&TuiApprovalRequest>,
     pending_question: Option<&PendingQuestion>,
 ) {
-    let composer_h = composer_height(composer);
+    let composer_h = composer_height(composer, frame.area().width);
     let dock = pending_approval.is_some() || pending_question.is_some();
     let dock_h = if pending_question.is_some() {
         8
@@ -1448,6 +1592,18 @@ fn render_current_session_view(
             .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[3],
     );
+    let composer_area = chunks[3];
+    if composer_area.width > 0 && composer_area.height > 0 {
+        let (cx, cy) = composer_cursor_cell(&composer.input, composer.cursor, composer_area.width);
+        frame.set_cursor_position(Position {
+            x: composer_area
+                .x
+                .saturating_add(cx.min(composer_area.width.saturating_sub(1))),
+            y: composer_area
+                .y
+                .saturating_add(cy.min(composer_area.height.saturating_sub(1))),
+        });
+    }
     frame.render_widget(
         Paragraph::new(
             "enter send/queue  ctrl+j newline  ctrl+s steer (unavailable)  ctrl+c cancel  ctrl+q quit",
@@ -1463,7 +1619,7 @@ fn draw_loop(
     run_goal: Option<String>,
     mut active_session_id: String,
     session_notice: String,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
@@ -1488,6 +1644,7 @@ fn draw_loop(
     let mut pending_switcher: Option<SessionSwitcher> = None;
     let mut composer = Composer::default();
     let mut completion = CompletionMenu::default();
+    let mut exit_notice = None;
 
     let loop_result = loop {
         drain_stream_events(&mut stream_rx, &mut timeline);
@@ -1626,10 +1783,17 @@ fn draw_loop(
                     ) {
                         break Err(error);
                     }
-                    timeline.push_status("[cancelled] active agent run".to_string());
+                    match tui_report_cancelled_run(&store, &active_session_id, &mut timeline) {
+                        Ok(_) => {}
+                        Err(error) => timeline.push_status(format!("[queue error] {error}")),
+                    }
                     continue;
                 }
                 if control_c || control_q {
+                    exit_notice = Some(
+                        tui_exit_disposition(&store, &active_session_id)
+                            .unwrap_or_else(|error| error),
+                    );
                     break Ok(());
                 }
                 let interaction_layer = active_interaction_layer(
@@ -1696,7 +1860,7 @@ fn draw_loop(
                             }
                         }
                         SwitcherAction::Activate => {
-                            match activate_selected_session(
+                            match tui_complete_session_switch(
                                 &store,
                                 switcher,
                                 worker.is_some(),
@@ -1737,7 +1901,7 @@ fn draw_loop(
                         let parsed = match parse_interactive_command(normalized) {
                             Ok(parsed) => parsed,
                             Err(error) => {
-                                composer.input = submitted;
+                                composer.set_text(submitted);
                                 completion.sync_for(&composer.input, Some(project_root));
                                 timeline.push_status(format!("[command error] {error}"));
                                 continue;
@@ -1751,7 +1915,7 @@ fn draw_loop(
                             match load_session_switcher(&store, &active_session_id) {
                                 Ok(switcher) => pending_switcher = Some(switcher),
                                 Err(error) => {
-                                    composer.input = submitted;
+                                    composer.set_text(submitted);
                                     completion.sync_for(&composer.input, Some(project_root));
                                     timeline.push_status(format!(
                                         "[command error] could not open session switcher: {error}"
@@ -1778,10 +1942,14 @@ fn draw_loop(
                         }
                         if worker.is_some() {
                             if parsed == Some(crate::interactive::InteractiveCommand::Quit) {
+                                exit_notice = Some(
+                                    tui_exit_disposition(&store, &active_session_id)
+                                        .unwrap_or_else(|error| error),
+                                );
                                 break Ok(());
                             }
                             if parsed.is_some() {
-                                composer.input = submitted;
+                                composer.set_text(submitted);
                                 completion.sync_for(&composer.input, Some(project_root));
                                 timeline.push_status(
                                     "Agent is still running; cancel it or wait before running a command."
@@ -1799,7 +1967,7 @@ fn draw_loop(
                                     "queued follow-up retained on session {active_session_id}"
                                 )),
                                 Err(error) => {
-                                    composer.input = submitted;
+                                    composer.set_text(submitted);
                                     completion.sync_for(&composer.input, Some(project_root));
                                     timeline.push_status(format!("[queue error] {error}"));
                                 }
@@ -1814,7 +1982,13 @@ fn draw_loop(
                                 &active_session_id,
                                 worker_status,
                             ) {
-                                Ok(InteractiveEffect::Quit) => break Ok(()),
+                                Ok(InteractiveEffect::Quit) => {
+                                    exit_notice = Some(
+                                        tui_exit_disposition(&store, &active_session_id)
+                                            .unwrap_or_else(|error| error),
+                                    );
+                                    break Ok(());
+                                }
                                 Ok(InteractiveEffect::Output(output)) => {
                                     timeline.push_status(output)
                                 }
@@ -1852,7 +2026,7 @@ fn draw_loop(
                                     )?);
                                 }
                                 Err(error) => {
-                                    composer.input = submitted;
+                                    composer.set_text(submitted);
                                     completion.sync_for(&composer.input, Some(project_root));
                                     timeline.push_status(format!("[command error] {error}"))
                                 }
@@ -1883,7 +2057,7 @@ fn draw_loop(
         &mut stream_rx,
         &mut timeline,
     );
-    loop_result.and(shutdown)
+    loop_result.and(shutdown).map(|()| exit_notice)
 }
 
 fn centered_rect(
@@ -1985,16 +2159,14 @@ mod tests {
             ComposerAction::Pending
         );
 
-        composer.input = "x".repeat(MAX_COMPOSER_BYTES);
+        composer.set_text("x".repeat(MAX_COMPOSER_BYTES));
         assert_eq!(
             composer_action_for_key(&mut composer, KeyCode::Char('y'), KeyModifiers::NONE),
             ComposerAction::Pending
         );
         assert_eq!(composer.input.len(), MAX_COMPOSER_BYTES);
 
-        let mut slash = Composer {
-            input: "/skills install ".to_string(),
-        };
+        let mut slash = Composer::from_text("/skills install ");
         assert_eq!(
             composer_action_for_key(&mut slash, KeyCode::Enter, KeyModifiers::NONE),
             ComposerAction::Submit("/skills install ".to_string())
@@ -2004,9 +2176,7 @@ mod tests {
 
     #[test]
     fn completion_navigation_inserts_without_clearing_on_escape() {
-        let mut composer = Composer {
-            input: "/".to_string(),
-        };
+        let mut composer = Composer::from_text("/");
         let mut completion = CompletionMenu::default();
         completion.sync(&composer.input);
         assert!(completion.is_open());
@@ -2024,7 +2194,7 @@ mod tests {
         composer.input.push('x');
         completion.sync(&composer.input);
         assert!(!completion.is_open(), "unknown commands are not guessed");
-        composer.input = "/skills ".to_string();
+        composer.set_text("/skills ".to_string());
         completion.sync(&composer.input);
         assert!(completion.is_open());
         let preserved = composer.input.clone();
@@ -2080,9 +2250,7 @@ mod tests {
         let mut active_id = "session-a".to_string();
         let mut timeline = ActiveTimeline::load(&store, &active_id).expect("active timeline");
         timeline.push_status("live output owned by a".to_string());
-        let composer = Composer {
-            input: "draft survives browsing".to_string(),
-        };
+        let composer = Composer::from_text("draft survives browsing");
         let mut switcher = load_session_switcher(&store, &active_id).expect("switcher");
         switcher.selected = switcher
             .candidates
@@ -2148,9 +2316,7 @@ mod tests {
         let mut active_id = "session-a".to_string();
         let mut timeline = ActiveTimeline::load(&store, &active_id).expect("timeline");
         let original = timeline.rendered_text();
-        let composer = Composer {
-            input: "keep this draft".to_string(),
-        };
+        let composer = Composer::from_text("keep this draft");
         let error =
             activate_selected_session(&store, &switcher, false, &mut active_id, &mut timeline)
                 .expect_err("corrupt target must fail closed");
@@ -2680,9 +2846,7 @@ mod tests {
             options: vec!["yes".to_string()],
             reply: question_tx,
         }));
-        let composer = Composer {
-            input: "/".to_string(),
-        };
+        let composer = Composer::from_text("/");
         let mut completion = CompletionMenu::default();
         completion.sync(&composer.input);
 
@@ -3102,5 +3266,110 @@ mod tests {
             ComposerAction::Pending
         );
         assert_eq!(composer.input, "\n");
+        assert_eq!(composer.cursor, 1);
+    }
+
+    #[test]
+    fn composer_moves_the_caret_and_inserts_in_the_middle() {
+        let mut composer = Composer::default();
+        for character in "abc".chars() {
+            assert_eq!(
+                composer_action_for_key(
+                    &mut composer,
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE
+                ),
+                ComposerAction::Pending
+            );
+        }
+        assert_eq!(composer.cursor, 3);
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Left, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Char('X'), KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "abXc");
+        assert_eq!(composer.cursor, 3);
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Backspace, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "abc");
+    }
+
+    #[test]
+    fn composer_height_follows_unicode_wrap_not_newline_count() {
+        let composer = Composer::from_text("a".repeat(200));
+        assert_eq!(composer_height(&composer, 80), 3);
+        assert_eq!(composer_height(&Composer::default(), 80), 2);
+    }
+
+    #[test]
+    fn ledger_places_the_caret_inside_the_composer_rect() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let composer = Composer::from_text("hi");
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "header",
+                    "idle",
+                    "you  hello",
+                    &composer,
+                    None,
+                    None,
+                )
+            })
+            .expect("render");
+        let position = terminal.get_cursor_position().expect("cursor");
+        assert!(
+            position.y >= 21 && position.y <= 22,
+            "caret y {} should be in the composer rows",
+            position.y
+        );
+        assert_eq!(position.x, 2);
+    }
+
+    #[test]
+    fn tui_cancel_quit_and_switch_report_queue_disposition() {
+        let directory = tempdir().expect("tempdir");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        store.create_session_with_id("session-a");
+        store.create_session_with_id("session-b");
+        persist_queued_follow_up(&store, "session-a", "next turn", "composer").expect("queue");
+
+        let mut timeline = ActiveTimeline::load(&store, "session-a").expect("timeline");
+        let cancelled =
+            tui_report_cancelled_run(&store, "session-a", &mut timeline).expect("cancel");
+        assert!(cancelled.contains("cancelled;"));
+        assert!(cancelled.contains("retained on session session-a"));
+        assert!(timeline.rendered_text().contains(&cancelled));
+        assert!(timeline
+            .rendered_text()
+            .contains("[cancelled] active agent run"));
+
+        let exited = tui_exit_disposition(&store, "session-a").expect("exit");
+        assert!(exited.contains("exited;"));
+        assert!(exited.contains("retained on session session-a"));
+
+        let mut switcher = load_session_switcher(&store, "session-a").expect("switcher");
+        switcher.selected = switcher
+            .candidates
+            .iter()
+            .position(|candidate| candidate.id == "session-b")
+            .expect("target");
+        let mut active_id = "session-a".to_string();
+        let mut timeline = ActiveTimeline::load(&store, &active_id).expect("switch timeline");
+        let switched =
+            tui_complete_session_switch(&store, &switcher, false, &mut active_id, &mut timeline)
+                .expect("switch");
+        assert_eq!(active_id, "session-b");
+        assert!(switched.contains("switched sessions;"));
+        assert!(switched.contains("retained on session session-a"));
+        assert!(timeline.rendered_text().contains(&switched));
     }
 }

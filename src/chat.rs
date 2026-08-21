@@ -9,9 +9,10 @@ use nib::config::load_nib_config_full;
 use nib::interactive::{
     display_stream_event, execute_interactive_command_in_state, format_session_status,
     interactive_completions, interactive_session_candidate, parse_interactive_command,
-    parse_queue_line, persist_queued_follow_up, resolve_session, set_active_model,
-    take_next_queued_follow_up, validate_interactive_session_target, InteractiveEffect,
-    InteractiveSessionSelection, ModelSelection, SessionResolution, StreamDisplay,
+    parse_queue_line, persist_queued_follow_up, queue_disposition_message, resolve_session,
+    set_active_model, take_next_queued_follow_up, validate_interactive_session_target,
+    InteractiveEffect, InteractiveSessionSelection, ModelSelection, SessionResolution,
+    StreamDisplay,
 };
 use nib::session::SessionStore;
 
@@ -265,13 +266,7 @@ fn run_plain_with_input(
                 "idle",
             ) {
                 Ok(InteractiveEffect::Quit) => {
-                    if let Ok(count) =
-                        nib::interactive::queued_follow_up_count(&session_store, &sid)
-                    {
-                        if count > 0 {
-                            println!("{count} queued follow-up(s) retained on session {sid}.");
-                        }
-                    }
+                    println!("{}", chat_queue_disposition(&session_store, &sid, "exited"));
                     println!(
                         "Goodbye. Session saved to {}",
                         session_store
@@ -283,14 +278,20 @@ fn run_plain_with_input(
                 }
                 Ok(InteractiveEffect::Output(output)) => println!("{output}"),
                 Ok(InteractiveEffect::SessionChanged { session_id, output }) => {
+                    let disposition =
+                        chat_queue_disposition(&session_store, &sid, "switched sessions");
                     sid = session_id;
                     println!("{output}");
+                    println!("{disposition}");
                 }
                 Ok(InteractiveEffect::SelectSession(selection)) => {
                     match select_session_from_console(&input, &session_store, &sid, &selection) {
                         Ok(ChatSessionAction::Activated(session_id)) => {
+                            let disposition =
+                                chat_queue_disposition(&session_store, &sid, "switched sessions");
                             sid = session_id;
                             println!("Resumed session {sid} from persisted state.");
+                            println!("{disposition}");
                         }
                         Ok(ChatSessionAction::Unchanged) => {
                             println!("Session {sid} is already active.")
@@ -523,6 +524,10 @@ fn select_model_from_console(
         return Ok(None);
     }
     Ok(Some(choice.to_string()))
+}
+
+fn chat_queue_disposition(store: &SessionStore, session_id: &str, action: &str) -> String {
+    queue_disposition_message(store, session_id, action).unwrap_or_else(|error| error)
 }
 
 fn execute_agent_step(
@@ -1084,5 +1089,23 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("console input closed")));
+    }
+
+    #[test]
+    fn chat_quit_and_session_switch_report_queue_disposition() {
+        let directory = tempdir().expect("sessions");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        let current = store.try_create_session().expect("current");
+        persist_queued_follow_up(&store, &current.id, "follow up later", "composer")
+            .expect("queue");
+        let exited = chat_queue_disposition(&store, &current.id, "exited");
+        assert!(exited.contains("exited;"));
+        assert!(exited.contains(&format!("retained on session {}", current.id)));
+
+        let target = store.try_create_session().expect("target");
+        let switched = chat_queue_disposition(&store, &current.id, "switched sessions");
+        assert!(switched.contains("switched sessions;"));
+        assert!(switched.contains(&current.id));
+        assert!(!switched.contains(&target.id));
     }
 }

@@ -716,19 +716,22 @@ pub fn unicode_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+pub fn wrapped_line_count(text: &str, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let width = usize::from(width);
+    text.split('\n')
+        .map(|line| unicode_display_width(line).max(1).div_ceil(width))
+        .sum::<usize>()
+        .max(1)
+}
+
 pub fn bottom_scroll_for_wrap(text: &str, width: u16, height: u16) -> u16 {
     if text.is_empty() || width == 0 || height == 0 {
         return 0;
     }
-    let width = usize::from(width);
-    let visual_lines = text
-        .split('\n')
-        .map(|line| {
-            let line_width = unicode_display_width(line).max(1);
-            line_width.div_ceil(width)
-        })
-        .sum::<usize>();
-    visual_lines
+    wrapped_line_count(text, width)
         .saturating_sub(usize::from(height))
         .min(usize::from(u16::MAX)) as u16
 }
@@ -2069,6 +2072,7 @@ mod tests {
                 || unicode_display_width("漢字") == 4
         );
         assert_eq!(bottom_scroll_for_wrap("ab", 1, 1), 1);
+        assert_eq!(wrapped_line_count(&"a".repeat(200), 80), 3);
     }
 
     #[test]
