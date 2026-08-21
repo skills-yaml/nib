@@ -350,9 +350,10 @@ Session: <id>
 
 Typed `LlmError` now reaches agent summaries, chat, `nib run`, TUI activity, gateway,
 durable workload, planner, and compression observers. Incident codes, `user_report`,
-CLI child-process redaction, and the user-guide recovery table remain in place. This
-change set does not close T026: coverage, all-targets, raw-terminal recovery smoke,
-MCP observer proof, and independent reviews stay open.
+CLI child-process redaction, and the user-guide recovery table remain in place. The
+T022 typed `LlmRequest` change did not introduce a competing failure type. This change
+set does not close T026: coverage, all-targets, raw-terminal recovery smoke, MCP
+observer proof, and independent reviews stay open.
 
 ## Open Questions
 

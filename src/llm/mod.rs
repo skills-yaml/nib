@@ -8,6 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 pub mod anthropic;
+pub mod conformance;
 pub mod error;
 pub mod factory;
 pub mod gemini;
@@ -23,8 +24,9 @@ pub use mock::MockLlmClient;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallAccumulator, ToolCallRequest,
+    GenerationOptions, LlmMessage, LlmMessageRole, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmTerminalStatus, ProviderCallId, ProviderContinuation, ReasoningOption, StreamEvent,
+    ToolCallAccumulator, ToolCallRequest, ToolDefinition,
 };
 
 pub(crate) const MAX_LLM_COMPLETE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;

@@ -683,3 +683,7 @@ Still remaining before Done:
   until T003, FT-017, and the agent loop bind those operations.
 - Native macOS and Windows terminal jobs, two-stage review, coverage, and the remaining
   umbrella acceptance items.
+
+A later T022 typed-request change did not add or ungated any FT-019 interaction
+surface. No further Unix-local FT-019 acceptance item is implementable without those
+runtime owners.

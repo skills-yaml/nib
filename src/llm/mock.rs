@@ -1,5 +1,7 @@
 //! Mock LLM for tests and offline development.
 
+#[cfg(test)]
+use crate::llm::types::{LlmMessage, ToolDefinition};
 use crate::llm::types::{LlmRequest, LlmResponse, ToolCallRequest};
 use async_trait::async_trait;
 use serde_json::json;
@@ -26,11 +28,11 @@ impl MockLlmClient {
     }
 }
 
-fn managed_process_smoke(messages: &[serde_json::Value]) -> Option<(&'static str, String)> {
+fn managed_process_smoke(
+    messages: &[crate::llm::types::LlmMessage],
+) -> Option<(&'static str, String)> {
     for message in messages {
-        let Some(content) = message.get("content").and_then(|value| value.as_str()) else {
-            continue;
-        };
+        let content = message.content.as_str();
         let lowercase = content.to_ascii_lowercase();
         for role in ["parent", "child"] {
             let marker = format!("managed supervisor release smoke {role} ");
@@ -53,13 +55,10 @@ fn managed_process_smoke(messages: &[serde_json::Value]) -> Option<(&'static str
     None
 }
 
-fn is_compression_request(messages: &[serde_json::Value]) -> bool {
-    messages.iter().any(|message| {
-        message
-            .get("content")
-            .and_then(|value| value.as_str())
-            .is_some_and(|content| content.contains("context compression engine"))
-    })
+fn is_compression_request(messages: &[crate::llm::types::LlmMessage]) -> bool {
+    messages
+        .iter()
+        .any(|message| message.content.contains("context compression engine"))
 }
 
 #[async_trait]
@@ -74,29 +73,36 @@ impl LlmClient for MockLlmClient {
                 &[],
             ));
         }
+        if request.options.temperature().is_some() {
+            return Err(crate::llm::LlmError::request_rejected(
+                "mock",
+                "mock",
+                Some("mock-model"),
+                "Mock requests do not support explicit temperature",
+                &[],
+            ));
+        }
+        crate::llm::conformance::reject_unsupported_reasoning(&request, "Mock").map_err(
+            |error| {
+                crate::llm::LlmError::request_rejected(
+                    "mock",
+                    "mock",
+                    Some("mock-model"),
+                    error,
+                    &[],
+                )
+            },
+        )?;
 
         let messages = request.messages;
         let tools = request.tools;
         let last = messages
             .last()
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_lowercase();
+            .map(|message| message.content.to_lowercase())
+            .unwrap_or_default();
 
-        let mut is_planner = false;
-        if let Some(t) = tools {
-            if let Some(tools_array) = serde_json::to_value(t)
-                .ok()
-                .and_then(|v| v.as_array().cloned())
-            {
-                for tool in tools_array {
-                    if tool["function"]["name"] == "submit_plan" {
-                        is_planner = true;
-                    }
-                }
-            }
-        }
+        let is_planner =
+            tools.is_some_and(|tools| tools.iter().any(|tool| tool.name() == "submit_plan"));
 
         if is_compression_request(messages) {
             return Ok(LlmResponse::text(
@@ -286,7 +292,7 @@ mod tests {
     use super::*;
     use crate::llm::types::{LlmRequestScope, ProviderContinuation};
 
-    fn request_with_continuation(messages: &[serde_json::Value]) -> LlmRequest<'_> {
+    fn request_with_continuation(messages: &[crate::llm::types::LlmMessage]) -> LlmRequest<'_> {
         let continuation = ProviderContinuation::new(
             "openai",
             "test-model",
@@ -298,24 +304,23 @@ mod tests {
             (),
         )
         .expect("Responses continuation");
-        LlmRequest::new(messages, None, 0.0).with_continuation(Some(continuation))
+        LlmRequest::new(messages, None).with_continuation(Some(continuation))
     }
 
     #[tokio::test]
     async fn mock_returns_tool_then_answer() {
         let client = MockLlmClient::new();
-        let tools = vec![json!({"type": "function"})];
-        let msgs = vec![json!({"role": "user", "content": "explore project"})];
+        let tools = vec![ToolDefinition::function("list_directory")];
+        let msgs = vec![LlmMessage::user("explore project")];
         let r1 = client
-            .complete(LlmRequest::new(&msgs, Some(&tools), 0.7))
+            .complete(LlmRequest::new(&msgs, Some(&tools)))
             .await
             .unwrap();
         assert!(r1.tool_calls.is_some());
         let r2 = client
             .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "summarize results"})],
+                &[LlmMessage::user("summarize results")],
                 None,
-                0.7,
             ))
             .await
             .unwrap();
@@ -327,12 +332,8 @@ mod tests {
         let client = MockLlmClient::new();
         let compressed = client
             .complete(LlmRequest::new(
-                &[json!({
-                    "role": "system",
-                    "content": "You are a context compression engine."
-                })],
+                &[LlmMessage::system("You are a context compression engine.")],
                 None,
-                0.3,
             ))
             .await
             .expect("compression response");
@@ -340,12 +341,8 @@ mod tests {
 
         let runtime = client
             .complete(LlmRequest::new(
-                &[json!({
-                    "role": "user",
-                    "content": "runtime coding e2e"
-                })],
-                Some(&[json!({"type": "function"})]),
-                0.7,
+                &[LlmMessage::user("runtime coding e2e")],
+                Some(&[ToolDefinition::function("apply_patch")]),
             ))
             .await
             .expect("runtime response");
@@ -357,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn complete_and_default_stream_reject_provider_continuations() {
         let client = MockLlmClient::new();
-        let messages = [json!({"role": "user", "content": "x"})];
+        let messages = [LlmMessage::user("x")];
 
         let complete_error = client
             .complete(request_with_continuation(&messages))
@@ -387,18 +384,16 @@ mod tests {
 
     #[test]
     fn managed_process_smoke_requires_a_bounded_alphanumeric_token() {
-        let valid = vec![json!({
-            "role": "user",
-            "content": "managed supervisor release smoke parent abcdef012345"
-        })];
+        let valid = vec![LlmMessage::user(
+            "managed supervisor release smoke parent abcdef012345",
+        )];
         assert_eq!(
             managed_process_smoke(&valid),
             Some(("parent", "abcdef012345".to_string()))
         );
-        let invalid = vec![json!({
-            "role": "user",
-            "content": "managed supervisor release smoke child ../../escape"
-        })];
+        let invalid = vec![LlmMessage::user(
+            "managed supervisor release smoke child ../../escape",
+        )];
         assert!(managed_process_smoke(&invalid).is_none());
     }
 }

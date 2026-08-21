@@ -1621,7 +1621,13 @@ struct RecordingCompressor {
 #[async_trait]
 impl LlmClient for RecordingCompressor {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, nib::llm::LlmError> {
-        self.prompts.lock().unwrap().push(request.messages.to_vec());
+        self.prompts.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(nib::llm::LlmMessage::to_openai_chat)
+                .collect(),
+        );
         Ok(LlmResponse::text(
             "Retain the verified path, decisions, and current progress.",
         ))

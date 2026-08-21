@@ -2,8 +2,8 @@
 
 use crate::config::ReasoningEffort;
 use crate::llm::types::{
-    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallRequest, MAX_CONTINUATION_BYTES,
+    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
+    ProviderContinuation, StreamEvent, ToolCallRequest, ToolDefinition, MAX_CONTINUATION_BYTES,
     MAX_CONTINUATION_ITEMS,
 };
 use crate::llm::{
@@ -175,17 +175,18 @@ impl OpenAiResponsesClient {
         }
     }
 
-    fn request_body(
+    pub(crate) fn request_body(
         &self,
         request: LlmRequest<'_>,
         stream: bool,
     ) -> Result<(Value, Option<LlmRequestScope>, Vec<Value>), String> {
+        crate::llm::conformance::reject_explicit_temperature_for_responses(&request)
+            .map_err(|error| self.contextual_error("request rejected", &error))?;
         let LlmRequest {
             messages,
             tools,
-            temperature: _,
+            options,
             max_output_tokens,
-            reasoning_effort,
             scope,
             continuation,
         } = request;
@@ -198,7 +199,10 @@ impl OpenAiResponsesClient {
             })
             .transpose()?
             .unwrap_or_default();
-        let mut input = messages.to_vec();
+        let mut input = messages
+            .iter()
+            .map(LlmMessage::to_openai_chat)
+            .collect::<Vec<_>>();
         input.extend(replay_tail.iter().cloned());
 
         let mut body = json!({
@@ -216,14 +220,16 @@ impl OpenAiResponsesClient {
             }
             body["max_output_tokens"] = json!(max_output_tokens);
         }
-        if let Some(effort) = reasoning_effort.or(self.reasoning_effort) {
+        if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning"] = json!({"effort": effort.as_str()});
         }
         let has_tools = tools.is_some_and(|tools| !tools.is_empty());
         if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
             body["tools"] = Value::Array(
-                flatten_function_tools(tools)
-                    .map_err(|error| self.contextual_error("request rejected", &error))?,
+                tools
+                    .iter()
+                    .map(ToolDefinition::to_responses_tool)
+                    .collect(),
             );
             body["tool_choice"] = json!("auto");
         }
@@ -604,48 +610,6 @@ async fn fail_stream(
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
     }
-}
-
-fn flatten_function_tools(tools: &[Value]) -> Result<Vec<Value>, String> {
-    tools
-        .iter()
-        .map(|tool| {
-            let outer = tool
-                .as_object()
-                .ok_or_else(|| "Responses tool definition must be an object".to_string())?;
-            if outer.get("type").and_then(Value::as_str) != Some("function") {
-                return Err(
-                    "Responses transport currently supports function tools only".to_string()
-                );
-            }
-
-            let mut flattened = match outer.get("function") {
-                Some(function) => function
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(|| "function tool payload must be an object".to_string())?,
-                None => outer.clone(),
-            };
-            flattened.remove("function");
-            flattened.insert("type".to_string(), json!("function"));
-
-            if flattened
-                .get("name")
-                .and_then(Value::as_str)
-                .is_none_or(|name| name.trim().is_empty())
-            {
-                return Err("function tool must have a non-empty name".to_string());
-            }
-            match flattened.get("strict") {
-                None => {
-                    flattened.insert("strict".to_string(), json!(false));
-                }
-                Some(Value::Bool(_)) => {}
-                Some(_) => return Err("function tool strict value must be boolean".to_string()),
-            }
-            Ok(Value::Object(flattened))
-        })
-        .collect()
 }
 
 fn parse_terminal_response(
@@ -1182,19 +1146,15 @@ mod tests {
             endpoint,
             Some(ReasoningEffort::Low),
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
-        let tools = [json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a file",
-                "parameters": {"type": "object"}
-            }
-        })];
+        let messages = [LlmMessage::user("inspect")];
+        let tools = [
+            ToolDefinition::new("read_file", "Read a file", json!({"type": "object"}))
+                .expect("read_file tool"),
+        ];
         let scope = LlmRequestScope::new("session-1", "run-1").unwrap();
         let response = client
             .complete(
-                LlmRequest::new(&messages, Some(&tools), 0.75)
+                LlmRequest::new(&messages, Some(&tools))
                     .with_reasoning_effort(Some(ReasoningEffort::Medium))
                     .with_max_output_tokens(41)
                     .with_scope(scope.clone()),
@@ -1242,10 +1202,10 @@ mod tests {
         continuation
             .record_tool_output(invocation_id, &json!({"ok": true}))
             .unwrap();
-        let follow_up = [json!({"role": "user", "content": "continue"})];
+        let follow_up = [LlmMessage::user("continue")];
         let (continued_body, _, replay_tail) = client
             .request_body(
-                LlmRequest::new(&follow_up, None, 1.0)
+                LlmRequest::new(&follow_up, None)
                     .with_scope(scope.clone())
                     .with_continuation(Some(continuation)),
                 false,
@@ -1284,10 +1244,10 @@ mod tests {
         second_continuation
             .record_tool_output(second_invocation_id, &json!({"written": true}))
             .unwrap();
-        let next_messages = [json!({"role": "user", "content": "latest runtime context"})];
+        let next_messages = [LlmMessage::user("latest runtime context")];
         let (third_body, _, _) = client
             .request_body(
-                LlmRequest::new(&next_messages, None, 1.0)
+                LlmRequest::new(&next_messages, None)
                     .with_scope(scope)
                     .with_continuation(Some(second_continuation)),
                 false,
@@ -1329,10 +1289,10 @@ mod tests {
             vec!["key".to_string()],
             "http://unused.invalid/v1/responses",
         );
-        let messages = [json!({"role": "user", "content": "continue"})];
+        let messages = [LlmMessage::user("continue")];
         let error = client
             .request_body(
-                LlmRequest::new(&messages, None, 0.0)
+                LlmRequest::new(&messages, None)
                     .with_scope(LlmRequestScope::new("session", "run").unwrap())
                     .with_continuation(Some(continuation)),
                 false,
@@ -1376,10 +1336,10 @@ mod tests {
         cross_continuation
             .record_tool_output(cross_invocation_id, &json!({"ok": true}))
             .unwrap();
-        let cross_messages = [json!({"role": "user", "content": "cross"})];
+        let cross_messages = [LlmMessage::user("cross")];
         let error = client
             .request_body(
-                LlmRequest::new(&cross_messages, None, 0.0)
+                LlmRequest::new(&cross_messages, None)
                     .with_scope(LlmRequestScope::new("session-b", "run-b").unwrap())
                     .with_continuation(Some(cross_continuation)),
                 false,
@@ -1408,10 +1368,10 @@ mod tests {
                 continuation
                     .record_tool_output(invocation_id, &json!({"session": session}))
                     .unwrap();
-                let messages = [json!({"role": "user", "content": session})];
+                let messages = [LlmMessage::user(session)];
                 client
                     .request_body(
-                        LlmRequest::new(&messages, None, 0.0)
+                        LlmRequest::new(&messages, None)
                             .with_scope(scope)
                             .with_continuation(Some(continuation)),
                         false,
@@ -1558,10 +1518,10 @@ mod tests {
             vec!["key".to_string()],
             format!("{base_url}/v1/responses"),
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
+        let messages = [LlmMessage::user("inspect")];
         let mut stream = client
             .stream(
-                LlmRequest::new(&messages, None, 0.0)
+                LlmRequest::new(&messages, None)
                     .with_scope(LlmRequestScope::new("session", "run").unwrap()),
             )
             .await
@@ -1617,10 +1577,10 @@ mod tests {
             vec!["key".to_string()],
             format!("{base_url}/v1/responses"),
         );
-        let messages = [json!({"role": "user", "content": "run both"})];
+        let messages = [LlmMessage::user("run both")];
         let mut stream = client
             .stream(
-                LlmRequest::new(&messages, None, 0.0)
+                LlmRequest::new(&messages, None)
                     .with_scope(LlmRequestScope::new("session", "run").unwrap()),
             )
             .await
@@ -1726,9 +1686,9 @@ mod tests {
             vec!["key".to_string()],
             format!("{base_url}/v1/responses"),
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
+        let messages = [LlmMessage::user("inspect")];
         let mut stream = client
-            .stream(LlmRequest::new(&messages, None, 0.0))
+            .stream(LlmRequest::new(&messages, None))
             .await
             .expect("open Responses stream");
         assert_eq!(
@@ -1761,9 +1721,9 @@ mod tests {
                 vec!["key".to_string()],
                 format!("{base_url}/v1/responses"),
             );
-            let messages = [json!({"role": "user", "content": "inspect"})];
+            let messages = [LlmMessage::user("inspect")];
             let stream = client
-                .stream(LlmRequest::new(&messages, None, 0.0))
+                .stream(LlmRequest::new(&messages, None))
                 .await
                 .expect("stream starts");
             let error = stream.finish().await.expect_err("terminal event required");
@@ -1802,9 +1762,9 @@ mod tests {
             vec!["key".to_string()],
             format!("{base_url}/v1/responses"),
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
+        let messages = [LlmMessage::user("inspect")];
         let complete_error = client
-            .complete(LlmRequest::new(&messages, None, 0.0))
+            .complete(LlmRequest::new(&messages, None))
             .await
             .expect_err("provider failure must reject completion");
 
@@ -1824,7 +1784,7 @@ mod tests {
             format!("{base_url}/v1/responses"),
         );
         let stream_error = client
-            .stream(LlmRequest::new(&messages, None, 0.0))
+            .stream(LlmRequest::new(&messages, None))
             .await
             .expect("stream starts")
             .finish()
@@ -1869,9 +1829,9 @@ mod tests {
             vec![secret.to_string()],
             format!("{base_url}/v1/responses"),
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
+        let messages = [LlmMessage::user("inspect")];
         let error = client
-            .complete(LlmRequest::new(&messages, None, 0.0))
+            .complete(LlmRequest::new(&messages, None))
             .await
             .expect_err("HTTP error");
         assert_eq!(error.class, crate::llm::LlmErrorClass::UnsupportedRequest);
@@ -1888,12 +1848,11 @@ mod tests {
 
     #[test]
     fn strict_defaults_false_but_explicit_values_are_preserved() {
-        let tools = flatten_function_tools(&[
-            json!({"type": "function", "function": {"name": "loose"}}),
-            json!({"type": "function", "function": {"name": "strict", "strict": true}}),
-        ])
-        .unwrap();
-        assert_eq!(tools[0]["strict"], false);
-        assert_eq!(tools[1]["strict"], true);
+        let loose = ToolDefinition::function("loose").to_responses_tool();
+        let strict = ToolDefinition::function("strict")
+            .with_strict(true)
+            .to_responses_tool();
+        assert_eq!(loose["strict"], false);
+        assert_eq!(strict["strict"], true);
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::config::ReasoningEffort;
 use crate::tools::ToolInvocationId;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -81,31 +81,351 @@ impl LlmRequestScope {
     }
 }
 
+const MAX_TOOL_NAME_BYTES: usize = 256;
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmMessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+impl LlmMessageRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "system" => Ok(Self::System),
+            "user" => Ok(Self::User),
+            "assistant" => Ok(Self::Assistant),
+            other => Err(format!(
+                "LLM message role '{other}' is not a provider-neutral system, user, or assistant message"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmMessage {
+    pub role: LlmMessageRole,
+    pub content: String,
+}
+
+impl LlmMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmMessageRole::System,
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmMessageRole::User,
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmMessageRole::Assistant,
+            content: content.into(),
+        }
+    }
+
+    pub fn from_openai_value(value: &Value) -> Result<Self, String> {
+        let role = value
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "LLM message is missing a role".to_string())?;
+        let content = value
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "LLM message is missing string content".to_string())?;
+        if value.get("tool_call_id").is_some() || role == "tool" {
+            return Err(
+                "tool results are continuation data and cannot be supplied as LLM messages"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            role: LlmMessageRole::parse(role)?,
+            content: content.to_string(),
+        })
+    }
+
+    pub fn from_openai_values(values: &[Value]) -> Result<Vec<Self>, String> {
+        values.iter().map(Self::from_openai_value).collect()
+    }
+
+    pub fn to_openai_chat(&self) -> Value {
+        json!({
+            "role": self.role.as_str(),
+            "content": self.content,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDefinition {
+    name: String,
+    description: String,
+    parameters: Value,
+    strict: bool,
+}
+
+impl ToolDefinition {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+    ) -> Result<Self, String> {
+        let name = name.into();
+        let description = description.into();
+        if name.trim().is_empty() || name.len() > MAX_TOOL_NAME_BYTES || name.contains('\0') {
+            return Err(format!(
+                "tool name must be 1..={MAX_TOOL_NAME_BYTES} bytes and contain no NUL"
+            ));
+        }
+        if description.len() > MAX_TOOL_DESCRIPTION_BYTES || description.contains('\0') {
+            return Err(format!(
+                "tool description must be at most {MAX_TOOL_DESCRIPTION_BYTES} bytes and contain no NUL"
+            ));
+        }
+        if !parameters.is_object() {
+            return Err("tool parameters must be a JSON object schema".to_string());
+        }
+        let encoded = serde_json::to_vec(&parameters)
+            .map_err(|error| format!("tool parameters could not be encoded: {error}"))?;
+        if encoded.len() > MAX_TOOL_SCHEMA_BYTES {
+            return Err(format!(
+                "tool parameters must be at most {MAX_TOOL_SCHEMA_BYTES} bytes"
+            ));
+        }
+        Ok(Self {
+            name,
+            description,
+            parameters,
+            strict: false,
+        })
+    }
+
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    pub fn function(name: impl Into<String>) -> Self {
+        Self::new(name, "", json!({"type": "object"}))
+            .expect("non-empty function tool names are valid")
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn parameters(&self) -> &Value {
+        &self.parameters
+    }
+
+    pub fn from_openai_value(value: &Value) -> Result<Self, String> {
+        let tool = value
+            .as_object()
+            .ok_or_else(|| "tool definition must be an object".to_string())?;
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            return Err("tool definition type must be 'function'".to_string());
+        }
+        let function = tool
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "tool definition is missing function".to_string())?;
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "tool definition is missing a name".to_string())?;
+        let description = match function.get("description") {
+            Some(description) => description
+                .as_str()
+                .ok_or_else(|| "tool description must be a string".to_string())?,
+            None => "",
+        };
+        let parameters = function
+            .get("parameters")
+            .cloned()
+            .ok_or_else(|| "tool definition parameters must be an object".to_string())?;
+        let mut tool = Self::new(name, description, parameters)?;
+        match function.get("strict") {
+            None => {}
+            Some(Value::Bool(strict)) => tool.strict = *strict,
+            Some(_) => return Err("function tool strict value must be boolean".to_string()),
+        }
+        Ok(tool)
+    }
+
+    pub fn from_openai_values(values: &[Value]) -> Result<Vec<Self>, String> {
+        values.iter().map(Self::from_openai_value).collect()
+    }
+
+    pub fn from_openai_values_opt(values: Option<&[Value]>) -> Result<Option<Vec<Self>>, String> {
+        values.map(Self::from_openai_values).transpose()
+    }
+
+    pub fn to_openai_tool(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+                "strict": self.strict,
+            }
+        })
+    }
+
+    pub fn to_anthropic_tool(&self) -> Value {
+        json!({
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.parameters,
+        })
+    }
+
+    pub fn to_gemini_declaration(&self) -> Value {
+        json!({
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        })
+    }
+
+    pub fn to_responses_tool(&self) -> Value {
+        json!({
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+            "strict": self.strict,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningOption {
+    ProviderDefault,
+    Disabled,
+    Effort(ReasoningEffort),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenerationOptions {
+    temperature: Option<f64>,
+    reasoning: ReasoningOption,
+}
+
+impl Default for GenerationOptions {
+    fn default() -> Self {
+        Self::provider_default()
+    }
+}
+
+impl GenerationOptions {
+    pub fn provider_default() -> Self {
+        Self {
+            temperature: None,
+            reasoning: ReasoningOption::ProviderDefault,
+        }
+    }
+
+    pub fn temperature(&self) -> Option<f64> {
+        self.temperature
+    }
+
+    pub fn reasoning(&self) -> ReasoningOption {
+        self.reasoning
+    }
+
+    pub fn with_temperature(mut self, value: f64) -> Result<Self, String> {
+        self.set_temperature(value)?;
+        Ok(self)
+    }
+
+    pub fn with_reasoning(mut self, reasoning: ReasoningOption) -> Self {
+        self.reasoning = reasoning;
+        self
+    }
+
+    fn set_temperature(&mut self, value: f64) -> Result<(), String> {
+        if !value.is_finite() {
+            return Err("temperature must be a finite number".to_string());
+        }
+        if !(0.0..=2.0).contains(&value) {
+            return Err("temperature must be in 0.0..=2.0".to_string());
+        }
+        self.temperature = Some(value);
+        Ok(())
+    }
+
+    pub fn resolved_reasoning(
+        self,
+        configured: Option<ReasoningEffort>,
+    ) -> Option<ReasoningEffort> {
+        match self.reasoning {
+            ReasoningOption::ProviderDefault => configured,
+            ReasoningOption::Disabled => Some(ReasoningEffort::None),
+            ReasoningOption::Effort(effort) => Some(effort),
+        }
+    }
+}
+
 pub struct LlmRequest<'a> {
-    pub messages: &'a [Value],
-    pub tools: Option<&'a [Value]>,
-    pub temperature: f64,
+    pub messages: &'a [LlmMessage],
+    pub tools: Option<&'a [ToolDefinition]>,
+    pub options: GenerationOptions,
     pub max_output_tokens: Option<u32>,
-    pub reasoning_effort: Option<ReasoningEffort>,
     pub scope: Option<LlmRequestScope>,
     pub continuation: Option<ProviderContinuation>,
 }
 
 impl<'a> LlmRequest<'a> {
-    pub fn new(messages: &'a [Value], tools: Option<&'a [Value]>, temperature: f64) -> Self {
+    pub fn new(messages: &'a [LlmMessage], tools: Option<&'a [ToolDefinition]>) -> Self {
         Self {
             messages,
             tools,
-            temperature,
+            options: GenerationOptions::provider_default(),
             max_output_tokens: None,
-            reasoning_effort: None,
             scope: None,
             continuation: None,
         }
     }
 
+    pub fn with_options(mut self, options: GenerationOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_temperature(mut self, value: f64) -> Result<Self, String> {
+        self.options.set_temperature(value)?;
+        Ok(self)
+    }
+
     pub fn with_reasoning_effort(mut self, effort: Option<ReasoningEffort>) -> Self {
-        self.reasoning_effort = effort;
+        self.options.reasoning = match effort {
+            None => ReasoningOption::ProviderDefault,
+            Some(ReasoningEffort::None) => ReasoningOption::Disabled,
+            Some(effort) => ReasoningOption::Effort(effort),
+        };
         self
     }
 
@@ -132,10 +452,10 @@ impl fmt::Debug for LlmRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LlmRequest")
             .field("message_count", &self.messages.len())
-            .field("tool_count", &self.tools.map_or(0, <[Value]>::len))
-            .field("temperature", &self.temperature)
+            .field("tool_count", &self.tools.map_or(0, <[ToolDefinition]>::len))
+            .field("temperature", &self.options.temperature())
             .field("max_output_tokens", &self.max_output_tokens)
-            .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning", &self.options.reasoning())
             .field("scope", &self.scope)
             .field("continuation", &self.continuation)
             .finish()
@@ -632,5 +952,60 @@ mod tests {
             )
             .unwrap_err();
         assert!(output_error.contains("tool output exceeds"));
+    }
+
+    #[test]
+    fn generation_options_accept_finite_range_and_reject_invalid_temperature() {
+        let options = GenerationOptions::provider_default()
+            .with_temperature(0.5)
+            .expect("valid temperature");
+        assert_eq!(options.temperature(), Some(0.5));
+        assert_eq!(options.reasoning(), ReasoningOption::ProviderDefault);
+
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 2.01] {
+            let error = GenerationOptions::provider_default()
+                .with_temperature(invalid)
+                .expect_err("invalid temperature");
+            assert!(
+                error.contains("finite") || error.contains("0.0..=2.0"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_messages_and_tools_reject_wire_protocol_shapes() {
+        let message = LlmMessage::from_openai_value(&json!({
+            "role": "user",
+            "content": "inspect"
+        }))
+        .expect("user message");
+        assert_eq!(message, LlmMessage::user("inspect"));
+        assert!(LlmMessage::from_openai_value(&json!({
+            "role": "tool",
+            "content": "result",
+            "tool_call_id": "call_1"
+        }))
+        .unwrap_err()
+        .contains("continuation"));
+
+        let tool = ToolDefinition::from_openai_value(&json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object"}
+            }
+        }))
+        .expect("function tool");
+        assert_eq!(tool.name(), "read_file");
+        assert_eq!(
+            ToolDefinition::from_openai_value(&json!({
+                "type": "function",
+                "function": {"name": "read"}
+            }))
+            .unwrap_err(),
+            "tool definition parameters must be an object"
+        );
     }
 }

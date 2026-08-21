@@ -144,12 +144,10 @@ pub async fn maybe_compress_session(
         cfg.llm.context_length,
         8,
     )?;
+    let typed_messages = crate::llm::LlmMessage::from_openai_values(&bounded.messages)?;
+    let typed_tools = crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref())?;
     let response = llm
-        .complete(LlmRequest::new(
-            &bounded.messages,
-            bounded.tools.as_deref(),
-            0.3,
-        ))
+        .complete(LlmRequest::new(&typed_messages, typed_tools.as_deref()))
         .await
         .map_err(|error| error.with_phase(LlmErrorPhase::Compression))?;
     let summary_content = response

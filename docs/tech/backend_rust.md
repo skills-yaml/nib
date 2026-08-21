@@ -47,7 +47,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### OpenAI-Compatible Transport Contract
 
 OpenAI-compatible providers resolve an explicit `chat_completions` or `responses` API
-mode before network I/O. `LlmClient` receives a structured request, and streaming
+mode before network I/O. `LlmClient` receives a typed `LlmRequest` (`LlmMessage`,
+`ToolDefinition`, `GenerationOptions`) rather than wire-shaped JSON messages. Streaming
 separates sanitized projected events from a private validated completed-turn envelope.
 Only the completed envelope can authorize tool execution. Responses continuations are
 byte/item bounded, bound to provider/model/session/run, redacted under `Debug`, and

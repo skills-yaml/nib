@@ -571,7 +571,7 @@ reconciliation is safer and auditable.
 - [ ] Core messages, tools, tool calls, tool results, terminal outcomes, stream deltas,
   capabilities, and errors are typed. Raw JSON is limited to validated schemas,
   arguments, results, and private adapter payloads.
-- [ ] `GenerationOptions` represents provider-default versus explicit finite
+- [x] `GenerationOptions` represents provider-default versus explicit finite
   temperature and reasoning. Every explicit value is serialized or rejected before
   I/O, and no current caller relies on a silently discarded positional temperature.
 - [ ] One provider registry owns supported names, display metadata, defaults,
@@ -731,12 +731,24 @@ Shipped on this host, still insufficient to move the spec to done:
   OpenRouter, Meta, Anthropic, Gemini, and Mock.
 - Per-adapter complete/stream fixtures for HTTP errors, redaction, continuation
   binding, and OpenAI-compatible complete/stream class equality.
+- Typed `LlmRequest` messages (`LlmMessage` system/user/assistant) and
+  `ToolDefinition` (validated name, description, JSON schema). JSON remains only for
+  schemas, tool arguments, and private adapter payloads on the request boundary.
+- `GenerationOptions` with optional finite `0..=2` temperature and
+  provider-default / disabled / explicit reasoning. Planner, agent, and compression
+  callers use provider default. Chat/Anthropic/Gemini omit default temperature and
+  serialize explicit values; Responses and Mock reject explicit temperature before
+  I/O; Anthropic, Gemini, and Mock reject non-default reasoning before I/O.
+- Shared `src/llm/conformance.rs` fixtures for temperature/reasoning validation and
+  OpenAI-compatible complete/stream HTTP 401 class equality.
 
-Remaining local and review work before Done (not closed on this Linux change set):
+Remaining before Done:
 
-- Typed `LlmRequest` messages/tools (`serde_json::Value` remains on the request).
-- `GenerationOptions` for provider-default versus explicit finite temperature.
-- One shared conformance harness that is not only per-module tests.
+- Completing the rest of the typed domain (`LlmProvider` naming, structural
+  capability objects, dedicated tool-result request types beyond continuation).
+- Expanding the shared harness to every terminal state, cancellation, and native
+  tool-correlation scenario for Anthropic, Gemini, and Mock, not only options and
+  OpenAI-compatible 401s.
 - T021 exact-revision release-binary sequencing, coverage/all-targets, and independent
   spec-compliance plus technical/security review.
 
