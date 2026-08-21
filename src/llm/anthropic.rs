@@ -1,8 +1,10 @@
 //! Anthropic Messages API client.
 
+#[cfg(test)]
+use crate::llm::types::LlmMessage;
 use crate::llm::types::{
     LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallRequest,
+    ProviderContinuation, StreamEvent, ToolCallRequest, ToolDefinition,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -123,33 +125,35 @@ impl AnthropicClient {
         })
     }
 
-    fn request_body(&self, request: LlmRequest<'_>, stream: bool) -> Result<Value, String> {
+    pub(crate) fn request_body(
+        &self,
+        request: LlmRequest<'_>,
+        stream: bool,
+    ) -> Result<Value, String> {
         let LlmRequest {
             messages: request_messages,
             tools,
-            temperature,
+            options,
             max_output_tokens,
-            reasoning_effort: _,
             scope,
             continuation,
         } = request;
         let system = request_messages
             .iter()
-            .find(|message| message.get("role") == Some(&json!("system")))
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
+            .find(|message| message.role == crate::llm::LlmMessageRole::System)
+            .map(|message| message.content.as_str())
             .unwrap_or("You are nib, a coding agent.");
         let mut messages = request_messages
             .iter()
-            .filter(|message| message.get("role") != Some(&json!("system")))
+            .filter(|message| message.role != crate::llm::types::LlmMessageRole::System)
             .map(|message| {
                 json!({
-                    "role": if message.get("role") == Some(&json!("assistant")) {
+                    "role": if message.role == crate::llm::LlmMessageRole::Assistant {
                         "assistant"
                     } else {
                         "user"
                     },
-                    "content": message.get("content").unwrap_or(&json!("")),
+                    "content": message.content,
                 })
             })
             .collect::<Vec<_>>();
@@ -163,10 +167,12 @@ impl AnthropicClient {
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_output_tokens.unwrap_or(4096),
-            "temperature": temperature,
             "system": system,
             "messages": messages,
         });
+        if let Some(temperature) = options.temperature() {
+            body["temperature"] = json!(temperature);
+        }
         if max_output_tokens == Some(0) {
             return Err("max_output_tokens must be greater than zero".to_string());
         }
@@ -174,7 +180,10 @@ impl AnthropicClient {
             body["stream"] = json!(true);
         }
         if let Some(tools) = tools {
-            body["tools"] = json!(anthropic_tool_definitions(tools)?);
+            body["tools"] = json!(tools
+                .iter()
+                .map(ToolDefinition::to_anthropic_tool)
+                .collect::<Vec<_>>());
         }
         Ok(body)
     }
@@ -528,10 +537,7 @@ impl LlmClient for AnthropicClient {
 }
 
 fn validate_anthropic_request(request: &LlmRequest<'_>) -> Result<(), String> {
-    if request.reasoning_effort.is_some() {
-        return Err("Anthropic requests do not support reasoning_effort".to_string());
-    }
-    Ok(())
+    crate::llm::conformance::reject_unsupported_reasoning(request, "Anthropic")
 }
 
 const MAX_NATIVE_BASE_URL_BYTES: usize = 4 * 1024;
@@ -580,46 +586,6 @@ pub(crate) fn normalize_anthropic_endpoint(base_url: &str) -> Result<String, Str
             parsed.as_str().trim_end_matches('/')
         )
     })
-}
-
-fn anthropic_tool_definitions(tools: &[Value]) -> Result<Vec<Value>, String> {
-    tools
-        .iter()
-        .map(|tool| {
-            let tool = tool
-                .as_object()
-                .ok_or_else(|| "Anthropic tool definition must be an object".to_string())?;
-            if tool.get("type").and_then(Value::as_str) != Some("function") {
-                return Err("Anthropic tool definition type must be 'function'".to_string());
-            }
-            let function = tool
-                .get("function")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "Anthropic tool definition is missing function".to_string())?;
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| "Anthropic tool definition is missing a name".to_string())?;
-            let description = match function.get("description") {
-                Some(description) => description.as_str().ok_or_else(|| {
-                    "Anthropic tool definition description must be a string".to_string()
-                })?,
-                None => "",
-            };
-            let input_schema = function
-                .get("parameters")
-                .filter(|schema| schema.is_object())
-                .ok_or_else(|| {
-                    "Anthropic tool definition parameters must be an object".to_string()
-                })?;
-            Ok(json!({
-                "name": name,
-                "description": description,
-                "input_schema": input_schema,
-            }))
-        })
-        .collect()
 }
 
 async fn safe_anthropic_http_error(
@@ -952,7 +918,7 @@ mod tests {
         .expect("test Anthropic endpoint")
     }
 
-    fn request_with_continuation(messages: &[Value]) -> LlmRequest<'_> {
+    fn request_with_continuation(messages: &[LlmMessage]) -> LlmRequest<'_> {
         let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
         let continuation = ProviderContinuation::new(
             "openai",
@@ -965,7 +931,7 @@ mod tests {
             (),
         )
         .unwrap();
-        LlmRequest::new(messages, None, 0.0)
+        LlmRequest::new(messages, None)
             .with_scope(scope)
             .with_continuation(Some(continuation))
     }
@@ -1039,7 +1005,7 @@ mod tests {
     #[tokio::test]
     async fn complete_and_stream_reject_foreign_continuations_and_unsupported_reasoning() {
         let client = test_client("http://127.0.0.1:9".to_string());
-        let messages = [json!({"role": "user", "content": "x"})];
+        let messages = [LlmMessage::user("x")];
 
         let error = client
             .complete(request_with_continuation(&messages))
@@ -1059,8 +1025,7 @@ mod tests {
         );
 
         let reasoning_request = || {
-            LlmRequest::new(&messages, None, 0.0)
-                .with_reasoning_effort(Some(ReasoningEffort::Medium))
+            LlmRequest::new(&messages, None).with_reasoning_effort(Some(ReasoningEffort::Medium))
         };
         let error = client
             .complete(reasoning_request())
@@ -1074,28 +1039,14 @@ mod tests {
         assert_eq!(error, "Anthropic requests do not support reasoning_effort");
     }
 
-    #[tokio::test]
-    async fn complete_and_stream_reject_malformed_tools_before_io() {
-        let client = test_client("http://127.0.0.1:9".to_string());
-        let messages = [json!({"role": "user", "content": "x"})];
-        let malformed_tools = [json!({"type": "function", "function": {"name": "read"}})];
-
-        let error = client
-            .complete(LlmRequest::new(&messages, Some(&malformed_tools), 0.0))
-            .await
-            .expect_err("completion must reject a malformed tool");
-        assert_eq!(
-            error,
-            "Anthropic tool definition parameters must be an object"
-        );
-        let error = client
-            .stream(LlmRequest::new(&messages, Some(&malformed_tools), 0.0))
-            .await
-            .expect_err("stream must reject a malformed tool");
-        assert_eq!(
-            error,
-            "Anthropic tool definition parameters must be an object"
-        );
+    #[test]
+    fn complete_and_stream_reject_malformed_tools_before_io() {
+        let error = ToolDefinition::from_openai_value(&json!({
+            "type": "function",
+            "function": {"name": "read"}
+        }))
+        .expect_err("malformed tool");
+        assert_eq!(error, "tool definition parameters must be an object");
     }
 
     #[test]
@@ -1164,18 +1115,15 @@ mod tests {
             .complete(
                 LlmRequest::new(
                     &[
-                        json!({"role": "system", "content": "follow project rules"}),
-                        json!({"role": "user", "content": "search"}),
+                        LlmMessage::system("follow project rules"),
+                        LlmMessage::user("search"),
                     ],
-                    Some(&[json!({
-                        "type": "function",
-                        "function": {
-                            "name": "grep",
-                            "description": "search files",
-                            "parameters": {"type": "object", "required": ["pattern"]}
-                        }
-                    })]),
-                    0.3,
+                    Some(&[ToolDefinition::new(
+                        "grep",
+                        "search files",
+                        json!({"type": "object", "required": ["pattern"]}),
+                    )
+                    .expect("grep tool")]),
                 )
                 .with_max_output_tokens(43)
                 .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
@@ -1223,7 +1171,7 @@ mod tests {
         let (base_url, request_rx) = serve_once("200 OK", "text/event-stream", body);
         let mut stream = test_client(base_url)
             .stream(
-                LlmRequest::new(&[json!({"role": "user", "content": "read"})], None, 0.0)
+                LlmRequest::new(&[LlmMessage::user("read")], None)
                     .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
             )
             .await
@@ -1270,11 +1218,7 @@ mod tests {
             "data: {\"index\":0,\"delta\":{\"text\":\"first\"}}\n\n"
         ));
         let mut stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "cancel"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open Anthropic stream");
         let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
@@ -1304,11 +1248,7 @@ mod tests {
             "data: {\"index\":0,\"delta\":{\"text\":\"late\"}}\n\n"
         ));
         let mut stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "finish"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("finish")], None))
             .await
             .expect("open Anthropic stream");
 
@@ -1339,11 +1279,7 @@ mod tests {
             "event: message_stop\ndata: {}\n\n",
         );
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "finish"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("finish")], None))
             .await
             .expect("Anthropic stream");
         let error = stream
@@ -1365,11 +1301,7 @@ mod tests {
         );
         let (base_url, _) = serve_once("200 OK", "text/event-stream", body);
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "read"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("read")], None))
             .await
             .expect("Anthropic stream");
 
@@ -1385,11 +1317,7 @@ mod tests {
         const SENTINEL: &str = "remote-secret-prompt-and-key";
         let (base_url, _) = serve_once("401 Unauthorized", "text/plain", SENTINEL);
         let error = test_client(base_url)
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("completion must reject HTTP error");
         assert_eq!(error, "Anthropic API request failed with HTTP 401");
@@ -1399,11 +1327,7 @@ mod tests {
 
         let (base_url, _) = serve_once("403 Forbidden", "text/plain", SENTINEL);
         let error = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("stream must reject HTTP error");
         assert_eq!(error, "Anthropic API request failed with HTTP 403");
@@ -1420,11 +1344,7 @@ mod tests {
             base_url,
         )
         .expect("configured Anthropic client")
-        .complete(LlmRequest::new(
-            &[json!({"role": "user", "content": "x"})],
-            None,
-            0.0,
-        ))
+        .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
         .await
         .expect_err("diagnostic redaction fixture");
         let report = error.user_report(None);
@@ -1443,11 +1363,7 @@ mod tests {
             ),
         );
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect("Anthropic stream response");
         let error = stream.finish().await.expect_err("provider stream error");
@@ -1466,11 +1382,7 @@ mod tests {
             Some(crate::llm::MAX_LLM_COMPLETE_RESPONSE_BYTES + 1),
         );
         let error = test_client(base_url)
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized completion must be rejected");
         assert!(error.contains("4194304-byte limit"));
@@ -1482,11 +1394,7 @@ mod tests {
             Some(crate::llm::MAX_LLM_STREAM_BYTES + 1),
         );
         let error = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized stream must be rejected");
         assert!(error.contains("16777216-byte limit"));

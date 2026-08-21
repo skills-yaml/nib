@@ -107,8 +107,9 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
             uuid::Uuid::new_v4().simple().to_string(),
         )?,
     };
-    let request =
-        LlmRequest::new(&bounded.messages, bounded.tools.as_deref(), 0.3).with_scope(scope);
+    let typed_messages = crate::llm::LlmMessage::from_openai_values(&bounded.messages)?;
+    let typed_tools = crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref())?;
+    let request = LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(scope);
     let mut stream = llm.stream(request).await?;
     while let Some(result) = stream.recv().await {
         let event = result.map_err(|error| *error)?;
@@ -202,8 +203,17 @@ mod tests {
             request: LlmRequest<'_>,
         ) -> Result<LlmResponse, crate::llm::LlmError> {
             *self.request.lock().expect("request lock") = Some((
-                request.messages.to_vec(),
-                request.tools.map(<[Value]>::to_vec),
+                request
+                    .messages
+                    .iter()
+                    .map(crate::llm::LlmMessage::to_openai_chat)
+                    .collect(),
+                request.tools.map(|tools| {
+                    tools
+                        .iter()
+                        .map(crate::llm::ToolDefinition::to_openai_tool)
+                        .collect()
+                }),
             ));
             Ok(LlmResponse::with_tools(vec![ToolCallRequest::new(
                 "submit_plan",

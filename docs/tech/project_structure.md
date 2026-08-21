@@ -24,16 +24,16 @@ nib/
 ├── docs/
 │   └── ... (specs, tech)
 ├── src/
-│   ├── main.rs                  # Rust CLI entry (clap)
+│   ├── main.rs                  # Rust CLI entry + unified interactive dispatch (clap)
 │   ├── lib.rs                   # Public runtime module surface
 │   ├── auth.rs                  # Provider authentication command
-│   ├── chat.rs                  # Interactive chat command
+│   ├── chat.rs                  # Unified interactive launcher + plain renderer
 │   ├── config_cmd.rs            # Config show/edit/validate command
 │   ├── console.rs               # Shared approval/question console input
 │   ├── context_cmd.rs           # Context inspection command
 │   ├── doctor.rs                # Runtime health checks
 │   ├── fs_security.rs           # Shared filesystem identity/link checks
-│   ├── interactive.rs           # Shared chat/TUI commands and interaction effects
+│   ├── interactive.rs           # Shared plain/TUI commands and interaction effects
 │   ├── mcp_cmd.rs               # MCP configuration command
 │   ├── mcp_test_fixture.rs      # Debug-only MCP subprocess fixture
 │   ├── run.rs                   # One-shot agent command
@@ -63,9 +63,14 @@ nib/
 - `src/fs_security.rs` — Shared filesystem identity and no-link primitives. Security-sensitive persistence and execution code should reuse this module.
 - `src/config/`, `src/profile/`, `src/session/`, and `src/daemons/` — Configuration plus profile-scoped session, memory, and durable workload state.
 - `src/integrations/` — Normalized gateways, bounded MCP framing, outbound/inbound MCP, and session worktree integration.
-- `src/interactive.rs` — Presentation-neutral chat/TUI command grammar, session
+- `src/interactive.rs` — Presentation-neutral plain/TUI command grammar, session
   selection, model selection, management effects, and stream-event display mapping.
-- `src/main.rs`, top-level command modules, `src/console.rs`, and `src/tui/` — Presentation and dispatch layers. They should stay relatively thin and reuse `src/interactive.rs` for shared capabilities.
+- `src/main.rs` and `src/chat.rs` — Unified interactive entry and deterministic
+  `auto`/`plain`/`tui` presentation selection. No-subcommand `nib` and `nib chat` share
+  this launcher; `nib tui` is a compatibility alias.
+- `src/console.rs` and `src/tui/` — Native plain and full-screen presentation layers.
+  They should stay relatively thin and reuse `src/interactive.rs` for shared
+  capabilities.
 - `docs/specs/` — Product truth. Never implement major behavior without a corresponding spec or task plan.
 - `docs/tech/` — Engineering conventions. Keep them up to date as the project evolves.
 
@@ -78,7 +83,8 @@ nib/
 
 - Not a microservices platform → no `backend/libs/`, `srv/`, `lambda/`, Firestore, Pub/Sub, etc.
 - Not primarily an API server (though it may grow lightweight MCP server or HTTP surfaces later).
-- Primary interfaces are excellent **CLI + TUI**, not web UIs.
+- The primary interface is one excellent interactive CLI with plain and full-screen
+  TUI presentation modes, not a web UI.
 
 ## Future Growth
 

@@ -616,7 +616,7 @@ pub fn provider_ready(entry: Option<&ProviderEntry>, provider: &str) -> bool {
 mod tests {
     use super::*;
     use crate::llm::types::LlmRequest;
-    use serde_json::{json, Value};
+    use serde_json::json;
     use serial_test::serial;
     use std::collections::HashMap;
 
@@ -948,12 +948,9 @@ mod tests {
         };
 
         let client = create_client(&config, None).expect("OpenAI Chat client");
-        let messages = [Value::Object(serde_json::Map::from_iter([
-            ("role".to_string(), json!("user")),
-            ("content".to_string(), json!("inspect")),
-        ]))];
+        let messages = [crate::llm::LlmMessage::user("inspect")];
         let error = client
-            .complete(LlmRequest::new(&messages, None, 0.0))
+            .complete(LlmRequest::new(&messages, None))
             .await
             .expect_err("fixture rejects request");
         let request = request_rx

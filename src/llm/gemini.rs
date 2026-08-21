@@ -1,8 +1,8 @@
 //! Google Gemini Generative Language API.
 
 use crate::llm::types::{
-    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderContinuation, StreamEvent,
-    ToolCallRequest,
+    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderContinuation,
+    StreamEvent, ToolCallRequest, ToolDefinition,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -144,13 +144,12 @@ impl GeminiClient {
         })
     }
 
-    fn request_body(&self, request: LlmRequest<'_>) -> Result<Value, String> {
+    pub(crate) fn request_body(&self, request: LlmRequest<'_>) -> Result<Value, String> {
         let LlmRequest {
             messages,
             tools,
-            temperature,
+            options,
             max_output_tokens,
-            reasoning_effort: _,
             scope,
             continuation,
         } = request;
@@ -162,28 +161,34 @@ impl GeminiClient {
                 scope.as_ref(),
             )?);
         }
-        let mut body = json!({
-            "contents": contents,
-            "generationConfig": {"temperature": temperature},
-        });
+        let mut generation_config = serde_json::Map::new();
+        if let Some(temperature) = options.temperature() {
+            generation_config.insert("temperature".to_string(), json!(temperature));
+        }
         if let Some(max_output_tokens) = max_output_tokens {
             if max_output_tokens == 0 {
                 return Err("max_output_tokens must be greater than zero".to_string());
             }
-            body["generationConfig"]["maxOutputTokens"] = json!(max_output_tokens);
+            generation_config.insert("maxOutputTokens".to_string(), json!(max_output_tokens));
+        }
+        let mut body = json!({
+            "contents": contents,
+        });
+        if !generation_config.is_empty() {
+            body["generationConfig"] = Value::Object(generation_config);
         }
         if let Some(system) = messages
             .iter()
-            .find(|message| message.get("role") == Some(&json!("system")))
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
+            .find(|message| message.role == crate::llm::LlmMessageRole::System)
         {
-            body["systemInstruction"] = json!({"parts": [{"text": system}]});
+            body["systemInstruction"] = json!({"parts": [{"text": system.content}]});
         }
-        if let Some(declarations) = tools.map(gemini_function_declarations).transpose()? {
-            if !declarations.is_empty() {
-                body["tools"] = json!([{"functionDeclarations": declarations}]);
-            }
+        if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+            let declarations = tools
+                .iter()
+                .map(ToolDefinition::to_gemini_declaration)
+                .collect::<Vec<_>>();
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
         }
         Ok(body)
     }
@@ -515,10 +520,7 @@ impl LlmClient for GeminiClient {
 }
 
 fn validate_gemini_request(request: &LlmRequest<'_>) -> Result<(), String> {
-    if request.reasoning_effort.is_some() {
-        return Err("Gemini requests do not support reasoning_effort".to_string());
-    }
-    Ok(())
+    crate::llm::conformance::reject_unsupported_reasoning(request, "Gemini")
 }
 
 const MAX_NATIVE_BASE_URL_BYTES: usize = 4 * 1024;
@@ -705,19 +707,19 @@ async fn fail_gemini_stream(
     }
 }
 
-fn gemini_contents(messages: &[Value]) -> Vec<Value> {
+fn gemini_contents(messages: &[LlmMessage]) -> Vec<Value> {
     messages
         .iter()
-        .filter(|message| message.get("role") != Some(&json!("system")))
+        .filter(|message| message.role != crate::llm::LlmMessageRole::System)
         .map(|message| {
-            let role = if message.get("role") == Some(&json!("assistant")) {
+            let role = if message.role == crate::llm::LlmMessageRole::Assistant {
                 "model"
             } else {
                 "user"
             };
             json!({
                 "role": role,
-                "parts": [{"text": message.get("content").and_then(Value::as_str).unwrap_or_default()}]
+                "parts": [{"text": message.content}]
             })
         })
         .collect()
@@ -953,7 +955,7 @@ mod tests {
         .expect("test Gemini endpoint")
     }
 
-    fn request_with_continuation(messages: &[Value]) -> LlmRequest<'_> {
+    fn request_with_continuation(messages: &[LlmMessage]) -> LlmRequest<'_> {
         let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
         let continuation = ProviderContinuation::new(
             "openai",
@@ -966,7 +968,7 @@ mod tests {
             (),
         )
         .unwrap();
-        LlmRequest::new(messages, None, 0.0)
+        LlmRequest::new(messages, None)
             .with_scope(scope)
             .with_continuation(Some(continuation))
     }
@@ -1023,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn complete_and_stream_reject_foreign_continuations_and_unsupported_reasoning() {
         let client = test_client("http://127.0.0.1:9".to_string());
-        let messages = [json!({"role": "user", "content": "x"})];
+        let messages = [LlmMessage::user("x")];
 
         let error = client
             .complete(request_with_continuation(&messages))
@@ -1043,8 +1045,7 @@ mod tests {
         );
 
         let reasoning_request = || {
-            LlmRequest::new(&messages, None, 0.0)
-                .with_reasoning_effort(Some(ReasoningEffort::Medium))
+            LlmRequest::new(&messages, None).with_reasoning_effort(Some(ReasoningEffort::Medium))
         };
         let error = client
             .complete(reasoning_request())
@@ -1058,22 +1059,14 @@ mod tests {
         assert_eq!(error, "Gemini requests do not support reasoning_effort");
     }
 
-    #[tokio::test]
-    async fn complete_and_stream_reject_malformed_tools_before_io() {
-        let client = test_client("http://127.0.0.1:9".to_string());
-        let messages = [json!({"role": "user", "content": "x"})];
-        let malformed_tools = [json!({"type": "function", "function": {"name": "read"}})];
-
-        let error = client
-            .complete(LlmRequest::new(&messages, Some(&malformed_tools), 0.0))
-            .await
-            .expect_err("completion must reject a malformed tool");
-        assert_eq!(error, "Gemini tool definition parameters must be an object");
-        let error = client
-            .stream(LlmRequest::new(&messages, Some(&malformed_tools), 0.0))
-            .await
-            .expect_err("stream must reject a malformed tool");
-        assert_eq!(error, "Gemini tool definition parameters must be an object");
+    #[test]
+    fn complete_and_stream_reject_malformed_tools_before_io() {
+        let error = ToolDefinition::from_openai_value(&json!({
+            "type": "function",
+            "function": {"name": "read"}
+        }))
+        .expect_err("malformed tool");
+        assert_eq!(error, "tool definition parameters must be an object");
     }
 
     #[test]
@@ -1246,19 +1239,16 @@ mod tests {
             .complete(
                 LlmRequest::new(
                     &[
-                        json!({"role": "system", "content": "follow project rules"}),
-                        json!({"role": "user", "content": "search"}),
-                        json!({"role": "assistant", "content": "working"}),
+                        LlmMessage::system("follow project rules"),
+                        LlmMessage::user("search"),
+                        LlmMessage::assistant("working"),
                     ],
-                    Some(&[json!({
-                        "type": "function",
-                        "function": {
-                            "name": "grep",
-                            "description": "search files",
-                            "parameters": {"type": "object", "required": ["pattern"]}
-                        }
-                    })]),
-                    0.4,
+                    Some(&[ToolDefinition::new(
+                        "grep",
+                        "search files",
+                        json!({"type": "object", "required": ["pattern"]}),
+                    )
+                    .expect("grep tool")]),
                 )
                 .with_max_output_tokens(47)
                 .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
@@ -1294,7 +1284,7 @@ mod tests {
         let (base_url, request_rx) = serve_once("200 OK", "text/event-stream", body);
         let mut stream = test_client(base_url)
             .stream(
-                LlmRequest::new(&[json!({"role": "user", "content": "read"})], None, 0.0)
+                LlmRequest::new(&[LlmMessage::user("read")], None)
                     .with_scope(LlmRequestScope::new("test-session", "test-run").unwrap()),
             )
             .await
@@ -1337,11 +1327,7 @@ mod tests {
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"first\"}]}}]}\n\n",
         );
         let mut stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "cancel"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open Gemini stream");
         let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
@@ -1367,11 +1353,7 @@ mod tests {
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"late\"}]}}]}\n\n"
         ));
         let mut stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "finish"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("finish")], None))
             .await
             .expect("open Gemini stream");
 
@@ -1402,11 +1384,7 @@ mod tests {
         );
         let (base_url, _) = serve_once("200 OK", "text/event-stream", body);
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "read"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("read")], None))
             .await
             .expect("Gemini stream");
 
@@ -1422,11 +1400,7 @@ mod tests {
         const SENTINEL: &str = "remote-secret-prompt-and-key";
         let (base_url, _) = serve_once("401 Unauthorized", "text/plain", SENTINEL);
         let error = test_client(base_url)
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("completion must reject HTTP error");
         assert_eq!(error, "Gemini API request failed with HTTP 401");
@@ -1436,11 +1410,7 @@ mod tests {
 
         let (base_url, _) = serve_once("403 Forbidden", "text/plain", SENTINEL);
         let error = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("stream must reject HTTP error");
         assert_eq!(error, "Gemini API request failed with HTTP 403");
@@ -1457,11 +1427,7 @@ mod tests {
             base_url,
         )
         .expect("configured Gemini client")
-        .complete(LlmRequest::new(
-            &[json!({"role": "user", "content": "x"})],
-            None,
-            0.0,
-        ))
+        .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
         .await
         .expect_err("diagnostic redaction fixture");
         let report = error.user_report(None);
@@ -1478,11 +1444,7 @@ mod tests {
             format!("data: {{\"error\":{{\"message\":\"{SENTINEL}\"}}}}\n\n"),
         );
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect("Gemini stream response");
         let error = stream.finish().await.expect_err("provider stream error");
@@ -1500,11 +1462,7 @@ mod tests {
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]},\"finishReason\":\"MAX_TOKENS\"}]}\n\n",
         );
         let stream = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect("Gemini stream response");
         let error = stream.finish().await.expect_err("truncated stream");
@@ -1520,11 +1478,7 @@ mod tests {
             Some(crate::llm::MAX_LLM_COMPLETE_RESPONSE_BYTES + 1),
         );
         let error = test_client(base_url)
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized completion must be rejected");
         assert!(error.contains("4194304-byte limit"));
@@ -1536,11 +1490,7 @@ mod tests {
             Some(crate::llm::MAX_LLM_STREAM_BYTES + 1),
         );
         let error = test_client(base_url)
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized stream must be rejected");
         assert!(error.contains("16777216-byte limit"));

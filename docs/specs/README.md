@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **23 done, 14 development, and 0 backlog**.
+The current lifecycle is **27 done, 14 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -46,14 +46,24 @@ adapters composed from shared wire codecs, native correlated tool continuation, 
 terminal/error normalization, and provider conformance gates.
 T023 is in development for credential-gated live qualification across every account-visible
 direct-provider model and a reviewed exact-ID OpenRouter allowlist.
-T024 is in development for source-controlled curated provider model defaults and
+T024 completed source-controlled curated provider model defaults and
 user-configurable per-provider picker lists.
 T025 completed interactive chat/TUI capability parity. T026 is in development for
 actionable, redaction-safe LLM failure propagation and native console/TUI presentation.
 T027 completed a doctor-diagnosed, explicitly invoked repair of canonical OpenAI
 tool/reasoning workloads that still use Chat Completions.
+T028 completed a current-session-first TUI, explicit preview-and-confirm session
+switching, persisted-session reloading, and slash-command completion.
 T029 is in development for explicit, verified switching between production and
 development self-update channels from an already managed installation.
+T030 completed one canonical interactive launcher that prefers the TUI, retains an
+explicit plain-mode fallback, preserves `nib run`, and keeps the existing interactive
+commands as compatibility entry points during migration.
+FT-019 is in development as the umbrella interaction contract for a Codex-inspired
+composer, transcript, live steering and queueing, status and permission visibility,
+inspectable activity, and full semantic parity between TUI and plain/chat modes. T031
+completed the first child slice (shared model, ledger TUI, queue-only live input,
+capability-gated compact/ps/stop/steer).
 FT-018 completed the verified self-update command, bounded update notices, Windows
 in-use replacement, and four-platform production rollout.
 
@@ -82,11 +92,14 @@ work or narrower guarantees.
 - [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
 - [T022: Provider-Neutral LLM Contract and Adapter Conformance](development/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
 - [T023: Live LLM Provider and Model Integration Qualification](development/T023_live_llm_provider_model_integration_qualification.md)
-- [T024: Configurable Provider Model Catalog and Curated Defaults](development/T024_configurable_provider_model_catalog_and_curated_defaults.md)
+- [T024: Configurable Provider Model Catalog and Curated Defaults](done/T024_configurable_provider_model_catalog_and_curated_defaults.md)
 - [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
 - [T026: Actionable, Redaction-Safe LLM Failure Reporting](development/T026_actionable_redaction_safe_llm_failure_reporting.md)
 - [T027: Doctor-Guided OpenAI Transport Repair](done/T027_doctor_guided_openai_transport_repair.md)
+- [T028: Current-Session-First TUI and Slash-Command Completion](done/T028_current_session_first_tui_and_slash_command_completion.md)
 - [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
+- [T030: Unified Interactive CLI and Plain-Mode Fallback](done/T030_unified_interactive_cli_and_plain_mode_fallback.md)
+- [T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](done/T031_ft019_interaction_model_and_ledger_tui.md)
 
 ### Feature specs
 
@@ -104,6 +117,7 @@ work or narrower guarantees.
 - [FT-016: MCP Server Exposure](development/ft_016_mcp_server_exposure.md)
 - [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
 - [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
+- [FT-019: Codex-Inspired Chat and TUI Interactions](development/ft_019_codex_inspired_chat_and_tui_interactions.md)
 
 ## Current Local Validation (2026-07-16)
 

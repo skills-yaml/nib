@@ -1,5 +1,19 @@
 # Memory Changelog
 
+## 2026-08-20 - FT-019 presentation and delivery decisions recorded
+
+- Type: decision
+- Source: user
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+Updated `docs/specs/backlog/ft_019_codex_inspired_chat_and_tui_interactions.md` with
+TUI ledger presentation, shared view-model ownership, queue-first live input, default
+key semantics, and remaining open decisions. Spec stays in backlog.
+
 ## 2026-06-17 - Initialize Agent Memory
 
 - Type: fact
@@ -285,3 +299,30 @@ identity, switched through `nib update --channel prod` to production commit `79e
 and then completed an option-free production no-op. T029 remains in development until
 the new command is published to production and the reverse production-to-development
 switch is proven.
+
+## 2026-08-19 - Interactive plain/TUI parity completed
+
+- Type: implementation / validation milestone
+- Source: user + T028 + T030
+- Confidence: high
+- Review: independent spec-compliance and code-quality self-reviews
+
+Content:
+
+Plain and full-screen interaction now share one command registry, bounded completion,
+session projection, strict preview-confirm switching, model/provider, skill, MCP,
+approval, question, streaming, cancellation, and reconciliation contracts. The TUI is
+current-session-first, and late events remain bound to their launch session. `nib` and
+`nib chat` use one automatic interactive launcher with `--plain` and `--tui` overrides;
+`nib tui` is a compatibility alias and `nib run` remains one-shot.
+
+T028 moved to `done`. T030 moved to `done` after hosted PR run `32312998166` passed the
+exact implementation revision on Linux, macOS, and Windows, including both native
+release-binary smoke jobs and the Windows pseudoterminal probe. Local evidence includes
+green `task check`, independent `task test`,
+`task check:all-targets`, all five documentation checks, 84.18 percent runtime line
+coverage (67,105/79,718), the locked release build, and Linux release-binary smoke for
+plain/TUI selection, approval, question, completion, session switching, cancellation,
+workload routing, and terminal restoration. One independent-suite attempt hit an
+unrelated namespace-recovery timing assertion; that exact test passed in the preceding
+canonical suite, the clean rerun, and the instrumented coverage suite.

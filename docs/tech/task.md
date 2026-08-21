@@ -39,6 +39,9 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold
 - `task build` — build the locked optimized release binary (optionally for `TARGET`)
+- `task smoke:interactive` — exercise the built Linux release binary through automatic
+  and explicit plain/TUI selection, compatibility aliases, a pseudo-terminal, terminal
+  restoration, and the unchanged one-shot command
 - `task smoke:managed-process` — build the Linux release binary, kill its active owner,
   and verify a detached supervised descendant is reaped before terminal publication
 - `task fix` — apply Rust formatting and Clippy fixes

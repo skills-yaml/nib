@@ -346,6 +346,15 @@ Session: <id>
 - This spec remains in Development: independent `task test`, coverage, raw-terminal
   failure recovery smoke, and final compliance/security review remain completion gates.
 
+## Implementation Progress (2026-08-21)
+
+Typed `LlmError` now reaches agent summaries, chat, `nib run`, TUI activity, gateway,
+durable workload, planner, and compression observers. Incident codes, `user_report`,
+CLI child-process redaction, and the user-guide recovery table remain in place. The
+T022 typed `LlmRequest` change did not introduce a competing failure type. This change
+set does not close T026: coverage, all-targets, raw-terminal recovery smoke, MCP
+observer proof, and independent reviews stay open.
+
 ## Open Questions
 
 - Should a strictly validated provider request ID be shown by default or only in an

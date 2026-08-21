@@ -9,7 +9,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 
 ### Key Libraries and Frameworks
 
-- **CLI Shell**: `clap` is used for command-line argument parsing (e.g., `nib run`, `nib chat`).
+- **CLI Shell**: `clap` is used for command-line argument parsing. `nib` launches the
+  unified interactive UI, while `nib run` remains the one-shot interface.
 - **TUI**: `ratatui` with `crossterm` is used for the terminal user interface, providing views for session history, live agent runs, and approval modals.
 - **Async Runtime**: `tokio` is the standard asynchronous runtime.
 - **Configuration**: Managed via `toml` (and `serde`). Config is strictly kept in `.nib/config.toml`.
@@ -23,7 +24,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### Project Structure (Rust specific)
 
 - `src/main.rs`: Entry point. Sets up logging and invokes the `clap` CLI router.
-- `src/auth.rs`, `src/chat.rs`, `src/run.rs`, and command modules: thin CLI command logic.
+- `src/chat.rs`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
+- `src/auth.rs`, `src/run.rs`, and other command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
 - `src/llm/`: The `LlmClient` traits and provider implementations (OpenAI, Anthropic,
   Gemini, Grok, OpenRouter, Meta, Mock). Provider wire metadata remains in the Rust
@@ -45,7 +47,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### OpenAI-Compatible Transport Contract
 
 OpenAI-compatible providers resolve an explicit `chat_completions` or `responses` API
-mode before network I/O. `LlmClient` receives a structured request, and streaming
+mode before network I/O. `LlmClient` receives a typed `LlmRequest` (`LlmMessage`,
+`ToolDefinition`, `GenerationOptions`) rather than wire-shaped JSON messages. Streaming
 separates sanitized projected events from a private validated completed-turn envelope.
 Only the completed envelope can authorize tool execution. Responses continuations are
 byte/item bounded, bound to provider/model/session/run, redacted under `Debug`, and

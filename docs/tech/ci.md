@@ -3,7 +3,8 @@
 Follows skm project structure.
 
 ## Pipeline
-- Use `task check`, `task test`, `task coverage`, `task build`, and the Linux
+- Use `task check`, `task test`, `task coverage`, `task build`, the Linux
+  `task smoke:interactive` terminal-selection gate, and the
   `task smoke:managed-process` release-binary owner-loss gate.
 - Rust toolchain via dtolnay/rust-toolchain.
 - Task via arduino/setup-task.
@@ -71,7 +72,8 @@ credential-free checks. It must not invoke any `task test:llm-live:*` target.
 
 ## Taskfile
 See root Taskfile.yml for Rust check, test, coverage, documentation, installer, build,
-managed-process smoke, and explicitly opted-in live LLM qualification tasks.
+interactive and managed-process smoke, and explicitly opted-in live LLM qualification
+tasks.
 
 ## Install & Update
 
@@ -113,7 +115,7 @@ See:
 ```bash
 task build          # Release binary
 task dev            # check + test + build + --help
-./target/release/nib chat
+./target/release/nib
 ```
 
 The release workflow (`.github/workflows/release.yml`) builds for multiple targets and

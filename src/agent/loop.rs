@@ -1073,7 +1073,10 @@ async fn run_agent_loop_inner(
             AgentState::InspectLlm => {
                 llm_turns += 1;
                 let continued_turn = provider_continuation.is_some();
-                let request = LlmRequest::new(&messages, llm_tools.as_deref(), 0.7)
+                let typed_messages = crate::llm::LlmMessage::from_openai_values(&messages)?;
+                let typed_tools =
+                    crate::llm::ToolDefinition::from_openai_values_opt(llm_tools.as_deref())?;
+                let request = LlmRequest::new(&typed_messages, typed_tools.as_deref())
                     .with_scope(request_scope.clone())
                     .with_continuation(provider_continuation.take());
                 let stream_result = llm.stream(request).await;

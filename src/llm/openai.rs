@@ -2,8 +2,8 @@
 
 use crate::config::ReasoningEffort;
 use crate::llm::types::{
-    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallAccumulator, ToolCallRequest,
+    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
+    ProviderContinuation, StreamEvent, ToolCallAccumulator, ToolCallRequest, ToolDefinition,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -183,28 +183,39 @@ impl OpenAiCompatClient {
         }
     }
 
-    fn request_body(&self, request: LlmRequest<'_>, stream: bool) -> Result<Value, String> {
-        let continuation_messages = request
-            .continuation
+    pub(crate) fn request_body(
+        &self,
+        request: LlmRequest<'_>,
+        stream: bool,
+    ) -> Result<Value, String> {
+        let LlmRequest {
+            messages,
+            tools,
+            options,
+            max_output_tokens,
+            scope,
+            continuation,
+        } = request;
+        let continuation_messages = continuation
             .map(|continuation| {
-                into_chat_messages(
-                    continuation,
-                    &self.provider,
-                    &self.model,
-                    request.scope.as_ref(),
-                )
+                into_chat_messages(continuation, &self.provider, &self.model, scope.as_ref())
             })
             .transpose()?
             .unwrap_or_default();
-        let mut messages = request.messages.to_vec();
-        messages.extend(continuation_messages);
+        let mut encoded_messages = messages
+            .iter()
+            .map(LlmMessage::to_openai_chat)
+            .collect::<Vec<_>>();
+        encoded_messages.extend(continuation_messages);
 
         let mut body = json!({
             "model": self.model,
-            "messages": messages,
-            "temperature": request.temperature,
+            "messages": encoded_messages,
         });
-        if let Some(max_output_tokens) = request.max_output_tokens {
+        if let Some(temperature) = options.temperature() {
+            body["temperature"] = json!(temperature);
+        }
+        if let Some(max_output_tokens) = max_output_tokens {
             if max_output_tokens == 0 {
                 return Err("max_output_tokens must be greater than zero".to_string());
             }
@@ -218,11 +229,14 @@ impl OpenAiCompatClient {
         if stream {
             body["stream"] = json!(true);
         }
-        if let Some(tools) = request.tools {
-            body["tools"] = json!(tools);
+        if let Some(tools) = tools {
+            body["tools"] = json!(tools
+                .iter()
+                .map(ToolDefinition::to_openai_tool)
+                .collect::<Vec<_>>());
             body["tool_choice"] = json!("auto");
         }
-        if let Some(effort) = request.reasoning_effort.or(self.reasoning_effort) {
+        if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning_effort"] = json!(effort.as_str());
         }
         Ok(body)
@@ -230,9 +244,7 @@ impl OpenAiCompatClient {
 
     fn requests_tools_with_reasoning(&self, request: &LlmRequest<'_>) -> bool {
         request.tools.is_some_and(|tools| !tools.is_empty())
-            && request
-                .reasoning_effort
-                .or(self.reasoning_effort)
+            && crate::llm::conformance::resolved_reasoning(request, self.reasoning_effort)
                 .is_some_and(|effort| effort != ReasoningEffort::None)
     }
 
@@ -1279,11 +1291,8 @@ mod tests {
 
     #[test]
     fn chat_request_construction_is_provider_and_model_name_agnostic() {
-        let messages = [json!({"role": "user", "content": "inspect"})];
-        let tools = [json!({
-            "type": "function",
-            "function": {"name": "read_file"}
-        })];
+        let messages = [LlmMessage::user("inspect")];
+        let tools = [ToolDefinition::function("read_file")];
         for (provider, model, base_url, expected_endpoint) in [
             (
                 "openai",
@@ -1314,7 +1323,7 @@ mod tests {
             assert_eq!(client.endpoint(), expected_endpoint);
             let body = client
                 .request_body(
-                    LlmRequest::new(&messages, Some(&tools), 0.2).with_max_output_tokens(37),
+                    LlmRequest::new(&messages, Some(&tools)).with_max_output_tokens(37),
                     false,
                 )
                 .expect("valid Chat request");
@@ -1364,9 +1373,8 @@ mod tests {
         let response = client
             .complete(
                 LlmRequest::new(
-                    &[json!({"role": "user", "content": "inspect"})],
-                    Some(&[json!({"type": "function", "function": {"name": "read_file"}})]),
-                    0.2,
+                    &[LlmMessage::user("inspect")],
+                    Some(&[ToolDefinition::function("read_file")]),
                 )
                 .with_scope(
                     crate::llm::types::LlmRequestScope::new("test-session", "test-run")
@@ -1417,14 +1425,14 @@ mod tests {
             base_url,
             Some(ReasoningEffort::Medium),
         );
-        let messages = [json!({"role": "user", "content": "plan"})];
-        let tools = [json!({
-            "type": "function",
-            "function": {"name": "submit_plan", "parameters": {"type": "object"}}
-        })];
+        let messages = [LlmMessage::user("plan")];
+        let tools = [
+            ToolDefinition::new("submit_plan", "", json!({"type": "object"}))
+                .expect("submit_plan tool"),
+        ];
 
         let error = client
-            .complete(LlmRequest::new(&messages, Some(&tools), 0.0))
+            .complete(LlmRequest::new(&messages, Some(&tools)))
             .await
             .expect_err("HTTP-200 provider error must fail");
 
@@ -1458,14 +1466,14 @@ mod tests {
             format!("{base_url}/v1"),
             Some(ReasoningEffort::Medium),
         );
-        let messages = [json!({"role": "user", "content": "plan"})];
-        let tools = [json!({
-            "type": "function",
-            "function": {"name": "submit_plan", "parameters": {"type": "object"}}
-        })];
+        let messages = [LlmMessage::user("plan")];
+        let tools = [
+            ToolDefinition::new("submit_plan", "", json!({"type": "object"}))
+                .expect("submit_plan tool"),
+        ];
 
         let error = client
-            .complete(LlmRequest::new(&messages, Some(&tools), 0.3))
+            .complete(LlmRequest::new(&messages, Some(&tools)))
             .await
             .expect_err("reported Chat tuple must fail");
 
@@ -1501,11 +1509,10 @@ mod tests {
         );
         let mut stream = client
             .stream(
-                LlmRequest::new(&[json!({"role": "user", "content": "search"})], None, 0.1)
-                    .with_scope(
-                        crate::llm::types::LlmRequestScope::new("test-session", "test-run")
-                            .expect("test scope"),
-                    ),
+                LlmRequest::new(&[LlmMessage::user("search")], None).with_scope(
+                    crate::llm::types::LlmRequestScope::new("test-session", "test-run")
+                        .expect("test scope"),
+                ),
             )
             .await
             .expect("OpenAI stream");
@@ -1566,9 +1573,9 @@ mod tests {
                 base_url,
                 None,
             );
-            let messages = [json!({"role": "user", "content": "stream"})];
+            let messages = [LlmMessage::user("stream")];
             let error = client
-                .stream(LlmRequest::new(&messages, None, 0.0))
+                .stream(LlmRequest::new(&messages, None))
                 .await
                 .expect("HTTP stream response")
                 .finish()
@@ -1595,13 +1602,13 @@ mod tests {
             base_url,
             Some(ReasoningEffort::Medium),
         );
-        let messages = [json!({"role": "user", "content": "stream"})];
-        let tools = [json!({
-            "type": "function",
-            "function": {"name": "submit_plan", "parameters": {"type": "object"}}
-        })];
+        let messages = [LlmMessage::user("stream")];
+        let tools = [
+            ToolDefinition::new("submit_plan", "", json!({"type": "object"}))
+                .expect("submit_plan tool"),
+        ];
         let error = client
-            .stream(LlmRequest::new(&messages, Some(&tools), 0.0))
+            .stream(LlmRequest::new(&messages, Some(&tools)))
             .await
             .expect("HTTP stream response")
             .finish()
@@ -1631,9 +1638,9 @@ mod tests {
                 vec!["stream-key".to_string()],
                 base_url,
             );
-            let messages = [json!({"role": "user", "content": "stream"})];
+            let messages = [LlmMessage::user("stream")];
             let error = client
-                .stream(LlmRequest::new(&messages, None, 0.0))
+                .stream(LlmRequest::new(&messages, None))
                 .await
                 .expect("HTTP stream response")
                 .finish()
@@ -1655,11 +1662,7 @@ mod tests {
             base_url,
         );
         let mut stream = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "cancel"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open OpenAI stream");
         let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
@@ -1690,11 +1693,7 @@ mod tests {
             base_url,
         );
         let mut stream = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "finish"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("finish")], None))
             .await
             .expect("open OpenAI stream");
 
@@ -1726,11 +1725,7 @@ mod tests {
             base_url,
         );
         let stream = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "finish"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("finish")], None))
             .await
             .expect("OpenAI stream");
         let error = stream
@@ -1752,9 +1747,9 @@ mod tests {
             vec!["stream-key".to_string()],
             base_url,
         );
-        let messages = [json!({"role": "user", "content": "write"})];
+        let messages = [LlmMessage::user("write")];
         let stream = client
-            .stream(LlmRequest::new(&messages, None, 0.0))
+            .stream(LlmRequest::new(&messages, None))
             .await
             .expect("OpenAI stream");
         let error = stream
@@ -1770,11 +1765,7 @@ mod tests {
         let client =
             OpenAiCompatClient::new("model".to_string(), vec!["bad".to_string()], base_url);
         let error = client
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("completion must reject HTTP errors");
         assert!(error.contains("Chat Completions API error HTTP 401"));
@@ -1787,11 +1778,7 @@ mod tests {
         let client =
             OpenAiCompatClient::new("model".to_string(), vec!["bad".to_string()], base_url);
         let error = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("stream must reject HTTP errors");
         assert!(error.contains("Chat Completions API error HTTP 403"));
@@ -1816,9 +1803,9 @@ mod tests {
                 base_url,
                 None,
             );
-            let messages = [json!({"role": "user", "content": "inspect"})];
+            let messages = [LlmMessage::user("inspect")];
             let complete_error = client
-                .complete(LlmRequest::new(&messages, None, 0.0))
+                .complete(LlmRequest::new(&messages, None))
                 .await
                 .expect_err("completion authentication error");
 
@@ -1835,7 +1822,7 @@ mod tests {
                 None,
             );
             let stream_error = client
-                .stream(LlmRequest::new(&messages, None, 0.0))
+                .stream(LlmRequest::new(&messages, None))
                 .await
                 .expect_err("stream authentication error");
 
@@ -1880,13 +1867,13 @@ mod tests {
             format!("{base_url}/{secret}"),
             Some(ReasoningEffort::Medium),
         );
-        let messages = [json!({"role": "user", "content": prompt_echo})];
-        let tools = [json!({
-            "type": "function",
-            "function": {"name": "submit_plan", "parameters": {"type": "object"}}
-        })];
+        let messages = [LlmMessage::user(prompt_echo)];
+        let tools = [
+            ToolDefinition::new("submit_plan", "", json!({"type": "object"}))
+                .expect("submit_plan tool"),
+        ];
         let error = client
-            .complete(LlmRequest::new(&messages, Some(&tools), 0.0))
+            .complete(LlmRequest::new(&messages, Some(&tools)))
             .await
             .expect_err("HTTP error");
         assert!(error.contains("[REDACTED]"));
@@ -1912,9 +1899,9 @@ mod tests {
             base_url,
             None,
         );
-        let messages = [json!({"role": "user", "content": "inspect"})];
+        let messages = [LlmMessage::user("inspect")];
         let error = client
-            .complete(LlmRequest::new(&messages, None, 0.0))
+            .complete(LlmRequest::new(&messages, None))
             .await
             .expect_err("oversized provider error");
         assert!(error.contains("openai Chat Completions API error HTTP 400"));
@@ -1933,11 +1920,7 @@ mod tests {
         let client =
             OpenAiCompatClient::new("model".to_string(), vec!["key".to_string()], base_url);
         let error = client
-            .complete(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .complete(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized completion must be rejected");
         assert!(error.contains("4194304-byte limit"));
@@ -1951,11 +1934,7 @@ mod tests {
         let client =
             OpenAiCompatClient::new("model".to_string(), vec!["key".to_string()], base_url);
         let error = client
-            .stream(LlmRequest::new(
-                &[json!({"role": "user", "content": "x"})],
-                None,
-                0.0,
-            ))
+            .stream(LlmRequest::new(&[LlmMessage::user("x")], None))
             .await
             .expect_err("oversized stream must be rejected");
         assert!(error.contains("16777216-byte limit"));

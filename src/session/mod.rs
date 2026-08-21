@@ -236,6 +236,20 @@ pub struct Session {
     pub active_skills: Vec<String>,
     #[serde(default)]
     pub skill_usage: Vec<SkillUsageRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_follow_ups: Vec<QueuedFollowUp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedFollowUp {
+    pub id: String,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+    pub source: String,
 }
 
 fn revision_is_zero(revision: &u64) -> bool {
@@ -323,6 +337,15 @@ fn session_mismatch_field(expected: &Session, published: &Session) -> &'static s
     if expected.skill_usage != published.skill_usage {
         return "skill_usage";
     }
+    if expected.queued_follow_ups != published.queued_follow_ups {
+        return "queued_follow_ups";
+    }
+    if expected.display_name != published.display_name {
+        return "display_name";
+    }
+    if expected.forked_from != published.forked_from {
+        return "forked_from";
+    }
     "unknown field"
 }
 
@@ -340,6 +363,9 @@ impl Session {
             events: vec![],
             active_skills: vec![],
             skill_usage: vec![],
+            queued_follow_ups: vec![],
+            display_name: None,
+            forked_from: None,
         }
     }
 

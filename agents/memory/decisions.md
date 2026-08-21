@@ -260,3 +260,39 @@ embedded identity controls subsequent option-free updates and startup notices. A
 different requested channel must replace the binary even when both manifests name the
 same commit. Local/source, unsupported, non-writable, and ambiguous installations
 remain installer-managed, and repository/tag selection remains compile-time controlled.
+
+## 2026-08-19 - Treat plain and TUI as presentations of one interactive product
+
+- Type: decision
+- Source: user + T028 + T030
+- Confidence: high
+- Review: none
+- Supersedes: 2026-06-20 chat-only `/model` capability and the separate chat/TUI product model
+
+Content:
+
+The line-oriented and full-screen interfaces must expose the same interactive agent,
+session, command, model/provider, skill, MCP, approval, question, cancellation, and
+reconciliation capabilities. Presentation and controls may remain native to each mode.
+`nib` is the canonical interactive launcher, automatically selecting the TUI on a
+capable terminal and plain mode otherwise; `--plain` and `--tui` force a presentation.
+`nib chat` uses the same launcher, `nib tui` remains a compatibility alias, and
+`nib run` retains its separate one-shot automation contract.
+
+## 2026-08-20 - FT-019 TUI is a ledgered renderer over a shared interaction model
+
+- Type: decision
+- Source: user + FT-019 backlog revision
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+FT-019 remains the umbrella interaction contract. The TUI is a presentation of that
+contract, not a second product: two fixed header/status rows, typed activity
+transcript, wrapped composer, and approval/question docks that keep the transcript
+visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
+canonical command discovery. Enter never steers; the first user-visible slice is
+queue-only until the agent loop can bind exact-run steering. Implementation still
+requires child development specs before code.

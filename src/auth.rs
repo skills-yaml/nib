@@ -123,7 +123,7 @@ fn run_auth_wizard_with_input(
     })
     .map_err(|error| format!("failed to save configuration: {error}"))?;
     println!("\nProviders configured in .nib/config.toml");
-    println!("You can now run: nib chat");
+    println!("You can now run: nib");
     Ok(())
 }
 

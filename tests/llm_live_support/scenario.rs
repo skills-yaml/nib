@@ -5,7 +5,9 @@ use super::{
     CatalogSnapshot, Classification, LlmTerminalStatus, ModelProfile, ScenarioId, TransportId,
 };
 use nib::config::{LlmApiMode, LlmConfig, NibConfig, ProviderEntry};
-use nib::llm::{create_client, LlmRequest, LlmRequestScope, StreamEvent};
+use nib::llm::{
+    create_client, LlmMessage, LlmRequest, LlmRequestScope, StreamEvent, ToolDefinition,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -202,10 +204,9 @@ async fn complete_text(
     run_id: &str,
 ) -> Result<(), String> {
     let nonce = nonce("complete");
-    let messages = [json!({
-        "role": "user",
-        "content": format!("Return the exact token {nonce} and no other text.")
-    })];
+    let messages = [LlmMessage::user(format!(
+        "Return the exact token {nonce} and no other text."
+    ))];
     let scope = scope(run_id, "complete")?;
     let response = client
         .complete(live_request(&messages, None, scope, settings))
@@ -220,10 +221,9 @@ async fn streamed_text(
     run_id: &str,
 ) -> Result<(), String> {
     let nonce = nonce("stream");
-    let messages = [json!({
-        "role": "user",
-        "content": format!("Return the exact token {nonce} and no other text.")
-    })];
+    let messages = [LlmMessage::user(format!(
+        "Return the exact token {nonce} and no other text."
+    ))];
     let scope = scope(run_id, "stream")?;
     let mut stream = client
         .stream(live_request(&messages, None, scope, settings))
@@ -287,7 +287,7 @@ async fn tool_continuation(
     } else {
         format!("Call record_probe with nonce {first_nonce}. Do not answer directly.")
     };
-    let messages = [json!({"role": "user", "content": content})];
+    let messages = [LlmMessage::user(content)];
     let scope = scope(run_id, if parallel { "parallel" } else { "tool" })?;
     let response = client
         .complete(live_request(
@@ -334,10 +334,9 @@ async fn tool_continuation(
             &json!({"success": true, "receipt": receipt}),
         )?;
     }
-    let follow_up = [json!({
-        "role": "user",
-        "content": format!("Return the exact receipt {receipt} and no other text.")
-    })];
+    let follow_up = [LlmMessage::user(format!(
+        "Return the exact receipt {receipt} and no other text."
+    ))];
     let final_response = client
         .complete(
             live_request(&follow_up, None, scope, settings).with_continuation(Some(continuation)),
@@ -348,31 +347,29 @@ async fn tool_continuation(
 }
 
 fn live_request<'a>(
-    messages: &'a [Value],
-    tools: Option<&'a [Value]>,
+    messages: &'a [LlmMessage],
+    tools: Option<&'a [ToolDefinition]>,
     scope: LlmRequestScope,
     settings: &LiveSettings,
 ) -> LlmRequest<'a> {
-    LlmRequest::new(messages, tools, 0.0)
+    LlmRequest::new(messages, tools)
         .with_scope(scope)
         .with_max_output_tokens(settings.limits.max_output_tokens_per_request)
 }
 
-fn qualification_tool(name: &str) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": "Record one synthetic qualification nonce without side effects.",
-            "strict": true,
-            "parameters": {
-                "type": "object",
-                "properties": {"nonce": {"type": "string"}},
-                "required": ["nonce"],
-                "additionalProperties": false
-            }
-        }
-    })
+fn qualification_tool(name: &str) -> ToolDefinition {
+    ToolDefinition::new(
+        name,
+        "Record one synthetic qualification nonce without side effects.",
+        json!({
+            "type": "object",
+            "properties": {"nonce": {"type": "string"}},
+            "required": ["nonce"],
+            "additionalProperties": false
+        }),
+    )
+    .expect("qualification tool")
+    .with_strict(true)
 }
 
 fn validate_text_response(response: nib::llm::LlmResponse, nonce: &str) -> Result<(), String> {
@@ -460,12 +457,13 @@ mod tests {
     #[test]
     fn qualification_tool_is_strict_and_inert() {
         let tool = qualification_tool("record_probe");
-        assert_eq!(tool["function"]["strict"], true);
+        let encoded = tool.to_openai_tool();
+        assert_eq!(encoded["function"]["strict"], true);
         assert_eq!(
-            tool["function"]["parameters"]["additionalProperties"],
+            encoded["function"]["parameters"]["additionalProperties"],
             false
         );
-        assert_eq!(tool["function"]["parameters"]["required"][0], "nonce");
+        assert_eq!(encoded["function"]["parameters"]["required"][0], "nonce");
     }
 
     #[test]
