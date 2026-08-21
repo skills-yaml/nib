@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **25 done, 14 development, and 0 backlog**.
+The current lifecycle is **25 done, 16 development, and 0 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -59,6 +59,11 @@ development self-update channels from an already managed installation.
 T030 completed one canonical interactive launcher that prefers the TUI, retains an
 explicit plain-mode fallback, preserves `nib run`, and keeps the existing interactive
 commands as compatibility entry points during migration.
+FT-019 is in development as the umbrella interaction contract for a Codex-inspired
+composer, transcript, live steering and queueing, status and permission visibility,
+inspectable activity, and full semantic parity between TUI and plain/chat modes. T031
+is the first child implementation spec (shared model, ledger TUI, queue-only live
+input, capability-gated compact/ps/stop/steer).
 FT-018 completed the verified self-update command, bounded update notices, Windows
 in-use replacement, and four-platform production rollout.
 
@@ -94,6 +99,7 @@ work or narrower guarantees.
 - [T028: Current-Session-First TUI and Slash-Command Completion](done/T028_current_session_first_tui_and_slash_command_completion.md)
 - [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
 - [T030: Unified Interactive CLI and Plain-Mode Fallback](done/T030_unified_interactive_cli_and_plain_mode_fallback.md)
+- [T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](development/T031_ft019_interaction_model_and_ledger_tui.md)
 
 ### Feature specs
 
@@ -111,6 +117,7 @@ work or narrower guarantees.
 - [FT-016: MCP Server Exposure](development/ft_016_mcp_server_exposure.md)
 - [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
 - [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
+- [FT-019: Codex-Inspired Chat and TUI Interactions](development/ft_019_codex_inspired_chat_and_tui_interactions.md)
 
 ## Current Local Validation (2026-07-16)
 

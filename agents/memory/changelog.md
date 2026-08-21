@@ -1,5 +1,19 @@
 # Memory Changelog
 
+## 2026-08-20 - FT-019 presentation and delivery decisions recorded
+
+- Type: decision
+- Source: user
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+Updated `docs/specs/backlog/ft_019_codex_inspired_chat_and_tui_interactions.md` with
+TUI ledger presentation, shared view-model ownership, queue-first live input, default
+key semantics, and remaining open decisions. Spec stays in backlog.
+
 ## 2026-06-17 - Initialize Agent Memory
 
 - Type: fact

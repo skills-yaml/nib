@@ -1,9 +1,12 @@
 //! Current-session-first Ratatui interface with live agent lifecycle rendering.
 
 use crate::interactive::{
-    display_stream_event, execute_interactive_command, interactive_completions,
+    apply_stream_event, bottom_scroll_for_wrap, display_stream_event,
+    execute_interactive_command_in_state, format_interaction_chrome, interactive_completions,
     interactive_session_candidate, interactive_session_selection, parse_interactive_command,
-    resolve_session, set_active_model, validate_interactive_session_target, InteractiveCompletion,
+    parse_queue_line, path_completions, persist_queued_follow_up, project_session_activities,
+    resolve_session, set_active_model, steer_unavailable_message, take_next_queued_follow_up,
+    validate_interactive_session_target, ActivityEntry, ActivityKind, InteractiveCompletion,
     InteractiveEffect, InteractiveSessionCandidate, InteractiveSessionSelection, ModelSelection,
     StreamDisplay,
 };
@@ -84,20 +87,6 @@ impl LiveOutput {
         self.text.push_str(OMITTED_OUTPUT_MARKER);
         self.text.push_str(&tail);
     }
-}
-
-fn bottom_scroll(text: &str, width: u16, height: u16) -> u16 {
-    if text.is_empty() || width == 0 || height == 0 {
-        return 0;
-    }
-    let width = usize::from(width);
-    let visual_lines = text
-        .split('\n')
-        .map(|line| line.chars().count().max(1).div_ceil(width))
-        .sum::<usize>();
-    visual_lines
-        .saturating_sub(usize::from(height))
-        .min(usize::from(u16::MAX)) as u16
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +211,9 @@ fn truncate_session_detail_rows(text: &mut String) {
 struct ActiveTimeline {
     session_id: String,
     persisted: String,
+    activities: Vec<ActivityEntry>,
     live: LiveOutput,
+    notice: Option<String>,
 }
 
 impl ActiveTimeline {
@@ -242,26 +233,48 @@ impl ActiveTimeline {
     }
 
     fn from_session(session: &crate::session::Session) -> Self {
+        let activities = project_session_activities(session);
         Self {
             session_id: session.id.clone(),
             persisted: SessionDetail::new(&session.id, Some(session)).text,
+            activities,
             live: LiveOutput::default(),
+            notice: None,
         }
     }
 
-    fn rendered_text(&self) -> String {
-        if self.live.text.is_empty() {
-            return self.persisted.clone();
+    fn push_status(&mut self, status: String) {
+        if status.starts_with("Resumed session ") {
+            self.notice = Some(status.clone());
         }
-        let separator = if self.persisted.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        format!(
-            "{}{separator}--- live activity ---\n{}",
-            self.persisted, self.live.text
-        )
+        self.live.push_status(status.clone());
+        self.activities.push(ActivityEntry {
+            kind: ActivityKind::System,
+            title: status,
+            body: String::new(),
+        });
+    }
+
+    fn apply_event(&mut self, event: StreamEvent) {
+        apply_stream_event(&mut self.activities, event.clone(), &mut self.live.state);
+        self.live.apply(event);
+    }
+
+    fn rendered_text(&self) -> String {
+        let mut text = self
+            .activities
+            .iter()
+            .map(ActivityEntry::render_line)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.is_empty() {
+            text = self.persisted.clone();
+        }
+        if self.live.text.is_empty() {
+            return text;
+        }
+        let separator = if text.ends_with('\n') { "" } else { "\n" };
+        format!("{text}{separator}")
     }
 }
 
@@ -377,10 +390,22 @@ enum ComposerAction {
     Submit(String),
 }
 
-fn composer_action_for_key(composer: &mut Composer, code: KeyCode) -> ComposerAction {
+fn composer_action_for_key(
+    composer: &mut Composer,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> ComposerAction {
     match code {
+        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if composer.input.len().saturating_add(1) <= MAX_COMPOSER_BYTES {
+                composer.input.push('\n');
+            }
+            ComposerAction::Pending
+        }
         KeyCode::Char(character)
-            if composer.input.len().saturating_add(character.len_utf8()) <= MAX_COMPOSER_BYTES =>
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && composer.input.len().saturating_add(character.len_utf8())
+                    <= MAX_COMPOSER_BYTES =>
         {
             composer.input.push(character);
             ComposerAction::Pending
@@ -397,10 +422,7 @@ fn composer_action_for_key(composer: &mut Composer, code: KeyCode) -> ComposerAc
                 ComposerAction::Submit(submitted)
             }
         }
-        KeyCode::Esc => {
-            composer.input.clear();
-            ComposerAction::Pending
-        }
+        KeyCode::Esc => ComposerAction::Pending,
         _ => ComposerAction::Pending,
     }
 }
@@ -413,14 +435,25 @@ struct CompletionMenu {
 }
 
 impl CompletionMenu {
+    #[cfg(test)]
     fn sync(&mut self, input: &str) {
+        self.sync_for(input, None);
+    }
+
+    fn sync_for(&mut self, input: &str, project_root: Option<&Path>) {
         if self.dismissed_for_input.as_deref() == Some(input) {
             self.suggestions.clear();
             self.selected = 0;
             return;
         }
         self.dismissed_for_input = None;
-        self.suggestions = interactive_completions(input);
+        self.suggestions = if input.starts_with('/') {
+            interactive_completions(input)
+        } else {
+            project_root
+                .map(|root| path_completions(root, input))
+                .unwrap_or_default()
+        };
         if self.selected >= self.suggestions.len() {
             self.selected = 0;
         }
@@ -587,10 +620,14 @@ enum QuestionAction {
 
 fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> QuestionAction {
     match code {
-        KeyCode::Char(character) => {
+        KeyCode::Char(character)
+            if question.response.len().saturating_add(character.len_utf8())
+                <= MAX_COMPOSER_BYTES =>
+        {
             question.response.push(character);
             QuestionAction::Pending
         }
+        KeyCode::Char(_) => QuestionAction::Pending,
         KeyCode::Backspace => {
             question.response.pop();
             QuestionAction::Pending
@@ -800,6 +837,7 @@ fn preview_exact_session(
         .iter()
         .position(|existing| existing.id == candidate.id)
     {
+        switcher.candidates[index] = candidate;
         switcher.selected = index;
     } else {
         if switcher.candidates.len() >= MAX_SWITCHER_CANDIDATES {
@@ -842,9 +880,7 @@ fn activate_selected_session(
         format!("Could not resume {target}: {error}. The active session is unchanged.")
     })?;
     let mut replacement = ActiveTimeline::from_session(&session);
-    replacement
-        .live
-        .push_status(format!("Resumed session {target} from persisted state."));
+    replacement.push_status(format!("Resumed session {target} from persisted state."));
     *timeline = replacement;
     *active_session_id = target.clone();
     Ok(target)
@@ -859,7 +895,7 @@ fn replace_active_session(
 ) -> Result<(), String> {
     let mut replacement = ActiveTimeline::load(store, &session_id)
         .map_err(|error| format!("created session could not be loaded: {error}"))?;
-    replacement.live.push_status(output);
+    replacement.push_status(output);
     *timeline = replacement;
     *active_session_id = session_id;
     Ok(())
@@ -930,7 +966,7 @@ fn render_session_switcher(
     let error = switcher
         .error
         .as_deref()
-        .map(|error| format!("\n[exact ID error] {error}\n"))
+        .map(|error| format!("\n[switcher error] {error}\n"))
         .unwrap_or_default();
     let preview = format!(
         "Exact session ID: {}{error}\n{selected_preview}",
@@ -1151,7 +1187,7 @@ fn drain_stream_events(
 ) {
     while let Ok(event) = stream_rx.try_recv() {
         if event.session_id == timeline.session_id {
-            timeline.live.apply(event.event);
+            timeline.apply_event(event.event);
         }
     }
 }
@@ -1214,7 +1250,7 @@ pub fn run_tui(
             let _ = restore_terminal();
             return Err(io::Error::new(
                 error.kind(),
-                format!("failed to initialize the full-screen TUI: {error}"),
+                format!("failed to initialize the full-screen TUI: {error}; use --plain instead"),
             ));
         }
     };
@@ -1317,51 +1353,106 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
+fn composer_height(composer: &Composer) -> u16 {
+    let lines = composer.input.split('\n').count().max(1);
+    u16::try_from(lines.saturating_add(1).min(6)).unwrap_or(6)
+}
+
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
+    header: &str,
+    status: &str,
     timeline_text: &str,
-    session_id: &str,
-    worker_status: &str,
     composer: &Composer,
+    pending_approval: Option<&TuiApprovalRequest>,
+    pending_question: Option<&PendingQuestion>,
 ) {
+    let composer_h = composer_height(composer);
+    let dock = pending_approval.is_some() || pending_question.is_some();
+    let dock_h = if pending_question.is_some() {
+        8
+    } else if dock {
+        6
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(composer_h),
+            Constraint::Length(1),
         ])
         .split(frame.area());
-    let stream_scroll = bottom_scroll(
-        timeline_text,
-        chunks[0].width.saturating_sub(2),
-        chunks[0].height.saturating_sub(2),
-    );
+    frame.render_widget(Paragraph::new(header), chunks[0]);
+    frame.render_widget(Paragraph::new(status), chunks[1]);
+    let body = if dock {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(dock_h)])
+            .split(chunks[2])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1)])
+            .split(chunks[2])
+    };
+    let stream_scroll =
+        bottom_scroll_for_wrap(timeline_text, body[0].width.max(1), body[0].height.max(1));
     frame.render_widget(
         Paragraph::new(timeline_text)
-            .block(
-                Block::default()
-                    .title(format!(" Active session: {session_id} | {worker_status} "))
-                    .borders(Borders::ALL),
-            )
             .scroll((stream_scroll, 0))
             .wrap(ratatui::widgets::Wrap { trim: true }),
-        chunks[0],
+        body[0],
     );
+    if let Some(req) = pending_approval {
+        let text = vec![
+            Line::from(Span::styled(
+                format!("approval  {} {:?}", req.call.tool_name, req.level),
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(ratatui::style::Color::Yellow),
+            )),
+            Line::from(format!("{}", req.call.arguments)),
+            Line::from("Y approve  N/Esc deny  D stays in this dock"),
+        ];
+        frame.render_widget(
+            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: true }),
+            body[1],
+        );
+    } else if let Some(question) = pending_question {
+        let mut text = vec![Line::from(Span::styled(
+            format!("question  {}", question.request.question),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        for (index, option) in question.request.options.iter().enumerate() {
+            let marker = if index == question.selected_option {
+                "> "
+            } else {
+                "  "
+            };
+            text.push(Line::from(format!("{marker}{option}")));
+        }
+        text.push(Line::from(format!("Response: {}", question.response)));
+        text.push(Line::from("Enter submit  Esc cancel"));
+        frame.render_widget(
+            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: true }),
+            body[1],
+        );
+    }
     frame.render_widget(
         Paragraph::new(composer.input.as_str())
             .style(Style::default().add_modifier(Modifier::BOLD))
-            .block(
-                Block::default()
-                    .title(" Message or / command ")
-                    .borders(Borders::ALL),
-            ),
-        chunks[1],
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        chunks[3],
     );
     frame.render_widget(
-        Paragraph::new("Enter send  /session switch  / completion  Ctrl+C cancel/quit")
-            .block(Block::default().borders(Borders::ALL)),
-        chunks[2],
+        Paragraph::new(
+            "enter send/queue  ctrl+j newline  ctrl+s steer (unavailable)  ctrl+c cancel  ctrl+q quit",
+        ),
+        chunks[4],
     );
 }
 
@@ -1377,7 +1468,7 @@ fn draw_loop(
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
     let mut timeline = ActiveTimeline::load(&store, &active_session_id)?;
-    timeline.live.push_status(session_notice);
+    timeline.push_status(session_notice);
     let mut worker = if let Some(goal) = run_goal {
         Some(spawn_tui_agent_worker(
             project_root.to_path_buf(),
@@ -1400,6 +1491,7 @@ fn draw_loop(
 
     let loop_result = loop {
         drain_stream_events(&mut stream_rx, &mut timeline);
+        let worker_finished = worker.as_ref().is_some_and(TuiAgentWorker::is_finished);
         if let Err(error) = reap_finished_worker(
             &mut worker,
             &mut pending_approval,
@@ -1410,6 +1502,26 @@ fn draw_loop(
             &mut timeline,
         ) {
             break Err(error);
+        }
+        if worker_finished && worker.is_none() {
+            match take_next_queued_follow_up(&store, &active_session_id) {
+                Ok(Some(goal)) => {
+                    timeline.push_status(format!("[user] {goal}"));
+                    match spawn_tui_agent_worker(
+                        project_root.to_path_buf(),
+                        active_session_id.clone(),
+                        goal,
+                        approval_tx.clone(),
+                        question_tx.clone(),
+                        stream_tx.clone(),
+                    ) {
+                        Ok(next) => worker = Some(next),
+                        Err(error) => break Err(error),
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => timeline.push_status(format!("[queue error] {error}")),
+            }
         }
         if pending_approval.is_none() {
             if let Ok(request) = approval_rx.try_recv() {
@@ -1430,100 +1542,42 @@ fn draw_loop(
             pending_switcher.as_ref(),
             completion.is_open(),
         );
+        let worker_status = if pending_approval.is_some() || pending_question.is_some() {
+            "awaiting you"
+        } else if worker.is_some() && timeline.live.state.as_deref() == Some("reconciliation") {
+            "reconciling"
+        } else if worker.is_some() {
+            "running"
+        } else {
+            "idle"
+        };
+        let session = store.load_result(&timeline.session_id).ok().flatten();
+        let queued = session
+            .as_ref()
+            .map(|session| session.queued_follow_ups.len())
+            .unwrap_or(0);
+        let (header, mut status_line) = format_interaction_chrome(
+            project_root,
+            session.as_ref(),
+            &timeline.session_id,
+            worker_status,
+            queued,
+        )
+        .unwrap_or_else(|error| (error.clone(), error));
+        if let Some(notice) = &timeline.notice {
+            status_line = format!("{status_line}  {notice}");
+        }
         if let Err(error) = terminal.draw(|f| {
-            let worker_status = if pending_approval.is_some() || pending_question.is_some() {
-                "awaiting input"
-            } else if worker.is_some() && timeline.live.state.as_deref() == Some("reconciliation") {
-                "reconciling"
-            } else if worker.is_some() {
-                "running"
-            } else {
-                "idle"
-            };
             render_current_session_view(
                 f,
+                &header,
+                &status_line,
                 &timeline_text,
-                &timeline.session_id,
-                worker_status,
                 &composer,
+                pending_approval.as_ref(),
+                pending_question.as_ref(),
             );
-            if interaction_layer == InteractionLayer::Approval {
-                let req = pending_approval
-                    .as_ref()
-                    .expect("approval layer requires a pending approval");
-                let modal_area = centered_rect(60, 20, f.area());
-                let text = vec![
-                    Line::from(vec![Span::styled(
-                        format!("Approval Required: {}", req.call.tool_name),
-                        Style::default()
-                            .add_modifier(Modifier::BOLD)
-                            .fg(ratatui::style::Color::Yellow),
-                    )]),
-                    Line::from(format!("Level: {:?}", req.level)),
-                    Line::from(""),
-                    Line::from("Arguments:"),
-                    Line::from(format!("{}", req.call.arguments)),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Approve? [y/n]",
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                ];
-                let modal = Paragraph::new(text)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Action Required "),
-                    )
-                    .wrap(ratatui::widgets::Wrap { trim: true });
-
-                f.render_widget(ratatui::widgets::Clear, modal_area);
-                f.render_widget(modal, modal_area);
-            } else if interaction_layer == InteractionLayer::Question {
-                let question = pending_question
-                    .as_ref()
-                    .expect("question layer requires a pending question");
-                let modal_height = if question.request.options.is_empty() {
-                    30
-                } else {
-                    45
-                };
-                let modal_area = centered_rect(70, modal_height, f.area());
-                let mut text = vec![
-                    Line::from(Span::styled(
-                        question.request.question.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                ];
-                for (index, option) in question.request.options.iter().enumerate() {
-                    let marker = if index == question.selected_option {
-                        "> "
-                    } else {
-                        "  "
-                    };
-                    text.push(Line::from(format!("{marker}{option}")));
-                }
-                if !question.request.options.is_empty() {
-                    text.push(Line::from(""));
-                }
-                text.push(Line::from(vec![
-                    Span::styled("Response: ", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(question.response.clone()),
-                ]));
-                text.push(Line::from(""));
-                text.push(Line::from("Enter submit  Esc cancel"));
-
-                let modal = Paragraph::new(text)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Input Required "),
-                    )
-                    .wrap(ratatui::widgets::Wrap { trim: true });
-                f.render_widget(ratatui::widgets::Clear, modal_area);
-                f.render_widget(modal, modal_area);
-            } else if interaction_layer == InteractionLayer::Model {
+            if interaction_layer == InteractionLayer::Model {
                 let model = pending_model
                     .as_ref()
                     .expect("model layer requires a pending model selection");
@@ -1553,7 +1607,7 @@ fn draw_loop(
                 Err(error) => break Err(error),
             };
             if let Event::Key(key) = input {
-                if key.kind != KeyEventKind::Press {
+                if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                     continue;
                 }
                 let control_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -1572,9 +1626,7 @@ fn draw_loop(
                     ) {
                         break Err(error);
                     }
-                    timeline
-                        .live
-                        .push_status("[cancelled] active agent run".to_string());
+                    timeline.push_status("[cancelled] active agent run".to_string());
                     continue;
                 }
                 if control_c || control_q {
@@ -1606,17 +1658,15 @@ fn draw_loop(
                         ModelAction::Pending => {}
                         ModelAction::Cancel => {
                             pending_model = None;
-                            timeline
-                                .live
-                                .push_status("Model selection cancelled.".to_string());
+                            timeline.push_status("Model selection cancelled.".to_string());
                         }
                         ModelAction::Submit(selected) => {
                             pending_model = None;
                             match set_active_model(project_root, &selected) {
-                                Ok(output) => timeline.live.push_status(output),
-                                Err(error) => timeline
-                                    .live
-                                    .push_status(format!("[command error] {error}")),
+                                Ok(output) => timeline.push_status(output),
+                                Err(error) => {
+                                    timeline.push_status(format!("[command error] {error}"))
+                                }
                             }
                         }
                     }
@@ -1633,9 +1683,7 @@ fn draw_loop(
                         SwitcherAction::Pending => {}
                         SwitcherAction::Close => {
                             pending_switcher = None;
-                            timeline
-                                .live
-                                .push_status("Session switch cancelled.".to_string());
+                            timeline.push_status("Session switch cancelled.".to_string());
                         }
                         SwitcherAction::PreviewExact(session_id) => {
                             if let Err(error) = preview_exact_session(
@@ -1661,9 +1709,7 @@ fn draw_loop(
                                 }
                                 Err(error) => {
                                     switcher.confirming = false;
-                                    timeline
-                                        .live
-                                        .push_status(format!("[session switch error] {error}"));
+                                    switcher.error = Some(error);
                                 }
                             }
                         }
@@ -1675,8 +1721,16 @@ fn draw_loop(
                 {
                     continue;
                 }
-                match composer_action_for_key(&mut composer, key.code) {
-                    ComposerAction::Pending => completion.sync(&composer.input),
+                if matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    timeline.push_status(steer_unavailable_message().to_string());
+                    continue;
+                }
+                match composer_action_for_key(&mut composer, key.code, key.modifiers) {
+                    ComposerAction::Pending => {
+                        completion.sync_for(&composer.input, Some(project_root))
+                    }
                     ComposerAction::Submit(submitted) => {
                         completion = CompletionMenu::default();
                         let normalized = submitted.trim();
@@ -1684,22 +1738,40 @@ fn draw_loop(
                             Ok(parsed) => parsed,
                             Err(error) => {
                                 composer.input = submitted;
-                                completion.sync(&composer.input);
-                                timeline
-                                    .live
-                                    .push_status(format!("[command error] {error}"));
+                                completion.sync_for(&composer.input, Some(project_root));
+                                timeline.push_status(format!("[command error] {error}"));
                                 continue;
                             }
                         };
-                        if parsed == Some(crate::interactive::InteractiveCommand::Session) {
+                        if matches!(
+                            parsed,
+                            Some(crate::interactive::InteractiveCommand::Session)
+                                | Some(crate::interactive::InteractiveCommand::Resume)
+                        ) {
                             match load_session_switcher(&store, &active_session_id) {
                                 Ok(switcher) => pending_switcher = Some(switcher),
                                 Err(error) => {
                                     composer.input = submitted;
-                                    completion.sync(&composer.input);
-                                    timeline.live.push_status(format!(
+                                    completion.sync_for(&composer.input, Some(project_root));
+                                    timeline.push_status(format!(
                                         "[command error] could not open session switcher: {error}"
                                     ));
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(queued) = parse_queue_line(normalized) {
+                            match persist_queued_follow_up(
+                                &store,
+                                &active_session_id,
+                                queued,
+                                "composer",
+                            ) {
+                                Ok(_) => timeline.push_status(format!(
+                                    "queued follow-up retained on session {active_session_id}"
+                                )),
+                                Err(error) => {
+                                    timeline.push_status(format!("[queue error] {error}"))
                                 }
                             }
                             continue;
@@ -1708,24 +1780,43 @@ fn draw_loop(
                             if parsed == Some(crate::interactive::InteractiveCommand::Quit) {
                                 break Ok(());
                             }
-                            composer.input = submitted;
-                            completion.sync(&composer.input);
-                            timeline.live.push_status(
-                                "Agent is still running; cancel it or wait before submitting."
-                                    .to_string(),
-                            );
+                            if parsed.is_some() {
+                                composer.input = submitted;
+                                completion.sync_for(&composer.input, Some(project_root));
+                                timeline.push_status(
+                                    "Agent is still running; cancel it or wait before running a command."
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                            match persist_queued_follow_up(
+                                &store,
+                                &active_session_id,
+                                normalized,
+                                "composer",
+                            ) {
+                                Ok(_) => timeline.push_status(format!(
+                                    "queued follow-up retained on session {active_session_id}"
+                                )),
+                                Err(error) => {
+                                    composer.input = submitted;
+                                    completion.sync_for(&composer.input, Some(project_root));
+                                    timeline.push_status(format!("[queue error] {error}"));
+                                }
+                            }
                             continue;
                         }
                         if let Some(command) = parsed {
-                            match execute_interactive_command(
+                            match execute_interactive_command_in_state(
                                 command,
                                 project_root,
                                 &store,
                                 &active_session_id,
+                                worker_status,
                             ) {
                                 Ok(InteractiveEffect::Quit) => break Ok(()),
                                 Ok(InteractiveEffect::Output(output)) => {
-                                    timeline.live.push_status(output)
+                                    timeline.push_status(output)
                                 }
                                 Ok(InteractiveEffect::SessionChanged { session_id, output }) => {
                                     if let Err(error) = replace_active_session(
@@ -1735,7 +1826,7 @@ fn draw_loop(
                                         &mut active_session_id,
                                         &mut timeline,
                                     ) {
-                                        timeline.live.push_status(format!(
+                                        timeline.push_status(format!(
                                             "[command error] {error}; the active session is unchanged"
                                         ));
                                     }
@@ -1749,17 +1840,26 @@ fn draw_loop(
                                 Ok(InteractiveEffect::SelectModel(selection)) => {
                                     pending_model = Some(PendingModelSelection::new(selection));
                                 }
+                                Ok(InteractiveEffect::SubmitGoal { goal }) => {
+                                    timeline.push_status(format!("[user] {goal}"));
+                                    worker = Some(spawn_tui_agent_worker(
+                                        project_root.to_path_buf(),
+                                        active_session_id.clone(),
+                                        goal,
+                                        approval_tx.clone(),
+                                        question_tx.clone(),
+                                        stream_tx.clone(),
+                                    )?);
+                                }
                                 Err(error) => {
                                     composer.input = submitted;
-                                    completion.sync(&composer.input);
-                                    timeline
-                                        .live
-                                        .push_status(format!("[command error] {error}"))
+                                    completion.sync_for(&composer.input, Some(project_root));
+                                    timeline.push_status(format!("[command error] {error}"))
                                 }
                             }
                         } else {
                             let goal = normalized.to_string();
-                            timeline.live.push_status(format!("[user] {goal}"));
+                            timeline.push_status(format!("[user] {goal}"));
                             worker = Some(spawn_tui_agent_worker(
                                 project_root.to_path_buf(),
                                 active_session_id.clone(),
@@ -1817,6 +1917,7 @@ mod tests {
         save_config, save_nib_config_full, LlmConfig, NibConfig, ProfileConfig, ProfilesConfig,
         ProviderEntry,
     };
+    use crate::interactive::execute_interactive_command;
     use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
     use std::collections::HashMap;
@@ -1866,23 +1967,27 @@ mod tests {
         let mut composer = Composer::default();
         for character in "/providers".chars() {
             assert_eq!(
-                composer_action_for_key(&mut composer, KeyCode::Char(character)),
+                composer_action_for_key(
+                    &mut composer,
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                ),
                 ComposerAction::Pending
             );
         }
         assert_eq!(
-            composer_action_for_key(&mut composer, KeyCode::Enter),
+            composer_action_for_key(&mut composer, KeyCode::Enter, KeyModifiers::NONE),
             ComposerAction::Submit("/providers".to_string())
         );
         assert!(composer.input.is_empty());
         assert_eq!(
-            composer_action_for_key(&mut composer, KeyCode::Tab),
+            composer_action_for_key(&mut composer, KeyCode::Tab, KeyModifiers::NONE),
             ComposerAction::Pending
         );
 
         composer.input = "x".repeat(MAX_COMPOSER_BYTES);
         assert_eq!(
-            composer_action_for_key(&mut composer, KeyCode::Char('y')),
+            composer_action_for_key(&mut composer, KeyCode::Char('y'), KeyModifiers::NONE),
             ComposerAction::Pending
         );
         assert_eq!(composer.input.len(), MAX_COMPOSER_BYTES);
@@ -1891,7 +1996,7 @@ mod tests {
             input: "/skills install ".to_string(),
         };
         assert_eq!(
-            composer_action_for_key(&mut slash, KeyCode::Enter),
+            composer_action_for_key(&mut slash, KeyCode::Enter, KeyModifiers::NONE),
             ComposerAction::Submit("/skills install ".to_string())
         );
         assert!(slash.input.is_empty());
@@ -1937,10 +2042,12 @@ mod tests {
             .draw(|frame| {
                 render_current_session_view(
                     frame,
-                    "Session: active-one\n[user] persisted request\n[assistant] persisted reply",
-                    "active-one",
-                    "idle",
+                    "workspace  ·  sess active-one  ·  local  ·  -",
+                    "idle  ·  mock/mock-model  ·  manual/hybrid net restricted  ·  queue 0",
+                    "you  persisted request\n\nassistant  persisted reply",
                     &composer,
+                    None,
+                    None,
                 )
             })
             .expect("render current session view");
@@ -1951,7 +2058,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Active session: active-one | idle"));
+        assert!(rendered.contains("sess active-one"));
+        assert!(rendered.contains("idle"));
         assert!(rendered.contains("persisted request"));
         assert!(rendered.contains("persisted reply"));
         assert!(!rendered.contains("nibble sessions"));
@@ -1971,9 +2079,7 @@ mod tests {
         let before_b = store.load("session-b").expect("session b");
         let mut active_id = "session-a".to_string();
         let mut timeline = ActiveTimeline::load(&store, &active_id).expect("active timeline");
-        timeline
-            .live
-            .push_status("live output owned by a".to_string());
+        timeline.push_status("live output owned by a".to_string());
         let composer = Composer {
             input: "draft survives browsing".to_string(),
         };
@@ -2155,7 +2261,7 @@ mod tests {
             .expect("old message");
         let mut active_id = "old-session".to_string();
         let mut timeline = ActiveTimeline::load(&store, &active_id).expect("timeline");
-        timeline.live.push_status("old live text".to_string());
+        timeline.push_status("old live text".to_string());
 
         let InteractiveEffect::SessionChanged { session_id, output } = execute_interactive_command(
             crate::interactive::InteractiveCommand::Clear,
@@ -2265,6 +2371,11 @@ mod tests {
         assert!(timeline.persisted.contains("inspect this session"));
         assert!(timeline.persisted.len() <= MAX_SESSION_DETAIL_BYTES);
         assert!(timeline.persisted.lines().count() <= MAX_SESSION_DETAIL_ROWS);
+        assert!(timeline
+            .activities
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::User
+                && entry.body.contains("inspect this session")));
     }
 
     #[test]
@@ -2352,10 +2463,12 @@ mod tests {
                 .draw(|frame| {
                     render_current_session_view(
                         frame,
-                        "Session: small-session",
-                        "small-session",
+                        "sess small-session",
                         "idle",
+                        "Session: small-session",
                         &Composer::default(),
+                        None,
+                        None,
                     );
                     render_completion(frame, &completion);
                 })
@@ -2887,5 +3000,107 @@ mod tests {
                 .iter()
                 .any(|message| message.role == "user" && message.content == goal));
         }
+    }
+
+    #[test]
+    fn ledger_keeps_transcript_visible_under_approval_and_question_docks() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let composer = Composer::default();
+        let (approval_tx, _approval_rx) = oneshot::channel();
+        let approval = TuiApprovalRequest {
+            call: ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task test"}),
+                session_id: None,
+                project_root: None,
+            },
+            level: PermissionLevel::Destructive,
+            reply: approval_tx,
+        };
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace  ·  sess dock-session  ·  local  ·  -",
+                    "awaiting you  ·  mock/mock-model  ·  queue 0",
+                    "you  inspect wrap\n\nassistant  the tests fail because width is wrong",
+                    &composer,
+                    Some(&approval),
+                    None,
+                )
+            })
+            .expect("render dock");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("sess dock-session"));
+        assert!(rendered.contains("inspect wrap"));
+        assert!(rendered.contains("approval"));
+        assert!(rendered.contains("run_terminal"));
+        assert!(rendered.contains("Y approve"));
+    }
+
+    #[test]
+    fn exact_id_preview_refreshes_listed_candidate_snapshot() {
+        let directory = tempdir().expect("tempdir");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        store.create_session_with_id("session-a");
+        store
+            .try_append_message("session-a", "user", "original")
+            .expect("message");
+        let mut switcher = load_session_switcher(&store, "session-a").expect("switcher");
+        let original_token = switcher.candidates[0].snapshot_token;
+        store
+            .try_append_message("session-a", "assistant", "changed")
+            .expect("mutate");
+        preview_exact_session(&store, &mut switcher, "session-a", "session-a")
+            .expect("refresh listed");
+        assert_ne!(switcher.candidates[0].snapshot_token, original_token);
+        assert!(switcher.candidates[0].preview.contains("changed"));
+    }
+
+    #[test]
+    fn switcher_activate_failure_stays_on_the_overlay() {
+        let directory = tempdir().expect("tempdir");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        store.create_session_with_id("session-a");
+        let mut switcher = load_session_switcher(&store, "session-a").expect("switcher");
+        let mut active_id = "session-a".to_string();
+        let mut timeline = ActiveTimeline::load(&store, &active_id).expect("timeline");
+        let error =
+            activate_selected_session(&store, &switcher, true, &mut active_id, &mut timeline)
+                .expect_err("busy worker");
+        switcher.error = Some(error);
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render_session_switcher(frame, &switcher, "session-a"))
+            .expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("switcher error"));
+        assert!(rendered.contains("still running"));
+    }
+
+    #[test]
+    fn unicode_width_follow_tail_counts_wide_glyphs() {
+        assert!(bottom_scroll_for_wrap("漢字漢字", 2, 1) >= 3);
+        let mut composer = Composer::default();
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Char('j'), KeyModifiers::CONTROL),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "\n");
     }
 }

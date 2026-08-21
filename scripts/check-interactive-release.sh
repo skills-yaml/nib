@@ -206,7 +206,7 @@ grep -Fq 'providers:' "$session_switch_output"
 grep -Fq 'Session' "$session_switch_output"
 grep -Fq 'Switcher' "$session_switch_output"
 grep -Fq 'Confirm session switch' "$session_switch_output"
-grep -Fq 'Resumed session ' "$session_switch_output"
+grep -Fq 'Resumed session' "$session_switch_output"
 mapfile -t resumed_sessions < <(
   grep -F -l "$resumed_goal" "$session_directory"/*.json
 )

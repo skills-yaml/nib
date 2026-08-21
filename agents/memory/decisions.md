@@ -278,3 +278,21 @@ reconciliation capabilities. Presentation and controls may remain native to each
 capable terminal and plain mode otherwise; `--plain` and `--tui` force a presentation.
 `nib chat` uses the same launcher, `nib tui` remains a compatibility alias, and
 `nib run` retains its separate one-shot automation contract.
+
+## 2026-08-20 - FT-019 TUI is a ledgered renderer over a shared interaction model
+
+- Type: decision
+- Source: user + FT-019 backlog revision
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+FT-019 remains the umbrella interaction contract. The TUI is a presentation of that
+contract, not a second product: two fixed header/status rows, typed activity
+transcript, wrapped composer, and approval/question docks that keep the transcript
+visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
+canonical command discovery. Enter never steers; the first user-visible slice is
+queue-only until the agent loop can bind exact-run steering. Implementation still
+requires child development specs before code.

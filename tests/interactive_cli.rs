@@ -84,6 +84,75 @@ fn forced_tui_rejects_redirected_streams_before_session_mutation() {
 }
 
 #[test]
+fn plain_help_lists_ft019_commands_and_incomplete_slash_is_not_a_goal() {
+    let project = configured_project();
+    let output = run_with_input(project.path(), &["--plain"], b"/help\n/quit\n");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(stdout.contains("mode: plain"), "{stdout}");
+    for command in [
+        "/status",
+        "/model",
+        "/permissions",
+        "/plan",
+        "/review",
+        "/diff",
+        "/compact",
+        "/session",
+        "/clear",
+        "/new",
+        "/resume",
+        "/fork",
+        "/rename",
+        "/copy",
+        "/ps",
+        "/stop",
+        "/providers",
+        "/skills",
+        "/mcp",
+        "/help",
+        "/quit",
+    ] {
+        assert!(stdout.contains(command), "missing {command} in {stdout}");
+    }
+    assert!(stdout.contains("unavailable: explicit compact waits on T003"));
+    assert!(stdout.contains("unavailable: session-owned process listing waits on FT-017"));
+    assert_eq!(session_count(project.path()), 1);
+
+    let incomplete = configured_project();
+    let incomplete_out = run_with_input(incomplete.path(), &["--plain"], b"/statu\n\n/quit\n");
+    assert!(incomplete_out.status.success());
+    let incomplete_stdout = String::from_utf8(incomplete_out.stdout).expect("UTF-8");
+    assert!(
+        incomplete_stdout.contains("unknown command")
+            || incomplete_stdout.contains("Command completions"),
+        "{incomplete_stdout}"
+    );
+    assert!(!incomplete_stdout.contains("Thinking..."));
+}
+
+#[test]
+fn plain_status_reports_session_identity_and_queue() {
+    let project = configured_project();
+    let output = run_with_input(project.path(), &["--plain"], b"/status\n/quit\n");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("/status") || stdout.contains("sess "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("queue"), "{stdout}");
+}
+
+#[test]
 fn help_and_one_shot_run_keep_their_non_interactive_contracts() {
     let help_project = configured_project();
     let help = run_with_input(help_project.path(), &["--help"], b"");

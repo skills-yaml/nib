@@ -2,10 +2,13 @@
 
 use crate::config::{load_nib_config_full, update_nib_config};
 use crate::llm::types::StreamEvent;
-use crate::session::{Session, SessionStore};
+use crate::session::{QueuedFollowUp, Session, SessionStore};
 use crate::{mcp_cmd, skill_cmd};
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
 
 /// Presentation-neutral metadata for one interactive command.
 ///
@@ -18,66 +21,190 @@ pub struct InteractiveCommandSpec {
     pub usage: &'static str,
     pub summary: &'static str,
     pub fixed_subcommands: &'static [&'static str],
+    pub gated_reason: Option<&'static str>,
+}
+
+const fn spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    usage: &'static str,
+    summary: &'static str,
+    fixed_subcommands: &'static [&'static str],
+    gated_reason: Option<&'static str>,
+) -> InteractiveCommandSpec {
+    InteractiveCommandSpec {
+        name,
+        aliases,
+        usage,
+        summary,
+        fixed_subcommands,
+        gated_reason,
+    }
 }
 
 pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
-    InteractiveCommandSpec {
-        name: "model",
-        aliases: &[],
-        usage: "/model [name]",
-        summary: "List models or select an exact model ID",
-        fixed_subcommands: &[],
-    },
-    InteractiveCommandSpec {
-        name: "providers",
-        aliases: &[],
-        usage: "/providers",
-        summary: "List configured providers",
-        fixed_subcommands: &[],
-    },
-    InteractiveCommandSpec {
-        name: "session",
-        aliases: &[],
-        usage: "/session",
-        summary: "Show or switch the active session",
-        fixed_subcommands: &[],
-    },
-    InteractiveCommandSpec {
-        name: "clear",
-        aliases: &[],
-        usage: "/clear",
-        summary: "Start a fresh session",
-        fixed_subcommands: &[],
-    },
-    InteractiveCommandSpec {
-        name: "skills",
-        aliases: &[],
-        usage: "/skills [list|install <url_or_path>|remove <name>]",
-        summary: "Manage installed skills",
-        fixed_subcommands: &["list", "install", "remove"],
-    },
-    InteractiveCommandSpec {
-        name: "mcp",
-        aliases: &[],
-        usage: "/mcp [list|add <name> <command> [args...]|remove <name>]",
-        summary: "Manage MCP servers",
-        fixed_subcommands: &["list", "add", "remove"],
-    },
-    InteractiveCommandSpec {
-        name: "help",
-        aliases: &[],
-        usage: "/help",
-        summary: "Show interactive command help",
-        fixed_subcommands: &[],
-    },
-    InteractiveCommandSpec {
-        name: "quit",
-        aliases: &["exit", "q"],
-        usage: "/quit (aliases: /exit, /q)",
-        summary: "Exit the interactive session",
-        fixed_subcommands: &[],
-    },
+    spec(
+        "status",
+        &[],
+        "/status",
+        "Show session, model, permissions, plan, and queue",
+        &[],
+        None,
+    ),
+    spec(
+        "model",
+        &[],
+        "/model [name]",
+        "List models or select an exact model ID",
+        &[],
+        None,
+    ),
+    spec(
+        "providers",
+        &[],
+        "/providers",
+        "List configured providers",
+        &[],
+        None,
+    ),
+    spec(
+        "permissions",
+        &[],
+        "/permissions [manual|smart|policy|off]",
+        "Inspect or set the configured approval mode",
+        &["manual", "smart", "policy", "off"],
+        None,
+    ),
+    spec(
+        "plan",
+        &[],
+        "/plan [prompt]",
+        "Show the current plan or request planning",
+        &[],
+        None,
+    ),
+    spec(
+        "review",
+        &[],
+        "/review",
+        "Review authoritative workspace changes",
+        &[],
+        None,
+    ),
+    spec(
+        "diff",
+        &[],
+        "/diff",
+        "Show the session workspace diff",
+        &[],
+        None,
+    ),
+    spec(
+        "compact",
+        &[],
+        "/compact",
+        "Request bounded context compression",
+        &[],
+        Some("unavailable: explicit compact waits on T003's user-facing compact request"),
+    ),
+    spec(
+        "session",
+        &[],
+        "/session",
+        "Show or switch the active session",
+        &[],
+        None,
+    ),
+    spec(
+        "resume",
+        &[],
+        "/resume",
+        "Preview and confirm resuming another session",
+        &[],
+        None,
+    ),
+    spec("new", &[], "/new", "Start a fresh session", &[], None),
+    spec("clear", &[], "/clear", "Start a fresh session", &[], None),
+    spec(
+        "fork",
+        &[],
+        "/fork",
+        "Branch a new session from the current transcript",
+        &[],
+        None,
+    ),
+    spec(
+        "rename",
+        &[],
+        "/rename <name>",
+        "Set the current session display name",
+        &[],
+        None,
+    ),
+    spec(
+        "copy",
+        &[],
+        "/copy",
+        "Print the latest completed assistant output",
+        &[],
+        None,
+    ),
+    spec(
+        "ps",
+        &[],
+        "/ps",
+        "List session-owned background work",
+        &[],
+        Some("unavailable: session-owned process listing waits on FT-017"),
+    ),
+    spec(
+        "stop",
+        &[],
+        "/stop",
+        "Stop session-owned background work",
+        &[],
+        Some("unavailable: session-owned process stop waits on FT-017"),
+    ),
+    spec(
+        "skills",
+        &[],
+        "/skills [list|install <url_or_path>|remove <name>]",
+        "Manage installed skills",
+        &["list", "install", "remove"],
+        None,
+    ),
+    spec(
+        "mcp",
+        &[],
+        "/mcp [list|add <name> <command> [args...]|remove <name>]",
+        "Manage MCP servers",
+        &["list", "add", "remove"],
+        None,
+    ),
+    spec(
+        "help",
+        &[],
+        "/help",
+        "Show interactive command help",
+        &[],
+        None,
+    ),
+    spec(
+        "quit",
+        &["exit", "q"],
+        "/quit (aliases: /exit, /q)",
+        "Exit the interactive session",
+        &[],
+        None,
+    ),
 ];
+
+const MAX_QUEUED_FOLLOW_UPS: usize = 16;
+const MAX_QUEUE_TEXT_BYTES: usize = 16 * 1024;
+const MAX_DISPLAY_NAME_BYTES: usize = 128;
+const MAX_ACTIVITY_BODY_BYTES: usize = 8 * 1024;
+const MAX_DIFF_BYTES: usize = 32 * 1024;
+const STEER_UNAVAILABLE: &str = "Steer is unavailable until the agent loop can bind instructions to the exact active run. Enter queues the next turn.";
 
 const MAX_INTERACTIVE_SESSION_ITEMS: usize = 100;
 const MAX_INTERACTIVE_SESSION_PREVIEW_CHARS: usize = 2_000;
@@ -278,7 +405,14 @@ pub fn interactive_help() -> String {
     let mut help = String::from("Commands:");
     for command in INTERACTIVE_COMMANDS {
         help.push_str(&format!("\n  {:<62} {}", command.usage, command.summary));
+        if let Some(reason) = command.gated_reason {
+            help.push_str(&format!("\n    {reason}"));
+        }
     }
+    help.push_str(
+        "\n  queue: <text>                                                Queue a follow-up for the next turn",
+    );
+    help.push_str(&format!("\n  {STEER_UNAVAILABLE}"));
     help
 }
 
@@ -393,9 +527,22 @@ pub enum McpCommand {
 pub enum InteractiveCommand {
     Quit,
     Help,
+    Status,
     Providers,
+    Permissions { selection: Option<String> },
+    Plan { prompt: Option<String> },
+    Review,
+    Diff,
+    Compact,
     Session,
+    Resume,
+    New,
     Clear,
+    Fork,
+    Rename { name: String },
+    Copy,
+    Ps,
+    Stop,
     Model { selection: Option<String> },
     Skills(SkillCommand),
     Mcp(McpCommand),
@@ -415,6 +562,699 @@ pub enum InteractiveEffect {
     SessionChanged { session_id: String, output: String },
     SelectSession(InteractiveSessionSelection),
     SelectModel(ModelSelection),
+    SubmitGoal { goal: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerSubmitKind {
+    IdleTurn,
+    QueueNext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    User,
+    Assistant,
+    Plan,
+    Tool,
+    Approval,
+    Question,
+    Compression,
+    Reconcile,
+    Cancellation,
+    Failure,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityEntry {
+    pub kind: ActivityKind,
+    pub title: String,
+    pub body: String,
+}
+
+impl ActivityKind {
+    pub fn role_label(self) -> &'static str {
+        match self {
+            Self::User => "you",
+            Self::Assistant => "assistant",
+            Self::Plan => "plan",
+            Self::Tool => "tool",
+            Self::Approval => "approval",
+            Self::Question => "question",
+            Self::Compression => "compression",
+            Self::Reconcile => "reconcile",
+            Self::Cancellation => "cancel",
+            Self::Failure => "fail",
+            Self::System => "system",
+        }
+    }
+}
+
+impl ActivityEntry {
+    pub fn render_line(&self) -> String {
+        if self.body.is_empty() {
+            format!("{}  {}", self.kind.role_label(), self.title)
+        } else {
+            format!("{}  {}\n{}", self.kind.role_label(), self.title, self.body)
+        }
+    }
+}
+
+pub fn classify_composer_submit(worker_active: bool) -> ComposerSubmitKind {
+    if worker_active {
+        ComposerSubmitKind::QueueNext
+    } else {
+        ComposerSubmitKind::IdleTurn
+    }
+}
+
+pub fn steer_unavailable_message() -> &'static str {
+    STEER_UNAVAILABLE
+}
+
+pub fn parse_queue_line(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    trimmed
+        .strip_prefix("queue:")
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+pub fn persist_queued_follow_up(
+    store: &SessionStore,
+    session_id: &str,
+    text: &str,
+    source: &str,
+) -> Result<QueuedFollowUp, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("queued follow-up must not be empty".to_string());
+    }
+    if text.len() > MAX_QUEUE_TEXT_BYTES {
+        return Err(format!(
+            "queued follow-up must be at most {MAX_QUEUE_TEXT_BYTES} bytes"
+        ));
+    }
+    store
+        .update_session(session_id, |session| {
+            if session.queued_follow_ups.len() >= MAX_QUEUED_FOLLOW_UPS {
+                return Err(crate::session::SessionError::InvalidMutation(format!(
+                    "at most {MAX_QUEUED_FOLLOW_UPS} queued follow-ups are retained"
+                )));
+            }
+            let item = QueuedFollowUp {
+                id: Uuid::new_v4().to_string(),
+                text: text.to_string(),
+                created_at: Utc::now(),
+                source: source.to_string(),
+            };
+            session.queued_follow_ups.push(item.clone());
+            Ok(item)
+        })
+        .map_err(|error| format!("failed to persist queued follow-up: {error}"))
+}
+
+pub fn queued_follow_up_count(store: &SessionStore, session_id: &str) -> Result<usize, String> {
+    Ok(store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .map(|session| session.queued_follow_ups.len())
+        .unwrap_or(0))
+}
+
+pub fn queue_disposition_message(
+    store: &SessionStore,
+    session_id: &str,
+    action: &str,
+) -> Result<String, String> {
+    let count = queued_follow_up_count(store, session_id)?;
+    if count == 0 {
+        Ok(format!("{action}; no queued follow-ups."))
+    } else {
+        Ok(format!(
+            "{action}; {count} queued follow-up(s) retained on session {session_id}."
+        ))
+    }
+}
+
+pub fn take_next_queued_follow_up(
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    store
+        .update_session(session_id, |session| {
+            if session.queued_follow_ups.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(session.queued_follow_ups.remove(0).text))
+        })
+        .map_err(|error| format!("failed to take queued follow-up: {error}"))
+}
+
+pub fn unicode_display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+pub fn bottom_scroll_for_wrap(text: &str, width: u16, height: u16) -> u16 {
+    if text.is_empty() || width == 0 || height == 0 {
+        return 0;
+    }
+    let width = usize::from(width);
+    let visual_lines = text
+        .split('\n')
+        .map(|line| {
+            let line_width = unicode_display_width(line).max(1);
+            line_width.div_ceil(width)
+        })
+        .sum::<usize>();
+    visual_lines
+        .saturating_sub(usize::from(height))
+        .min(usize::from(u16::MAX)) as u16
+}
+
+pub fn project_session_activities(session: &Session) -> Vec<ActivityEntry> {
+    let mut activities = Vec::new();
+    if let Some(name) = session.display_name.as_deref() {
+        activities.push(ActivityEntry {
+            kind: ActivityKind::System,
+            title: format!("session {name}"),
+            body: String::new(),
+        });
+    }
+    if let Some(parent) = session.forked_from.as_deref() {
+        activities.push(ActivityEntry {
+            kind: ActivityKind::System,
+            title: format!("forked from {parent}"),
+            body: String::new(),
+        });
+    }
+    for message in &session.messages {
+        let kind = if message.role.eq_ignore_ascii_case("user") {
+            ActivityKind::User
+        } else {
+            ActivityKind::Assistant
+        };
+        activities.push(ActivityEntry {
+            kind,
+            title: String::new(),
+            body: bounded_activity_body(&message.content),
+        });
+    }
+    if let Some(plan) = &session.plan {
+        activities.push(plan_activity(plan));
+    }
+    for call in &session.tool_calls {
+        let name = call.tool_name.as_deref().unwrap_or("tool");
+        let status = if call.error.is_some() { "failed" } else { "ok" };
+        let body = call
+            .error
+            .clone()
+            .or_else(|| call.result.as_ref().map(inline_json))
+            .unwrap_or_default();
+        activities.push(ActivityEntry {
+            kind: ActivityKind::Tool,
+            title: format!("{name} {status}"),
+            body: bounded_activity_body(&body),
+        });
+    }
+    if let Some(summary) = &session.summary {
+        activities.push(ActivityEntry {
+            kind: ActivityKind::Compression,
+            title: format!("summarized through message {}", session.summary_index),
+            body: bounded_activity_body(summary),
+        });
+    }
+    activities
+}
+
+pub fn apply_stream_event(
+    activities: &mut Vec<ActivityEntry>,
+    event: StreamEvent,
+    live_state: &mut Option<String>,
+) {
+    match event {
+        StreamEvent::StateTransition { state } => {
+            *live_state = Some(state.clone());
+            activities.push(ActivityEntry {
+                kind: ActivityKind::System,
+                title: format!("state {state}"),
+                body: String::new(),
+            });
+        }
+        StreamEvent::Content(content) => {
+            if let Some(last) = activities.last_mut() {
+                if last.kind == ActivityKind::Assistant && last.title == "live" {
+                    last.body.push_str(&content);
+                    last.body = bounded_activity_body(&last.body);
+                    return;
+                }
+            }
+            activities.push(ActivityEntry {
+                kind: ActivityKind::Assistant,
+                title: "live".to_string(),
+                body: bounded_activity_body(&content),
+            });
+        }
+        StreamEvent::ToolCallChunk {
+            name: Some(name), ..
+        } if !name.is_empty() => activities.push(ActivityEntry {
+            kind: ActivityKind::Tool,
+            title: format!("{name} requested"),
+            body: String::new(),
+        }),
+        StreamEvent::ToolCallChunk { .. } => {}
+        StreamEvent::PlanGenerated { step_count } => {
+            let noun = if step_count == 1 { "step" } else { "steps" };
+            activities.push(ActivityEntry {
+                kind: ActivityKind::Plan,
+                title: format!("generated {step_count} {noun}"),
+                body: String::new(),
+            });
+        }
+        StreamEvent::ApprovalRequired {
+            tool_name,
+            arguments,
+        } => activities.push(ActivityEntry {
+            kind: ActivityKind::Approval,
+            title: format!("{tool_name} needs approval"),
+            body: bounded_activity_body(&inline_json(&arguments)),
+        }),
+        StreamEvent::QuestionRequired { question, options } => {
+            let options = if options.is_empty() {
+                String::new()
+            } else {
+                format!("options: {}", options.join(" | "))
+            };
+            activities.push(ActivityEntry {
+                kind: ActivityKind::Question,
+                title: question,
+                body: options,
+            });
+        }
+        StreamEvent::ToolStarted {
+            tool_name,
+            arguments,
+        } => activities.push(ActivityEntry {
+            kind: ActivityKind::Tool,
+            title: format!("{tool_name} running"),
+            body: bounded_activity_body(&inline_json(&arguments)),
+        }),
+        StreamEvent::TerminalOutput {
+            tool_name, chunk, ..
+        } => {
+            if let Some(last) = activities.iter_mut().rev().find(|entry| {
+                entry.kind == ActivityKind::Tool && entry.title.starts_with(&tool_name)
+            }) {
+                if !last.body.is_empty() && !last.body.ends_with('\n') {
+                    last.body.push('\n');
+                }
+                last.body.push_str(chunk.trim_end_matches(['\r', '\n']));
+                last.body = bounded_activity_body(&last.body);
+            }
+        }
+        StreamEvent::ToolCompleted {
+            tool_name,
+            success,
+            output,
+            error,
+        } => {
+            let status = if success { "ok" } else { "failed" };
+            let detail = match (output.as_ref(), error.as_deref()) {
+                (Some(output), Some(error)) => format!("{}; error: {error}", inline_json(output)),
+                (Some(output), None) => inline_json(output),
+                (None, Some(error)) => error.to_string(),
+                (None, None) => "no result".to_string(),
+            };
+            activities.push(ActivityEntry {
+                kind: ActivityKind::Tool,
+                title: format!("{tool_name} {status}"),
+                body: bounded_activity_body(&detail),
+            });
+        }
+        StreamEvent::Compression {
+            before_tokens,
+            after_tokens,
+            summarized_through,
+        } => activities.push(ActivityEntry {
+            kind: ActivityKind::Compression,
+            title: format!("{before_tokens} -> {after_tokens} tokens"),
+            body: format!("summarized through message {summarized_through}"),
+        }),
+        StreamEvent::Reconciled { outcome } => activities.push(ActivityEntry {
+            kind: ActivityKind::Reconcile,
+            title: outcome,
+            body: String::new(),
+        }),
+        StreamEvent::Failure {
+            failure,
+            session_id,
+        } => activities.push(ActivityEntry {
+            kind: ActivityKind::Failure,
+            title: "LLM request failed".to_string(),
+            body: bounded_activity_body(&failure.user_report(session_id.as_deref())),
+        }),
+        StreamEvent::End(reason) => {
+            let kind = if reason.to_ascii_lowercase().contains("cancel") {
+                ActivityKind::Cancellation
+            } else {
+                ActivityKind::System
+            };
+            activities.push(ActivityEntry {
+                kind,
+                title: reason,
+                body: String::new(),
+            });
+        }
+    }
+}
+
+fn plan_activity(plan: &crate::session::Plan) -> ActivityEntry {
+    let current = plan.current_step_index.min(plan.steps.len());
+    let title = plan
+        .steps
+        .get(plan.current_step_index)
+        .map(|step| step.description.as_str())
+        .unwrap_or("complete");
+    let body = plan
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| format!("{}. [{}] {}", index + 1, step.status, step.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ActivityEntry {
+        kind: ActivityKind::Plan,
+        title: format!("{current}/{} {title}", plan.steps.len()),
+        body: bounded_activity_body(&body),
+    }
+}
+
+fn bounded_activity_body(content: &str) -> String {
+    if content.len() <= MAX_ACTIVITY_BODY_BYTES {
+        return content.to_string();
+    }
+    let mut end = MAX_ACTIVITY_BODY_BYTES.saturating_sub(3);
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &content[..end])
+}
+
+pub fn format_interaction_chrome(
+    project_root: &Path,
+    session: Option<&Session>,
+    session_id: &str,
+    lifecycle: &str,
+    queued: usize,
+) -> Result<(String, String), String> {
+    let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    let provider = config.llm.get_active_provider();
+    let model = config
+        .llm
+        .get_provider(None)
+        .map(|entry| entry.model.clone())
+        .unwrap_or_else(|| "unconfigured".to_string());
+    let reasoning = config
+        .llm
+        .get_provider(None)
+        .and_then(|entry| entry.reasoning_effort)
+        .map(|effort| format!(" {effort:?}"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let name = session
+        .and_then(|session| session.display_name.as_deref())
+        .unwrap_or("");
+    let name = if name.is_empty() {
+        String::new()
+    } else {
+        format!(" \"{name}\"")
+    };
+    let origin = if session
+        .and_then(|session| session.forked_from.as_deref())
+        .is_some()
+    {
+        "forked"
+    } else if session
+        .and_then(|session| session.messages.first())
+        .is_some()
+    {
+        "resumed"
+    } else {
+        "local"
+    };
+    let worktree = session
+        .and_then(|session| session.tool_calls.last())
+        .and_then(|call| call.worktree_path.as_deref())
+        .unwrap_or("-");
+    let header = format!(
+        "{project}  ·  sess {session_id}{name}  ·  {origin}  ·  {worktree}",
+        project = project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project")
+    );
+    let plan = session
+        .and_then(|session| session.plan.as_ref())
+        .map(|plan| {
+            let current = plan.current_step_index.min(plan.steps.len());
+            let title = plan
+                .steps
+                .get(plan.current_step_index)
+                .map(|step| step.description.as_str())
+                .unwrap_or("complete");
+            format!("  ·  plan {current}/{} {title}", plan.steps.len())
+        })
+        .unwrap_or_default();
+    let status = format!(
+        "{lifecycle}  ·  {provider}/{model}{reasoning}  ·  {}/{} net {}  ·  queue {queued}{plan}",
+        config.approvals.mode, config.execution.provider, config.execution.boundaries.network
+    );
+    Ok((header, status))
+}
+
+pub fn format_session_status(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    lifecycle: &str,
+) -> Result<String, String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+    let queued = session
+        .as_ref()
+        .map(|session| session.queued_follow_ups.len())
+        .unwrap_or(0);
+    let (header, status) = format_interaction_chrome(
+        project_root,
+        session.as_ref(),
+        session_id,
+        lifecycle,
+        queued,
+    )?;
+    Ok(format!("{header}\n{status}"))
+}
+
+pub fn path_completions(project_root: &Path, input: &str) -> Vec<InteractiveCompletion> {
+    const MAX_PATHS: usize = 32;
+    let Some(at) = input.rfind('@') else {
+        return Vec::new();
+    };
+    if input[..at].contains(['\n', '\r']) {
+        return Vec::new();
+    }
+    let prefix = &input[at + 1..];
+    if prefix.contains([' ', '\n', '\r']) {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    collect_project_paths(project_root, project_root, prefix, 0, &mut matches);
+    matches.sort();
+    matches.truncate(MAX_PATHS);
+    matches
+        .into_iter()
+        .map(|path| InteractiveCompletion {
+            insertion: format!("{}@{path}", &input[..at]),
+            usage: "@path",
+            summary: "Attach a project path",
+        })
+        .collect()
+}
+
+fn collect_project_paths(
+    root: &Path,
+    current: &Path,
+    prefix: &str,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 3 || out.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if relative.starts_with('.')
+            || relative.starts_with("target/")
+            || relative == "target"
+            || relative.starts_with("node_modules/")
+        {
+            continue;
+        }
+        if relative.starts_with(prefix) {
+            out.push(relative.clone());
+        }
+        if path.is_dir() {
+            collect_project_paths(root, &path, prefix, depth + 1, out);
+        }
+    }
+}
+
+fn gated_command_output(name: &str) -> Result<InteractiveEffect, String> {
+    let spec = find_command_spec(name).expect("gated command is registered");
+    let reason = spec.gated_reason.expect("gated command requires a reason");
+    Ok(InteractiveEffect::Output(format!("/{name} {reason}")))
+}
+
+fn bounded_workspace_diff(project_root: &Path) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &project_root.to_string_lossy(), "diff", "--no-color"])
+        .output()
+        .map_err(|error| format!("failed to read git diff: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git diff failed: {}",
+            stderr
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("repository unavailable")
+        ));
+    }
+    let mut diff = String::from_utf8_lossy(&output.stdout).into_owned();
+    if diff.trim().is_empty() {
+        return Ok("No workspace diff.".to_string());
+    }
+    if diff.len() > MAX_DIFF_BYTES {
+        diff.truncate(MAX_DIFF_BYTES);
+        while !diff.is_char_boundary(diff.len()) {
+            diff.pop();
+        }
+        diff.push_str("\n[diff truncated]");
+    }
+    Ok(diff)
+}
+
+fn format_current_plan(session: Option<&Session>) -> String {
+    match session.and_then(|session| session.plan.as_ref()) {
+        Some(plan) => plan_activity(plan).render_line(),
+        None => "No plan in the active session.".to_string(),
+    }
+}
+
+fn latest_assistant_output(session: Option<&Session>) -> Result<String, String> {
+    session
+        .and_then(|session| {
+            session
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role.eq_ignore_ascii_case("assistant"))
+        })
+        .map(|message| message.content.clone())
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| "no completed assistant output to copy".to_string())
+}
+
+fn fork_session(store: &SessionStore, session_id: &str) -> Result<(String, String), String> {
+    let source = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .ok_or_else(|| format!("session {session_id} no longer exists"))?;
+    let created = store
+        .try_create_session()
+        .map_err(|error| format!("failed to fork session: {error}"))?;
+    store
+        .update_session(&created.id, |session| {
+            session.messages = source.messages.clone();
+            session.tool_calls = source.tool_calls.clone();
+            session.plan = source.plan.clone();
+            session.summary = source.summary.clone();
+            session.summary_index = source.summary_index;
+            session.events = source.events.clone();
+            session.active_skills = source.active_skills.clone();
+            session.skill_usage = source.skill_usage.clone();
+            session.display_name = source.display_name.clone();
+            session.forked_from = Some(source.id.clone());
+            session.queued_follow_ups.clear();
+            Ok(())
+        })
+        .map_err(|error| format!("failed to copy forked session: {error}"))?;
+    Ok((
+        created.id.clone(),
+        format!("Forked session {} from {session_id}.", created.id),
+    ))
+}
+
+fn rename_session(store: &SessionStore, session_id: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("usage: /rename <name>".to_string());
+    }
+    if name.len() > MAX_DISPLAY_NAME_BYTES {
+        return Err(format!(
+            "session name must be at most {MAX_DISPLAY_NAME_BYTES} bytes"
+        ));
+    }
+    store
+        .update_session(session_id, |session| {
+            session.display_name = Some(name.to_string());
+            Ok(())
+        })
+        .map_err(|error| format!("failed to rename session: {error}"))?;
+    Ok(format!("Renamed session {session_id} to '{name}'."))
+}
+
+fn set_approval_mode(project_root: &Path, mode: &str) -> Result<String, String> {
+    let mode = mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "manual" | "smart" | "policy" | "off") {
+        return Err("usage: /permissions [manual|smart|policy|off]".to_string());
+    }
+    update_nib_config(project_root, {
+        let selected = mode.clone();
+        move |config| {
+            config.approvals.mode = selected;
+            Ok(())
+        }
+    })
+    .map_err(|error| format!("failed saving permissions: {error}"))?;
+    Ok(format!("Approval mode set to '{mode}'."))
+}
+
+fn format_permissions(project_root: &Path) -> Result<String, String> {
+    let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "Effective permissions:\n  approval: {}\n  execution: {}\n  profile: {}\n  network: {}\n  plan_mode: {}\nConfigured UI selection cannot weaken AGENTS.md, skill, worktree, sandbox, or platform limits.",
+        config.approvals.mode,
+        config.execution.provider,
+        config.execution.default_profile,
+        config.execution.boundaries.network,
+        config.execution.plan_mode
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,9 +1431,36 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
     let parsed = match command {
         "quit" if arguments.is_empty() => InteractiveCommand::Quit,
         "help" if arguments.is_empty() => InteractiveCommand::Help,
+        "status" if arguments.is_empty() => InteractiveCommand::Status,
         "providers" if arguments.is_empty() => InteractiveCommand::Providers,
+        "permissions" => InteractiveCommand::Permissions {
+            selection: if arguments.is_empty() {
+                None
+            } else {
+                Some(arguments.join(" "))
+            },
+        },
+        "plan" => InteractiveCommand::Plan {
+            prompt: if arguments.is_empty() {
+                None
+            } else {
+                Some(arguments.join(" "))
+            },
+        },
+        "review" if arguments.is_empty() => InteractiveCommand::Review,
+        "diff" if arguments.is_empty() => InteractiveCommand::Diff,
+        "compact" if arguments.is_empty() => InteractiveCommand::Compact,
         "session" if arguments.is_empty() => InteractiveCommand::Session,
+        "resume" if arguments.is_empty() => InteractiveCommand::Resume,
+        "new" if arguments.is_empty() => InteractiveCommand::New,
         "clear" if arguments.is_empty() => InteractiveCommand::Clear,
+        "fork" if arguments.is_empty() => InteractiveCommand::Fork,
+        "rename" => InteractiveCommand::Rename {
+            name: arguments.join(" "),
+        },
+        "copy" if arguments.is_empty() => InteractiveCommand::Copy,
+        "ps" if arguments.is_empty() => InteractiveCommand::Ps,
+        "stop" if arguments.is_empty() => InteractiveCommand::Stop,
         "model" => InteractiveCommand::Model {
             selection: if arguments.is_empty() {
                 None
@@ -648,9 +1515,78 @@ pub fn execute_interactive_command(
     store: &SessionStore,
     session_id: &str,
 ) -> Result<InteractiveEffect, String> {
+    execute_interactive_command_in_state(command, project_root, store, session_id, "idle")
+}
+
+pub fn execute_interactive_command_in_state(
+    command: InteractiveCommand,
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    lifecycle: &str,
+) -> Result<InteractiveEffect, String> {
     match command {
         InteractiveCommand::Quit => Ok(InteractiveEffect::Quit),
         InteractiveCommand::Help => Ok(InteractiveEffect::Output(interactive_help())),
+        InteractiveCommand::Status => Ok(InteractiveEffect::Output(format_session_status(
+            project_root,
+            store,
+            session_id,
+            lifecycle,
+        )?)),
+        InteractiveCommand::Permissions { selection: None } => {
+            Ok(InteractiveEffect::Output(format_permissions(project_root)?))
+        }
+        InteractiveCommand::Permissions {
+            selection: Some(mode),
+        } => Ok(InteractiveEffect::Output(set_approval_mode(
+            project_root,
+            &mode,
+        )?)),
+        InteractiveCommand::Plan { prompt: None } => {
+            let session = store
+                .load_result(session_id)
+                .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+            Ok(InteractiveEffect::Output(format_current_plan(
+                session.as_ref(),
+            )))
+        }
+        InteractiveCommand::Plan {
+            prompt: Some(prompt),
+        } => Ok(InteractiveEffect::SubmitGoal { goal: prompt }),
+        InteractiveCommand::Review | InteractiveCommand::Diff => Ok(InteractiveEffect::Output(
+            bounded_workspace_diff(project_root)?,
+        )),
+        InteractiveCommand::Compact => gated_command_output("compact"),
+        InteractiveCommand::Ps => gated_command_output("ps"),
+        InteractiveCommand::Stop => gated_command_output("stop"),
+        InteractiveCommand::Resume | InteractiveCommand::Session => Ok(
+            InteractiveEffect::SelectSession(interactive_session_selection(store, session_id)?),
+        ),
+        InteractiveCommand::New | InteractiveCommand::Clear => {
+            let new_session = store
+                .try_create_session()
+                .map_err(|error| format!("failed to create session: {error}"))?;
+            Ok(InteractiveEffect::SessionChanged {
+                output: format!("Started fresh session {}.", new_session.id),
+                session_id: new_session.id,
+            })
+        }
+        InteractiveCommand::Fork => {
+            let (session_id, output) = fork_session(store, session_id)?;
+            Ok(InteractiveEffect::SessionChanged { session_id, output })
+        }
+        InteractiveCommand::Rename { name } => Ok(InteractiveEffect::Output(rename_session(
+            store, session_id, &name,
+        )?)),
+        InteractiveCommand::Copy => {
+            let session = store
+                .load_result(session_id)
+                .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+            Ok(InteractiveEffect::Output(latest_assistant_output(
+                session.as_ref(),
+            )?))
+        }
         InteractiveCommand::Providers => {
             let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
             let active = config.llm.get_active_provider();
@@ -663,18 +1599,6 @@ pub fn execute_interactive_command(
                 output.push_str(&format!("\n  - {name}: {}{marker}", entry.model));
             }
             Ok(InteractiveEffect::Output(output))
-        }
-        InteractiveCommand::Session => Ok(InteractiveEffect::SelectSession(
-            interactive_session_selection(store, session_id)?,
-        )),
-        InteractiveCommand::Clear => {
-            let new_session = store
-                .try_create_session()
-                .map_err(|error| format!("failed to create session: {error}"))?;
-            Ok(InteractiveEffect::SessionChanged {
-                output: format!("Started fresh session {}.", new_session.id),
-                session_id: new_session.id,
-            })
         }
         InteractiveCommand::Model { selection: None } => {
             let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
@@ -1001,5 +1925,224 @@ mod tests {
             .mcp
             .servers
             .contains_key("local"));
+    }
+
+    #[test]
+    fn live_input_queues_instead_of_steering_and_persists_before_ack() {
+        assert_eq!(
+            classify_composer_submit(false),
+            ComposerSubmitKind::IdleTurn
+        );
+        assert_eq!(
+            classify_composer_submit(true),
+            ComposerSubmitKind::QueueNext
+        );
+        assert!(steer_unavailable_message().contains("Enter queues"));
+        assert_eq!(parse_queue_line("queue: next goal"), Some("next goal"));
+        assert_eq!(parse_queue_line("hello"), None);
+
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        let session = store.try_create_session().expect("session");
+        let queued = persist_queued_follow_up(&store, &session.id, "run the follow-up", "composer")
+            .expect("persist");
+        assert_eq!(queued.text, "run the follow-up");
+        assert_eq!(
+            queued_follow_up_count(&store, &session.id).expect("count"),
+            1
+        );
+        let disposition =
+            queue_disposition_message(&store, &session.id, "cancelled").expect("disposition");
+        assert!(disposition.contains("retained on session"));
+        let taken = take_next_queued_follow_up(&store, &session.id)
+            .expect("take")
+            .expect("queued text");
+        assert_eq!(taken, "run the follow-up");
+        assert_eq!(
+            queued_follow_up_count(&store, &session.id).expect("empty"),
+            0
+        );
+    }
+
+    #[test]
+    fn new_commands_are_parsed_and_gated_commands_explain_unavailability() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(project.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(project.path()).expect("store");
+        let session_id = resolve_session(&store, None)
+            .expect("session")
+            .session_id()
+            .to_string();
+        store
+            .try_append_message(&session_id, "user", "goal")
+            .expect("user");
+        store
+            .try_append_message(&session_id, "assistant", "done")
+            .expect("assistant");
+
+        for command in [
+            "/status",
+            "/permissions",
+            "/plan",
+            "/review",
+            "/diff",
+            "/compact",
+            "/new",
+            "/resume",
+            "/fork",
+            "/rename wrap-fix",
+            "/copy",
+            "/ps",
+            "/stop",
+        ] {
+            parse_interactive_command(command).unwrap_or_else(|error| panic!("{command}: {error}"));
+        }
+
+        let InteractiveEffect::Output(status) = execute_interactive_command_in_state(
+            InteractiveCommand::Status,
+            project.path(),
+            &store,
+            &session_id,
+            "running",
+        )
+        .expect("status") else {
+            panic!("status output");
+        };
+        assert!(status.contains("running"));
+        assert!(status.contains(&session_id));
+
+        let InteractiveEffect::Output(compact) = execute_interactive_command(
+            InteractiveCommand::Compact,
+            project.path(),
+            &store,
+            &session_id,
+        )
+        .expect("compact") else {
+            panic!("compact output");
+        };
+        assert!(compact.contains("unavailable"));
+        assert!(compact.contains("T003"));
+
+        let InteractiveEffect::Output(copied) = execute_interactive_command(
+            InteractiveCommand::Copy,
+            project.path(),
+            &store,
+            &session_id,
+        )
+        .expect("copy") else {
+            panic!("copy output");
+        };
+        assert_eq!(copied, "done");
+
+        let InteractiveEffect::SessionChanged {
+            session_id: forked, ..
+        } = execute_interactive_command(
+            InteractiveCommand::Fork,
+            project.path(),
+            &store,
+            &session_id,
+        )
+        .expect("fork")
+        else {
+            panic!("fork session");
+        };
+        let forked_session = store
+            .load_result(&forked)
+            .expect("load fork")
+            .expect("fork exists");
+        assert_eq!(
+            forked_session.forked_from.as_deref(),
+            Some(session_id.as_str())
+        );
+        let source = store
+            .load_result(&session_id)
+            .expect("reload source")
+            .expect("source");
+        assert!(source.forked_from.is_none());
+
+        assert!(
+            unicode_display_width("漢字") > unicode_display_width("ab")
+                || unicode_display_width("漢字") == 4
+        );
+        assert_eq!(bottom_scroll_for_wrap("ab", 1, 1), 1);
+    }
+
+    #[test]
+    fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
+        let directory = tempdir().expect("dir");
+        let mut session = SessionStore::at_dir(directory.path().join("s"))
+            .try_create_session()
+            .expect("session");
+        session.messages.push(crate::session::SessionMessage {
+            index: 0,
+            role: "user".to_string(),
+            content: "inspect wrap".to_string(),
+            timestamp: None,
+        });
+        session.plan = Some(crate::session::Plan::new(
+            "inspect wrap",
+            vec![crate::session::PlanStep {
+                description: "write tests".to_string(),
+                status: "InProgress".to_string(),
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+            }],
+        ));
+        let projected = project_session_activities(&session);
+        assert!(projected
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::User));
+        assert!(projected
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::Plan));
+
+        let mut live = Vec::new();
+        let mut state = None;
+        apply_stream_event(
+            &mut live,
+            StreamEvent::Content("hello".to_string()),
+            &mut state,
+        );
+        apply_stream_event(
+            &mut live,
+            StreamEvent::ToolStarted {
+                tool_name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "README.md"}),
+            },
+            &mut state,
+        );
+        apply_stream_event(
+            &mut live,
+            StreamEvent::Reconciled {
+                outcome: "completed".to_string(),
+            },
+            &mut state,
+        );
+        assert_eq!(live[0].kind, ActivityKind::Assistant);
+        assert_eq!(live[1].kind, ActivityKind::Tool);
+        assert_eq!(live[2].kind, ActivityKind::Reconcile);
+    }
+
+    #[test]
+    fn path_completions_stay_inside_the_project_and_ignore_dot_entries() {
+        let project = tempdir().expect("project");
+        std::fs::create_dir_all(project.path().join("src")).expect("src");
+        std::fs::write(project.path().join("src/main.rs"), "fn main() {}").expect("file");
+        std::fs::write(project.path().join(".secret"), "nope").expect("dotfile");
+        let matches = path_completions(project.path(), "see @src/m");
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.insertion.ends_with("@src/main.rs")),
+            "{matches:?}"
+        );
+        assert!(matches
+            .iter()
+            .all(|item| !item.insertion.contains(".secret")));
     }
 }

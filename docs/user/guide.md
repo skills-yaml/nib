@@ -336,13 +336,27 @@ alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
 Both presentation modes expose these commands:
 
+- `/status` shows session, model, permissions, plan, and queued follow-up count.
 - `/model` or `/model <name>` lists or selects a model.
+- `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
+  mode without claiming to weaken AGENTS.md, skill, worktree, sandbox, or platform
+  limits.
+- `/plan [prompt]` shows the current plan or starts a planning turn.
+- `/review` and `/diff` show the git workspace diff.
+- `/new` and `/clear` start a fresh session; `/resume` and `/session` open
+  preview-and-confirm resume.
+- `/fork` copies the current transcript into a new session; `/rename <name>` sets a
+  display name.
+- `/copy` prints the latest completed assistant output.
+- `/compact`, `/ps`, and `/stop` are listed but explain why they are unavailable until
+  T003 and FT-017 expose those operations.
 - `/providers` lists configured providers.
-- `/session` opens bounded preview-and-confirm session selection; `/clear` switches to
-  a new session.
 - `/skills list|install|remove` manages skills.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
+- `queue: <text>` stores a follow-up for the next turn. While a TUI turn is running,
+  Enter queues and never steers. Steer remains unavailable until the agent loop can
+  bind to the exact active run.
 
 #### Plain mode
 
@@ -367,23 +381,22 @@ nib --tui --session <id>
 nib tui                            # compatibility alias
 ```
 
-The TUI opens on the active session timeline, with its bounded persisted conversation,
-plan, tool, and lifecycle history above the composer. Historical sessions are not a
-permanent pane. It supports the same `/model`, `/providers`, `/session`, `/clear`,
-`/skills`, `/mcp`, `/help`, and exit commands as plain mode. `--run` submits an initial goal;
-`--session` hydrates an existing session before input is accepted, and `--auth` runs
-authentication before raw mode starts.
+The TUI opens as a ledger: two fixed header/status rows, a typed activity transcript
+(user, assistant, plan, tool, approval, question, compression, reconcile, failure),
+and a wrapped multi-line composer. Historical sessions are not a permanent pane.
+`--run` submits an initial goal; `--session` hydrates an existing session before input
+is accepted, and `--auth` runs authentication before raw mode starts.
 
-Streamed model output and tool lifecycle events appear live. Calls that still require
-interactive approval open a modal showing the tool and arguments; press `Y` to
-approve, `N` or `Esc` to deny. `ask_question` opens a selectable or typed-response
-modal and resumes the same loop.
+Streamed model output and tool lifecycle events update typed activity entries. Calls
+that still require interactive approval or a question appear as a dock on the current
+entry so the transcript and plan summary stay visible. Press `Y` to approve, `N` or
+`Esc` to deny. `Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a
+turn is running.
 
 The composer has focus initially. A slash-command prefix opens bounded completion from
 the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
-insert, and `Esc` to close completion without clearing the draft. `Enter` retains its
-normal submit behavior; unknown and incomplete slash commands remain in the composer
-and show an error instead of becoming agent goals.
+insert, and `Esc` to close completion without clearing the draft. Unknown and incomplete
+slash commands remain in the composer and show an error instead of becoming agent goals.
 
 Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
 and typing an exact session ID can preview an older session omitted from the bounded
@@ -396,8 +409,9 @@ active. Switching is rejected while an agent worker is running. `/clear` uses th
 full-view replacement boundary for its new session.
 
 Approval, question, model, and session overlays take input before command completion.
-`Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or `/quit` also
-exits. Presentation differs between plain mode and the TUI, but their agent, session,
+Switcher and selector errors render on the overlay that caused them. `Ctrl+C` cancels
+an active run; with no active run it exits. `Ctrl+Q` or `/quit` also exits.
+Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.
 
 ### Skills

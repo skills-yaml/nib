@@ -7,10 +7,11 @@ use crate::auth::run_auth_wizard;
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 use nib::config::load_nib_config_full;
 use nib::interactive::{
-    display_stream_event, execute_interactive_command, interactive_completions,
-    interactive_session_candidate, parse_interactive_command, resolve_session, set_active_model,
-    validate_interactive_session_target, InteractiveEffect, InteractiveSessionSelection,
-    ModelSelection, SessionResolution, StreamDisplay,
+    display_stream_event, execute_interactive_command_in_state, format_session_status,
+    interactive_completions, interactive_session_candidate, parse_interactive_command,
+    parse_queue_line, persist_queued_follow_up, resolve_session, set_active_model,
+    take_next_queued_follow_up, validate_interactive_session_target, InteractiveEffect,
+    InteractiveSessionSelection, ModelSelection, SessionResolution, StreamDisplay,
 };
 use nib::session::SessionStore;
 
@@ -180,7 +181,10 @@ fn run_plain_with_input(
     let mut sid = resolution.session_id().to_string();
 
     println!("\nnib  |  mode: plain  |  session: {sid}  |  provider: {active}");
-    println!("Type message. /model to change (list/select or name). /help for commands. Ctrl+C to exit.\n");
+    if let Ok(status) = format_session_status(project, &session_store, &sid, "idle") {
+        println!("{status}");
+    }
+    println!("Type message, queue: <text>, or /help. Enter never steers. Ctrl+C to exit.\n");
 
     // Show recent history (last few)
     if let Some(sess) = session_store
@@ -220,6 +224,14 @@ fn run_plain_with_input(
             continue;
         }
 
+        if let Some(queued) = parse_queue_line(&command_input) {
+            match persist_queued_follow_up(&session_store, &sid, queued, "composer") {
+                Ok(_) => println!("queued follow-up retained on session {sid}"),
+                Err(error) => println!("{error}"),
+            }
+            continue;
+        }
+
         let parsed = match parse_interactive_command(&command_input) {
             Err(error) => {
                 println!("{error}");
@@ -245,8 +257,21 @@ fn run_plain_with_input(
         };
 
         if let Some(command) = parsed {
-            match execute_interactive_command(command, project, &session_store, &sid) {
+            match execute_interactive_command_in_state(
+                command,
+                project,
+                &session_store,
+                &sid,
+                "idle",
+            ) {
                 Ok(InteractiveEffect::Quit) => {
+                    if let Ok(count) =
+                        nib::interactive::queued_follow_up_count(&session_store, &sid)
+                    {
+                        if count > 0 {
+                            println!("{count} queued follow-up(s) retained on session {sid}.");
+                        }
+                    }
                     println!(
                         "Goodbye. Session saved to {}",
                         session_store
@@ -286,6 +311,22 @@ fn run_plain_with_input(
                         }
                     }
                 }
+                Ok(InteractiveEffect::SubmitGoal { goal }) => {
+                    println!("Thinking...");
+                    if let Err(error) = execute_agent_step(project, &sid, &goal, &input) {
+                        println!("{error}");
+                    }
+                    match take_next_queued_follow_up(&session_store, &sid) {
+                        Ok(Some(next)) => {
+                            println!("Starting queued follow-up.");
+                            if let Err(error) = execute_agent_step(project, &sid, &next, &input) {
+                                println!("{error}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => println!("{error}"),
+                    }
+                }
                 Err(error) => println!("{error}"),
             }
             continue;
@@ -295,6 +336,16 @@ fn run_plain_with_input(
 
         match execute_agent_step(project, &sid, &command_input, &input) {
             Ok(()) => {}
+            Err(error) => println!("{error}"),
+        }
+        match take_next_queued_follow_up(&session_store, &sid) {
+            Ok(Some(goal)) => {
+                println!("Starting queued follow-up.");
+                if let Err(error) = execute_agent_step(project, &sid, &goal, &input) {
+                    println!("{error}");
+                }
+            }
+            Ok(None) => {}
             Err(error) => println!("{error}"),
         }
     }
