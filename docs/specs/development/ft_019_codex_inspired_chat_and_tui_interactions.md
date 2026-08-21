@@ -3,7 +3,7 @@
 **Status:** Development
 
 **Related:**
-[T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](T031_ft019_interaction_model_and_ledger_tui.md),
+[T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](../done/T031_ft019_interaction_model_and_ledger_tui.md),
 [T025: Interactive Chat and TUI Capability Parity](../done/T025_interactive_chat_tui_capability_parity.md),
 [T028: Current-Session-First TUI and Slash-Command Completion](../done/T028_current_session_first_tui_and_slash_command_completion.md),
 [T030: Unified Interactive CLI and Plain-Mode Fallback](../done/T030_unified_interactive_cli_and_plain_mode_fallback.md),
@@ -660,3 +660,26 @@ criteria, affected areas, persistence decisions, validation gates, and dependenc
 ownership. It moves to done only after every normative interaction is implemented or
 explicitly removed through a reviewed spec amendment. Steer, `/compact`, `/ps`, and
 `/stop` remain capability-gated under T031 until their runtime owners land.
+
+## Implementation Reconciliation (2026-08-21)
+
+T031 completed the first child slice and moved to `docs/specs/done/`. This umbrella
+stays in development.
+
+Closed on this revision:
+
+- Bounded in-process TUI draft history: `Up`/`Down` restore prior submissions when
+  completion and other overlays are closed, stash the current draft, and drop the
+  oldest entry after 50 stored submissions.
+- User-guide TUI versus plain command/state/keyboard parity matrix, including draft
+  history, queue, steer-unavailable, cancel, quit, completion, session switch, and
+  approval presentation.
+
+Still remaining before Done:
+
+- Safe project-path attachment and the rest of the composer/command families that
+  T031 did not ship.
+- Exact-run steering and `/compact` `/ps` `/stop` bodies, which stay capability-gated
+  until T003, FT-017, and the agent loop bind those operations.
+- Native macOS and Windows terminal jobs, two-stage review, coverage, and the remaining
+  umbrella acceptance items.

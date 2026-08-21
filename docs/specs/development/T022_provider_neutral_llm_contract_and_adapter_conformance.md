@@ -722,6 +722,24 @@ provider/model/API/session/run mismatches still fail before I/O. The exact local
 `task check` gate passes; exact-revision hosted matrix evidence and the broader
 unchecked conformance criteria remain open.
 
+## Implementation Progress (2026-08-21)
+
+Shipped on this host, still insufficient to move the spec to done:
+
+- One agent-facing `LlmClient` port, `LlmError`/`LlmErrorClass`/`RetryDisposition`,
+  opaque `ProviderContinuation`, and a registry/factory for OpenAI, xAI/Grok,
+  OpenRouter, Meta, Anthropic, Gemini, and Mock.
+- Per-adapter complete/stream fixtures for HTTP errors, redaction, continuation
+  binding, and OpenAI-compatible complete/stream class equality.
+
+Remaining local and review work before Done (not closed on this Linux change set):
+
+- Typed `LlmRequest` messages/tools (`serde_json::Value` remains on the request).
+- `GenerationOptions` for provider-default versus explicit finite temperature.
+- One shared conformance harness that is not only per-module tests.
+- T021 exact-revision release-binary sequencing, coverage/all-targets, and independent
+  spec-compliance plus technical/security review.
+
 ## External References
 
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)

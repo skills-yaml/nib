@@ -1,15 +1,15 @@
 # T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input
 
-**Status:** Development
-**Related:** [FT-019](ft_019_codex_inspired_chat_and_tui_interactions.md),
-[T025](../done/T025_interactive_chat_tui_capability_parity.md),
-[T028](../done/T028_current_session_first_tui_and_slash_command_completion.md),
-[T030](../done/T030_unified_interactive_cli_and_plain_mode_fallback.md),
-[T018](../done/T018_ratatui_tui_approval.md),
-[T003](T003_context_engine_with_dynamic_compression_and_session_management.md),
-[T026](T026_actionable_redaction_safe_llm_failure_reporting.md),
-[FT-012](../done/ft_012_richer_planner.md),
-[FT-017](ft_017_managed_process_supervisor.md)
+**Status:** Done
+**Related:** [FT-019](../development/ft_019_codex_inspired_chat_and_tui_interactions.md),
+[T025](T025_interactive_chat_tui_capability_parity.md),
+[T028](T028_current_session_first_tui_and_slash_command_completion.md),
+[T030](T030_unified_interactive_cli_and_plain_mode_fallback.md),
+[T018](T018_ratatui_tui_approval.md),
+[T003](../development/T003_context_engine_with_dynamic_compression_and_session_management.md),
+[T026](../development/T026_actionable_redaction_safe_llm_failure_reporting.md),
+[FT-012](ft_012_richer_planner.md),
+[FT-017](../development/ft_017_managed_process_supervisor.md)
 
 ## Summary
 
@@ -128,3 +128,14 @@ process. Ambiguous leftover queue remains persisted and is shown by `/status`.
 - Session mismatch checks must include new fields.
 - Do not auto-start queued work on process start.
 - Gated commands must not call compact or process-stop APIs.
+
+## Implementation Reconciliation (2026-08-21)
+
+T031's acceptance criteria are implemented in `src/interactive.rs`, `src/tui/mod.rs`,
+`src/chat.rs`, and `src/session/mod.rs`. Queue persist-before-ack, ledger rendering,
+approval/question docks, overlay-local switcher errors, exact-ID snapshot refresh,
+composer caret, wrap-based height, and bounded draft history are covered by library
+and `--plain` child-process tests. `/compact`, `/ps`, `/stop`, and steer remain
+explicitly gated. Canonical `task docs:check` and `task check` evidence is recorded
+on the completing revision. Umbrella FT-019 stays in development for remaining
+steer/compact/process bodies and native macOS/Windows terminal jobs.

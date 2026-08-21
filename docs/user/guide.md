@@ -358,6 +358,21 @@ Both presentation modes expose these commands:
   Enter queues and never steers. Steer remains unavailable until the agent loop can
   bind to the exact active run.
 
+Parity matrix (same command/session effect in both renderers):
+
+| Action | TUI | Plain |
+| --- | --- | --- |
+| Idle submit | `Enter` | `Enter` |
+| Newline | `Ctrl+J` | continuation / editor |
+| Queue next | `Enter` while running, or `queue: text` | `queue: text` |
+| Steer | `Ctrl+S` reports unavailable | same message in `/help` |
+| Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
+| Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
+| Command discovery | `/` completion | `/` plus numbered choices |
+| Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
+| Approvals | dock on the current tool | Y/N prompt |
+| Draft history | `Up`/`Down` when no overlay | previous lines via the terminal |
+
 #### Plain mode
 
 Plain mode presents the interactive session as a line-oriented prompt. Agent questions
@@ -395,7 +410,8 @@ turn is running.
 
 The composer has focus initially. A slash-command prefix opens bounded completion from
 the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
-insert, and `Esc` to close completion without clearing the draft. Unknown and incomplete
+insert, and `Esc` to close completion without clearing the draft. When completion is
+closed, `Up`/`Down` restore bounded in-process draft history. Unknown and incomplete
 slash commands remain in the composer and show an error instead of becoming agent goals.
 
 Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,

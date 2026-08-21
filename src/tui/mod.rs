@@ -378,11 +378,15 @@ struct PendingQuestion {
 }
 
 const MAX_COMPOSER_BYTES: usize = 16 * 1024;
+const MAX_DRAFT_HISTORY: usize = 50;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Composer {
     input: String,
     cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    stash: Option<String>,
 }
 
 impl Composer {
@@ -392,12 +396,61 @@ impl Composer {
         Self {
             cursor: input.len(),
             input,
+            history: Vec::new(),
+            history_index: None,
+            stash: None,
         }
     }
 
     fn set_text(&mut self, input: String) {
         self.cursor = input.len();
         self.input = input;
+    }
+
+    fn remember_submission(&mut self, submitted: &str) {
+        let submitted = submitted.trim();
+        if submitted.is_empty() {
+            return;
+        }
+        if self.history.last().map(String::as_str) != Some(submitted) {
+            self.history.push(submitted.to_string());
+            if self.history.len() > MAX_DRAFT_HISTORY {
+                let extra = self.history.len() - MAX_DRAFT_HISTORY;
+                self.history.drain(0..extra);
+            }
+        }
+        self.history_index = None;
+        self.stash = None;
+    }
+
+    fn recall_older(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_index {
+            None => {
+                self.stash = Some(self.input.clone());
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(index) => index - 1,
+        };
+        self.history_index = Some(next);
+        self.set_text(self.history[next].clone());
+    }
+
+    fn recall_newer(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 >= self.history.len() {
+            self.history_index = None;
+            let restored = self.stash.take().unwrap_or_default();
+            self.set_text(restored);
+            return;
+        }
+        self.history_index = Some(index + 1);
+        self.set_text(self.history[index + 1].clone());
     }
 
     fn clamp_cursor(&mut self) {
@@ -477,6 +530,14 @@ fn composer_action_for_key(
             composer.cursor = composer.input.len();
             ComposerAction::Pending
         }
+        KeyCode::Up => {
+            composer.recall_older();
+            ComposerAction::Pending
+        }
+        KeyCode::Down => {
+            composer.recall_newer();
+            ComposerAction::Pending
+        }
         KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
             composer.insert_str("\n");
             ComposerAction::Pending
@@ -495,6 +556,7 @@ fn composer_action_for_key(
             } else {
                 let submitted = std::mem::take(&mut composer.input);
                 composer.cursor = 0;
+                composer.remember_submission(&submitted);
                 ComposerAction::Submit(submitted)
             }
         }
@@ -3298,6 +3360,56 @@ mod tests {
             ComposerAction::Pending
         );
         assert_eq!(composer.input, "abc");
+    }
+
+    #[test]
+    fn composer_restores_bounded_draft_history_with_up_and_down() {
+        let mut composer = Composer::default();
+        for draft in ["first goal", "second goal"] {
+            for character in draft.chars() {
+                composer_action_for_key(
+                    &mut composer,
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                );
+            }
+            assert_eq!(
+                composer_action_for_key(&mut composer, KeyCode::Enter, KeyModifiers::NONE),
+                ComposerAction::Submit(draft.to_string())
+            );
+        }
+        composer.set_text("scratch".to_string());
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Up, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "second goal");
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Up, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "first goal");
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Down, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "second goal");
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Down, KeyModifiers::NONE),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "scratch");
+    }
+
+    #[test]
+    fn composer_draft_history_drops_oldest_entries_beyond_the_bound() {
+        let mut composer = Composer::default();
+        for index in 0..=MAX_DRAFT_HISTORY {
+            composer.remember_submission(&format!("goal-{index}"));
+        }
+        assert_eq!(composer.history.len(), MAX_DRAFT_HISTORY);
+        assert_eq!(composer.history[0], "goal-1");
+        assert_eq!(composer.history.last().map(String::as_str), Some("goal-50"));
     }
 
     #[test]
