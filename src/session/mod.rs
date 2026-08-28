@@ -23,6 +23,13 @@ pub struct SessionMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<PathAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathAttachment {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -441,6 +448,8 @@ pub enum SessionError {
     InvalidMutation(String),
     #[error("invalid session id: {0}")]
     InvalidSessionId(String),
+    #[error("session identifier conflicts with configured sensitive data")]
+    SensitiveSessionId,
     #[error("session file {path} is {size} bytes; maximum is {max} bytes")]
     FileTooLarge { path: String, size: u64, max: u64 },
 }
@@ -563,6 +572,7 @@ pub struct SessionStore {
     directory_identity_file: Option<Arc<File>>,
     initialization_error: Option<String>,
     lock_timeout: Option<Duration>,
+    sensitive_values: Arc<Vec<String>>,
 }
 
 pub(crate) struct SessionRunLease {
@@ -667,7 +677,8 @@ impl SessionStore {
         profile
             .ensure_state_dirs()
             .map_err(|error| error.to_string())?;
-        Ok(Self::at_dir(profile.sessions_dir().to_path_buf()))
+        Ok(Self::at_dir(profile.sessions_dir().to_path_buf())
+            .with_sensitive_values(config.public_session_sensitive_values()))
     }
 
     pub fn at_dir(sessions_dir: PathBuf) -> Self {
@@ -681,6 +692,7 @@ impl SessionStore {
                 directory_identity_file: Some(Arc::new(identity_file)),
                 initialization_error: None,
                 lock_timeout: None,
+                sensitive_values: Arc::new(Vec::new()),
             },
             Err(error) => Self {
                 sessions_dir: requested,
@@ -691,8 +703,18 @@ impl SessionStore {
                     "session directory is unsafe or unavailable: {error}"
                 )),
                 lock_timeout: None,
+                sensitive_values: Arc::new(Vec::new()),
             },
         }
+    }
+
+    pub(crate) fn with_sensitive_values(mut self, values: Vec<String>) -> Self {
+        self.sensitive_values = Arc::new(values);
+        self
+    }
+
+    pub(crate) fn public_sensitive_values(&self) -> &[String] {
+        self.sensitive_values.as_slice()
     }
 
     pub(crate) fn with_lock_timeout(mut self, timeout: Duration) -> Self {
@@ -710,7 +732,7 @@ impl SessionStore {
     }
 
     pub(crate) fn try_acquire_run_lease(&self, id: &str) -> Result<SessionRunLease, SessionError> {
-        validate_session_id(id)?;
+        self.validate_session_id(id)?;
         self.verify_directory_binding()?;
         let lock_path = self.sessions_dir.join(format!(".session-run-{id}.lock"));
         let lock = crate::daemons::state::try_acquire_file_lock_in(&lock_path, &self.sessions_dir)
@@ -736,11 +758,22 @@ impl SessionStore {
     }
 
     fn lock_path(&self, id: &str) -> Result<PathBuf, SessionError> {
-        validate_session_id(id)?;
+        self.validate_session_id(id)?;
         let stripe = session_lock_stripe(id);
         Ok(self
             .sessions_dir
             .join(format!(".session-lock-{stripe:02}.lock")))
+    }
+
+    fn validate_session_id(&self, id: &str) -> Result<(), SessionError> {
+        let redacted = crate::tools::executor::redact_text_with_encoded_sensitive_values(
+            id,
+            self.sensitive_values.iter().cloned(),
+        );
+        if redacted != id {
+            return Err(SessionError::SensitiveSessionId);
+        }
+        validate_session_id(id)
     }
 
     fn process_lock(&self, path: &Path) -> Result<Arc<SessionMutex>, SessionError> {
@@ -1418,6 +1451,7 @@ impl SessionStore {
                 role: role.to_string(),
                 content: content.to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             Ok(session.clone())
         })
@@ -1524,7 +1558,8 @@ impl SessionStore {
                             )
                         })?
                         .to_string();
-                    validate_session_id(&id).map_err(|error| error.to_string())?;
+                    self.validate_session_id(&id)
+                        .map_err(|error| error.to_string())?;
                     if ids.len() >= max_sessions {
                         return Err(format!(
                             "session directory {} exceeds the {max_sessions}-session limit",
@@ -1560,7 +1595,13 @@ impl SessionStore {
                     Ok(())
                 },
             )
-            .map_err(SessionError::InvalidMutation)?;
+            .map_err(|error| {
+                if error == SessionError::SensitiveSessionId.to_string() {
+                    SessionError::SensitiveSessionId
+                } else {
+                    SessionError::InvalidMutation(error)
+                }
+            })?;
         ids.sort();
         if validate_contents {
             for id in &ids {

@@ -119,7 +119,7 @@ option.
 - [x] `nib update --help` documents `--channel <prod|development>` and its purpose.
 - [x] `nib update` without `--channel` preserves the existing current-channel no-op and
       update behavior.
-- [ ] `nib update --channel development` from a managed production build validates and
+- [x] `nib update --channel development` from a managed production build validates and
       installs only the `development-latest` artifact set.
 - [x] `nib update --channel prod` from a managed development build validates and
       installs only the `prod-latest` artifact set.
@@ -129,7 +129,7 @@ option.
       installation even when both manifests name the same commit and version.
 - [x] A same-channel, same-commit request remains a successful no-op with no archive
       download or executable mutation.
-- [ ] Successful switch output names both exact build identities, and the next
+- [x] Successful switch output names both exact build identities, and the next
       `nib version`, startup check, and option-free `nib update` follow the target
       embedded channel.
 - [x] Local, source-built, unsupported, non-writable, concurrent, and ambiguous
@@ -210,9 +210,9 @@ model, sessions, LLM transports, tools, and TUI are not modified.
 ## Completion State
 
 Development. The CLI, target-channel routing, same-commit switching, safety boundaries,
-tests, and documentation are implemented and validated. The development release and a
-real development-to-production switch are proven. Production publication and the
-production-to-development direction remain required before transition to `done`.
+tests, and documentation are implemented and validated. Managed Linux switches in both
+directions are proven against the public rolling releases. Exact-revision hosted native
+failure-boundary evidence remains required before transition to `done`.
 
 ## Development Validation Snapshot (2026-08-19)
 
@@ -266,3 +266,19 @@ production-to-development direction remain required before transition to `done`.
   production-to-development switch cannot be exercised until the production release is
   approved and published. That direction and final startup-following evidence remain
   open.
+
+## Production-to-Development Evidence (2026-08-23)
+
+- A fresh isolated Linux download of `prod-latest` passed its published SHA-256
+  checksum and reported the managed production identity
+  `1abee6498de4ffbc195cca4f3d02f58697b25f04`.
+- `nib update --channel development` reported the exact transition from production
+  `1abee64` to development `5112a73`, then the replaced executable reported embedded
+  development identity `5112a73c962b2d228f9b311a448b6101af477f01`.
+- A native pseudo-terminal startup invocation continued to report that development
+  identity, and the following option-free `nib update` was a successful development
+  no-op. The qualification ran only in a fresh `/tmp` installation and did not mutate
+  the source worktree.
+- This closes the real managed reverse-direction and target-following criteria. The
+  final exact implementation revision still requires the documented hosted native
+  matrix and failure-boundary reconciliation before lifecycle completion.

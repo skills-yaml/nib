@@ -211,11 +211,9 @@ An approval, question, selector, or detail view is a presentation layer over the
 states. It must not create an alternative run state. Late events remain bound to the
 session and run that produced them and cannot appear under a newly active session.
 
-The current agent loop has no exact-run steer intake. Until a child spec proves an
-interruptible request boundary that can bind a steer to the exact active run, the
-first user-visible slices expose **queue-only** live input: submit while running
-queues, and the steer action is absent or visibly disabled with an explanation. Do
-not emulate steer by concatenating onto the composer or the in-flight prompt.
+T031 originally shipped queue-only live input. T033 now provides exact-run steering:
+accepted input is persisted before delivery and applied only at safe agent boundaries.
+It does not mutate the composer into an in-flight prompt or interrupt a provider frame.
 
 ### Composer and context attachment
 
@@ -271,7 +269,7 @@ task:
 | Newline | `Ctrl+J` | continuation / editor |
 | Idle submit | `Enter` | Enter |
 | Queue next (running) | `Enter` | `queue:` prefix or numbered choice |
-| Steer current | `Ctrl+S` (disabled until exact-run binding exists) | `steer:` prefix (same gate) |
+| Steer current | `Ctrl+S` while an exact worker is active | `steer:` prefix while an exact run is active |
 | Cancel run | `Ctrl+C` | `Ctrl+C` |
 | Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
 | Inspect/detail | `Esc` then select; `Enter` expands | numbered detail |
@@ -383,6 +381,12 @@ overlay lists active bindings, and future key customization must map to semantic
 actions rather than bypassing this precedence. Bindings must remain testable on
 Linux, macOS, and Windows terminal adapters.
 
+Because line-oriented plain terminals cannot distinguish delayed paste/type-ahead
+from a later consumer, an approval or question response retains modal ownership until
+the user submits a separate empty delimiter line. Non-empty lines before that
+delimiter are rejected under the modal and can never become commands, queued turns,
+or goals; EOF before the delimiter fails the response closed.
+
 ### Plain/chat and TUI parity
 
 - Every command and state transition in this spec has a plain/chat interaction path
@@ -403,8 +407,7 @@ Linux, macOS, and Windows terminal adapters.
   plain/chat and TUI modes.
 - Upgrade the composer with multi-line editing, bounded history, contextual command
   and path completion, and explicit submit/newline semantics.
-- Add auditable active-turn steering and durable queued follow-ups, with queue-only
-  live input until exact-run steering exists.
+- Add auditable exact-run active-turn steering and durable queued follow-ups.
 - Add status, permission, plan, review/diff, compact, session fork/resume/new/rename,
   copy, and background-work command families over existing runtime capabilities.
 - Redesign transcript activity into typed, bounded, inspectable entries while
@@ -511,51 +514,51 @@ must resolve the open decisions below and define its exact persistence changes.
 
 ## Acceptance Criteria
 
-- [ ] One presentation-neutral state machine owns interactive command, turn,
+- [x] One presentation-neutral state machine owns interactive command, turn,
       approval, question, steering, queue, cancellation, and reconciliation effects.
-- [ ] TUI and plain/chat expose the same supported commands, argument semantics,
+- [x] TUI and plain/chat expose the same supported commands, argument semantics,
       availability rules, effective session, and persisted outcomes.
-- [ ] The active interface shows project/session identity, run state, model/reasoning,
+- [x] The active interface shows project/session identity, run state, model/reasoning,
       effective permissions, context status, plan `i/n` when present, and queued-work
       count.
-- [ ] The TUI renders header and status as fixed rows, the transcript as typed
+- [x] The TUI renders header and status as fixed rows, the transcript as typed
       activity entries, and the composer as a wrapped multi-line editor; it does not
       keep a permanent plan or session-administration pane.
-- [ ] The composer supports bounded multi-line input, paste, editing, draft history,
+- [x] The composer supports bounded multi-line input, paste, editing, draft history,
       command completion, and safe project-path attachment.
-- [ ] Unknown or incomplete commands never execute as goals, and conditional commands
+- [x] Unknown or incomplete commands never execute as goals, and conditional commands
       explain why they are unavailable.
-- [ ] Idle submit, current-turn steer, and next-turn queue are distinct actions with
+- [x] Idle submit, current-turn steer, and next-turn queue are distinct actions with
       deterministic, auditable, exactly-once behavior. Enter never steers. Steer is
-      absent or disabled until exact-run binding exists.
-- [ ] Queued work survives only under its documented persistence and recovery policy;
+      available only while an exact session/run-bound foreground worker is active.
+- [x] Queued work survives only under its documented persistence and recovery policy;
       cancellation, exit, and session switching always show its disposition.
-- [ ] User, assistant, plan, tool, approval, question, compression, reconciliation,
+- [x] User, assistant, plan, tool, approval, question, compression, reconciliation,
       cancellation, and failure entries are visibly and structurally distinct.
-- [ ] Streaming updates one bounded in-progress entry, while completed messages and
+- [x] Streaming updates one bounded in-progress entry, while completed messages and
       tool outcomes match authoritative persisted state.
-- [ ] TUI `waiting_approval` and `waiting_question` keep the current transcript and
+- [x] TUI `waiting_approval` and `waiting_question` keep the current transcript and
       plan summary visible. Selector and switcher errors render on the overlay that
       caused them.
-- [ ] `/status`, `/model`, `/permissions`, `/plan`, `/review`, `/diff`, `/compact`,
+- [x] `/status`, `/model`, `/permissions`, `/plan`, `/review`, `/diff`, `/compact`,
       `/new`, `/resume`, `/fork`, `/rename`, `/copy`, `/ps`, and `/stop` meet their
       contracts or are explicitly capability-gated.
-- [ ] Existing `/session`, `/clear`, `/providers`, `/skills`, `/mcp`, `/help`, `/quit`,
+- [x] Existing `/session`, `/clear`, `/providers`, `/skills`, `/mcp`, `/help`, `/quit`,
       `/exit`, and `/q` behavior remains compatible.
-- [ ] `/` remains canonical command discovery; any command palette uses the same
+- [x] `/` remains canonical command discovery; any command palette uses the same
       registry.
-- [ ] Approval and permission UIs display effective scope and cannot weaken configured,
+- [x] Approval and permission UIs display effective scope and cannot weaken configured,
       managed, AGENTS.md, skill, worktree, sandbox, or platform constraints.
-- [ ] Modal precedence guarantees one consumer for every key or submitted line.
-- [ ] Switching, resuming, forking, renderer failure, late events, and worker shutdown
+- [x] Modal precedence guarantees one consumer for every key or submitted line.
+- [x] Switching, resuming, forking, renderer failure, late events, and worker shutdown
       cannot mix sessions or duplicate execution.
-- [ ] T026 failure semantics are used consistently and operational failures never
+- [x] T026 failure semantics are used consistently and operational failures never
       become assistant messages.
-- [ ] Narrow terminals, resize, Unicode, large transcripts, long tool output,
+- [x] Narrow terminals, resize, Unicode, large transcripts, long tool output,
       redirected input/output, `TERM=dumb`, and `NO_COLOR` remain bounded and usable.
-- [ ] User documentation includes a parity matrix, command reference, state model,
+- [x] User documentation includes a parity matrix, command reference, state model,
       keyboard help, approval behavior, recovery behavior, and migration aliases.
-- [ ] All child specs complete independent spec-compliance and code-quality/security
+- [x] All child specs complete independent spec-compliance and code-quality/security
       review with no unresolved blocking findings.
 - [ ] `task docs:check`, `task check`, `task test`, `task check:all-targets`,
       `task coverage`, `task build`, `task smoke:interactive`, native terminal gates,
@@ -620,9 +623,10 @@ where they conflict. They do not authorize implementation.
 - `/` is canonical discovery. A command palette is optional TUI chrome over the same
   registry.
 - Enter submits when idle and queues when a turn is running. Enter never steers.
-  Steer uses a distinct chord and stays disabled until exact-run binding exists.
-- The first user-visible renderer slice is queue-only. The current agent loop has no
-  steer intake; do not fake it.
+  Steer uses a distinct chord or explicit plain prefix and is admitted only through an
+  exact session/run-bound durable channel.
+- The first user-visible renderer slice was queue-only; T033 replaces that temporary
+  gate with checkpointed exact-run steering while preserving queue behavior.
 - Approval and question UI in the TUI is a dock on the current activity entry.
 - Session-switcher and selector failures are overlay-local. Exact-ID preview refreshes
   an already-listed candidate's snapshot.
@@ -631,21 +635,21 @@ where they conflict. They do not authorize implementation.
 - One designed TUI theme with fallbacks is enough. User theming and mouse-only
   operation are out of scope for this feature.
 
-## Open Decisions Before Development
+## Resolved Development Decisions and Native Qualification
 
-The first child development spec must still resolve:
-
-- Native-adapter confirmation that `Ctrl+J` (newline) and `Ctrl+S` (steer, once
-  enabled) are reliable on Linux, macOS, and Windows consoles, and which documented
-  fallbacks apply if they are not.
-- The additive session schema for queued input and fork lineage that keeps old
-  sessions readable and ambiguous crash recovery non-executing.
-- The exact read-only permission fields the executor and sandbox can expose without
-  duplicating policy logic. The minimum visible set is approval mode, execution
-  provider, network posture, worktree identity, and whether a broader/`off` mode is
-  in force.
-- Whether `/status` and `/permissions` can ship in slice 2 from existing config
-  surfaces, or must wait on the executor read API in slice 4.
+- `Ctrl+J` is the documented TUI newline binding and `Ctrl+S` is the exact-run steer
+  binding. Plain mode provides continuation/editor input and `steer: <text>` as the
+  product-operation fallbacks. T034 owns the remaining exact native macOS/Windows key
+  and restoration evidence; local or cross-target execution cannot close that gate.
+- T031 added backward-compatible `queued_follow_ups`, `display_name`, and `forked_from`
+  session fields. Queue recovery never auto-starts ambiguous retained work.
+- `/status` and `/permissions` consume the ToolExecutor's shared effective-posture
+  projection: configured approval preset, execution provider/profile, network posture,
+  validated session worktree identity, and direct/broader-mode warnings. They do not
+  reconstruct or broaden policy in either renderer.
+- `/status` and `/permissions` shipped through the shared registry and reducer; T032
+  subsequently completed `/compact`, `/ps`, and `/stop`, and T033 completed exact-run
+  steering.
 
 ## Rollout Notes
 
@@ -658,8 +662,8 @@ TUI interaction.
 FT-019 moved from backlog to development after T031 recorded exact scope, acceptance
 criteria, affected areas, persistence decisions, validation gates, and dependency
 ownership. It moves to done only after every normative interaction is implemented or
-explicitly removed through a reviewed spec amendment. Steer, `/compact`, `/ps`, and
-`/stop` remain capability-gated under T031 until their runtime owners land.
+explicitly removed through a reviewed spec amendment. T032 binds `/compact`, `/ps`, and
+`/stop` to their runtime owners; T033 owns exact-run steering.
 
 ## Implementation Reconciliation (2026-08-21)
 
@@ -675,15 +679,220 @@ Closed on this revision:
   history, queue, steer-unavailable, cancel, quit, completion, session switch, and
   approval presentation.
 
+Closed after T031 on this revision:
+
+- `@` path completion remains project-scoped. Submitting `@path` stores a structured
+  `PathAttachment` on the user message and injects bounded file contents into the
+  attached-project-paths context section. The user text keeps the mention and does not
+  expand file contents into an unbounded prompt string. Escapes, symlinks, and dot
+  paths fail closed.
+- Queued TUI follow-ups are now claimed only after a gated worker thread and async
+  runtime report startup readiness. Startup failure leaves the FIFO item persisted and
+  records its retained disposition without persisting raw error text; activation failure
+  restores the same item idempotently at the queue head. Deterministic tests cover
+  retained failure audit, FIFO claim, and exactly-once restoration.
+- Persisted ledger projection now maps user, assistant, tool, and system roles
+  explicitly; unsupported legacy roles remain visible as bounded System diagnostics.
+  Authoritative session events project into typed plan, approval, question, compression,
+  reconciliation, cancellation, failure, and System entries. Projection uses timestamps
+  where present and stable source/index tie-breakers when timestamps are equal or absent;
+  it does not infer chronology that persistence did not record. Tool lifecycle events
+  defer to `ToolCallRecord`, and event/failure projection exposes only allowlisted
+  structural evidence rather than raw arguments, output, or provider text. Deterministic
+  tests cover ordering, redaction, deduplication, and legacy JSON roundtrip stability.
+- The TUI composer now applies Unicode-safe Delete at the caret and consumes bracketed
+  paste events as bounded multi-line input. Paste normalizes CRLF and lone CR line
+  endings, omits unsafe controls, truncates only on UTF-8 boundaries, and renders an
+  explicit status when content is omitted. Terminal restoration disables bracketed
+  paste before leaving the alternate screen on normal, error, and guard-drop paths.
+  Reachable model/session overlay invariant checks now render bounded recoverable UI
+  errors instead of panicking. Deterministic tests cover editing, paste safety and
+  truncation, modal fallback rendering, and terminal control restoration.
+- `/plan <prompt>` now emits a typed presentation-neutral plan-mode run effect in both
+  renderers. Plain and TUI workers pass `mode = "plan"` to the existing agent loop, while
+  ordinary and queued submissions remain execute mode; the resulting structured plan is
+  persisted unapproved and reconciled as `plan_ready` without approval or tool execution.
+  `/review` and `/diff` now prefer the active session's validated durable managed-worktree
+  ownership, revalidate it after inspection, fail closed on stale, replaced, or escaping
+  ownership, and fall back to the project root only when no session ownership exists. Git
+  inspection uses the existing bounded managed runner and UTF-8-safe output truncation.
+  Deterministic tests cover typed effects, both renderer runtimes, project fallback,
+  owned-worktree selection, bounds, and ownership rejection.
+- `/status` and `/permissions` now render one presentation-neutral effective execution
+  posture resolved through the same ToolExecutor instruction-tightening and platform
+  sandbox route used for tool execution. Configured approval is labeled separately;
+  effective provider/profile/network, mutation plan and managed-worktree gates,
+  instruction fail-closed state, direct/off warnings, and the stronger per-action
+  AGENTS/skill/tool-policy limits are explicit without relying on color. `/status` also
+  reports the resolved LLM transport and bounded approximate persisted context usage.
+  Permission changes recompute this posture and never claim to override stronger
+  controls. Deterministic tests cover network tightening, invalid-directive fail-closed,
+  off warnings, platform routing, transport/context bounds, and control-safe output.
+- Agent-loop cancellation and pre-turn non-LLM reconciliation stay in typed session
+  events rather than synthetic assistant content. When a process dies after durable
+  tool completion but before its private provider continuation completes, recovery
+  appends one bounded structured assistant-role boundary containing only
+  `provider_continuation_interrupted`. This keeps the next user turn role-valid without
+  replaying the tool or persisting provider continuation state. Cancellation summaries
+  omit `last_message` so a gateway cannot echo the interrupted user prompt. Recovery
+  precedes even an already-cancelled restart's generic reconciliation, preventing that
+  event from hiding an older open continuation. A recovery-persistence failure after
+  run admission still records the matching exact-run `local_error` terminal and cannot
+  reach cancellation/provider effects. Deterministic unit, injected-failure, and
+  process-kill/restart regressions cover these boundaries.
+- Plain and TUI approval prompts now consume one normalized `ApprovalContext` produced
+  after ToolExecutor resolves scope, risk, effective network posture, and worktree
+  requirements. It presents an allowlisted actionable operation summary, permission/risk,
+  target scope, truthful pending managed-worktree disposition, reason, and bounded grant
+  semantics without rendering raw argument JSON. Terminal commands, patch target names,
+  merge/management targets, configured secrets and their percent/Base64 variants,
+  controls, and oversized values are redacted and strictly bounded; plan approvals use
+  the same contextual path with plan identity, step count, and a bounded goal summary.
+  Legacy `ApprovalHandler` implementations remain compatible through a default contextual
+  method, and deterministic tests preserve decisions and transcript-visible TUI docks.
+  Public `approval_required` and `tool_started` stream/session lifecycle evidence now
+  carries only typed identity/status fields; raw arguments remain solely in the
+  authoritative redacted tool-call audit rather than being duplicated into UI events.
+- Agent runs now bind a validated caller-supplied or private generated 32-hex run ID to
+  provider request scope, additive run summaries, and exactly one persisted start and
+  terminal lifecycle record. Replayed IDs fail before prompt, approval, or tool effects.
+  TUI workers stamp the same private ID on stream envelopes and accept live events only
+  when both session and exact active run match, isolating late same-session events while
+  keeping steer unavailable.
+- One presentation-neutral reducer now owns approval, question, destructive
+  confirmation, selector/detail, completion, and composer precedence, plus typed
+  command, queue, idle-turn, cancel, quit, stale-event, no-op, and bounded error
+  reductions. TUI keys and exact-run stream envelopes map into that reducer before
+  renderer-specific handling. Plain submitted lines, approval/question answers,
+  numbered selectors, session confirmation, and command completion use the same
+  consumer selection and submission classification. Command errors and modal input
+  cannot fall through as goals or lower-priority actions. Pure table-driven and
+  renderer-adapter tests cover precedence, exactly-one consumption, stale session/run
+  events, invalid-action recovery, command non-fallthrough, and plain/TUI mapping.
+- Transcript navigation now uses an explicit presentation-only row viewport over the
+  same Unicode-width wrapping projection rendered by the TUI. Follow-tail is the
+  default; PageUp/PageDown clamp by deterministic visible pages, streamed activity
+  preserves an unpinned top row, and submit or Ctrl+End explicitly resumes following.
+  The visible status/footer reports both pin state and key hints. Draft history remains
+  process-local, keeps the existing 50-entry/consecutive-deduplication policy, and now
+  uses one bounded Unicode/control-safe search model. Ctrl+R or `/history [query]`
+  opens the keyboard-only TUI selector, while plain mode provides the same bounded
+  results as a numbered select-and-confirm flow. Pure, TestBackend, and plain tests
+  cover empty/Unicode/bounded/no-match history, restoration/eviction/precedence,
+  narrow wrapping, resize/clamping, append while unpinned, and explicit repinning.
+- Interactive release qualification is now split between the deterministic
+  `task test:interactive` semantic suite and `task smoke:interactive:binary`, which
+  drives the already-built optimized binary through redirected input and a real Linux
+  pseudo-terminal using Mock only. The fixture removes ambient provider credentials,
+  keeps its redaction sentinel on an inactive provider, isolates HOME/config/project/
+  session state, applies hard timeouts and cleanup, and checks
+  terminal-mode, alternate-screen, and bracketed-paste restoration. The PTY cases
+  exercise multiline Unicode paste/edit/Delete, command and project-path completion,
+  status/permissions/history, transcript-visible approval/question docks, exact-run
+  steering versus queue, cancellation reconciliation, resume/fork, review/diff, manual
+  scrolling/repinning, resize/narrow rendering, `TERM=dumb`, `NO_COLOR`, and clean
+  exit. Authoritative ledgers prove attachment, queue, cancellation, and private-data
+  invariants where Ratatui differential writes are not a stable textual oracle.
+  `task test:interactive` passed 135 focused tests, the optimized `task build` passed,
+  and `task smoke:interactive:binary` passed on Linux. This is not native macOS or
+  Windows terminal evidence; those gates remain open.
+- Run lifecycle activity remains typed but no longer renders the private exact run ID,
+  and the approval dock honors `NO_COLOR` while retaining bold/text signaling. Focused
+  tests and the Linux smoke assert that persisted run IDs, inactive-provider sentinel
+  credentials, raw argument bodies, and unsafe pasted controls do not reach renderer
+  output or the message ledger. The provider-neutral request scope and enclosing
+  request also redact exact session/run values from their public `Debug` surfaces.
+- `ask_question` now has one registry-owned closed schema: a required non-empty bounded
+  question and at most 20 bounded non-empty options. The executor validates that schema
+  before opening a modal, the agent loop accepts it only as the sole tool in its batch,
+  and both renderers receive control-safe bounded text. Invalid arguments cannot create
+  a pending interaction or authorize another tool.
+- TUI shutdown requests agent cancellation first, resolves pending approval/question
+  dependencies, drains matching lifecycle events, and joins the worker for at most five
+  seconds before returning control to terminal restoration. Cancellation wins a
+  same-tick race with approval denial. Deterministic responsive and unresponsive worker
+  tests plus the optimized Linux PTY smoke cover the bounded exit path.
+- T032 makes `/compact` an exact-session maintenance run over T003 compression without
+  manufacturing a user or assistant message. It preserves raw history, uses an exact
+  compare-and-swap publication, and records matching run and compression evidence.
+- T032 makes `/ps` and `/stop <task-id>` use a bounded allowlisted projection and an
+  atomic session-owner check over FT-017's durable workload authority. Foreign and
+  missing task IDs are indistinguishable at the interactive boundary; `/stop` without
+  an ID is read-only and always explains the exact-ID follow-up.
+- T033 adds a bounded exact-session/exact-run steering channel. Plain `steer:` and TUI
+  `Ctrl+S` persist ordered user input before delivery, apply it at safe provider/tool
+  boundaries, supersede unapproved plans, suppress uncommitted provider tool proposals,
+  and preserve Enter/`queue:` as next-turn input. Typed activity omits private run IDs,
+  and terminal/channel races persist explicit delivery-failure evidence.
+
+Combined local validation on 2026-08-26 passed `task check`,
+`task check:all-targets`, `task coverage` at 85.71% (82,695 / 96,482), the 16/16 runtime
+end-to-end suite, the locked optimized build, and the redirected/PTY release smoke.
+These are Linux/local results; they do not satisfy native macOS/Windows terminal or
+final independent-review gates.
+
 Still remaining before Done:
 
-- Safe project-path attachment and the rest of the composer/command families that
-  T031 did not ship.
-- Exact-run steering and `/compact` `/ps` `/stop` bodies, which stay capability-gated
-  until T003, FT-017, and the agent loop bind those operations.
-- Native macOS and Windows terminal jobs, two-stage review, coverage, and the remaining
-  umbrella acceptance items.
+- The optional local shell shortcut is not a Done blocker unless a later reviewed
+  decision makes it required.
+- Native macOS and Windows terminal jobs, final umbrella two-stage review, and the
+  remaining umbrella acceptance items. T033's independent two-stage review is complete.
 
-A later T022 typed-request change did not add or ungated any FT-019 interaction
-surface. No further Unix-local FT-019 acceptance item is implementable without those
-runtime owners.
+## Final Interaction and Native-Harness Reconciliation (2026-08-27)
+
+Fresh umbrella review found and the implementation repaired four locally actionable
+boundaries. Active TUI submission now parses slash commands before live-run queueing,
+so `/quit`, unknown commands, and idle-only commands cannot become later agent goals.
+Plain queue chaining prepares the next runtime/worker dependencies before atomically
+claiming the FIFO head, starts every successful follow-up in order, and retains later
+work after cancellation or startup failure. Header/status chrome now renders the
+profile captured at startup and revalidates the current session worktree instead of
+trusting historical tool-call labels.
+
+The command registry now owns typed argument schemas, mutability, availability,
+live-worker policy, completion candidates, aliases, usage, and help metadata. One
+explicit interaction lifecycle derives idle/planning/running/waiting/reconciling and
+terminal presentation, while the shared reducer owns approval, question, destructive
+confirmation, command, queue, steering, stale-event, and reconciled-terminal semantics.
+Both renderers map presentation input into those reductions. TUI cancellation reports
+the drained authoritative reconciliation after worker join rather than unconditionally
+labeling a racing completion as cancelled, and failed/nonterminal runs do not claim
+queued work.
+
+T034 adds the remaining local native-terminal harness implementation: Darwin-portable
+Unix PTY supervision, bounded Windows ConPTY input and console-mode evidence, a
+Mock-only Windows optimized-binary smoke, native post-build CI wiring, Task entry
+points, static contracts, and technical documentation. Linux locally passed the
+optimized binary smoke; exact hosted macOS/Windows execution, a clean completion
+revision, and aggregate canonical evidence remain open.
+
+## Final Independent Review Evidence (2026-08-27)
+
+A fresh independent spec-compliance review passed the locally implemented FT019
+contract and all 8/8 T031 criteria. A separate fresh code-quality/security review
+passed after repairs for empty control-prefix fallthrough, typed failure/FIFO
+retention, terminal-aware quit reporting, joined-terminal status projection, and
+plain modal type-ahead. Plain approval/question replies now remain pending under modal
+ownership until a separate empty delimiter line arrives; delayed non-empty lines are
+rejected for any duration and cannot reach command, queue, or goal handling. The
+focused regression delays surplus input beyond the removed timing heuristic.
+
+T034 also passed independent implementation-scope spec review and a separate
+code-quality/security/portability review after its Unix ledger privacy scan and
+Windows fixture cleanup were made fail-closed. FT019 is therefore locally 21/22: only
+the exact clean-revision aggregate and native terminal criterion remains open.
+
+The final native Linux qualification also caught an eager-input defect outside the
+modal reducer: one-shot `nib run --yes` started the console reader even when no prompt
+was requested, so the release watchdog's background process group stopped on
+`SIGTTIN`. The bounded console broker is now lazy and starts exactly once on the first
+real input request. Its six tests are included in `task test:interactive`, bringing the
+focused gate to 160 tests, and the unchanged bounded `task smoke:interactive` now
+passes the optimized Linux PTY and redirected matrix end to end.
+
+The final local canonical matrix passed `task test` (943 library tests, 86 binary
+tests, and every integration/doctest target), all 39 installer tests, all 5
+documentation-integrity tests, `task check`, `task check:all-targets`, `task coverage`
+at 85.98% (85,650 / 99,615), `task build`, and `task smoke:interactive`. This remains
+local dirty-worktree Linux evidence; FT019 stays at 21/22 until the exact clean revision
+passes the native macOS and Windows qualification owned by T034.

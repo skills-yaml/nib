@@ -908,6 +908,7 @@ fn deliver_timer_message(
                     })
                     .to_string(),
                     timestamp: Some(Utc::now()),
+                    attachments: Vec::new(),
                 }),
                 Some(role) => {
                     return Err(crate::session::SessionError::InvalidMutation(format!(
@@ -920,6 +921,7 @@ fn deliver_timer_message(
                 role: "user".to_string(),
                 content: prompt.to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             session.events.push(crate::session::SessionEvent {
                 index: session.events.len(),
@@ -992,6 +994,7 @@ pub fn deliver_background_task_observation(
                 })
                 .to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             };
             match session.messages.last().map(|message| message.role.as_str()) {
                 None => {
@@ -1005,6 +1008,7 @@ pub fn deliver_background_task_observation(
                         })
                         .to_string(),
                         timestamp: Some(Utc::now()),
+                        attachments: Vec::new(),
                     });
                     let mut message = boundary();
                     message.index = session.messages.len();
@@ -1035,6 +1039,7 @@ pub fn deliver_background_task_observation(
                 })
                 .to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             session.events.push(crate::session::SessionEvent {
                 index: session.events.len(),

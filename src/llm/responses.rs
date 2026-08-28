@@ -2,9 +2,9 @@
 
 use crate::config::ReasoningEffort;
 use crate::llm::types::{
-    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallRequest, ToolDefinition, MAX_CONTINUATION_BYTES,
-    MAX_CONTINUATION_ITEMS,
+    LlmDelta, LlmFinishReason, LlmMessage, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation,
+    ToolCallRequest, ToolDefinition, ToolResult, MAX_CONTINUATION_BYTES, MAX_CONTINUATION_ITEMS,
 };
 use crate::llm::{
     ensure_response_content_length, ensure_stream_event_size, next_stream_item_or_closed,
@@ -83,7 +83,7 @@ fn into_responses_input(
     model: &str,
     scope: Option<&LlmRequestScope>,
 ) -> Result<Vec<Value>, String> {
-    let (state, outputs): (ResponsesTurnState, BTreeMap<ToolInvocationId, String>) =
+    let (state, outputs): (ResponsesTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume(provider, model, RESPONSES_TRANSPORT, scope)?;
     let mut input = state.output_items;
     for (invocation_id, provider_call_id) in state.calls {
@@ -93,7 +93,7 @@ fn into_responses_input(
         input.push(json!({
             "type": "function_call_output",
             "call_id": provider_call_id.as_str(),
-            "output": output,
+            "output": output.encoded_output(),
         }));
     }
     if input.len() > MAX_CONTINUATION_ITEMS {
@@ -156,16 +156,36 @@ impl OpenAiResponsesClient {
         provider: impl Into<String>,
         model: String,
         api_keys: Vec<String>,
+        diagnostic_secrets: Vec<String>,
+        endpoint: impl Into<String>,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Self {
+        Self::configured_with_diagnostic_secrets_and_client(
+            provider,
+            model,
+            api_keys,
+            diagnostic_secrets,
+            endpoint,
+            reasoning_effort,
+            Client::new(),
+        )
+    }
+
+    pub(crate) fn configured_with_diagnostic_secrets_and_client(
+        provider: impl Into<String>,
+        model: String,
+        api_keys: Vec<String>,
         mut diagnostic_secrets: Vec<String>,
         endpoint: impl Into<String>,
         reasoning_effort: Option<ReasoningEffort>,
+        client: Client,
     ) -> Self {
         diagnostic_secrets.extend(api_keys.iter().cloned());
         diagnostic_secrets
             .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
         diagnostic_secrets.dedup();
         Self {
-            client: Client::new(),
+            client,
             provider: provider.into(),
             model,
             api_keys,
@@ -250,12 +270,16 @@ impl OpenAiResponsesClient {
         )
     }
 
-    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+    fn error_context(
+        &self,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::error::LlmErrorContext {
         crate::llm::error::LlmErrorContext::new(
             self.provider.clone(),
             RESPONSES_TRANSPORT,
             Some(self.model.clone()),
             self.diagnostic_secrets.clone(),
+            retry_attempts,
         )
     }
 
@@ -270,7 +294,11 @@ impl OpenAiResponsesClient {
         )
     }
 
-    fn request_error(&self, error: &str) -> crate::llm::LlmError {
+    fn request_error(
+        &self,
+        error: &str,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::LlmError {
         let safe_credential_error = error == "provider request requires at least one credential"
             || (error.starts_with("all ") && error.contains("credential(s) exhausted"));
         let detail = if safe_credential_error {
@@ -285,13 +313,20 @@ impl OpenAiResponsesClient {
             self.contextual_error("request failed", detail),
             &self.diagnostic_secrets,
         )
+        .with_retry_attempts(retry_attempts)
     }
 
     async fn http_error(
         &self,
         status: StatusCode,
         response: reqwest::Response,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
     ) -> crate::llm::LlmError {
+        let request_id = if self.provider == "openai" {
+            crate::llm::error::bounded_request_id_header(response.headers().get("x-request-id"))
+        } else {
+            None
+        };
         let (structured, detail) =
             match read_bounded_error_response(response, "Responses API error response").await {
                 Ok(body) => {
@@ -310,7 +345,7 @@ impl OpenAiResponsesClient {
                     "provider error response could not be read".to_string(),
                 ),
             };
-        crate::llm::LlmError::http(
+        let error = crate::llm::LlmError::http(
             &self.provider,
             RESPONSES_TRANSPORT,
             Some(&self.model),
@@ -319,6 +354,11 @@ impl OpenAiResponsesClient {
             self.contextual_error(&format!("HTTP {}", status.as_u16()), &detail),
             &self.diagnostic_secrets,
         )
+        .with_retry_attempts(retry_attempts);
+        match request_id {
+            Some(request_id) => error.with_request_id(&request_id, &self.diagnostic_secrets),
+            None => error,
+        }
     }
 
     fn completion_read_error(&self, error: &str) -> crate::llm::LlmError {
@@ -334,6 +374,21 @@ impl OpenAiResponsesClient {
 #[async_trait]
 impl LlmClient for OpenAiResponsesClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            &self.provider,
+            crate::llm::registry::ProviderTransport::Responses,
+            crate::llm::conformance::ProviderOperation::Complete,
+        )
+        .map_err(|error| {
+            crate::llm::LlmError::request_rejected(
+                &self.provider,
+                RESPONSES_TRANSPORT,
+                Some(&self.model),
+                error,
+                &self.diagnostic_secrets,
+            )
+        })?;
         let (body, scope, replay_tail) = self.request_body(request, false).map_err(|error| {
             crate::llm::LlmError::request_rejected(
                 &self.provider,
@@ -343,7 +398,11 @@ impl LlmClient for OpenAiResponsesClient {
                 &self.diagnostic_secrets,
             )
         })?;
-        let response = send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            &self.provider,
+            crate::llm::registry::ProviderTransport::Responses,
+        );
+        let outcome = send_with_retry(
             |credential_index| {
                 self.client
                     .post(&self.endpoint)
@@ -351,17 +410,23 @@ impl LlmClient for OpenAiResponsesClient {
                     .json(&body)
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|error| self.request_error(&error))?;
+        .map_err(|failure| self.request_error(&failure.error, failure.attempts))?;
+        let retry_attempts = outcome.attempts;
+        let response = outcome.value;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(self.http_error(status, response).await);
+            return Err(self.http_error(status, response, retry_attempts).await);
         }
         let data = read_bounded_json_response(response, "Responses completion response")
             .await
-            .map_err(|error| self.completion_read_error(&error))?;
+            .map_err(|error| {
+                self.completion_read_error(&error)
+                    .with_retry_attempts(retry_attempts)
+            })?;
         parse_terminal_response(
             &data,
             &self.provider,
@@ -380,10 +445,27 @@ impl LlmClient for OpenAiResponsesClient {
                 error,
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(retry_attempts)
         })
+        .map(|response| response.with_retry_attempts(retry_attempts))
     }
 
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            &self.provider,
+            crate::llm::registry::ProviderTransport::Responses,
+            crate::llm::conformance::ProviderOperation::Stream,
+        )
+        .map_err(|error| {
+            crate::llm::LlmError::request_rejected(
+                &self.provider,
+                RESPONSES_TRANSPORT,
+                Some(&self.model),
+                error,
+                &self.diagnostic_secrets,
+            )
+        })?;
         let (body, scope, replay_tail) = self.request_body(request, true).map_err(|error| {
             crate::llm::LlmError::request_rejected(
                 &self.provider,
@@ -393,7 +475,11 @@ impl LlmClient for OpenAiResponsesClient {
                 &self.diagnostic_secrets,
             )
         })?;
-        let response = send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            &self.provider,
+            crate::llm::registry::ProviderTransport::Responses,
+        );
+        let outcome = send_with_retry(
             |credential_index| {
                 self.client
                     .post(&self.endpoint)
@@ -401,20 +487,26 @@ impl LlmClient for OpenAiResponsesClient {
                     .json(&body)
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|error| self.request_error(&error))?;
+        .map_err(|failure| self.request_error(&failure.error, failure.attempts))?;
+        let retry_attempts = outcome.attempts;
+        let response = outcome.value;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(self.http_error(status, response).await);
+            return Err(self.http_error(status, response, retry_attempts).await);
         }
         ensure_response_content_length(
             &response,
             MAX_LLM_STREAM_BYTES,
             "Responses stream response",
         )
-        .map_err(|error| self.protocol_error(self.contextual_error("protocol failure", &error)))?;
+        .map_err(|error| {
+            self.protocol_error(self.contextual_error("protocol failure", &error))
+                .with_retry_attempts(retry_attempts)
+        })?;
 
         let provider = self.provider.clone();
         let model = self.model.clone();
@@ -436,6 +528,10 @@ impl LlmClient for OpenAiResponsesClient {
                 Ok::<_, String>(chunk)
             });
             let mut events = bounded_bytes.eventsource();
+            let mut item_budget = crate::llm::ResponseItemBudget::new(
+                crate::llm::MAX_LLM_STREAM_EVENTS,
+                "Responses stream events",
+            );
 
             while let Some(event) = next_stream_item_or_closed(&public_tx, &mut events).await {
                 let event = match event {
@@ -478,6 +574,10 @@ impl LlmClient for OpenAiResponsesClient {
                         return;
                     }
                 };
+                if let Err(error) = item_budget.account(1) {
+                    fail_stream(&public_tx, &mut completion_tx, error).await;
+                    return;
+                }
 
                 if let Err(error) =
                     ensure_stream_event_size(event.data.len(), "Responses stream event")
@@ -500,11 +600,19 @@ impl LlmClient for OpenAiResponsesClient {
                     fail_stream(
                         &public_tx,
                         &mut completion_tx,
-                        contextual_error(
+                        crate::llm::LlmError::provider_rejected(
                             &provider,
-                            &model,
-                            "protocol failure",
-                            "stream ended before a typed response.completed event",
+                            RESPONSES_TRANSPORT,
+                            Some(&model),
+                            crate::llm::LlmErrorPhase::Stream,
+                            None,
+                            contextual_error(
+                                &provider,
+                                &model,
+                                "protocol failure",
+                                "stream ended before a typed response.completed event",
+                                &diagnostic_secrets,
+                            ),
                             &diagnostic_secrets,
                         ),
                     )
@@ -548,9 +656,13 @@ impl LlmClient for OpenAiResponsesClient {
                         }
                     }
                     Ok(StreamAction::Completed(completion)) => {
-                        let completion = *completion;
-                        let finish_reason = completion.finish_reason.clone();
-                        if !send_stream_event(&public_tx, Ok(StreamEvent::End(finish_reason))).await
+                        let completion = (*completion).with_retry_attempts(retry_attempts);
+                        let finish_reason = completion.finish_reason;
+                        if !send_stream_event(
+                            &public_tx,
+                            Ok(LlmStreamEvent::Terminal(finish_reason)),
+                        )
+                        .await
                         {
                             return;
                         }
@@ -583,11 +695,19 @@ impl LlmClient for OpenAiResponsesClient {
                 fail_stream(
                     &public_tx,
                     &mut completion_tx,
-                    contextual_error(
+                    crate::llm::LlmError::provider_rejected(
                         &provider,
-                        &model,
-                        "protocol failure",
-                        "stream ended before a typed response.completed event",
+                        RESPONSES_TRANSPORT,
+                        Some(&model),
+                        crate::llm::LlmErrorPhase::Stream,
+                        None,
+                        contextual_error(
+                            &provider,
+                            &model,
+                            "protocol failure",
+                            "stream ended before a typed response.completed event",
+                            &diagnostic_secrets,
+                        ),
                         &diagnostic_secrets,
                     ),
                 )
@@ -596,12 +716,12 @@ impl LlmClient for OpenAiResponsesClient {
         });
 
         Ok(LlmStream::with_private_completion(public_rx, completion_rx)
-            .with_error_context(self.error_context()))
+            .with_error_context(self.error_context(retry_attempts)))
     }
 }
 
 async fn fail_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    public_tx: &mpsc::Sender<Result<LlmStreamEvent, crate::llm::LlmStreamFailure>>,
     completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
     error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
@@ -653,6 +773,8 @@ fn parse_terminal_response(
             secrets,
         ));
     }
+    let usage = parse_responses_usage(data)
+        .map_err(|error| contextual_error(provider, model, "protocol failure", &error, secrets))?;
 
     let output = object
         .get("output")
@@ -666,6 +788,8 @@ fn parse_terminal_response(
                 secrets,
             )
         })?;
+    crate::llm::ensure_response_item_count(output.len(), "Responses output items")
+        .map_err(|error| contextual_error(provider, model, "protocol failure", &error, secrets))?;
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     let mut call_bindings = Vec::new();
@@ -696,6 +820,10 @@ fn parse_terminal_response(
                             "response message was missing its content array",
                             secrets,
                         )
+                    })?;
+                crate::llm::ensure_response_item_count(parts.len(), "Responses content parts")
+                    .map_err(|error| {
+                        contextual_error(provider, model, "protocol failure", &error, secrets)
                     })?;
                 for part in parts {
                     match part.get("type").and_then(Value::as_str) {
@@ -803,8 +931,10 @@ fn parse_terminal_response(
             terminal_status: LlmTerminalStatus::Refused,
             content: None,
             tool_calls: None,
-            finish_reason: "refusal".to_string(),
+            finish_reason: LlmFinishReason::Refusal,
             continuation: None,
+            usage,
+            attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
         });
     }
 
@@ -826,9 +956,62 @@ fn parse_terminal_response(
         terminal_status: LlmTerminalStatus::Completed,
         content: (!content.trim().is_empty()).then_some(content),
         tool_calls: has_tools.then_some(tool_calls),
-        finish_reason: if has_tools { "tool_calls" } else { "stop" }.to_string(),
+        finish_reason: if has_tools {
+            LlmFinishReason::ToolCalls
+        } else {
+            LlmFinishReason::Complete
+        },
         continuation,
+        usage,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
+}
+
+fn required_responses_usage_count(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<u64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("Responses usage {field} must be a non-negative integer"))
+}
+
+fn optional_responses_usage_detail(
+    usage: &serde_json::Map<String, Value>,
+    details_field: &str,
+    count_field: &str,
+) -> Result<Option<u64>, String> {
+    let Some(details) = usage.get(details_field).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let details = details
+        .as_object()
+        .ok_or_else(|| format!("Responses usage {details_field} must be an object"))?;
+    match details.get(count_field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            format!("Responses usage {details_field}.{count_field} must be a non-negative integer")
+        }),
+    }
+}
+
+fn parse_responses_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
+    let Some(usage) = data.get("usage").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| "Responses usage must be an object".to_string())?;
+    LlmUsage::new(
+        required_responses_usage_count(usage, "input_tokens")?,
+        required_responses_usage_count(usage, "output_tokens")?,
+        required_responses_usage_count(usage, "total_tokens")?,
+        optional_responses_usage_detail(usage, "input_tokens_details", "cached_tokens")?,
+        optional_responses_usage_detail(usage, "output_tokens_details", "reasoning_tokens")?,
+    )
+    .map(Some)
+    .map_err(|error| format!("Responses usage is invalid: {error}"))
 }
 
 fn ensure_completed_item(
@@ -893,9 +1076,10 @@ fn required_nonempty_string<'a>(
     })
 }
 
+#[derive(Debug)]
 enum StreamAction {
     Ignore,
-    Public(Vec<StreamEvent>),
+    Public(Vec<LlmStreamEvent>),
     Completed(Box<LlmResponse>),
 }
 
@@ -921,8 +1105,8 @@ fn parse_stream_event(
         "response.output_text.delta" => {
             let delta =
                 required_string(data, "delta", "output text delta", provider, model, secrets)?;
-            Ok(StreamAction::Public(vec![StreamEvent::Content(
-                delta.to_string(),
+            Ok(StreamAction::Public(vec![LlmStreamEvent::Delta(
+                LlmDelta::Content(delta.to_string()),
             )]))
         }
         "response.output_item.added"
@@ -942,11 +1126,13 @@ fn parse_stream_event(
                 model,
                 secrets,
             )?;
-            Ok(StreamAction::Public(vec![StreamEvent::ToolCallChunk {
-                index,
-                name: Some(name.to_string()),
-                arguments: None,
-            }]))
+            Ok(StreamAction::Public(vec![LlmStreamEvent::Delta(
+                LlmDelta::ToolCallChunk {
+                    index,
+                    name: Some(name.to_string()),
+                    arguments: None,
+                },
+            )]))
         }
         "response.function_call_arguments.delta" => {
             let index = stream_output_index(data, provider, model, secrets)?;
@@ -958,11 +1144,13 @@ fn parse_stream_event(
                 model,
                 secrets,
             )?;
-            Ok(StreamAction::Public(vec![StreamEvent::ToolCallChunk {
-                index,
-                name: None,
-                arguments: Some(delta.to_string()),
-            }]))
+            Ok(StreamAction::Public(vec![LlmStreamEvent::Delta(
+                LlmDelta::ToolCallChunk {
+                    index,
+                    name: None,
+                    arguments: Some(delta.to_string()),
+                },
+            )]))
         }
         "response.completed" => {
             let response = data.get("response").ok_or_else(|| {
@@ -1116,7 +1304,14 @@ mod tests {
                     "name": "read_file",
                     "arguments": "{\"path\":\"README.md\"}"
                 }
-            ]
+            ],
+            "usage": {
+                "input_tokens": 21,
+                "output_tokens": 9,
+                "total_tokens": 30,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 4}
+            }
         })
     }
 
@@ -1164,7 +1359,11 @@ mod tests {
 
         assert_eq!(response.content.as_deref(), Some("inspected successfully"));
         assert_eq!(response.terminal_status, LlmTerminalStatus::Completed);
-        assert_eq!(response.finish_reason, "tool_calls");
+        assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(21, 9, 30, Some(5), Some(4)).unwrap())
+        );
         let call = &response.tool_calls.as_ref().expect("tool calls")[0];
         assert_eq!(call.name, "read_file");
         assert_eq!(call.arguments["path"], "README.md");
@@ -1200,12 +1399,11 @@ mod tests {
         let invocation_id = call.invocation_id;
         let mut continuation = response.continuation.expect("continuation");
         continuation
-            .record_tool_output(invocation_id, &json!({"ok": true}))
+            .record_tool_result(ToolResult::success(invocation_id, json!({"ok": true})).unwrap())
             .unwrap();
-        let follow_up = [LlmMessage::user("continue")];
         let (continued_body, _, replay_tail) = client
             .request_body(
-                LlmRequest::new(&follow_up, None)
+                LlmRequest::new(&messages, Some(&tools))
                     .with_scope(scope.clone())
                     .with_continuation(Some(continuation)),
                 false,
@@ -1242,7 +1440,9 @@ mod tests {
         let second_invocation_id = second_response.tool_calls.as_ref().unwrap()[0].invocation_id;
         let mut second_continuation = second_response.continuation.unwrap();
         second_continuation
-            .record_tool_output(second_invocation_id, &json!({"written": true}))
+            .record_tool_result(
+                ToolResult::success(second_invocation_id, json!({"written": true})).unwrap(),
+            )
             .unwrap();
         let next_messages = [LlmMessage::user("latest runtime context")];
         let (third_body, _, _) = client
@@ -1281,7 +1481,7 @@ mod tests {
         let mut continuation = response.continuation.unwrap();
         let invocation_id = response.tool_calls.unwrap()[0].invocation_id;
         continuation
-            .record_tool_output(invocation_id, &json!("done"))
+            .record_tool_result(ToolResult::success(invocation_id, json!("done")).unwrap())
             .unwrap();
         let client = OpenAiResponsesClient::new(
             "openai",
@@ -1334,7 +1534,9 @@ mod tests {
         let cross_invocation_id = cross_response.tool_calls.as_ref().unwrap()[0].invocation_id;
         let mut cross_continuation = cross_response.continuation.unwrap();
         cross_continuation
-            .record_tool_output(cross_invocation_id, &json!({"ok": true}))
+            .record_tool_result(
+                ToolResult::success(cross_invocation_id, json!({"ok": true})).unwrap(),
+            )
             .unwrap();
         let cross_messages = [LlmMessage::user("cross")];
         let error = client
@@ -1366,7 +1568,9 @@ mod tests {
                 let invocation_id = response.tool_calls.as_ref().unwrap()[0].invocation_id;
                 let mut continuation = response.continuation.unwrap();
                 continuation
-                    .record_tool_output(invocation_id, &json!({"session": session}))
+                    .record_tool_result(
+                        ToolResult::success(invocation_id, json!({"session": session})).unwrap(),
+                    )
                     .unwrap();
                 let messages = [LlmMessage::user(session)];
                 client
@@ -1434,11 +1638,11 @@ mod tests {
 
         let mut continuation_a = response_a.continuation.unwrap();
         let error = continuation_a
-            .record_tool_output(invocation_b, &json!({"wrong": true}))
+            .record_tool_result(ToolResult::success(invocation_b, json!({"wrong": true})).unwrap())
             .expect_err("another session's token must be rejected");
         assert!(error.contains("does not belong"));
         continuation_a
-            .record_tool_output(invocation_a, &json!({"right": true}))
+            .record_tool_result(ToolResult::success(invocation_a, json!({"right": true})).unwrap())
             .expect("originating token remains valid");
     }
 
@@ -1475,7 +1679,7 @@ mod tests {
         let response =
             parse_terminal_response(&refusal, "openai", "gpt", None, Vec::new(), &[]).unwrap();
         assert_eq!(response.terminal_status, LlmTerminalStatus::Refused);
-        assert_eq!(response.finish_reason, "refusal");
+        assert_eq!(response.finish_reason, LlmFinishReason::Refusal);
         assert!(response.content.is_none());
         assert!(response.tool_calls.is_none());
         assert!(response.continuation.is_none());
@@ -1527,24 +1731,70 @@ mod tests {
             .await
             .expect("Responses stream");
         let mut public = Vec::new();
-        while let Some(event) = stream.recv().await {
+        while let Some(event) = stream.recv_private().await {
             public.push(event.expect("valid public event"));
         }
 
-        assert!(matches!(&public[0], StreamEvent::Content(text) if text == "inspected"));
-        assert!(matches!(&public[1], StreamEvent::Content(text) if text == " successfully"));
+        assert!(matches!(
+            &public[0],
+            LlmStreamEvent::Delta(LlmDelta::Content(text)) if text == "inspected"
+        ));
+        assert!(matches!(
+            &public[1],
+            LlmStreamEvent::Delta(LlmDelta::Content(text)) if text == " successfully"
+        ));
         assert!(matches!(
             &public[2],
-            StreamEvent::ToolCallChunk { index: 2, name: Some(name), arguments: None }
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                index: 2,
+                name: Some(name),
+                arguments: None
+            })
                 if name == "read_file"
         ));
-        assert!(matches!(public.last(), Some(StreamEvent::End(reason)) if reason == "tool_calls"));
+        assert!(matches!(
+            public.last(),
+            Some(LlmStreamEvent::Terminal(LlmFinishReason::ToolCalls))
+        ));
         assert!(!format!("{public:?}").contains("call_private_123"));
 
         let completion = stream.finish().await.expect("private completion");
+        assert_eq!(
+            completion.usage,
+            Some(LlmUsage::new(21, 9, 30, Some(5), Some(4)).unwrap())
+        );
         let call = &completion.tool_calls.unwrap()[0];
         assert_eq!(call.call_id.as_ref().unwrap().as_str(), "call_private_123");
         assert!(completion.continuation.is_some());
+    }
+
+    #[test]
+    fn complete_and_stream_terminal_usage_fail_closed_when_malformed() {
+        for usage in [
+            json!({"input_tokens": 2.5, "output_tokens": 1, "total_tokens": 3}),
+            json!({"input_tokens": 2, "output_tokens": 1, "total_tokens": 4}),
+            json!({"input_tokens": 1_000_000_001_u64, "output_tokens": 0, "total_tokens": 1_000_000_001_u64}),
+        ] {
+            let terminal = json!({
+                "status": "completed",
+                "output": [{"type": "message", "status": "completed", "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": usage,
+            });
+            let complete_error =
+                parse_terminal_response(&terminal, "openai", "gpt-test", None, Vec::new(), &[])
+                    .expect_err("malformed complete usage must fail");
+            let stream_error = parse_stream_event(
+                &json!({"type": "response.completed", "response": terminal}),
+                "openai",
+                "gpt-test",
+                None,
+                &[],
+                &[],
+            )
+            .expect_err("malformed streamed usage must fail");
+            assert!(complete_error.contains("usage"), "{complete_error}");
+            assert!(stream_error.contains("usage"), "{stream_error}");
+        }
     }
 
     #[tokio::test]
@@ -1586,7 +1836,7 @@ mod tests {
             .await
             .expect("Responses stream");
         let mut public = Vec::new();
-        while let Some(event) = stream.recv().await {
+        while let Some(event) = stream.recv_private().await {
             public.push(event.expect("valid public event"));
         }
         assert!(!format!("{public:?}").contains("call_alpha"));
@@ -1650,7 +1900,10 @@ mod tests {
         .unwrap() else {
             panic!("text projection");
         };
-        assert_eq!(text, [StreamEvent::Content(" ".to_string())]);
+        assert_eq!(
+            text,
+            [LlmStreamEvent::Delta(LlmDelta::Content(" ".to_string()))]
+        );
 
         let StreamAction::Public(arguments) = parse_stream_event(
             &json!({
@@ -1669,7 +1922,10 @@ mod tests {
         };
         assert!(matches!(
             &arguments[0],
-            StreamEvent::ToolCallChunk { arguments: Some(delta), .. } if delta == " "
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                arguments: Some(delta),
+                ..
+            }) if delta == " "
         ));
     }
 
@@ -1692,8 +1948,8 @@ mod tests {
             .await
             .expect("open Responses stream");
         assert_eq!(
-            stream.recv().await.unwrap().unwrap(),
-            StreamEvent::Content("first".to_string())
+            stream.recv_private().await.unwrap().unwrap(),
+            LlmStreamEvent::Delta(LlmDelta::Content("first".to_string()))
         );
         drop(stream);
 
@@ -1793,11 +2049,11 @@ mod tests {
 
         assert_eq!(
             complete_error.class,
-            crate::llm::LlmErrorClass::ProviderUnavailable
+            crate::llm::LlmErrorClass::ProviderRejected
         );
         assert_eq!(
             stream_error.class,
-            crate::llm::LlmErrorClass::ProviderUnavailable
+            crate::llm::LlmErrorClass::ProviderRejected
         );
         assert_eq!(
             complete_error.phase,
@@ -1834,7 +2090,7 @@ mod tests {
             .complete(LlmRequest::new(&messages, None))
             .await
             .expect_err("HTTP error");
-        assert_eq!(error.class, crate::llm::LlmErrorClass::UnsupportedRequest);
+        assert_eq!(error.class, crate::llm::LlmErrorClass::ProviderRejected);
         assert_eq!(error.phase, crate::llm::LlmErrorPhase::HttpResponse);
         assert_eq!(error.http_status, Some(400));
         assert!(error.len() <= MAX_DIAGNOSTIC_BYTES);

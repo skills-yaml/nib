@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 
+const MAX_RUN_GOAL_BYTES: usize = 20_000;
+const MAX_RUN_SUMMARY_BYTES: usize = 512;
+
 #[derive(Args, Debug)]
 pub struct RunArgs {
     pub goal: String,
@@ -34,7 +37,17 @@ pub fn run_agent(args: &RunArgs) -> Result<(), String> {
 fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), String> {
     let project = std::env::current_dir()
         .map_err(|error| format!("failed to resolve the current project directory: {error}"))?;
-    println!("nib run: {}", args.goal);
+    let config = nib::config::load_nib_config_full(&project).map_err(|error| error.to_string())?;
+    if args.goal.len() > MAX_RUN_GOAL_BYTES {
+        return Err(format!(
+            "agent goal exceeds the {MAX_RUN_GOAL_BYTES}-byte limit"
+        ));
+    }
+    if let Some(session_id) = args.session.as_deref() {
+        config.validate_public_session_id(session_id)?;
+    }
+    let sensitive_values = config.public_session_sensitive_values();
+    println!("nib run: starting");
 
     let session_store = nib::session::SessionStore::for_project(&project)?;
     let sid = if let Some(s) = &args.session {
@@ -46,10 +59,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
             .id
     };
 
-    println!(
-        "session={} mode={} max_steps={}",
-        sid, args.mode, args.max_steps
-    );
+    let mode = nib::interactive::bounded_public_text(&args.mode, &sensitive_values, 32, false);
+    println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
 
     // We use the Rust agent loop directly
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -90,7 +101,13 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
             }
             println!("Agent run completed for session {}", sid);
             if let Some(msg) = summary.last_message {
-                println!("Last: {}", msg.chars().take(300).collect::<String>());
+                let msg = nib::interactive::bounded_public_text(
+                    &msg,
+                    &sensitive_values,
+                    MAX_RUN_SUMMARY_BYTES,
+                    false,
+                );
+                println!("Last: {msg}");
             }
             Ok(())
         }
@@ -290,5 +307,83 @@ mod tests {
                 Some("apply_patch" | "run_terminal")
             )
         }));
+    }
+
+    #[test]
+    #[serial]
+    fn run_rejects_a_credential_derived_session_before_persistence() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        config.llm.providers.insert(
+            "inactive-openai".to_string(),
+            nib::config::ProviderEntry {
+                model: "fixture".to_string(),
+                api_key: Some("private-session-key".to_string()),
+                ..Default::default()
+            },
+        );
+        config.skills.enabled = false;
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        save_nib_config_full(project.path(), &mut config).expect("mock config");
+        let _cwd = CurrentDirGuard::enter(project.path());
+
+        let error = run_agent(&RunArgs {
+            goal: "list project files".to_string(),
+            session: Some("private-session-key".to_string()),
+            max_steps: 1,
+            mode: "execute".to_string(),
+            provider: Some("mock".to_string()),
+            model: Some("mock-model".to_string()),
+            yes: true,
+        })
+        .expect_err("credential-derived session id");
+
+        assert_eq!(
+            error,
+            "session identifier conflicts with configured sensitive data"
+        );
+        assert!(!error.contains("private-session-key"));
+        assert!(SessionStore::for_project(project.path())
+            .expect("session store")
+            .list_result()
+            .expect("session list")
+            .is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn run_rejects_an_oversized_goal_before_output_or_persistence() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(project.path(), &mut config).expect("mock config");
+        let _cwd = CurrentDirGuard::enter(project.path());
+
+        let error = run_agent(&RunArgs {
+            goal: "x".repeat(MAX_RUN_GOAL_BYTES + 1),
+            session: None,
+            max_steps: 1,
+            mode: "execute".to_string(),
+            provider: Some("mock".to_string()),
+            model: Some("mock-model".to_string()),
+            yes: true,
+        })
+        .expect_err("oversized goal");
+
+        assert_eq!(
+            error,
+            format!("agent goal exceeds the {MAX_RUN_GOAL_BYTES}-byte limit")
+        );
+        assert!(SessionStore::for_project(project.path())
+            .expect("session store")
+            .list_result()
+            .expect("session list")
+            .is_empty());
     }
 }

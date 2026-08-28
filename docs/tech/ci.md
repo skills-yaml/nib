@@ -3,16 +3,18 @@
 Follows skm project structure.
 
 ## Pipeline
-- Use `task check`, `task test`, `task coverage`, `task build`, the Linux
-  `task smoke:interactive` terminal-selection gate, and the
-  `task smoke:managed-process` release-binary owner-loss gate.
+- Use `task check`, `task test`, `task coverage`, `task build`, the offline Mock-only
+  `task smoke:interactive` redirected/native-Unix-PTY semantics and restoration gate,
+  the Windows ConPTY binary smoke, and the `task smoke:managed-process` release-binary
+  owner-loss gate. T021 release candidates also run `task qualify:llm-release` against
+  credential-free localhost fixtures.
 - Rust toolchain via dtolnay/rust-toolchain.
 - Task via arduino/setup-task.
 - Install bwrap on Linux and require the PID-namespace supervisor regressions.
 - Keep broad bwrap/network diagnostics separate from the exact managed-process backend
   probe so restricted network namespaces do not suppress a usable PID supervisor.
-- Run `task check:all-targets` and `task test` plus native backend and
-  production-rejection tests on Windows and
+- Run `task check:all-targets` and `task test` plus native backend,
+  production-rejection, and post-build interactive terminal tests on Windows and
   macOS in addition to the Linux validation/coverage and production supervisor smoke.
   Production delegation remains Linux-only until a separate spec proves protected
   cleanup authority on those platforms.
@@ -69,6 +71,15 @@ scan fails.
 
 Ordinary `.github/workflows/ci.yml` continues to run only deterministic,
 credential-free checks. It must not invoke any `task test:llm-live:*` target.
+
+`task qualify:llm-release` builds the optimized executable with the checkout's exact
+40-character HEAD identity, rejects any mismatch in `nib version`, and records the
+executable SHA-256 plus the exercised help, doctor, planning, Responses tool-result,
+and typed-failure paths in `target/release-qualification/t021-release-binary.json`.
+The fixture binds only to `127.0.0.1`; it neither reads provider credentials nor makes
+a paid request. A dirty worktree may exercise the harness, but its evidence is marked
+`acceptance_eligible: false`; only a clean exact-revision native artifact can satisfy
+T021's remaining acceptance criterion.
 
 ## Taskfile
 See root Taskfile.yml for Rust check, test, coverage, documentation, installer, build,
@@ -200,11 +211,12 @@ The Windows qualification creates its terminal with the operating system's inbox
 `conhost.exe --headless` mode through a repository-owned bounded adapter. Unlike the
 Git for Windows `winpty.exe` adapter, the inbox host does not require the Actions
 PowerShell process to already have terminal handles. It accepts redirected input and
-output pipes, creates the real child console, and returns that console's combined VT
-stream. A repository child adapter runs the requested executable without redirecting
-its handles and writes one unpredictable exit marker after it completes, so the outer
-host can preserve an exact nonzero child status without trusting `conhost.exe`'s own
-status or allowing child output to forge the marker.
+output pipes, accepts at most 64 delayed input chunks (4 KiB each and 32 KiB total),
+creates the real child console, and returns that console's combined VT stream. A
+repository child adapter runs the requested executable without redirecting its handles
+and writes unpredictable exit and console-mode evidence markers after it completes, so
+the outer host can preserve an exact nonzero child status and prove before/after mode
+restoration without trusting `conhost.exe`'s own status or child-forgeable markers.
 
 Normal hosted Windows CI runs this smoke before the long Windows compilation and test
 steps. It requires a PowerShell child to observe interactive standard error, captured
@@ -219,7 +231,13 @@ outer-host timeout inside a finite time window, so slow hosted startup cannot ma
 as successful timeout cleanup and an early setup exit receives a distinct diagnostic.
 After observing readiness, the probe publishes a separate armed signal and continuously
 requires the descendant to remain alive until cleanup. The full timeout and cleanup
-sequence has a 40-second end-to-end upper bound.
+sequence has a 40-second end-to-end upper bound. Success, nonzero exit, and timeout
+paths also compare the calling console's before/after modes. After the optimized Windows
+build, `task smoke:interactive:windows:binary` drives `nib.exe` through this adapter in
+both capable-TUI and `TERM=dumb` plain fallback modes using an isolated Mock-only
+configuration. The macOS job similarly runs `task smoke:interactive:binary` through
+the native BSD `script` adapter after its optimized build; neither native smoke reads
+provider credentials or permits a terminal fallback to drop `/status` or `/quit`.
 
 The publisher creates its reserved staging Git ref explicitly at the candidate SHA
 before draft upload and supplies `--verify-tag`; it does not rely on a draft Release to

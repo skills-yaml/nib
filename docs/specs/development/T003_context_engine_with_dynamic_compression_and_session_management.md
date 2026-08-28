@@ -423,6 +423,16 @@ child failure, and replacement preservation. The revision also passed `task fix`
 child release and join, original-directory assertions, and successful-update readback.
 Native Windows execution and the exact hosted matrix remain open.
 
+## FT-019 Explicit Compaction Reconciliation (T032, 2026-08-26)
+
+T032 reuses this task's bounded summary persistence for an explicit `/compact`
+maintenance run. Explicit invocation bypasses only the automatic threshold: the
+enabled switch and ratio validation remain authoritative, raw messages remain
+immutable, and summary publication now compares the complete raw message snapshot so
+a concurrent append rejects the stale summary. The command creates no synthetic chat
+message and records exact run plus compression evidence. This does not close T003's
+native platform evidence requirements.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows and macOS session/context runtime gates on their configured

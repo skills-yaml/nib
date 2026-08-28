@@ -2,8 +2,9 @@
 
 use crate::config::ReasoningEffort;
 use crate::llm::types::{
-    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallAccumulator, ToolCallRequest, ToolDefinition,
+    LlmDelta, LlmFinishReason, LlmMessage, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation,
+    ToolCallAccumulator, ToolCallRequest, ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -73,7 +74,7 @@ fn into_chat_messages(
     model: &str,
     scope: Option<&LlmRequestScope>,
 ) -> Result<Vec<Value>, String> {
-    let (state, outputs): (ChatTurnState, BTreeMap<ToolInvocationId, String>) =
+    let (state, outputs): (ChatTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume(provider, model, CHAT_TRANSPORT, scope)?;
     let mut messages = vec![state.assistant_message];
     for (invocation_id, call_id) in state.calls {
@@ -83,7 +84,7 @@ fn into_chat_messages(
         messages.push(json!({
             "role": "tool",
             "tool_call_id": call_id.as_str(),
-            "content": output,
+            "content": output.encoded_output(),
         }));
     }
     Ok(messages)
@@ -132,16 +133,36 @@ impl OpenAiCompatClient {
         provider: String,
         model: String,
         api_keys: Vec<String>,
+        diagnostic_secrets: Vec<String>,
+        base_url: impl Into<String>,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Self {
+        Self::configured_with_diagnostic_secrets_and_client(
+            provider,
+            model,
+            api_keys,
+            diagnostic_secrets,
+            base_url,
+            reasoning_effort,
+            Client::new(),
+        )
+    }
+
+    pub(crate) fn configured_with_diagnostic_secrets_and_client(
+        provider: String,
+        model: String,
+        api_keys: Vec<String>,
         mut diagnostic_secrets: Vec<String>,
         base_url: impl Into<String>,
         reasoning_effort: Option<ReasoningEffort>,
+        client: Client,
     ) -> Self {
         diagnostic_secrets.extend(api_keys.iter().cloned());
         diagnostic_secrets
             .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
         diagnostic_secrets.dedup();
         Self {
-            client: Client::new(),
+            client,
             provider,
             model,
             api_keys,
@@ -228,6 +249,11 @@ impl OpenAiCompatClient {
         }
         if stream {
             body["stream"] = json!(true);
+            // Only canonical OpenAI documents this option. Compatible providers keep
+            // their existing request shape unless their own contract proves support.
+            if self.provider == "openai" {
+                body["stream_options"] = json!({"include_usage": true});
+            }
         }
         if let Some(tools) = tools {
             body["tools"] = json!(tools
@@ -258,12 +284,16 @@ impl OpenAiCompatClient {
         )
     }
 
-    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+    fn error_context(
+        &self,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::error::LlmErrorContext {
         crate::llm::error::LlmErrorContext::new(
             self.provider.clone(),
             CHAT_TRANSPORT,
             Some(self.model.clone()),
             self.diagnostic_secrets.clone(),
+            retry_attempts,
         )
     }
 
@@ -288,7 +318,11 @@ impl OpenAiCompatClient {
         )
     }
 
-    fn request_error(&self, error: &str) -> crate::llm::LlmError {
+    fn request_error(
+        &self,
+        error: &str,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::LlmError {
         let safe_credential_error = error == "provider request requires at least one credential"
             || (error.starts_with("all ") && error.contains("credential(s) exhausted"));
         let detail = if safe_credential_error {
@@ -303,6 +337,7 @@ impl OpenAiCompatClient {
             self.contextual_error("request failed", detail),
             &self.diagnostic_secrets,
         )
+        .with_retry_attempts(retry_attempts)
     }
 
     async fn http_error(
@@ -310,7 +345,13 @@ impl OpenAiCompatClient {
         status: StatusCode,
         response: reqwest::Response,
         requests_tools_with_reasoning: bool,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
     ) -> crate::llm::LlmError {
+        let request_id = if self.provider == "openai" {
+            crate::llm::error::bounded_request_id_header(response.headers().get("x-request-id"))
+        } else {
+            None
+        };
         let body = crate::llm::read_bounded_error_response(
             response,
             "OpenAI-compatible API error response",
@@ -337,7 +378,7 @@ impl OpenAiCompatClient {
         } else {
             ""
         };
-        crate::llm::LlmError::http(
+        let error = crate::llm::LlmError::http(
             &self.provider,
             CHAT_TRANSPORT,
             Some(&self.model),
@@ -349,6 +390,11 @@ impl OpenAiCompatClient {
             ),
             &self.diagnostic_secrets,
         )
+        .with_retry_attempts(retry_attempts);
+        match request_id {
+            Some(request_id) => error.with_request_id(&request_id, &self.diagnostic_secrets),
+            None => error,
+        }
     }
 
     fn completion_read_error(&self, error: &str) -> crate::llm::LlmError {
@@ -586,6 +632,13 @@ fn truncate_diagnostic(value: &str, max_bytes: usize) -> String {
 #[async_trait]
 impl LlmClient for OpenAiCompatClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            &self.provider,
+            crate::llm::registry::ProviderTransport::ChatCompletions,
+            crate::llm::conformance::ProviderOperation::Complete,
+        )
+        .map_err(|error| self.rejected_request(&error))?;
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
         let scope = request.scope.clone();
         let body = self
@@ -593,27 +646,37 @@ impl LlmClient for OpenAiCompatClient {
             .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
-        let resp = crate::llm::send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            &self.provider,
+            crate::llm::registry::ProviderTransport::ChatCompletions,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 let mut request = self.client.post(&url).json(&body);
                 request = request.bearer_auth(&self.api_keys[credential_index]);
                 request
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|error| self.request_error(&error))?;
+        .map_err(|failure| self.request_error(&failure.error, failure.attempts))?;
+        let retry_attempts = outcome.attempts;
+        let resp = outcome.value;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(self
-                .http_error(status, resp, requests_tools_with_reasoning)
+                .http_error(status, resp, requests_tools_with_reasoning, retry_attempts)
                 .await);
         }
 
         let data =
             crate::llm::read_bounded_json_response(resp, "OpenAI-compatible completion response")
                 .await
-                .map_err(|error| self.completion_read_error(&error))?;
+                .map_err(|error| {
+                    self.completion_read_error(&error)
+                        .with_retry_attempts(retry_attempts)
+                })?;
         if let Some(failure) = chat_protocol_failure(&data) {
             return Err(crate::llm::LlmError::provider_rejected(
                 &self.provider,
@@ -626,20 +689,33 @@ impl LlmClient for OpenAiCompatClient {
                     &failure.detail(requests_tools_with_reasoning),
                 ),
                 &self.diagnostic_secrets,
-            ));
+            )
+            .with_retry_attempts(retry_attempts));
         }
         let mut response = parse_openai_response(&data).map_err(|_| {
             self.protocol_error(
                 "protocol failure",
                 "completion response did not satisfy the Chat Completions schema",
             )
+            .with_retry_attempts(retry_attempts)
         })?;
         attach_chat_continuation(&mut response, &data, &self.provider, &self.model, scope)
-            .map_err(|error| self.protocol_error("protocol failure", &error))?;
+            .map_err(|error| {
+                self.protocol_error("protocol failure", &error)
+                    .with_retry_attempts(retry_attempts)
+            })?;
+        response.attempts = retry_attempts;
         Ok(response)
     }
 
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            &self.provider,
+            crate::llm::registry::ProviderTransport::ChatCompletions,
+            crate::llm::conformance::ProviderOperation::Stream,
+        )
+        .map_err(|error| self.rejected_request(&error))?;
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
         let scope = request.scope.clone();
         let body = self
@@ -647,20 +723,27 @@ impl LlmClient for OpenAiCompatClient {
             .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
-        let resp = crate::llm::send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            &self.provider,
+            crate::llm::registry::ProviderTransport::ChatCompletions,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 let mut request = self.client.post(&url).json(&body);
                 request = request.bearer_auth(&self.api_keys[credential_index]);
                 request
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|error| self.request_error(&error))?;
+        .map_err(|failure| self.request_error(&failure.error, failure.attempts))?;
+        let retry_attempts = outcome.attempts;
+        let resp = outcome.value;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(self
-                .http_error(status, resp, requests_tools_with_reasoning)
+                .http_error(status, resp, requests_tools_with_reasoning, retry_attempts)
                 .await);
         }
         crate::llm::ensure_response_content_length(
@@ -668,9 +751,13 @@ impl LlmClient for OpenAiCompatClient {
             crate::llm::MAX_LLM_STREAM_BYTES,
             "OpenAI-compatible stream response",
         )
-        .map_err(|error| self.protocol_error("protocol failure", &error))?;
+        .map_err(|error| {
+            self.protocol_error("protocol failure", &error)
+                .with_retry_attempts(retry_attempts)
+        })?;
 
         let provider = self.provider.clone();
+        let canonical_openai = provider == "openai";
         let model = self.model.clone();
         let continuation_scope = scope;
         let diagnostic_secrets = self.diagnostic_secrets.clone();
@@ -685,6 +772,7 @@ impl LlmClient for OpenAiCompatClient {
             let mut content = String::new();
             let mut tool_calls = ToolCallAccumulator::default();
             let mut call_ids = BTreeMap::new();
+            let mut pending_completion: Option<LlmResponse> = None;
             let mut budget = crate::llm::ResponseByteBudget::new(
                 crate::llm::MAX_LLM_STREAM_BYTES,
                 "OpenAI-compatible stream response",
@@ -697,16 +785,17 @@ impl LlmClient for OpenAiCompatClient {
                 Ok::<_, String>(chunk)
             });
             let mut stream = bounded_bytes.eventsource();
-            while let Some(event_res) =
+            let mut item_budget = crate::llm::ResponseItemBudget::new(
+                crate::llm::MAX_LLM_STREAM_EVENTS,
+                "OpenAI-compatible stream events",
+            );
+            'events: while let Some(event_res) =
                 crate::llm::next_stream_item_or_closed(&tx, &mut stream).await
             {
                 match event_res {
                     Ok(event) => {
-                        if let Err(error) = crate::llm::ensure_stream_event_size(
-                            event.data.len(),
-                            "OpenAI-compatible stream event",
-                        ) {
-                            fail_chat_stream(
+                        if let Err(error) = item_budget.account(1) {
+                            fail_chat_stream_conditionally(
                                 &tx,
                                 &mut completion_tx,
                                 contextual_chat_error(
@@ -716,6 +805,26 @@ impl LlmClient for OpenAiCompatClient {
                                     &error,
                                     &diagnostic_secrets,
                                 ),
+                                pending_completion.is_some(),
+                            )
+                            .await;
+                            return;
+                        }
+                        if let Err(error) = crate::llm::ensure_stream_event_size(
+                            event.data.len(),
+                            "OpenAI-compatible stream event",
+                        ) {
+                            fail_chat_stream_conditionally(
+                                &tx,
+                                &mut completion_tx,
+                                contextual_chat_error(
+                                    &provider,
+                                    &model,
+                                    "protocol failure",
+                                    &error,
+                                    &diagnostic_secrets,
+                                ),
+                                pending_completion.is_some(),
                             )
                             .await;
                             return;
@@ -726,7 +835,7 @@ impl LlmClient for OpenAiCompatClient {
                                 .as_ref()
                                 .and_then(chat_protocol_failure)
                                 .unwrap_or_else(ChatProtocolFailure::in_band_error);
-                            fail_chat_stream(
+                            fail_chat_stream_conditionally(
                                 &tx,
                                 &mut completion_tx,
                                 crate::llm::LlmError::provider_rejected(
@@ -744,28 +853,76 @@ impl LlmClient for OpenAiCompatClient {
                                     ),
                                     &diagnostic_secrets,
                                 ),
+                                pending_completion.is_some(),
                             )
                             .await;
                             return;
                         }
                         if event.data == "[DONE]" {
-                            fail_chat_stream(
-                                &tx,
-                                &mut completion_tx,
-                                contextual_chat_error(
-                                    &provider,
-                                    &model,
-                                    "protocol failure",
-                                    "stream ended before an explicit finish_reason",
-                                    &diagnostic_secrets,
-                                ),
-                            )
-                            .await;
+                            if let Some(completion) = pending_completion.take() {
+                                if let Some(sender) = completion_tx.take() {
+                                    let _ = sender.send(Ok(completion));
+                                }
+                            } else {
+                                fail_chat_stream(
+                                    &tx,
+                                    &mut completion_tx,
+                                    contextual_chat_error(
+                                        &provider,
+                                        &model,
+                                        "protocol failure",
+                                        "stream ended before an explicit finish_reason",
+                                        &diagnostic_secrets,
+                                    ),
+                                )
+                                .await;
+                            }
                             return;
                         }
 
                         match serde_json::from_str::<Value>(&event.data) {
                             Ok(data) => {
+                                let chunk_usage = match parse_openai_usage(&data) {
+                                    Ok(usage) => usage,
+                                    Err(error) => {
+                                        fail_chat_stream_conditionally(
+                                            &tx,
+                                            &mut completion_tx,
+                                            contextual_chat_error(
+                                                &provider,
+                                                &model,
+                                                "protocol failure",
+                                                &error,
+                                                &diagnostic_secrets,
+                                            ),
+                                            pending_completion.is_some(),
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                };
+                                if let Some(completion) = pending_completion.as_mut() {
+                                    let usage_only = data
+                                        .get("choices")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(Vec::is_empty)
+                                        && chunk_usage.is_some();
+                                    if !usage_only || completion.usage.is_some() {
+                                        fail_chat_private_completion(
+                                            &mut completion_tx,
+                                            contextual_chat_error(
+                                                &provider,
+                                                &model,
+                                                "protocol failure",
+                                                "stream emitted invalid or duplicate data after its terminal event",
+                                                &diagnostic_secrets,
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                    completion.usage = chunk_usage;
+                                    continue;
+                                }
                                 if let Some(failure) = chat_protocol_failure(&data) {
                                     fail_chat_stream(
                                         &tx,
@@ -845,15 +1002,34 @@ impl LlmClient for OpenAiCompatClient {
                                         return;
                                     }
                                 };
+                                if chunk_usage.is_some()
+                                    && !parsed_events
+                                        .iter()
+                                        .any(|event| matches!(event, LlmStreamEvent::Terminal(_)))
+                                {
+                                    fail_chat_stream(
+                                        &tx,
+                                        &mut completion_tx,
+                                        contextual_chat_error(
+                                            &provider,
+                                            &model,
+                                            "protocol failure",
+                                            "stream returned usage before its terminal event",
+                                            &diagnostic_secrets,
+                                        ),
+                                    )
+                                    .await;
+                                    return;
+                                }
                                 for parsed in parsed_events {
                                     match &parsed {
-                                        StreamEvent::Content(fragment) => {
+                                        LlmStreamEvent::Delta(LlmDelta::Content(fragment)) => {
                                             content.push_str(fragment)
                                         }
-                                        StreamEvent::ToolCallChunk { .. } => {
-                                            tool_calls.push(&parsed)
-                                        }
-                                        StreamEvent::End(reason) => {
+                                        LlmStreamEvent::Delta(
+                                            delta @ LlmDelta::ToolCallChunk { .. },
+                                        ) => tool_calls.push(delta),
+                                        LlmStreamEvent::Terminal(reason) => {
                                             let calls = match std::mem::take(&mut tool_calls)
                                                 .finish_with_call_ids(std::mem::take(&mut call_ids))
                                             {
@@ -874,8 +1050,10 @@ impl LlmClient for OpenAiCompatClient {
                                                     return;
                                                 }
                                             };
-                                            if (!calls.is_empty() && reason != "tool_calls")
-                                                || (calls.is_empty() && reason == "tool_calls")
+                                            if (!calls.is_empty()
+                                                && *reason != LlmFinishReason::ToolCalls)
+                                                || (calls.is_empty()
+                                                    && *reason == LlmFinishReason::ToolCalls)
                                             {
                                                 fail_chat_stream(
                                                     &tx,
@@ -920,7 +1098,7 @@ impl LlmClient for OpenAiCompatClient {
                                                 match chat_continuation(
                                                     &provider,
                                                     &model,
-                                                    continuation_scope,
+                                                    continuation_scope.clone(),
                                                     assistant_message,
                                                     &calls,
                                                 ) {
@@ -946,19 +1124,24 @@ impl LlmClient for OpenAiCompatClient {
                                                 terminal_status: LlmTerminalStatus::Completed,
                                                 content: completed_content,
                                                 tool_calls: (!calls.is_empty()).then_some(calls),
-                                                finish_reason: reason.clone(),
+                                                finish_reason: *reason,
                                                 continuation,
+                                                usage: chunk_usage,
+                                                attempts: retry_attempts,
                                             };
                                             if !crate::llm::send_stream_event(&tx, Ok(parsed)).await
                                             {
                                                 return;
+                                            }
+                                            if canonical_openai {
+                                                pending_completion = Some(completion);
+                                                continue 'events;
                                             }
                                             if let Some(sender) = completion_tx.take() {
                                                 let _ = sender.send(Ok(completion));
                                             }
                                             return;
                                         }
-                                        _ => {}
                                     }
                                     if !crate::llm::send_stream_event(&tx, Ok(parsed)).await {
                                         return;
@@ -966,7 +1149,7 @@ impl LlmClient for OpenAiCompatClient {
                                 }
                             }
                             Err(_) => {
-                                fail_chat_stream(
+                                fail_chat_stream_conditionally(
                                     &tx,
                                     &mut completion_tx,
                                     contextual_chat_error(
@@ -976,6 +1159,7 @@ impl LlmClient for OpenAiCompatClient {
                                         "stream contained malformed JSON",
                                         &diagnostic_secrets,
                                     ),
+                                    pending_completion.is_some(),
                                 )
                                 .await;
                                 return;
@@ -983,7 +1167,7 @@ impl LlmClient for OpenAiCompatClient {
                         }
                     }
                     Err(EventStreamError::Transport(error)) => {
-                        fail_chat_stream(
+                        fail_chat_stream_conditionally(
                             &tx,
                             &mut completion_tx,
                             crate::llm::LlmError::transport(
@@ -1000,12 +1184,13 @@ impl LlmClient for OpenAiCompatClient {
                                 &diagnostic_secrets,
                             )
                             .with_phase(crate::llm::LlmErrorPhase::Stream),
+                            pending_completion.is_some(),
                         )
                         .await;
                         return;
                     }
                     Err(EventStreamError::Utf8(_) | EventStreamError::Parser(_)) => {
-                        fail_chat_stream(
+                        fail_chat_stream_conditionally(
                             &tx,
                             &mut completion_tx,
                             contextual_chat_error(
@@ -1015,6 +1200,7 @@ impl LlmClient for OpenAiCompatClient {
                                 "stream contained malformed SSE data",
                                 &diagnostic_secrets,
                             ),
+                            pending_completion.is_some(),
                         )
                         .await;
                         return;
@@ -1022,28 +1208,34 @@ impl LlmClient for OpenAiCompatClient {
                 }
             }
             if !tx.is_closed() {
-                fail_chat_stream(
+                let detail = if pending_completion.is_some() {
+                    "canonical OpenAI stream ended before its [DONE] marker"
+                } else {
+                    "stream ended before an explicit finish_reason"
+                };
+                fail_chat_stream_conditionally(
                     &tx,
                     &mut completion_tx,
                     contextual_chat_error(
                         &provider,
                         &model,
                         "protocol failure",
-                        "stream ended before an explicit finish_reason",
+                        detail,
                         &diagnostic_secrets,
                     ),
+                    pending_completion.is_some(),
                 )
                 .await;
             }
         });
 
         Ok(LlmStream::with_private_completion(rx, completion_rx)
-            .with_error_context(self.error_context()))
+            .with_error_context(self.error_context(retry_attempts)))
     }
 }
 
 async fn fail_chat_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    public_tx: &mpsc::Sender<Result<LlmStreamEvent, crate::llm::LlmStreamFailure>>,
     completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
     error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
@@ -1051,6 +1243,28 @@ async fn fail_chat_stream(
     let _ = crate::llm::send_stream_event(public_tx, Err(error.clone())).await;
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
+    }
+}
+
+fn fail_chat_private_completion(
+    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
+    error: impl Into<crate::llm::LlmStreamFailure>,
+) {
+    if let Some(sender) = completion_tx.take() {
+        let _ = sender.send(Err(error.into()));
+    }
+}
+
+async fn fail_chat_stream_conditionally(
+    public_tx: &mpsc::Sender<Result<LlmStreamEvent, crate::llm::LlmStreamFailure>>,
+    completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
+    error: impl Into<crate::llm::LlmStreamFailure>,
+    public_terminal_emitted: bool,
+) {
+    if public_terminal_emitted {
+        fail_chat_private_completion(completion_tx, error);
+    } else {
+        fail_chat_stream(public_tx, completion_tx, error).await;
     }
 }
 
@@ -1092,7 +1306,15 @@ fn chat_stream_call_ids(data: &Value) -> Result<Vec<(usize, ProviderCallId)>, St
         .collect()
 }
 
-pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<StreamEvent>, String> {
+fn normalize_chat_finish_reason(reason: &str) -> Result<LlmFinishReason, String> {
+    match reason {
+        "stop" => Ok(LlmFinishReason::Complete),
+        "tool_calls" => Ok(LlmFinishReason::ToolCalls),
+        _ => Err("OpenAI-compatible response contained an unsupported finish_reason".to_string()),
+    }
+}
+
+pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<LlmStreamEvent>, String> {
     if let Some(failure) = chat_protocol_failure(data) {
         return Err(failure.detail(false));
     }
@@ -1106,9 +1328,12 @@ pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<StreamEvent>, Strin
     let mut events = Vec::new();
     let delta = choice.get("delta").unwrap_or(&Value::Null);
     if let Some(content) = delta.get("content").and_then(Value::as_str) {
-        events.push(StreamEvent::Content(content.to_string()));
+        events.push(LlmStreamEvent::Delta(LlmDelta::Content(
+            content.to_string(),
+        )));
     }
     if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+        crate::llm::ensure_response_item_count(tool_calls.len(), "OpenAI streamed tool calls")?;
         for call in tool_calls {
             let index = call
                 .get("index")
@@ -1116,7 +1341,7 @@ pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<StreamEvent>, Strin
                 .ok_or_else(|| "OpenAI tool-call delta is missing index".to_string())?
                 as usize;
             let function = call.get("function").unwrap_or(&Value::Null);
-            events.push(StreamEvent::ToolCallChunk {
+            events.push(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                 index,
                 name: function
                     .get("name")
@@ -1126,15 +1351,64 @@ pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<StreamEvent>, Strin
                     .get("arguments")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-            });
+            }));
         }
     }
     if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
         if !finish.is_empty() && finish != "null" {
-            events.push(StreamEvent::End(finish.to_string()));
+            events.push(LlmStreamEvent::Terminal(normalize_chat_finish_reason(
+                finish,
+            )?));
         }
     }
     Ok(events)
+}
+
+fn required_chat_usage_count(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<u64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("OpenAI usage {field} must be a non-negative integer"))
+}
+
+fn optional_chat_usage_detail(
+    usage: &serde_json::Map<String, Value>,
+    details_field: &str,
+    count_field: &str,
+) -> Result<Option<u64>, String> {
+    let Some(details) = usage.get(details_field).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let details = details
+        .as_object()
+        .ok_or_else(|| format!("OpenAI usage {details_field} must be an object"))?;
+    match details.get(count_field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            format!("OpenAI usage {details_field}.{count_field} must be a non-negative integer")
+        }),
+    }
+}
+
+fn parse_openai_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
+    let Some(usage) = data.get("usage").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| "OpenAI usage must be an object".to_string())?;
+    LlmUsage::new(
+        required_chat_usage_count(usage, "prompt_tokens")?,
+        required_chat_usage_count(usage, "completion_tokens")?,
+        required_chat_usage_count(usage, "total_tokens")?,
+        optional_chat_usage_detail(usage, "prompt_tokens_details", "cached_tokens")?,
+        optional_chat_usage_detail(usage, "completion_tokens_details", "reasoning_tokens")?,
+    )
+    .map(Some)
+    .map_err(|error| format!("OpenAI usage is invalid: {error}"))
 }
 
 pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
@@ -1150,6 +1424,7 @@ pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
 
     let mut tool_calls = Vec::new();
     if let Some(tcs) = message.get("tool_calls").and_then(|v| v.as_array()) {
+        crate::llm::ensure_response_item_count(tcs.len(), "OpenAI tool calls")?;
         for tc in tcs {
             let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
             let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
@@ -1171,14 +1446,14 @@ pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
         }
     }
 
-    let finish = choice
+    let native_finish = choice
         .get("finish_reason")
         .and_then(|v| v.as_str())
         .filter(|reason| !reason.is_empty() && *reason != "null")
-        .ok_or_else(|| "OpenAI response is missing finish_reason".to_string())?
-        .to_string();
-    if (!tool_calls.is_empty() && finish != "tool_calls")
-        || (tool_calls.is_empty() && finish == "tool_calls")
+        .ok_or_else(|| "OpenAI response is missing finish_reason".to_string())?;
+    let finish_reason = normalize_chat_finish_reason(native_finish)?;
+    if (!tool_calls.is_empty() && finish_reason != LlmFinishReason::ToolCalls)
+        || (tool_calls.is_empty() && finish_reason == LlmFinishReason::ToolCalls)
     {
         return Err("OpenAI finish_reason did not match the completed tool-call set".to_string());
     }
@@ -1191,8 +1466,10 @@ pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
         } else {
             Some(tool_calls)
         },
-        finish_reason: finish,
+        finish_reason,
         continuation: None,
+        usage: parse_openai_usage(data)?,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
 }
 
@@ -1203,6 +1480,43 @@ mod tests {
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
     use std::time::Duration;
+
+    #[test]
+    fn chat_continuation_encodes_a_typed_tool_result() {
+        let scope = LlmRequestScope::new("session", "run").unwrap();
+        let call = ToolCallRequest::with_provider_call(
+            ProviderCallId::new("call_typed").unwrap(),
+            "inspect",
+            json!({}),
+        );
+        let assistant_message = json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_typed",
+                "type": "function",
+                "function": {"name": "inspect", "arguments": "{}"}
+            }]
+        });
+        let mut continuation = chat_continuation(
+            "openai",
+            "gpt-test",
+            Some(scope.clone()),
+            assistant_message,
+            std::slice::from_ref(&call),
+        )
+        .unwrap();
+        continuation
+            .record_tool_result(
+                ToolResult::success(call.invocation_id, json!({"value": 1})).unwrap(),
+            )
+            .unwrap();
+
+        let messages =
+            into_chat_messages(continuation, "openai", "gpt-test", Some(&scope)).unwrap();
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_typed");
+        assert_eq!(messages[1]["content"], "{\"value\":1}");
+    }
 
     #[test]
     fn parses_streamed_text_and_tool_fragments() {
@@ -1220,10 +1534,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], StreamEvent::Content(value) if value == "working"));
+        assert!(matches!(
+            &events[0],
+            LlmStreamEvent::Delta(LlmDelta::Content(value)) if value == "working"
+        ));
         assert!(matches!(
             &events[1],
-            StreamEvent::ToolCallChunk { index: 0, name: Some(name), .. } if name == "read_file"
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                index: 0,
+                name: Some(name),
+                ..
+            }) if name == "read_file"
         ));
     }
 
@@ -1361,7 +1682,14 @@ mod tests {
                         }]
                     },
                     "finish_reason": "tool_calls"
-                }]
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 8,
+                    "total_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 4},
+                    "completion_tokens_details": {"reasoning_tokens": 3}
+                }
             })
             .to_string(),
         );
@@ -1385,7 +1713,11 @@ mod tests {
             .expect("OpenAI completion");
 
         assert_eq!(response.content.as_deref(), Some("inspected"));
-        assert_eq!(response.finish_reason, "tool_calls");
+        assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(12, 8, 20, Some(4), Some(3)).unwrap())
+        );
         let call = &response.tool_calls.expect("tool call")[0];
         assert_eq!(call.call_id.as_ref().unwrap().as_str(), "call_read_1");
         assert_eq!(call.name, "read_file");
@@ -1400,6 +1732,23 @@ mod tests {
             .contains("authorization: bearer test-key"));
         assert!(request.contains("\"model\":\"test-model\""));
         assert!(request.contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn complete_usage_rejects_malformed_fractional_negative_and_overflow_counts() {
+        for usage in [
+            json!({"prompt_tokens": 1.5, "completion_tokens": 2, "total_tokens": 3}),
+            json!({"prompt_tokens": -1, "completion_tokens": 2, "total_tokens": 1}),
+            json!({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 4}),
+            json!({"prompt_tokens": 1_000_000_001_u64, "completion_tokens": 0, "total_tokens": 1_000_000_001_u64}),
+        ] {
+            let error = parse_openai_response(&json!({
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": usage,
+            }))
+            .expect_err("malformed usage must fail the completion");
+            assert!(error.contains("usage"), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -1519,19 +1868,21 @@ mod tests {
         let mut content = String::new();
         let mut accumulator = crate::llm::ToolCallAccumulator::default();
         let mut finish = None;
-        while let Some(event) = stream.recv().await {
+        while let Some(event) = stream.recv_private().await {
             let event = event.expect("valid stream event");
-            if let StreamEvent::Content(fragment) = &event {
+            if let LlmStreamEvent::Delta(LlmDelta::Content(fragment)) = &event {
                 content.push_str(fragment);
             }
-            if let StreamEvent::End(reason) = &event {
-                finish = Some(reason.clone());
+            if let LlmStreamEvent::Terminal(reason) = &event {
+                finish = Some(*reason);
             }
-            accumulator.push(&event);
+            if let LlmStreamEvent::Delta(delta) = &event {
+                accumulator.push(delta);
+            }
         }
 
         assert_eq!(content, "work");
-        assert_eq!(finish.as_deref(), Some("tool_calls"));
+        assert_eq!(finish, Some(LlmFinishReason::ToolCalls));
         let calls = accumulator.finish().expect("complete tool call");
         assert!(
             calls[0].call_id.is_none(),
@@ -1549,6 +1900,89 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("captured stream request");
         assert!(request.contains("\"stream\":true"));
+        assert!(!request.contains("\"stream_options\""));
+    }
+
+    #[tokio::test]
+    async fn canonical_chat_stream_waits_for_optional_usage_and_done_without_public_events() {
+        for (usage_chunk, expected_usage) in [
+            (
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
+                Some(LlmUsage::new(9, 4, 13, Some(2), Some(1)).unwrap()),
+            ),
+            ("", None),
+        ] {
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}},\"finish_reason\":null}}]}}\n\n\
+                 data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+                 {usage_chunk}data: [DONE]\n\n"
+            );
+            let (base_url, request_rx) = serve_once("200 OK", "text/event-stream", body);
+            let client = OpenAiCompatClient::configured(
+                "openai".to_string(),
+                "stream-model".to_string(),
+                vec!["stream-key".to_string()],
+                base_url,
+                None,
+            );
+            let messages = [LlmMessage::user("stream")];
+            let mut stream = client
+                .stream(LlmRequest::new(&messages, None))
+                .await
+                .expect("canonical OpenAI stream");
+            assert!(matches!(
+                stream.recv_private().await,
+                Some(Ok(LlmStreamEvent::Delta(LlmDelta::Content(content)))) if content == "ok"
+            ));
+            assert!(matches!(
+                stream.recv_private().await,
+                Some(Ok(LlmStreamEvent::Terminal(LlmFinishReason::Complete)))
+            ));
+            assert!(stream.recv_private().await.is_none(), "event followed public End");
+            let completion = stream.finish().await.expect("private completion");
+            assert_eq!(completion.usage, expected_usage);
+
+            let request = request_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("captured canonical stream request");
+            assert!(request.contains("\"stream_options\":{\"include_usage\":true}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_usage_after_chat_end_fails_privately_without_a_post_end_event() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":\"bad\",\"completion_tokens\":1,\"total_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (base_url, _) = serve_once("200 OK", "text/event-stream", body);
+        let client = OpenAiCompatClient::configured(
+            "openai".to_string(),
+            "stream-model".to_string(),
+            vec!["stream-key".to_string()],
+            base_url,
+            None,
+        );
+        let messages = [LlmMessage::user("stream")];
+        let mut stream = client
+            .stream(LlmRequest::new(&messages, None))
+            .await
+            .expect("canonical OpenAI stream");
+        assert!(matches!(
+            stream.recv_private().await,
+            Some(Ok(LlmStreamEvent::Terminal(LlmFinishReason::Complete)))
+        ));
+        assert!(
+            stream.recv_private().await.is_none(),
+            "error followed public End"
+        );
+        let error = stream
+            .finish()
+            .await
+            .expect_err("malformed terminal usage must fail");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Protocol);
+        assert!(error.contains("usage"));
     }
 
     #[tokio::test]
@@ -1665,12 +2099,15 @@ mod tests {
             .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open OpenAI stream");
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("first event timeout")
             .expect("first event")
             .expect("valid first event");
-        assert_eq!(first, StreamEvent::Content("first".to_string()));
+        assert_eq!(
+            first,
+            LlmStreamEvent::Delta(LlmDelta::Content("first".to_string()))
+        );
         drop(stream);
 
         let disconnected =
@@ -1697,16 +2134,18 @@ mod tests {
             .await
             .expect("open OpenAI stream");
 
-        let error = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("terminal event timeout")
             .expect("terminal event")
             .expect_err("DONE without finish_reason must fail");
         assert!(error.contains("explicit finish_reason"));
-        assert!(tokio::time::timeout(Duration::from_secs(1), stream.recv())
-            .await
-            .expect("producer closure timeout")
-            .is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
+                .await
+                .expect("producer closure timeout")
+                .is_none()
+        );
 
         let disconnected =
             tokio::task::spawn_blocking(move || disconnect_rx.recv_timeout(Duration::from_secs(5)))

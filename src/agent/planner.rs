@@ -1,7 +1,7 @@
 use crate::context::budget::{build_bounded_planning_input, PlanningPromptRequest};
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, LlmResponse, LlmStream};
 use crate::session::{Plan, PlanStep};
 use serde_json::json;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ pub async fn generate_plan_with_events_bounded(
         skills: Vec::new(),
         memory: Vec::new(),
         workload: Vec::new(),
+        attachments: Vec::new(),
     };
     generate_plan_with_context_events_bounded(llm, goal, &context, None, event_tx, context_length)
         .await
@@ -65,7 +66,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
     goal: &str,
     context: &RuntimeContextSections,
     session: Option<&crate::session::Session>,
-    event_tx: Option<&Sender<StreamEvent>>,
+    _event_tx: Option<&Sender<StreamEvent>>,
     context_length: usize,
     scope: Option<LlmRequestScope>,
 ) -> Result<Plan, crate::llm::LlmError> {
@@ -110,15 +111,19 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
     let typed_messages = crate::llm::LlmMessage::from_openai_values(&bounded.messages)?;
     let typed_tools = crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref())?;
     let request = LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(scope);
-    let mut stream = llm.stream(request).await?;
-    while let Some(result) = stream.recv().await {
-        let event = result.map_err(|error| *error)?;
-        if let Some(tx) = event_tx.filter(|_| matches!(&event, StreamEvent::Content(_))) {
-            let _ = tx.send(event).await;
-        }
-    }
-    let completed = stream.finish().await?;
-    plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default()).map_err(Into::into)
+    let completed = finish_private_planning_stream(llm.stream(request).await?).await?;
+    let plan = plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default())
+        .map_err(crate::llm::LlmError::from)?;
+    Ok(plan)
+}
+
+async fn finish_private_planning_stream(
+    stream: LlmStream,
+) -> Result<LlmResponse, crate::llm::LlmError> {
+    // `LlmStream` exposes no unvalidated provider-delta receiver outside `crate::llm`.
+    // Planning keeps the completed response private for the additional structured-plan
+    // validation boundary.
+    stream.finish().await
 }
 
 pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<Plan, String> {
@@ -189,6 +194,27 @@ mod tests {
         assert!(error.contains("empty or invalid"));
     }
 
+    #[tokio::test]
+    async fn planning_deltas_remain_private_when_terminal_validation_fails() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(Ok(crate::llm::LlmStreamEvent::Delta(
+            crate::llm::LlmDelta::Content("private planning echo\u{1b}[31m".to_string()),
+        )))
+        .await
+        .expect("delta");
+        tx.send(Err(crate::llm::LlmStreamFailure::from(
+            "late planning rejection",
+        )))
+        .await
+        .expect("failure");
+        drop(tx);
+
+        let error = finish_private_planning_stream(LlmStream::from_public_receiver(rx))
+            .await
+            .expect_err("late failure rejects private planning output");
+        assert_eq!(error.class, crate::llm::LlmErrorClass::Protocol);
+    }
+
     type RecordedPlannerRequest = (Vec<Value>, Option<Vec<Value>>);
 
     #[derive(Default)]
@@ -245,6 +271,7 @@ mod tests {
                 label: "workload.snapshot-marker".to_string(),
                 content: "WORKLOAD_PLANNER_MARKER active=1 prepared=0".to_string(),
             }],
+            attachments: Vec::new(),
         };
         let session: crate::session::Session = serde_json::from_value(json!({
             "id": "planner-session-marker",

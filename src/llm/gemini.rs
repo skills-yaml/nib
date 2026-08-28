@@ -1,8 +1,9 @@
 //! Google Gemini Generative Language API.
 
 use crate::llm::types::{
-    LlmMessage, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderContinuation,
-    StreamEvent, ToolCallRequest, ToolDefinition,
+    LlmDelta, LlmFinishReason, LlmMessage, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderContinuation, ToolCallRequest,
+    ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -26,11 +27,26 @@ fn gemini_continuation(
     model_content: Value,
     calls: &[ToolCallRequest],
 ) -> Result<ProviderContinuation, String> {
-    let retained_function_names = model_content
+    let retained_function_parts = model_content
         .get("parts")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|part| part.get("functionCall").is_some())
+        .collect::<Vec<_>>();
+    for part in &retained_function_parts {
+        if part.get("thoughtSignature").is_some_and(|signature| {
+            signature.as_str().is_none_or(|signature| {
+                signature.is_empty() || signature.chars().any(char::is_control)
+            })
+        }) {
+            return Err(
+                "Gemini continuation contains invalid thought-signature metadata".to_string(),
+            );
+        }
+    }
+    let retained_function_names = retained_function_parts
+        .iter()
         .filter_map(|part| {
             part.get("functionCall")
                 .and_then(|call| call.get("name"))
@@ -77,15 +93,14 @@ fn into_gemini_contents(
     model: &str,
     scope: Option<&LlmRequestScope>,
 ) -> Result<Vec<Value>, String> {
-    let (state, outputs): (GeminiTurnState, BTreeMap<ToolInvocationId, String>) =
+    let (state, outputs): (GeminiTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume("google", model, GEMINI_TRANSPORT, scope)?;
     let mut parts = Vec::with_capacity(state.calls.len());
     for (invocation_id, name) in state.calls {
         let output = outputs
             .get(&invocation_id)
             .ok_or_else(|| "Gemini continuation is missing a tool output".to_string())?;
-        let mut response = serde_json::from_str::<Value>(output)
-            .map_err(|_| "Gemini continuation contains an invalid tool output".to_string())?;
+        let mut response = output.output().clone();
         if !response.is_object() {
             response = json!({"result": response});
         }
@@ -193,12 +208,16 @@ impl GeminiClient {
         Ok(body)
     }
 
-    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+    fn error_context(
+        &self,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::error::LlmErrorContext {
         crate::llm::error::LlmErrorContext::new(
             "google",
             GEMINI_TRANSPORT,
             Some(self.model.clone()),
             self.diagnostic_secrets.clone(),
+            retry_attempts,
         )
     }
 
@@ -227,12 +246,23 @@ impl GeminiClient {
 #[async_trait]
 impl LlmClient for GeminiClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            "google",
+            crate::llm::registry::ProviderTransport::GeminiGenerateContent,
+            crate::llm::conformance::ProviderOperation::Complete,
+        )
+        .map_err(|error| self.request_error(error))?;
         validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
         let scope = request.scope.clone();
         let body = self
             .request_body(request)
             .map_err(|error| self.request_error(error))?;
-        let response = crate::llm::send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            "google",
+            crate::llm::registry::ProviderTransport::GeminiGenerateContent,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 let url = format!(
                     "{}/models/{}:generateContent",
@@ -245,9 +275,10 @@ impl LlmClient for GeminiClient {
                     .json(&body)
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|_| {
+        .map_err(|failure| {
             crate::llm::LlmError::transport(
                 "google",
                 GEMINI_TRANSPORT,
@@ -255,15 +286,25 @@ impl LlmClient for GeminiClient {
                 "Gemini request failed before a valid HTTP response",
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(failure.attempts)
         })?;
+        let retry_attempts = outcome.attempts;
+        let response = outcome.value;
         if !response.status().is_success() {
-            return Err(
-                safe_gemini_http_error(response, &self.model, &self.diagnostic_secrets).await,
-            );
+            return Err(safe_gemini_http_error(
+                response,
+                &self.model,
+                &self.diagnostic_secrets,
+                retry_attempts,
+            )
+            .await);
         }
         let data = crate::llm::read_bounded_json_response(response, "Gemini completion response")
             .await
-            .map_err(|error| self.protocol_error(error))?;
+            .map_err(|error| {
+                self.protocol_error(error)
+                    .with_retry_attempts(retry_attempts)
+            })?;
         let mut completed = parse_gemini_response(&data).map_err(|error| {
             crate::llm::LlmError::provider_rejected(
                 "google",
@@ -274,6 +315,7 @@ impl LlmClient for GeminiClient {
                 error,
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(retry_attempts)
         })?;
         if let Some(calls) = completed
             .tool_calls
@@ -285,22 +327,37 @@ impl LlmClient for GeminiClient {
                 .cloned()
                 .ok_or_else(|| {
                     self.protocol_error("Gemini response function calls are missing content")
+                        .with_retry_attempts(retry_attempts)
                 })?;
             completed.continuation = Some(
-                gemini_continuation(&self.model, scope, model_content, calls)
-                    .map_err(|error| self.protocol_error(error))?,
+                gemini_continuation(&self.model, scope, model_content, calls).map_err(|error| {
+                    self.protocol_error(error)
+                        .with_retry_attempts(retry_attempts)
+                })?,
             );
         }
+        completed.attempts = retry_attempts;
         Ok(completed)
     }
 
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            "google",
+            crate::llm::registry::ProviderTransport::GeminiGenerateContent,
+            crate::llm::conformance::ProviderOperation::Stream,
+        )
+        .map_err(|error| self.request_error(error))?;
         validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
         let continuation_scope = request.scope.clone();
         let body = self
             .request_body(request)
             .map_err(|error| self.request_error(error))?;
-        let response = crate::llm::send_with_retry(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            "google",
+            crate::llm::registry::ProviderTransport::GeminiGenerateContent,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 let url = format!(
                     "{}/models/{}:streamGenerateContent?alt=sse",
@@ -313,9 +370,10 @@ impl LlmClient for GeminiClient {
                     .json(&body)
             },
             self.api_keys.len(),
+            retry_capabilities,
         )
         .await
-        .map_err(|_| {
+        .map_err(|failure| {
             crate::llm::LlmError::transport(
                 "google",
                 GEMINI_TRANSPORT,
@@ -323,18 +381,28 @@ impl LlmClient for GeminiClient {
                 "Gemini request failed before a valid HTTP response",
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(failure.attempts)
         })?;
+        let retry_attempts = outcome.attempts;
+        let response = outcome.value;
         if !response.status().is_success() {
-            return Err(
-                safe_gemini_http_error(response, &self.model, &self.diagnostic_secrets).await,
-            );
+            return Err(safe_gemini_http_error(
+                response,
+                &self.model,
+                &self.diagnostic_secrets,
+                retry_attempts,
+            )
+            .await);
         }
         crate::llm::ensure_response_content_length(
             &response,
             crate::llm::MAX_LLM_STREAM_BYTES,
             "Gemini stream response",
         )
-        .map_err(|error| self.protocol_error(error))?;
+        .map_err(|error| {
+            self.protocol_error(error)
+                .with_retry_attempts(retry_attempts)
+        })?;
 
         let (public_tx, public_rx) = mpsc::channel(100);
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -359,8 +427,13 @@ impl LlmClient for GeminiClient {
                 Ok::<_, String>(chunk)
             });
             let mut stream = bounded_bytes.eventsource();
+            let mut item_budget = crate::llm::ResponseItemBudget::new(
+                crate::llm::MAX_LLM_STREAM_EVENTS,
+                "Gemini stream events",
+            );
             let mut parser = GeminiStreamParser::default();
             let mut retained_parts = Vec::new();
+            let mut usage = None;
             while let Some(event_result) =
                 crate::llm::next_stream_item_or_closed(&public_tx, &mut stream).await
             {
@@ -392,6 +465,10 @@ impl LlmClient for GeminiClient {
                         return;
                     }
                 };
+                if let Err(error) = item_budget.account(1) {
+                    fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                    return;
+                }
                 if let Err(error) =
                     crate::llm::ensure_stream_event_size(event.data.len(), "Gemini stream event")
                 {
@@ -427,6 +504,17 @@ impl LlmClient for GeminiClient {
                     .await;
                     return;
                 }
+                let chunk_usage = match parse_gemini_usage(&data) {
+                    Ok(usage) => usage,
+                    Err(error) => {
+                        fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                        return;
+                    }
+                };
+                if let Err(error) = merge_gemini_stream_usage(&mut usage, chunk_usage) {
+                    fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                    return;
+                }
                 if let Some(parts) = data
                     .get("candidates")
                     .and_then(Value::as_array)
@@ -440,40 +528,46 @@ impl LlmClient for GeminiClient {
                 let events = match parser.parse_chunk(&data) {
                     Ok(events) => events,
                     Err(error) => {
-                        fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                        fail_gemini_stream(
+                            &public_tx,
+                            &mut completion_tx,
+                            gemini_stream_rejection(&model, Some(&data), error, &sensitive_values),
+                        )
+                        .await;
                         return;
                     }
                 };
                 for parsed in events {
                     match parsed {
-                        StreamEvent::End(reason) => {
-                            if reason.trim().is_empty() {
-                                fail_gemini_stream(
-                                    &public_tx,
-                                    &mut completion_tx,
-                                    "Gemini stream contained an invalid terminal reason"
-                                        .to_string(),
-                                )
-                                .await;
-                                return;
-                            }
+                        LlmStreamEvent::Terminal(reason) => {
                             let completion = match complete_gemini_stream(
                                 content,
                                 tool_calls,
-                                reason.clone(),
+                                reason,
                                 &model,
                                 continuation_scope,
                                 retained_parts,
+                                usage,
                             ) {
-                                Ok(completion) => completion,
+                                Ok(completion) => completion.with_retry_attempts(retry_attempts),
                                 Err(error) => {
-                                    fail_gemini_stream(&public_tx, &mut completion_tx, error).await;
+                                    fail_gemini_stream(
+                                        &public_tx,
+                                        &mut completion_tx,
+                                        gemini_stream_rejection(
+                                            &model,
+                                            Some(&data),
+                                            error,
+                                            &sensitive_values,
+                                        ),
+                                    )
+                                    .await;
                                     return;
                                 }
                             };
                             if !crate::llm::send_stream_event(
                                 &public_tx,
-                                Ok(StreamEvent::End(reason)),
+                                Ok(LlmStreamEvent::Terminal(reason)),
                             )
                             .await
                             {
@@ -484,24 +578,28 @@ impl LlmClient for GeminiClient {
                             }
                             return;
                         }
-                        StreamEvent::Content(fragment) => {
+                        LlmStreamEvent::Delta(LlmDelta::Content(fragment)) => {
                             content.push_str(&fragment);
                             if !crate::llm::send_stream_event(
                                 &public_tx,
-                                Ok(StreamEvent::Content(fragment)),
+                                Ok(LlmStreamEvent::Delta(LlmDelta::Content(fragment))),
                             )
                             .await
                             {
                                 return;
                             }
                         }
-                        event @ StreamEvent::ToolCallChunk { .. } => {
-                            tool_calls.push(&event);
-                            if !crate::llm::send_stream_event(&public_tx, Ok(event)).await {
+                        LlmStreamEvent::Delta(delta @ LlmDelta::ToolCallChunk { .. }) => {
+                            tool_calls.push(&delta);
+                            if !crate::llm::send_stream_event(
+                                &public_tx,
+                                Ok(LlmStreamEvent::Delta(delta)),
+                            )
+                            .await
+                            {
                                 return;
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -509,13 +607,18 @@ impl LlmClient for GeminiClient {
                 fail_gemini_stream(
                     &public_tx,
                     &mut completion_tx,
-                    "Gemini stream ended before an explicit finishReason".to_string(),
+                    gemini_stream_rejection(
+                        &model,
+                        None,
+                        "Gemini stream ended before an explicit finishReason",
+                        &sensitive_values,
+                    ),
                 )
                 .await;
             }
         });
         Ok(LlmStream::with_private_completion(public_rx, completion_rx)
-            .with_error_context(self.error_context()))
+            .with_error_context(self.error_context(retry_attempts)))
     }
 }
 
@@ -577,6 +680,7 @@ async fn safe_gemini_http_error(
     response: Response,
     model: &str,
     sensitive_values: &[String],
+    retry_attempts: crate::llm::RetryAttemptMetadata,
 ) -> crate::llm::LlmError {
     let status = response.status();
     let body_read =
@@ -602,6 +706,7 @@ async fn safe_gemini_http_error(
         safe_message,
         sensitive_values,
     )
+    .with_retry_attempts(retry_attempts)
 }
 
 fn is_gemini_refusal_reason(reason: &str) -> bool {
@@ -621,11 +726,15 @@ fn is_gemini_refusal_reason(reason: &str) -> bool {
     )
 }
 
-fn gemini_terminal_status(reason: &str, has_tool_calls: bool) -> Result<LlmTerminalStatus, String> {
+fn normalize_gemini_finish_reason(
+    reason: &str,
+    has_tool_calls: bool,
+) -> Result<LlmFinishReason, String> {
     match reason {
-        "STOP" => Ok(LlmTerminalStatus::Completed),
+        "STOP" if has_tool_calls => Ok(LlmFinishReason::ToolCalls),
+        "STOP" => Ok(LlmFinishReason::Complete),
         reason if is_gemini_refusal_reason(reason) && !has_tool_calls => {
-            Ok(LlmTerminalStatus::Refused)
+            Ok(LlmFinishReason::Refusal)
         }
         reason if is_gemini_refusal_reason(reason) => {
             Err("Gemini refusal contained executable function calls".to_string())
@@ -644,7 +753,26 @@ fn gemini_terminal_status(reason: &str, has_tool_calls: bool) -> Result<LlmTermi
     }
 }
 
-fn normalized_gemini_prompt_block(data: &Value) -> Result<Option<String>, String> {
+fn gemini_terminal_status(
+    reason: LlmFinishReason,
+    has_tool_calls: bool,
+) -> Result<LlmTerminalStatus, String> {
+    match (reason, has_tool_calls) {
+        (LlmFinishReason::Complete | LlmFinishReason::Refusal, false)
+        | (LlmFinishReason::ToolCalls, true) => Ok(reason.terminal_status()),
+        (LlmFinishReason::Complete, true) => {
+            Err("Gemini completion terminal contained executable function calls".to_string())
+        }
+        (LlmFinishReason::ToolCalls, false) => {
+            Err("Gemini tool terminal contained no function calls".to_string())
+        }
+        (LlmFinishReason::Refusal, true) => {
+            Err("Gemini refusal contained executable function calls".to_string())
+        }
+    }
+}
+
+fn normalized_gemini_prompt_block(data: &Value) -> Result<Option<LlmFinishReason>, String> {
     let Some(reason) = data
         .get("promptFeedback")
         .and_then(|feedback| feedback.get("blockReason"))
@@ -659,7 +787,7 @@ fn normalized_gemini_prompt_block(data: &Value) -> Result<Option<String>, String
         reason,
         "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "OTHER"
     ) {
-        Ok(Some("SAFETY".to_string()))
+        Ok(Some(LlmFinishReason::Refusal))
     } else {
         Err("Gemini response contained an unsupported prompt block reason".to_string())
     }
@@ -668,13 +796,14 @@ fn normalized_gemini_prompt_block(data: &Value) -> Result<Option<String>, String
 fn complete_gemini_stream(
     content: String,
     tool_calls: crate::llm::ToolCallAccumulator,
-    finish_reason: String,
+    finish_reason: LlmFinishReason,
     model: &str,
     scope: Option<LlmRequestScope>,
     retained_parts: Vec<Value>,
+    usage: Option<LlmUsage>,
 ) -> Result<LlmResponse, String> {
     let tool_calls = tool_calls.finish()?;
-    let terminal_status = gemini_terminal_status(&finish_reason, !tool_calls.is_empty())?;
+    let terminal_status = gemini_terminal_status(finish_reason, !tool_calls.is_empty())?;
     let completed_content = (!content.trim().is_empty()).then_some(content);
     let continuation = if tool_calls.is_empty() {
         None
@@ -692,11 +821,13 @@ fn complete_gemini_stream(
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         finish_reason,
         continuation,
+        usage,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
 }
 
 async fn fail_gemini_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    public_tx: &mpsc::Sender<Result<LlmStreamEvent, crate::llm::LlmStreamFailure>>,
     completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
     error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
@@ -705,6 +836,23 @@ async fn fail_gemini_stream(
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(Err(error));
     }
+}
+
+fn gemini_stream_rejection(
+    model: &str,
+    data: Option<&Value>,
+    error: impl AsRef<str>,
+    sensitive_values: &[String],
+) -> crate::llm::LlmError {
+    crate::llm::LlmError::provider_rejected(
+        "google",
+        GEMINI_TRANSPORT,
+        Some(model),
+        crate::llm::LlmErrorPhase::Stream,
+        data,
+        error,
+        sensitive_values,
+    )
 }
 
 fn gemini_contents(messages: &[LlmMessage]) -> Vec<Value> {
@@ -763,17 +911,96 @@ pub fn gemini_function_declarations(tools: &[Value]) -> Result<Vec<Value>, Strin
         .collect()
 }
 
+fn required_gemini_usage_count(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<u64, String> {
+    usage
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("Gemini usage {field} must be a non-negative integer"))
+}
+
+fn optional_gemini_usage_count(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, String> {
+    match usage.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("Gemini usage {field} must be a non-negative integer")),
+    }
+}
+
+fn parse_gemini_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
+    let Some(usage) = data.get("usageMetadata").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| "Gemini usageMetadata must be an object".to_string())?;
+    let input = required_gemini_usage_count(usage, "promptTokenCount")?;
+    let candidates = optional_gemini_usage_count(usage, "candidatesTokenCount")?.unwrap_or(0);
+    let reasoning = optional_gemini_usage_count(usage, "thoughtsTokenCount")?;
+    // Gemini reports thought tokens outside candidatesTokenCount but includes them in
+    // totalTokenCount. Normalize output to the complete billed output before applying
+    // the provider-neutral exact-total invariant.
+    let output = candidates
+        .checked_add(reasoning.unwrap_or(0))
+        .ok_or_else(|| {
+            "Gemini output usage overflowed while including thought tokens".to_string()
+        })?;
+    LlmUsage::new(
+        input,
+        output,
+        required_gemini_usage_count(usage, "totalTokenCount")?,
+        optional_gemini_usage_count(usage, "cachedContentTokenCount")?,
+        reasoning,
+    )
+    .map(Some)
+    .map_err(|error| format!("Gemini usage is invalid: {error}"))
+}
+
+fn merge_gemini_stream_usage(
+    current: &mut Option<LlmUsage>,
+    next: Option<LlmUsage>,
+) -> Result<(), String> {
+    let Some(next) = next else {
+        return Ok(());
+    };
+    if let Some(prior) = current {
+        if next.input_tokens != prior.input_tokens
+            || next.output_tokens < prior.output_tokens
+            || next.total_tokens < prior.total_tokens
+            || next.cached_input_tokens != prior.cached_input_tokens
+            || (prior.reasoning_output_tokens.is_some() && next.reasoning_output_tokens.is_none())
+            || next
+                .reasoning_output_tokens
+                .zip(prior.reasoning_output_tokens)
+                .is_some_and(|(next, prior)| next < prior)
+        {
+            return Err("Gemini cumulative stream usage was inconsistent".to_string());
+        }
+    }
+    *current = Some(next);
+    Ok(())
+}
+
 pub fn parse_gemini_response(data: &Value) -> Result<LlmResponse, String> {
     if data.get("error").is_some() {
         return Err("Gemini completion reported a provider error".to_string());
     }
-    if let Some(reason) = normalized_gemini_prompt_block(data)? {
+    if let Some(finish_reason) = normalized_gemini_prompt_block(data)? {
         return Ok(LlmResponse {
             terminal_status: LlmTerminalStatus::Refused,
             content: None,
             tool_calls: None,
-            finish_reason: reason,
+            finish_reason,
             continuation: None,
+            usage: parse_gemini_usage(data)?,
+            attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
         });
     }
     let candidates = data
@@ -784,16 +1011,18 @@ pub fn parse_gemini_response(data: &Value) -> Result<LlmResponse, String> {
         return Err("Gemini response must contain exactly one candidate".to_string());
     }
     let candidate = &candidates[0];
-    let finish_reason = candidate
+    let native_finish_reason = candidate
         .get("finishReason")
         .and_then(Value::as_str)
         .filter(|reason| !reason.trim().is_empty())
-        .ok_or_else(|| "Gemini response is missing a finish reason".to_string())?
-        .to_string();
+        .ok_or_else(|| "Gemini response is missing a finish reason".to_string())?;
     let parts = candidate
         .get("content")
         .and_then(|content| content.get("parts"))
         .and_then(Value::as_array);
+    if let Some(parts) = parts {
+        crate::llm::ensure_response_item_count(parts.len(), "Gemini content parts")?;
+    }
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     for part in parts.into_iter().flatten() {
@@ -825,13 +1054,18 @@ pub fn parse_gemini_response(data: &Value) -> Result<LlmResponse, String> {
             return Err("Gemini response contains an unsupported content part".to_string());
         }
     }
-    let terminal_status = gemini_terminal_status(&finish_reason, !tool_calls.is_empty())?;
+    let finish_reason =
+        normalize_gemini_finish_reason(native_finish_reason, !tool_calls.is_empty())?;
+    let terminal_status = gemini_terminal_status(finish_reason, !tool_calls.is_empty())?;
+    let usage = parse_gemini_usage(data)?;
     Ok(LlmResponse {
         terminal_status,
         content: (!content.is_empty()).then_some(content),
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         finish_reason,
         continuation: None,
+        usage,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
 }
 
@@ -842,12 +1076,12 @@ struct GeminiStreamParser {
 }
 
 impl GeminiStreamParser {
-    fn parse_chunk(&mut self, data: &Value) -> Result<Vec<StreamEvent>, String> {
+    fn parse_chunk(&mut self, data: &Value) -> Result<Vec<LlmStreamEvent>, String> {
         if data.get("error").is_some() {
             return Err("Gemini stream reported a provider error".to_string());
         }
         if let Some(reason) = normalized_gemini_prompt_block(data)? {
-            return Ok(vec![StreamEvent::End(reason)]);
+            return Ok(vec![LlmStreamEvent::Terminal(reason)]);
         }
         let candidates = data
             .get("candidates")
@@ -863,11 +1097,12 @@ impl GeminiStreamParser {
             .and_then(|content| content.get("parts"))
             .and_then(Value::as_array)
         {
+            crate::llm::ensure_response_item_count(parts.len(), "Gemini streamed content parts")?;
             for part in parts {
                 let mut recognized = false;
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     recognized = true;
-                    events.push(StreamEvent::Content(text.to_string()));
+                    events.push(LlmStreamEvent::Delta(LlmDelta::Content(text.to_string())));
                 } else if part.get("text").is_some() {
                     return Err("Gemini stream text part is malformed".to_string());
                 }
@@ -888,11 +1123,11 @@ impl GeminiStreamParser {
                             "Gemini function call arguments must be an object".to_string()
                         })?;
                     let index = self.call_index(function)?;
-                    events.push(StreamEvent::ToolCallChunk {
+                    events.push(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                         index,
                         name: Some(name.to_string()),
                         arguments: Some(arguments.to_string()),
-                    });
+                    }));
                 }
                 if !recognized {
                     return Err("Gemini stream contains an unsupported content part".to_string());
@@ -904,8 +1139,10 @@ impl GeminiStreamParser {
                 .as_str()
                 .filter(|reason| !reason.trim().is_empty() && *reason != "null")
                 .ok_or_else(|| "Gemini stream contains an invalid finish reason".to_string())?;
-            gemini_terminal_status(reason, false)?;
-            events.push(StreamEvent::End(reason.to_string()));
+            events.push(LlmStreamEvent::Terminal(normalize_gemini_finish_reason(
+                reason,
+                self.next_call_index > 0,
+            )?));
         }
         Ok(events)
     }
@@ -932,7 +1169,7 @@ impl GeminiStreamParser {
     }
 }
 
-pub fn parse_gemini_stream_chunk(data: &Value) -> Result<Vec<StreamEvent>, String> {
+pub fn parse_gemini_stream_chunk(data: &Value) -> Result<Vec<LlmStreamEvent>, String> {
     GeminiStreamParser::default().parse_chunk(data)
 }
 
@@ -953,6 +1190,147 @@ mod tests {
             base_url,
         )
         .expect("test Gemini endpoint")
+    }
+
+    #[test]
+    fn gemini_continuation_emits_structured_typed_tool_results() {
+        let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
+        let call = ToolCallRequest::new("inspect", json!({}));
+        let model_content = json!({
+            "role": "model",
+            "parts": [{"functionCall": {"name": "inspect", "args": {}}}],
+        });
+        let mut continuation = gemini_continuation(
+            "gemini-test",
+            Some(scope.clone()),
+            model_content,
+            std::slice::from_ref(&call),
+        )
+        .unwrap();
+        continuation
+            .record_tool_result(
+                ToolResult::success(call.invocation_id, json!({"value": 1})).unwrap(),
+            )
+            .unwrap();
+
+        let contents = into_gemini_contents(continuation, "gemini-test", Some(&scope)).unwrap();
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            "inspect"
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["value"],
+            1
+        );
+    }
+
+    #[test]
+    fn idless_parallel_continuation_retains_thought_signatures_and_exact_order() {
+        let scope = LlmRequestScope::new("test-session", "parallel-run").unwrap();
+        let calls = [
+            ToolCallRequest::new("first", json!({"slot": 1})),
+            ToolCallRequest::new("second", json!({"slot": 2})),
+        ];
+        let model_content = json!({
+            "role": "model",
+            "parts": [
+                {"functionCall": {"name": "first", "args": {"slot": 1}},
+                 "thoughtSignature": "private-signature-one"},
+                {"functionCall": {"name": "second", "args": {"slot": 2}},
+                 "thoughtSignature": "private-signature-two"}
+            ]
+        });
+        let mut continuation =
+            gemini_continuation("gemini-test", Some(scope.clone()), model_content, &calls)
+                .expect("parallel Gemini continuation");
+        continuation
+            .record_tool_result(
+                ToolResult::success(calls[0].invocation_id, json!({"receipt": 1})).unwrap(),
+            )
+            .unwrap();
+        continuation
+            .record_tool_result(
+                ToolResult::success(calls[1].invocation_id, json!({"receipt": 2})).unwrap(),
+            )
+            .unwrap();
+
+        let contents = into_gemini_contents(continuation, "gemini-test", Some(&scope)).unwrap();
+        assert_eq!(
+            contents[0]["parts"][0]["thoughtSignature"],
+            "private-signature-one"
+        );
+        assert_eq!(
+            contents[0]["parts"][1]["thoughtSignature"],
+            "private-signature-two"
+        );
+        assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "first");
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["receipt"],
+            1
+        );
+        assert_eq!(
+            contents[1]["parts"][1]["functionResponse"]["name"],
+            "second"
+        );
+        assert_eq!(
+            contents[1]["parts"][1]["functionResponse"]["response"]["receipt"],
+            2
+        );
+        let public = format!("{:?}", contents[1]);
+        assert!(!public.contains("private-signature"));
+    }
+
+    #[test]
+    fn idless_parallel_continuation_rejects_order_count_and_signature_mismatch() {
+        let scope = LlmRequestScope::new("test-session", "parallel-run").unwrap();
+        let calls = [
+            ToolCallRequest::new("first", json!({})),
+            ToolCallRequest::new("second", json!({})),
+        ];
+        let model_content = json!({
+            "role": "model",
+            "parts": [
+                {"functionCall": {"name": "first", "args": {}}, "thoughtSignature": "sig-a"},
+                {"functionCall": {"name": "second", "args": {}}, "thoughtSignature": "sig-b"}
+            ]
+        });
+        let reversed = [calls[1].clone(), calls[0].clone()];
+        assert!(gemini_continuation(
+            "gemini-test",
+            Some(scope.clone()),
+            model_content.clone(),
+            &reversed,
+        )
+        .expect_err("order mismatch")
+        .contains("order"));
+        assert!(gemini_continuation(
+            "gemini-test",
+            Some(scope.clone()),
+            model_content.clone(),
+            &calls[..1],
+        )
+        .expect_err("count mismatch")
+        .contains("order"));
+        let mut result_order = gemini_continuation(
+            "gemini-test",
+            Some(scope.clone()),
+            model_content.clone(),
+            &calls,
+        )
+        .expect("valid ordered continuation");
+        assert!(result_order
+            .record_tool_result(
+                ToolResult::success(calls[1].invocation_id, json!({"receipt": 2})).unwrap(),
+            )
+            .expect_err("result order mismatch")
+            .contains("out of order"));
+        let mut invalid_signature = model_content;
+        invalid_signature["parts"][0]["thoughtSignature"] = json!("");
+        assert!(
+            gemini_continuation("gemini-test", Some(scope), invalid_signature, &calls,)
+                .expect_err("invalid signature")
+                .contains("thought-signature")
+        );
     }
 
     fn request_with_continuation(messages: &[LlmMessage]) -> LlmRequest<'_> {
@@ -1116,7 +1494,7 @@ mod tests {
         }))
         .expect("prompt refusal");
         assert_eq!(prompt.terminal_status, LlmTerminalStatus::Refused);
-        assert_eq!(prompt.finish_reason, "SAFETY");
+        assert_eq!(prompt.finish_reason, LlmFinishReason::Refusal);
         assert!(prompt.tool_calls.is_none());
 
         let candidate = parse_gemini_response(&json!({
@@ -1140,10 +1518,17 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &events[0],
-            StreamEvent::ToolCallChunk { name: Some(name), arguments: Some(arguments), .. }
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                name: Some(name),
+                arguments: Some(arguments),
+                ..
+            })
                 if name == "grep" && arguments.contains("needle")
         ));
-        assert_eq!(events[1], StreamEvent::End("STOP".to_string()));
+        assert_eq!(
+            events[1],
+            LlmStreamEvent::Terminal(LlmFinishReason::ToolCalls)
+        );
     }
 
     #[test]
@@ -1173,7 +1558,14 @@ mod tests {
                         }
                     }]},
                     "finishReason": "STOP"
-                }]
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 4,
+                    "thoughtsTokenCount": 3,
+                    "totalTokenCount": 17,
+                    "cachedContentTokenCount": 2
+                }
             }))
             .expect("second Gemini chunk");
 
@@ -1181,7 +1573,9 @@ mod tests {
         assert_eq!(parser.provider_call_indexes["provider-call-two"], 1);
         let mut accumulator = crate::llm::ToolCallAccumulator::default();
         for event in first.iter().chain(&second) {
-            accumulator.push(event);
+            if let LlmStreamEvent::Delta(delta) = event {
+                accumulator.push(delta);
+            }
         }
         let calls = accumulator.finish().expect("two Gemini function calls");
         assert_eq!(calls.len(), 2);
@@ -1211,11 +1605,11 @@ mod tests {
 
         assert!(matches!(
             first[0],
-            StreamEvent::ToolCallChunk { index: 0, .. }
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk { index: 0, .. })
         ));
         assert!(matches!(
             second[0],
-            StreamEvent::ToolCallChunk { index: 1, .. }
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk { index: 1, .. })
         ));
     }
 
@@ -1231,7 +1625,14 @@ mod tests {
                         {"functionCall": {"name": "grep", "args": {"pattern": "needle"}}}
                     ]},
                     "finishReason": "STOP"
-                }]
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 4,
+                    "thoughtsTokenCount": 3,
+                    "totalTokenCount": 17,
+                    "cachedContentTokenCount": 2
+                }
             })
             .to_string(),
         );
@@ -1257,7 +1658,11 @@ mod tests {
             .expect("Gemini completion");
 
         assert_eq!(response.content.as_deref(), Some("checking"));
-        assert_eq!(response.finish_reason, "STOP");
+        assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(10, 7, 17, Some(2), Some(3)).unwrap())
+        );
         let call = &response.tool_calls.expect("function call")[0];
         assert_eq!(call.name, "grep");
         assert_eq!(call.arguments["pattern"], "needle");
@@ -1279,7 +1684,7 @@ mod tests {
     async fn stream_consumes_sse_text_and_function_calls() {
         let body = concat!(
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"work\"}]}}]}\n\n",
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"README.md\"}}}]},\"finishReason\":\"STOP\"}]}\n\n"
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"README.md\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":3,\"totalTokenCount\":17,\"cachedContentTokenCount\":2}}\n\n"
         );
         let (base_url, request_rx) = serve_once("200 OK", "text/event-stream", body);
         let mut stream = test_client(base_url)
@@ -1292,25 +1697,31 @@ mod tests {
         let mut content = String::new();
         let mut accumulator = crate::llm::ToolCallAccumulator::default();
         let mut finish = None;
-        while let Some(event) = stream.recv().await {
+        while let Some(event) = stream.recv_private().await {
             let event = event.expect("valid Gemini event");
-            if let StreamEvent::Content(fragment) = &event {
+            if let LlmStreamEvent::Delta(LlmDelta::Content(fragment)) = &event {
                 content.push_str(fragment);
             }
-            if let StreamEvent::End(reason) = &event {
-                finish = Some(reason.clone());
+            if let LlmStreamEvent::Terminal(reason) = &event {
+                finish = Some(*reason);
             }
-            accumulator.push(&event);
+            if let LlmStreamEvent::Delta(delta) = &event {
+                accumulator.push(delta);
+            }
         }
 
         assert_eq!(content, "work");
-        assert_eq!(finish.as_deref(), Some("STOP"));
+        assert_eq!(finish, Some(LlmFinishReason::ToolCalls));
         let calls = accumulator.finish().expect("streamed Gemini call");
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments["path"], "README.md");
         let completion = stream.finish().await.expect("private Gemini completion");
         assert_eq!(completion.content.as_deref(), Some("work"));
-        assert_eq!(completion.finish_reason, "STOP");
+        assert_eq!(completion.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            completion.usage,
+            Some(LlmUsage::new(10, 7, 17, Some(2), Some(3)).unwrap())
+        );
         let private_calls = completion.tool_calls.expect("private tool authority");
         assert_eq!(private_calls[0].name, "read_file");
         assert_eq!(private_calls[0].arguments["path"], "README.md");
@@ -1319,6 +1730,36 @@ mod tests {
             .expect("captured Gemini stream request");
         assert!(request
             .starts_with("POST /v1beta/models/gemini-test:streamGenerateContent?alt=sse HTTP/1.1"));
+    }
+
+    #[test]
+    fn gemini_usage_includes_thoughts_and_rejects_malformed_or_overflow_counts() {
+        let usage = parse_gemini_usage(&json!({
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 2,
+                "thoughtsTokenCount": 3,
+                "totalTokenCount": 10
+            }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, Some(3));
+
+        for usage in [
+            json!({"promptTokenCount": 1.5, "candidatesTokenCount": 1, "totalTokenCount": 2}),
+            json!({"promptTokenCount": 2, "candidatesTokenCount": 1, "thoughtsTokenCount": 1, "totalTokenCount": 3}),
+            json!({"promptTokenCount": 1, "candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1, "totalTokenCount": u64::MAX}),
+            json!({"promptTokenCount": 1_000_000_001_u64, "candidatesTokenCount": 0, "totalTokenCount": 1_000_000_001_u64}),
+        ] {
+            let error = parse_gemini_usage(&json!({"usageMetadata": usage}))
+                .expect_err("malformed Gemini usage must fail");
+            assert!(
+                error.contains("usage") || error.contains("overflow"),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1330,12 +1771,15 @@ mod tests {
             .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open Gemini stream");
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("first event timeout")
             .expect("first event")
             .expect("valid first event");
-        assert_eq!(first, StreamEvent::Content("first".to_string()));
+        assert_eq!(
+            first,
+            LlmStreamEvent::Delta(LlmDelta::Content("first".to_string()))
+        );
         drop(stream);
 
         let disconnected =
@@ -1357,16 +1801,21 @@ mod tests {
             .await
             .expect("open Gemini stream");
 
-        let terminal = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let terminal = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("terminal event timeout")
             .expect("terminal event")
             .expect("valid terminal event");
-        assert_eq!(terminal, StreamEvent::End("STOP".to_string()));
-        assert!(tokio::time::timeout(Duration::from_secs(1), stream.recv())
-            .await
-            .expect("producer closure timeout")
-            .is_none());
+        assert_eq!(
+            terminal,
+            LlmStreamEvent::Terminal(LlmFinishReason::Complete)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
+                .await
+                .expect("producer closure timeout")
+                .is_none()
+        );
 
         let disconnected =
             tokio::task::spawn_blocking(move || disconnect_rx.recv_timeout(Duration::from_secs(5)))

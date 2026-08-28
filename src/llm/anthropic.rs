@@ -3,8 +3,9 @@
 #[cfg(test)]
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
-    LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalStatus, ProviderCallId,
-    ProviderContinuation, StreamEvent, ToolCallRequest, ToolDefinition,
+    LlmDelta, LlmFinishReason, LlmRequest, LlmRequestScope, LlmResponse, LlmStreamEvent,
+    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest,
+    ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -63,22 +64,18 @@ fn into_anthropic_messages(
     model: &str,
     scope: Option<&LlmRequestScope>,
 ) -> Result<Vec<Value>, String> {
-    let (state, outputs): (AnthropicTurnState, BTreeMap<ToolInvocationId, String>) =
+    let (state, outputs): (AnthropicTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume("anthropic", model, ANTHROPIC_TRANSPORT, scope)?;
     let mut results = Vec::with_capacity(state.calls.len());
     for (invocation_id, call_id) in state.calls {
         let output = outputs
             .get(&invocation_id)
             .ok_or_else(|| "Anthropic continuation is missing a tool output".to_string())?;
-        let is_error = serde_json::from_str::<Value>(output)
-            .ok()
-            .and_then(|value| value.get("success").and_then(Value::as_bool))
-            == Some(false);
         results.push(json!({
             "type": "tool_result",
             "tool_use_id": call_id.as_str(),
-            "content": output,
-            "is_error": is_error,
+            "content": output.encoded_output(),
+            "is_error": output.classification().is_error(),
         }));
     }
     Ok(vec![
@@ -188,12 +185,16 @@ impl AnthropicClient {
         Ok(body)
     }
 
-    fn error_context(&self) -> crate::llm::error::LlmErrorContext {
+    fn error_context(
+        &self,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
+    ) -> crate::llm::error::LlmErrorContext {
         crate::llm::error::LlmErrorContext::new(
             "anthropic",
             ANTHROPIC_TRANSPORT,
             Some(self.model.clone()),
             self.diagnostic_secrets.clone(),
+            retry_attempts,
         )
     }
 
@@ -222,13 +223,24 @@ impl AnthropicClient {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            "anthropic",
+            crate::llm::registry::ProviderTransport::AnthropicMessages,
+            crate::llm::conformance::ProviderOperation::Complete,
+        )
+        .map_err(|error| self.request_error(error))?;
         validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
         let scope = request.scope.clone();
         let body = self
             .request_body(request, false)
             .map_err(|error| self.request_error(error))?;
 
-        let resp = crate::llm::send_with_retry_for(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            "anthropic",
+            crate::llm::registry::ProviderTransport::AnthropicMessages,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 self.client
                     .post(&self.base_url)
@@ -237,10 +249,10 @@ impl LlmClient for AnthropicClient {
                     .json(&body)
             },
             self.api_keys.len(),
-            crate::llm::is_anthropic_transient_status,
+            retry_capabilities,
         )
         .await
-        .map_err(|_| {
+        .map_err(|failure| {
             crate::llm::LlmError::transport(
                 "anthropic",
                 ANTHROPIC_TRANSPORT,
@@ -248,17 +260,27 @@ impl LlmClient for AnthropicClient {
                 "Anthropic request failed before a valid HTTP response",
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(failure.attempts)
         })?;
+        let retry_attempts = outcome.attempts;
+        let resp = outcome.value;
 
         if !resp.status().is_success() {
-            return Err(
-                safe_anthropic_http_error(resp, &self.model, &self.diagnostic_secrets).await,
-            );
+            return Err(safe_anthropic_http_error(
+                resp,
+                &self.model,
+                &self.diagnostic_secrets,
+                retry_attempts,
+            )
+            .await);
         }
 
         let data = crate::llm::read_bounded_json_response(resp, "Anthropic completion response")
             .await
-            .map_err(|error| self.protocol_error(error))?;
+            .map_err(|error| {
+                self.protocol_error(error)
+                    .with_retry_attempts(retry_attempts)
+            })?;
         let mut response = parse_anthropic_response(&data).map_err(|error| {
             crate::llm::LlmError::provider_rejected(
                 "anthropic",
@@ -269,6 +291,7 @@ impl LlmClient for AnthropicClient {
                 error,
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(retry_attempts)
         })?;
         if let Some(calls) = response
             .tool_calls
@@ -279,23 +302,42 @@ impl LlmClient for AnthropicClient {
                 .get("content")
                 .and_then(Value::as_array)
                 .cloned()
-                .ok_or_else(|| self.protocol_error("Anthropic response is missing content"))?;
+                .ok_or_else(|| {
+                    self.protocol_error("Anthropic response is missing content")
+                        .with_retry_attempts(retry_attempts)
+                })?;
             response.continuation = Some(
-                anthropic_continuation(&self.model, scope, assistant_content, calls)
-                    .map_err(|error| self.protocol_error(error))?,
+                anthropic_continuation(&self.model, scope, assistant_content, calls).map_err(
+                    |error| {
+                        self.protocol_error(error)
+                            .with_retry_attempts(retry_attempts)
+                    },
+                )?,
             );
         }
+        response.attempts = retry_attempts;
         Ok(response)
     }
 
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, crate::llm::LlmError> {
+        crate::llm::conformance::validate_request_capabilities(
+            &request,
+            "anthropic",
+            crate::llm::registry::ProviderTransport::AnthropicMessages,
+            crate::llm::conformance::ProviderOperation::Stream,
+        )
+        .map_err(|error| self.request_error(error))?;
         validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
         let continuation_scope = request.scope.clone();
         let body = self
             .request_body(request, true)
             .map_err(|error| self.request_error(error))?;
 
-        let resp = crate::llm::send_with_retry_for(
+        let retry_capabilities = crate::llm::registry::retry_capabilities(
+            "anthropic",
+            crate::llm::registry::ProviderTransport::AnthropicMessages,
+        );
+        let outcome = crate::llm::send_with_retry(
             |credential_index| {
                 self.client
                     .post(&self.base_url)
@@ -304,10 +346,10 @@ impl LlmClient for AnthropicClient {
                     .json(&body)
             },
             self.api_keys.len(),
-            crate::llm::is_anthropic_transient_status,
+            retry_capabilities,
         )
         .await
-        .map_err(|_| {
+        .map_err(|failure| {
             crate::llm::LlmError::transport(
                 "anthropic",
                 ANTHROPIC_TRANSPORT,
@@ -315,19 +357,29 @@ impl LlmClient for AnthropicClient {
                 "Anthropic request failed before a valid HTTP response",
                 &self.diagnostic_secrets,
             )
+            .with_retry_attempts(failure.attempts)
         })?;
+        let retry_attempts = outcome.attempts;
+        let resp = outcome.value;
 
         if !resp.status().is_success() {
-            return Err(
-                safe_anthropic_http_error(resp, &self.model, &self.diagnostic_secrets).await,
-            );
+            return Err(safe_anthropic_http_error(
+                resp,
+                &self.model,
+                &self.diagnostic_secrets,
+                retry_attempts,
+            )
+            .await);
         }
         crate::llm::ensure_response_content_length(
             &resp,
             crate::llm::MAX_LLM_STREAM_BYTES,
             "Anthropic stream response",
         )
-        .map_err(|error| self.protocol_error(error))?;
+        .map_err(|error| {
+            self.protocol_error(error)
+                .with_retry_attempts(retry_attempts)
+        })?;
 
         let (public_tx, public_rx) = mpsc::channel(100);
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -341,8 +393,9 @@ impl LlmClient for AnthropicClient {
             let mut completion_tx = Some(completion_tx);
             let mut content = String::new();
             let mut tool_calls = crate::llm::ToolCallAccumulator::default();
-            let mut finish_reason: Option<String> = None;
+            let mut finish_reason: Option<LlmFinishReason> = None;
             let mut parser = AnthropicStreamParser::default();
+            let mut usage = AnthropicUsageAccumulator::default();
             let mut budget = crate::llm::ResponseByteBudget::new(
                 crate::llm::MAX_LLM_STREAM_BYTES,
                 "Anthropic stream response",
@@ -355,6 +408,10 @@ impl LlmClient for AnthropicClient {
                 Ok::<_, String>(chunk)
             });
             let mut stream = bounded_bytes.eventsource();
+            let mut item_budget = crate::llm::ResponseItemBudget::new(
+                crate::llm::MAX_LLM_STREAM_EVENTS,
+                "Anthropic stream events",
+            );
             while let Some(event_res) =
                 crate::llm::next_stream_item_or_closed(&public_tx, &mut stream).await
             {
@@ -386,6 +443,10 @@ impl LlmClient for AnthropicClient {
                         return;
                     }
                 };
+                if let Err(error) = item_budget.account(1) {
+                    fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                    return;
+                }
                 if let Err(error) =
                     crate::llm::ensure_stream_event_size(event.data.len(), "Anthropic stream event")
                 {
@@ -424,12 +485,22 @@ impl LlmClient for AnthropicClient {
                     return;
                 }
 
+                if let Err(error) = usage.observe(&event.event, &data) {
+                    fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                    return;
+                }
+
                 if event.event == "message_stop" {
                     let Some(reason) = finish_reason.take() else {
                         fail_anthropic_stream(
                             &public_tx,
                             &mut completion_tx,
-                            "Anthropic stream ended without a stop reason".to_string(),
+                            anthropic_stream_rejection(
+                                &model,
+                                Some(&data),
+                                "Anthropic stream ended without a stop reason",
+                                &sensitive_values,
+                            ),
                         )
                         .await;
                         return;
@@ -438,18 +509,38 @@ impl LlmClient for AnthropicClient {
                         content,
                         tool_calls,
                         parser.take_call_ids(),
-                        reason.clone(),
+                        reason,
                         &model,
                         continuation_scope,
+                        match usage.finish() {
+                            Ok(usage) => usage,
+                            Err(error) => {
+                                fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                                return;
+                            }
+                        },
                     ) {
-                        Ok(completion) => completion,
+                        Ok(completion) => completion.with_retry_attempts(retry_attempts),
                         Err(error) => {
-                            fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                            fail_anthropic_stream(
+                                &public_tx,
+                                &mut completion_tx,
+                                anthropic_stream_rejection(
+                                    &model,
+                                    Some(&data),
+                                    error,
+                                    &sensitive_values,
+                                ),
+                            )
+                            .await;
                             return;
                         }
                     };
-                    if !crate::llm::send_stream_event(&public_tx, Ok(StreamEvent::End(reason)))
-                        .await
+                    if !crate::llm::send_stream_event(
+                        &public_tx,
+                        Ok(LlmStreamEvent::Terminal(reason)),
+                    )
+                    .await
                     {
                         return;
                     }
@@ -462,14 +553,24 @@ impl LlmClient for AnthropicClient {
                 let events = match parser.parse_event(&event.event, &data) {
                     Ok(events) => events,
                     Err(error) => {
-                        fail_anthropic_stream(&public_tx, &mut completion_tx, error).await;
+                        fail_anthropic_stream(
+                            &public_tx,
+                            &mut completion_tx,
+                            anthropic_stream_rejection(
+                                &model,
+                                Some(&data),
+                                error,
+                                &sensitive_values,
+                            ),
+                        )
+                        .await;
                         return;
                     }
                 };
                 for parsed in events {
                     match parsed {
-                        StreamEvent::End(reason) => {
-                            if reason.trim().is_empty() || finish_reason.replace(reason).is_some() {
+                        LlmStreamEvent::Terminal(reason) => {
+                            if finish_reason.replace(reason).is_some() {
                                 fail_anthropic_stream(
                                     &public_tx,
                                     &mut completion_tx,
@@ -480,7 +581,7 @@ impl LlmClient for AnthropicClient {
                                 return;
                             }
                         }
-                        StreamEvent::Content(fragment) => {
+                        LlmStreamEvent::Delta(LlmDelta::Content(fragment)) => {
                             if finish_reason.is_some() {
                                 fail_anthropic_stream(
                                     &public_tx,
@@ -494,14 +595,14 @@ impl LlmClient for AnthropicClient {
                             content.push_str(&fragment);
                             if !crate::llm::send_stream_event(
                                 &public_tx,
-                                Ok(StreamEvent::Content(fragment)),
+                                Ok(LlmStreamEvent::Delta(LlmDelta::Content(fragment))),
                             )
                             .await
                             {
                                 return;
                             }
                         }
-                        event @ StreamEvent::ToolCallChunk { .. } => {
+                        LlmStreamEvent::Delta(delta @ LlmDelta::ToolCallChunk { .. }) => {
                             if finish_reason.is_some() {
                                 fail_anthropic_stream(
                                     &public_tx,
@@ -512,12 +613,16 @@ impl LlmClient for AnthropicClient {
                                 .await;
                                 return;
                             }
-                            tool_calls.push(&event);
-                            if !crate::llm::send_stream_event(&public_tx, Ok(event)).await {
+                            tool_calls.push(&delta);
+                            if !crate::llm::send_stream_event(
+                                &public_tx,
+                                Ok(LlmStreamEvent::Delta(delta)),
+                            )
+                            .await
+                            {
                                 return;
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -525,14 +630,19 @@ impl LlmClient for AnthropicClient {
                 fail_anthropic_stream(
                     &public_tx,
                     &mut completion_tx,
-                    "Anthropic stream ended before a message_stop event".to_string(),
+                    anthropic_stream_rejection(
+                        &model,
+                        None,
+                        "Anthropic stream ended before a message_stop event",
+                        &sensitive_values,
+                    ),
                 )
                 .await;
             }
         });
 
         Ok(LlmStream::with_private_completion(public_rx, completion_rx)
-            .with_error_context(self.error_context()))
+            .with_error_context(self.error_context(retry_attempts)))
     }
 }
 
@@ -592,8 +702,11 @@ async fn safe_anthropic_http_error(
     response: Response,
     model: &str,
     sensitive_values: &[String],
+    retry_attempts: crate::llm::RetryAttemptMetadata,
 ) -> crate::llm::LlmError {
     let status = response.status();
+    let request_id =
+        crate::llm::error::bounded_request_id_header(response.headers().get("request-id"));
     let body_read =
         crate::llm::read_bounded_error_response(response, "Anthropic API error response").await;
     let structured = body_read
@@ -608,7 +721,7 @@ async fn safe_anthropic_http_error(
     } else {
         format!("Anthropic API request failed with HTTP {}", status.as_u16())
     };
-    crate::llm::LlmError::http(
+    let error = crate::llm::LlmError::http(
         "anthropic",
         ANTHROPIC_TRANSPORT,
         Some(model),
@@ -617,24 +730,41 @@ async fn safe_anthropic_http_error(
         safe_message,
         sensitive_values,
     )
+    .with_retry_attempts(retry_attempts);
+    match request_id {
+        Some(request_id) => error.with_request_id(&request_id, sensitive_values),
+        None => error,
+    }
 }
 
-fn anthropic_terminal_status(
-    reason: &str,
-    has_tool_calls: bool,
-) -> Result<LlmTerminalStatus, String> {
+fn normalize_anthropic_finish_reason(reason: &str) -> Result<LlmFinishReason, String> {
     match reason {
-        "end_turn" | "stop_sequence" if !has_tool_calls => Ok(LlmTerminalStatus::Completed),
-        "tool_use" if has_tool_calls => Ok(LlmTerminalStatus::Completed),
-        "refusal" if !has_tool_calls => Ok(LlmTerminalStatus::Refused),
-        "end_turn" | "stop_sequence" => {
-            Err("Anthropic terminal reason is inconsistent with tool use".to_string())
-        }
-        "tool_use" => Err("Anthropic tool-use terminal reason has no tool calls".to_string()),
-        "refusal" => Err("Anthropic refusal contained executable tool calls".to_string()),
+        "end_turn" | "stop_sequence" => Ok(LlmFinishReason::Complete),
+        "tool_use" => Ok(LlmFinishReason::ToolCalls),
+        "refusal" => Ok(LlmFinishReason::Refusal),
         "max_tokens" => Err("Anthropic response was truncated before completion".to_string()),
         "pause_turn" => Err("Anthropic response paused before completion".to_string()),
         _ => Err("Anthropic response contained an unsupported terminal reason".to_string()),
+    }
+}
+
+fn anthropic_terminal_status(
+    reason: LlmFinishReason,
+    has_tool_calls: bool,
+) -> Result<LlmTerminalStatus, String> {
+    match (reason, has_tool_calls) {
+        (LlmFinishReason::Complete, false) => Ok(LlmTerminalStatus::Completed),
+        (LlmFinishReason::ToolCalls, true) => Ok(LlmTerminalStatus::Completed),
+        (LlmFinishReason::Refusal, false) => Ok(LlmTerminalStatus::Refused),
+        (LlmFinishReason::Complete, true) => {
+            Err("Anthropic terminal reason is inconsistent with tool use".to_string())
+        }
+        (LlmFinishReason::ToolCalls, false) => {
+            Err("Anthropic tool-use terminal reason has no tool calls".to_string())
+        }
+        (LlmFinishReason::Refusal, true) => {
+            Err("Anthropic refusal contained executable tool calls".to_string())
+        }
     }
 }
 
@@ -642,12 +772,13 @@ fn complete_anthropic_stream(
     content: String,
     tool_calls: crate::llm::ToolCallAccumulator,
     call_ids: BTreeMap<usize, ProviderCallId>,
-    finish_reason: String,
+    finish_reason: LlmFinishReason,
     model: &str,
     scope: Option<LlmRequestScope>,
+    usage: Option<LlmUsage>,
 ) -> Result<LlmResponse, String> {
     let tool_calls = tool_calls.finish_with_call_ids(call_ids)?;
-    let terminal_status = anthropic_terminal_status(&finish_reason, !tool_calls.is_empty())?;
+    let terminal_status = anthropic_terminal_status(finish_reason, !tool_calls.is_empty())?;
     let completed_content = (!content.trim().is_empty()).then_some(content);
     let continuation = if tool_calls.is_empty() {
         None
@@ -681,11 +812,13 @@ fn complete_anthropic_stream(
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         finish_reason,
         continuation,
+        usage,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
 }
 
 async fn fail_anthropic_stream(
-    public_tx: &mpsc::Sender<Result<StreamEvent, crate::llm::LlmStreamFailure>>,
+    public_tx: &mpsc::Sender<Result<LlmStreamEvent, crate::llm::LlmStreamFailure>>,
     completion_tx: &mut Option<oneshot::Sender<Result<LlmResponse, crate::llm::LlmStreamFailure>>>,
     error: impl Into<crate::llm::LlmStreamFailure>,
 ) {
@@ -696,6 +829,23 @@ async fn fail_anthropic_stream(
     }
 }
 
+fn anthropic_stream_rejection(
+    model: &str,
+    data: Option<&Value>,
+    error: impl AsRef<str>,
+    sensitive_values: &[String],
+) -> crate::llm::LlmError {
+    crate::llm::LlmError::provider_rejected(
+        "anthropic",
+        ANTHROPIC_TRANSPORT,
+        Some(model),
+        crate::llm::LlmErrorPhase::Stream,
+        data,
+        error,
+        sensitive_values,
+    )
+}
+
 fn is_anthropic_error_envelope(event_type: &str, data: &Value) -> bool {
     event_type == "error" || data.get("type").and_then(Value::as_str) == Some("error")
 }
@@ -704,16 +854,31 @@ fn is_anthropic_error_envelope(event_type: &str, data: &Value) -> bool {
 struct AnthropicStreamParser {
     call_ids: BTreeMap<usize, ProviderCallId>,
     native_call_ids: BTreeSet<String>,
+    content_indexes: BTreeSet<usize>,
 }
 
 impl AnthropicStreamParser {
-    fn parse_event(&mut self, event_type: &str, data: &Value) -> Result<Vec<StreamEvent>, String> {
+    fn parse_event(
+        &mut self,
+        event_type: &str,
+        data: &Value,
+    ) -> Result<Vec<LlmStreamEvent>, String> {
         if is_anthropic_error_envelope(event_type, data) {
             return Err("Anthropic stream reported a provider error".to_string());
         }
         let mut events = Vec::new();
         match event_type {
             "content_block_start" => {
+                let index = data
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(|| "Anthropic content block is missing index".to_string())?;
+                self.content_indexes.insert(index);
+                crate::llm::ensure_response_item_count(
+                    self.content_indexes.len(),
+                    "Anthropic streamed content blocks",
+                )?;
                 let block = data
                     .get("content_block")
                     .and_then(Value::as_object)
@@ -722,11 +887,6 @@ impl AnthropicStreamParser {
                     })?;
                 match block.get("type").and_then(Value::as_str) {
                     Some("tool_use") => {
-                        let index = data
-                            .get("index")
-                            .and_then(Value::as_u64)
-                            .and_then(|index| usize::try_from(index).ok())
-                            .ok_or_else(|| "Anthropic tool block is missing index".to_string())?;
                         let name = block
                             .get("name")
                             .and_then(Value::as_str)
@@ -747,11 +907,11 @@ impl AnthropicStreamParser {
                         }
                         self.call_ids
                             .insert(index, ProviderCallId::new(native_call_id)?);
-                        events.push(StreamEvent::ToolCallChunk {
+                        events.push(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                             index,
                             name: Some(name.to_string()),
                             arguments: Some(String::new()),
-                        });
+                        }));
                     }
                     Some("text") => {}
                     Some(_) => {
@@ -772,11 +932,16 @@ impl AnthropicStreamParser {
                     .and_then(Value::as_u64)
                     .and_then(|index| usize::try_from(index).ok())
                     .ok_or_else(|| "Anthropic content delta is missing index".to_string())?;
+                self.content_indexes.insert(index);
+                crate::llm::ensure_response_item_count(
+                    self.content_indexes.len(),
+                    "Anthropic streamed content blocks",
+                )?;
                 if let Some(text) = delta.get("text") {
                     let text = text.as_str().ok_or_else(|| {
                         "Anthropic content delta text must be a string".to_string()
                     })?;
-                    events.push(StreamEvent::Content(text.to_string()));
+                    events.push(LlmStreamEvent::Delta(LlmDelta::Content(text.to_string())));
                 }
                 if let Some(arguments) = delta.get("partial_json") {
                     let arguments = arguments.as_str().ok_or_else(|| {
@@ -787,11 +952,11 @@ impl AnthropicStreamParser {
                             "Anthropic tool argument delta has no matching tool call".to_string()
                         );
                     }
-                    events.push(StreamEvent::ToolCallChunk {
+                    events.push(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                         index,
                         name: None,
                         arguments: Some(arguments.to_string()),
-                    });
+                    }));
                 }
             }
             "message_delta" => {
@@ -806,7 +971,9 @@ impl AnthropicStreamParser {
                         .ok_or_else(|| {
                             "Anthropic message delta has an invalid stop reason".to_string()
                         })?;
-                    events.push(StreamEvent::End(reason.to_string()));
+                    events.push(LlmStreamEvent::Terminal(normalize_anthropic_finish_reason(
+                        reason,
+                    )?));
                 }
             }
             _ => {}
@@ -822,8 +989,178 @@ impl AnthropicStreamParser {
 pub fn parse_anthropic_stream_event(
     event_type: &str,
     data: &Value,
-) -> Result<Vec<StreamEvent>, String> {
+) -> Result<Vec<LlmStreamEvent>, String> {
     AnthropicStreamParser::default().parse_event(event_type, data)
+}
+
+fn required_anthropic_usage_count(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<u64, String> {
+    usage
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("Anthropic usage {field} must be a non-negative integer"))
+}
+
+fn optional_anthropic_usage_count(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, String> {
+    match usage.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("Anthropic usage {field} must be a non-negative integer")),
+    }
+}
+
+fn optional_anthropic_usage_detail(
+    usage: &serde_json::Map<String, Value>,
+    details_field: &str,
+    count_field: &str,
+) -> Result<Option<u64>, String> {
+    let Some(details) = usage.get(details_field).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let details = details
+        .as_object()
+        .ok_or_else(|| format!("Anthropic usage {details_field} must be an object"))?;
+    optional_anthropic_usage_count(details, count_field)
+}
+
+fn normalized_anthropic_usage(usage: &serde_json::Map<String, Value>) -> Result<LlmUsage, String> {
+    let uncached_input = required_anthropic_usage_count(usage, "input_tokens")?;
+    let output = required_anthropic_usage_count(usage, "output_tokens")?;
+    let cache_creation =
+        optional_anthropic_usage_count(usage, "cache_creation_input_tokens")?.unwrap_or(0);
+    let cache_read = optional_anthropic_usage_count(usage, "cache_read_input_tokens")?;
+    let input = uncached_input
+        .checked_add(cache_creation)
+        .and_then(|count| count.checked_add(cache_read.unwrap_or(0)))
+        .ok_or_else(|| {
+            "Anthropic input usage overflowed while including cache tokens".to_string()
+        })?;
+    let total = input
+        .checked_add(output)
+        .ok_or_else(|| "Anthropic total usage overflowed".to_string())?;
+    LlmUsage::new(
+        input,
+        output,
+        total,
+        cache_read,
+        optional_anthropic_usage_detail(usage, "output_tokens_details", "thinking_tokens")?,
+    )
+    .map_err(|error| format!("Anthropic usage is invalid: {error}"))
+}
+
+fn parse_anthropic_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
+    let Some(usage) = data.get("usage").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| "Anthropic usage must be an object".to_string())?;
+    normalized_anthropic_usage(usage).map(Some)
+}
+
+#[derive(Default)]
+struct AnthropicUsageAccumulator {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
+    saw_usage: bool,
+}
+
+impl AnthropicUsageAccumulator {
+    fn observe(&mut self, event_type: &str, data: &Value) -> Result<(), String> {
+        match event_type {
+            "message_start" => {
+                let Some(usage) = data
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+                    .filter(|value| !value.is_null())
+                else {
+                    return Ok(());
+                };
+                if self.saw_usage {
+                    return Err("Anthropic stream returned duplicate initial usage".to_string());
+                }
+                let usage = usage.as_object().ok_or_else(|| {
+                    "Anthropic stream initial usage must be an object".to_string()
+                })?;
+                let normalized = normalized_anthropic_usage(usage)?;
+                self.input_tokens = Some(normalized.input_tokens);
+                self.output_tokens = Some(normalized.output_tokens);
+                self.cached_input_tokens = normalized.cached_input_tokens;
+                self.reasoning_output_tokens = normalized.reasoning_output_tokens;
+                self.saw_usage = true;
+            }
+            "message_delta" => {
+                let Some(usage) = data.get("usage").filter(|value| !value.is_null()) else {
+                    return Ok(());
+                };
+                let usage = usage
+                    .as_object()
+                    .ok_or_else(|| "Anthropic stream delta usage must be an object".to_string())?;
+                let output = required_anthropic_usage_count(usage, "output_tokens")?;
+                if self.output_tokens.is_some_and(|prior| output < prior) {
+                    return Err(
+                        "Anthropic cumulative output usage decreased during the stream".to_string(),
+                    );
+                }
+                self.output_tokens = Some(output);
+                if let Some(reasoning) = optional_anthropic_usage_detail(
+                    usage,
+                    "output_tokens_details",
+                    "thinking_tokens",
+                )? {
+                    if self
+                        .reasoning_output_tokens
+                        .is_some_and(|prior| reasoning < prior)
+                    {
+                        return Err(
+                            "Anthropic cumulative reasoning usage decreased during the stream"
+                                .to_string(),
+                        );
+                    }
+                    self.reasoning_output_tokens = Some(reasoning);
+                }
+                self.saw_usage = true;
+            }
+            _ if data.get("usage").is_some() => {
+                return Err("Anthropic stream returned usage on an unsupported event".to_string())
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Option<LlmUsage>, String> {
+        if !self.saw_usage {
+            return Ok(None);
+        }
+        let input = self.input_tokens.ok_or_else(|| {
+            "Anthropic stream usage was missing its initial input count".to_string()
+        })?;
+        let output = self.output_tokens.ok_or_else(|| {
+            "Anthropic stream usage was missing its cumulative output count".to_string()
+        })?;
+        let total = input
+            .checked_add(output)
+            .ok_or_else(|| "Anthropic stream total usage overflowed".to_string())?;
+        LlmUsage::new(
+            input,
+            output,
+            total,
+            self.cached_input_tokens,
+            self.reasoning_output_tokens,
+        )
+        .map(Some)
+        .map_err(|error| format!("Anthropic stream usage is invalid: {error}"))
+    }
 }
 
 pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
@@ -834,6 +1171,7 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
         .get("content")
         .and_then(Value::as_array)
         .ok_or("Anthropic response is missing content")?;
+    crate::llm::ensure_response_item_count(content_blocks.len(), "Anthropic content blocks")?;
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut native_call_ids = BTreeSet::new();
@@ -879,13 +1217,14 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
         }
     }
 
-    let finish_reason = data
+    let native_finish_reason = data
         .get("stop_reason")
         .and_then(Value::as_str)
         .filter(|reason| !reason.trim().is_empty())
-        .ok_or("Anthropic response is missing a stop reason")?
-        .to_string();
-    let terminal_status = anthropic_terminal_status(&finish_reason, !tool_calls.is_empty())?;
+        .ok_or("Anthropic response is missing a stop reason")?;
+    let finish_reason = normalize_anthropic_finish_reason(native_finish_reason)?;
+    let terminal_status = anthropic_terminal_status(finish_reason, !tool_calls.is_empty())?;
+    let usage = parse_anthropic_usage(data)?;
     Ok(LlmResponse {
         terminal_status,
         content: if text.is_empty() { None } else { Some(text) },
@@ -896,6 +1235,8 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
         },
         finish_reason,
         continuation: None,
+        usage,
+        attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
     })
 }
 
@@ -916,6 +1257,38 @@ mod tests {
             base_url,
         )
         .expect("test Anthropic endpoint")
+    }
+
+    #[test]
+    fn continuation_is_error_uses_the_explicit_tool_result_class() {
+        let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
+        let call = ToolCallRequest::with_provider_call(
+            ProviderCallId::new("toolu_explicit").unwrap(),
+            "inspect",
+            json!({}),
+        );
+        let assistant_content = vec![json!({
+            "type": "tool_use",
+            "id": "toolu_explicit",
+            "name": "inspect",
+            "input": {},
+        })];
+        let mut continuation = anthropic_continuation(
+            "claude-test",
+            Some(scope.clone()),
+            assistant_content,
+            std::slice::from_ref(&call),
+        )
+        .unwrap();
+        continuation
+            .record_tool_result(
+                ToolResult::error(call.invocation_id, json!({"success": true})).unwrap(),
+            )
+            .unwrap();
+
+        let messages = into_anthropic_messages(continuation, "claude-test", Some(&scope)).unwrap();
+        assert_eq!(messages[1]["content"][0]["is_error"], true);
+        assert_eq!(messages[1]["content"][0]["content"], "{\"success\":true}");
     }
 
     fn request_with_continuation(messages: &[LlmMessage]) -> LlmRequest<'_> {
@@ -960,11 +1333,19 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &start[0],
-            StreamEvent::ToolCallChunk { index: 2, name: Some(name), .. } if name == "grep"
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                index: 2,
+                name: Some(name),
+                ..
+            }) if name == "grep"
         ));
         assert!(matches!(
             &delta[0],
-            StreamEvent::ToolCallChunk { index: 2, arguments: Some(arguments), .. }
+            LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
+                index: 2,
+                arguments: Some(arguments),
+                ..
+            })
                 if arguments.contains("pattern")
         ));
     }
@@ -1107,7 +1488,14 @@ mod tests {
                     {"type": "text", "text": "checking"},
                     {"type": "tool_use", "id": "toolu_grep", "name": "grep", "input": {"pattern": "needle"}}
                 ],
-                "stop_reason": "tool_use"
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 2,
+                    "output_tokens_details": {"thinking_tokens": 3}
+                }
             })
             .to_string(),
         );
@@ -1132,7 +1520,11 @@ mod tests {
             .expect("Anthropic completion");
 
         assert_eq!(response.content.as_deref(), Some("checking"));
-        assert_eq!(response.finish_reason, "tool_use");
+        assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(15, 7, 22, Some(2), Some(3)).unwrap())
+        );
         let call = &response.tool_calls.expect("tool use")[0];
         assert_eq!(call.name, "grep");
         assert_eq!(call.arguments["pattern"], "needle");
@@ -1155,6 +1547,8 @@ mod tests {
     #[tokio::test]
     async fn stream_consumes_named_sse_events_and_partial_tool_json() {
         let body = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0}}}}\n\n",
             "event: content_block_delta\n",
             "data: {\"index\":0,\"delta\":{\"text\":\"work\"}}\n\n",
             "event: content_block_start\n",
@@ -1164,7 +1558,7 @@ mod tests {
             "event: content_block_delta\n",
             "data: {\"index\":1,\"delta\":{\"partial_json\":\"\\\"README.md\\\"}\"}}\n\n",
             "event: message_delta\n",
-            "data: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "data: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7,\"output_tokens_details\":{\"thinking_tokens\":3}}}\n\n",
             "event: message_stop\n",
             "data: {}\n\n"
         );
@@ -1179,25 +1573,31 @@ mod tests {
         let mut content = String::new();
         let mut accumulator = crate::llm::ToolCallAccumulator::default();
         let mut finish = None;
-        while let Some(event) = stream.recv().await {
+        while let Some(event) = stream.recv_private().await {
             let event = event.expect("valid Anthropic event");
-            if let StreamEvent::Content(fragment) = &event {
+            if let LlmStreamEvent::Delta(LlmDelta::Content(fragment)) = &event {
                 content.push_str(fragment);
             }
-            if let StreamEvent::End(reason) = &event {
-                finish = Some(reason.clone());
+            if let LlmStreamEvent::Terminal(reason) = &event {
+                finish = Some(*reason);
             }
-            accumulator.push(&event);
+            if let LlmStreamEvent::Delta(delta) = &event {
+                accumulator.push(delta);
+            }
         }
 
         assert_eq!(content, "work");
-        assert_eq!(finish.as_deref(), Some("tool_use"));
+        assert_eq!(finish, Some(LlmFinishReason::ToolCalls));
         let calls = accumulator.finish().expect("streamed tool call");
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments["path"], "README.md");
         let completion = stream.finish().await.expect("private Anthropic completion");
         assert_eq!(completion.content.as_deref(), Some("work"));
-        assert_eq!(completion.finish_reason, "tool_use");
+        assert_eq!(completion.finish_reason, LlmFinishReason::ToolCalls);
+        assert_eq!(
+            completion.usage,
+            Some(LlmUsage::new(15, 7, 22, Some(2), Some(3)).unwrap())
+        );
         let private_calls = completion.tool_calls.expect("private tool authority");
         assert_eq!(private_calls[0].name, "read_file");
         assert_eq!(private_calls[0].arguments["path"], "README.md");
@@ -1211,6 +1611,38 @@ mod tests {
         assert!(request.contains("\"stream\":true"));
     }
 
+    #[test]
+    fn anthropic_usage_rejects_malformed_overflow_and_decreasing_cumulative_counts() {
+        for usage in [
+            json!({"input_tokens": 1.5, "output_tokens": 2}),
+            json!({"input_tokens": 1_000_000_001_u64, "output_tokens": 0}),
+            json!({"input_tokens": u64::MAX, "output_tokens": 0, "cache_creation_input_tokens": 1}),
+        ] {
+            let error = parse_anthropic_response(&json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": usage,
+            }))
+            .expect_err("malformed Anthropic usage must fail");
+            assert!(
+                error.contains("usage") || error.contains("overflow"),
+                "{error}"
+            );
+        }
+
+        let mut cumulative = AnthropicUsageAccumulator::default();
+        cumulative
+            .observe(
+                "message_start",
+                &json!({"message": {"usage": {"input_tokens": 3, "output_tokens": 2}}}),
+            )
+            .unwrap();
+        let error = cumulative
+            .observe("message_delta", &json!({"usage": {"output_tokens": 1}}))
+            .expect_err("cumulative usage must not decrease");
+        assert!(error.contains("decreased"));
+    }
+
     #[tokio::test]
     async fn dropping_stream_receiver_closes_the_open_http_response() {
         let (base_url, _request_rx, disconnect_rx) = serve_open_stream(concat!(
@@ -1221,12 +1653,15 @@ mod tests {
             .stream(LlmRequest::new(&[LlmMessage::user("cancel")], None))
             .await
             .expect("open Anthropic stream");
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("first event timeout")
             .expect("first event")
             .expect("valid first event");
-        assert_eq!(first, StreamEvent::Content("first".to_string()));
+        assert_eq!(
+            first,
+            LlmStreamEvent::Delta(LlmDelta::Content("first".to_string()))
+        );
         drop(stream);
 
         let disconnected =
@@ -1252,16 +1687,21 @@ mod tests {
             .await
             .expect("open Anthropic stream");
 
-        let terminal = tokio::time::timeout(Duration::from_secs(1), stream.recv())
+        let terminal = tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
             .await
             .expect("terminal event timeout")
             .expect("terminal event")
             .expect("valid terminal event");
-        assert_eq!(terminal, StreamEvent::End("end_turn".to_string()));
-        assert!(tokio::time::timeout(Duration::from_secs(1), stream.recv())
-            .await
-            .expect("producer closure timeout")
-            .is_none());
+        assert_eq!(
+            terminal,
+            LlmStreamEvent::Terminal(LlmFinishReason::Complete)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.recv_private())
+                .await
+                .expect("producer closure timeout")
+                .is_none()
+        );
 
         let disconnected =
             tokio::task::spawn_blocking(move || disconnect_rx.recv_timeout(Duration::from_secs(5)))

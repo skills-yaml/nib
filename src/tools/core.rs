@@ -623,13 +623,7 @@ async fn run_terminal(
         .and_then(|v| v.as_u64())
         .unwrap_or(terminal_timeout_secs)
         .max(1);
-    let max_output_bytes = bounded_usize_arg(
-        args,
-        "max_output_bytes",
-        DEFAULT_TERMINAL_OUTPUT_BYTES,
-        1,
-        MAX_TERMINAL_OUTPUT_BYTES,
-    )?;
+    let max_output_bytes = terminal_output_limit(args)?;
     let run_cwd = args
         .get("cwd")
         .and_then(|value| value.as_str())
@@ -752,6 +746,16 @@ async fn run_terminal(
     }
 
     Ok(res)
+}
+
+pub(crate) fn terminal_output_limit(args: &Value) -> Result<usize, String> {
+    bounded_usize_arg(
+        args,
+        "max_output_bytes",
+        DEFAULT_TERMINAL_OUTPUT_BYTES,
+        1,
+        MAX_TERMINAL_OUTPUT_BYTES,
+    )
 }
 
 fn sandbox_output_callback(

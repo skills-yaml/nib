@@ -36,6 +36,7 @@ pub struct RuntimeContextSections {
     pub skills: Vec<RuntimeContextSection>,
     pub memory: Vec<RuntimeContextSection>,
     pub workload: Vec<RuntimeContextSection>,
+    pub attachments: Vec<RuntimeContextSection>,
 }
 
 impl RuntimeContextSections {
@@ -68,8 +69,59 @@ impl RuntimeContextSections {
                 context.push_str(&format!("\n- {}: {}", section.label, section.content));
             }
         }
+        if !self.attachments.is_empty() {
+            context.push_str("\n\n## Attached Project Paths\n");
+            for section in &self.attachments {
+                context.push_str(&format!("\n### {}\n{}\n", section.label, section.content));
+            }
+        }
         context
     }
+}
+
+const MAX_ATTACHMENT_FILE_BYTES: usize = 8 * 1024;
+
+pub fn attachment_context_sections(
+    project_root: &Path,
+    attachments: &[crate::session::PathAttachment],
+) -> Vec<RuntimeContextSection> {
+    let Ok(root) = project_root.canonicalize() else {
+        return Vec::new();
+    };
+    let mut sections = Vec::new();
+    for attachment in attachments {
+        let candidate = root.join(&attachment.path);
+        let Ok(metadata) = candidate.symlink_metadata() else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(&root) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&canonical) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let truncated = if text.len() > MAX_ATTACHMENT_FILE_BYTES {
+            let mut end = MAX_ATTACHMENT_FILE_BYTES.min(text.len());
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}{}", &text[..end], "\n\n...[attached file bounded]...")
+        } else {
+            text.into_owned()
+        };
+        sections.push(RuntimeContextSection {
+            label: attachment.path.clone(),
+            content: truncated,
+        });
+    }
+    sections
 }
 
 pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedSessionContext {
@@ -325,6 +377,7 @@ pub fn assemble_runtime_context_sections(
         skills: skill_sections,
         memory: memory_sections,
         workload: Vec::new(),
+        attachments: Vec::new(),
     }
 }
 
@@ -451,5 +504,32 @@ mod tests {
         assert!(rendered.contains("RUNTIME_BOUNDARY_STANDARD"));
         assert!(rendered.contains("libs/payments/README.md"));
         assert!(rendered.contains("PAYMENTS_DOMAIN_BOUNDARY"));
+    }
+
+    #[test]
+    fn attachment_context_is_structured_and_bounded() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::create_dir_all(directory.path().join("src")).expect("src");
+        std::fs::write(directory.path().join("src/lib.rs"), "ATTACHMENT_MARKER").expect("file");
+        let sections = attachment_context_sections(
+            directory.path(),
+            &[crate::session::PathAttachment {
+                path: "src/lib.rs".to_string(),
+            }],
+        );
+        let rendered = RuntimeContextSections {
+            agents: String::new(),
+            task: "inspect @src/lib.rs".to_string(),
+            project_docs: Vec::new(),
+            skills: Vec::new(),
+            memory: Vec::new(),
+            workload: Vec::new(),
+            attachments: sections,
+        }
+        .render();
+        assert!(rendered.contains("## Attached Project Paths"));
+        assert!(rendered.contains("src/lib.rs"));
+        assert!(rendered.contains("ATTACHMENT_MARKER"));
+        assert!(!rendered.contains("inspect @src/lib.rs\nATTACHMENT_MARKER"));
     }
 }

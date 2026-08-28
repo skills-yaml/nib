@@ -4662,32 +4662,32 @@ mod tests {
             .expect("retained prior state");
         let previous_for_hook = previous.clone();
         let mut pending_cleanup = Some((writer_directory, previous_file));
-        let mut remove_before_open = || {
-            let (writer_directory, previous_file) =
-                pending_cleanup.take().expect("prior-open hook runs once");
-            writer_directory.remove_visible_file_if_matches(
-                &previous_for_hook,
-                &previous_file,
-                || Ok(()),
-            )
+        let recovered = {
+            let mut remove_before_open = || {
+                let (writer_directory, previous_file) =
+                    pending_cleanup.take().expect("prior-open hook runs once");
+                writer_directory.remove_visible_file_if_matches(
+                    &previous_for_hook,
+                    &previous_file,
+                    || Ok(()),
+                )
+            };
+            let mut live_target_hook = || {};
+            directory
+                .recover_atomic_transaction_with_hooks(
+                    &target,
+                    &temporary,
+                    &previous,
+                    true,
+                    false,
+                    AtomicRecoveryHooks {
+                        previous_open: &mut remove_before_open,
+                        live_target: &mut live_target_hook,
+                    },
+                )
+                .expect("changed namespace must be re-evaluated")
         };
-        let mut live_target_hook = || {};
 
-        let recovered = directory
-            .recover_atomic_transaction_with_hooks(
-                &target,
-                &temporary,
-                &previous,
-                true,
-                false,
-                AtomicRecoveryHooks {
-                    previous_open: &mut remove_before_open,
-                    live_target: &mut live_target_hook,
-                },
-            )
-            .expect("changed namespace must be re-evaluated");
-
-        drop(remove_before_open);
         assert!(!recovered);
         assert!(pending_cleanup.is_none());
         assert_eq!(

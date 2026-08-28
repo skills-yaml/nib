@@ -14,7 +14,9 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - **TUI**: `ratatui` with `crossterm` is used for the terminal user interface, providing views for session history, live agent runs, and approval modals.
 - **Async Runtime**: `tokio` is the standard asynchronous runtime.
 - **Configuration**: Managed via `toml` (and `serde`). Config is strictly kept in `.nib/config.toml`.
-- **HTTP / LLMs**: `reqwest` (with `rustls`) is used for all LLM API calls. `async-trait` is used for the `LlmClient` abstraction.
+- **HTTP / LLMs**: `reqwest` (with `rustls`) is used for all LLM API calls.
+  `async-trait` is used for the canonical `LlmProvider` abstraction; `LlmClient` is a
+  compatibility re-export of that same trait, not a second contract.
 - **Data Serialization**: `serde` and `serde_json` for LLM APIs, profile-scoped session storage, daemon state, and tool calling formats.
 - **Error Handling**: `thiserror` for robust error modeling.
 - **Sandboxing**: Git worktrees isolate mutations. The hybrid provider adds `bwrap`
@@ -27,7 +29,7 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - `src/chat.rs`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
 - `src/auth.rs`, `src/run.rs`, and other command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
-- `src/llm/`: The `LlmClient` traits and provider implementations (OpenAI, Anthropic,
+- `src/llm/`: The `LlmProvider` contract and provider implementations (OpenAI, Anthropic,
   Gemini, Grok, OpenRouter, Meta, Mock). Provider wire metadata remains in the Rust
   registry; source-attributed model defaults are embedded from
   `src/llm/default_models.toml`.
@@ -47,7 +49,7 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### OpenAI-Compatible Transport Contract
 
 OpenAI-compatible providers resolve an explicit `chat_completions` or `responses` API
-mode before network I/O. `LlmClient` receives a typed `LlmRequest` (`LlmMessage`,
+mode before network I/O. `LlmProvider` receives a typed `LlmRequest` (`LlmMessage`,
 `ToolDefinition`, `GenerationOptions`) rather than wire-shaped JSON messages. Streaming
 separates sanitized projected events from a private validated completed-turn envelope.
 Only the completed envelope can authorize tool execution. Responses continuations are
@@ -59,9 +61,18 @@ or retry a rejected request with different API semantics. Responses uses `store:
 for nib's local-first state contract, which is distinct from provider-side retention
 policy or Zero Data Retention eligibility.
 
+The central provider registry owns an immutable capability record for each implemented
+transport. The record explicitly distinguishes complete/stream support, function tools,
+typed and parallel tool continuation, reasoning forms, endpoint shape, terminal and
+refusal forms, in-band error envelopes, retryable and `Retry-After` statuses, and
+credential-rotation policy. Factory resolution selects one of those records, and
+`ProviderDiagnostics`/`nib doctor` expose the registered implementation, selected
+transport, and capability record. This is adapter structure, not a mutable model
+catalog or a live compatibility assertion.
+
 ### LLM Failure Boundary
 
-`LlmClient::complete`, `LlmClient::stream`, and `LlmStream` return the canonical
+`LlmProvider::complete`, `LlmProvider::stream`, and `LlmStream` return the canonical
 provider-neutral `LlmError`. Adapters classify only local request state, numeric HTTP
 status, and exact allowlisted structural codes. Complete and streaming failures retain
 the registered provider, transport, redacted model, phase, retry disposition, optional
@@ -75,6 +86,10 @@ them for model-authored content. Console, TUI, gateway, delegated, and durable o
 derive their bounded report and recovery action from the typed class instead of parsing
 diagnostic text. Internal compatibility messages are redacted and bounded in memory but
 are skipped during serialization.
+
+`LlmStream` exposes no provider-delta receiver outside `crate::llm`. Adapters still
+consume the wire incrementally, but application callers can only finish the stream and
+project public content/tool events from the validated completed response.
 
 ### Provider Model Catalog
 

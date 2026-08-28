@@ -195,8 +195,11 @@ fn run_doctor_inner(project: &Path, fix: bool) -> bool {
             }
         }
         if commands_available {
-            match check_mcp_reachability(project, &nib_cfg.mcp.servers, &nib_cfg.sensitive_values())
-            {
+            match check_mcp_reachability(
+                project,
+                &nib_cfg.mcp.servers,
+                &nib_cfg.public_session_sensitive_values(),
+            ) {
                 Ok(tool_count) => println!("  Protocol initialize/list OK ({tool_count} tools)"),
                 Err(error) => {
                     println!("  MCP protocol FAILED: {error}");
@@ -588,7 +591,7 @@ fn check_permission_layer(
         .with_terminal_config(&config.terminal)
         .with_approval_handler(handler)
         .with_environment(profile.custom_env())
-        .with_sensitive_values(config.sensitive_values());
+        .with_sensitive_values(config.public_session_sensitive_values());
     let root = profile.root_path().to_path_buf();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -862,6 +865,11 @@ mod tests {
             .join("\n");
         assert!(lines.contains("Provider: openai"));
         assert!(lines.contains("Model: gpt-5.6-luna"));
+        assert!(lines.contains("Implementation: openai"));
+        assert!(lines.contains("Transport: responses"));
+        assert!(lines.contains(
+            "Adapter capabilities: complete=true, stream=true, tools=true, tool_continuation=true, parallel_tools=true, reasoning=configurable_effort, endpoint_shape=api_root_or_transport_endpoint, terminal_form=responses_status, refusal_form=responses_output_item, in_band_error_form=responses_error_event, retry_statuses=408/425/429/500/502/503/504, retry_after_statuses=429/503, credential_rotation_statuses=429"
+        ));
         assert!(lines.contains("API mode: responses"));
         assert!(lines.contains("Endpoint path: /v1/responses"));
         assert!(lines.contains("Reasoning effort: medium"));

@@ -4657,6 +4657,9 @@ fn prepare_child_runtime_config(project_root: &Path, worktree_path: &Path) -> Re
     // A child always owns only its linked worktree. Parent-specific writable
     // exceptions must not silently expand that boundary.
     config.execution.boundaries.allow_write.clear();
+    // The worktree is a new configuration root. Do not treat the parent's
+    // snapshot revision as authoritative for a path that has no config yet.
+    config.revision = 0;
     crate::config::save_nib_config_full(worktree_path, &mut config)
         .map_err(|error| error.to_string())
 }
@@ -6339,6 +6342,90 @@ mod tests {
             .join(".nib/process-scopes")
             .join(format!("{id}.json"))
             .exists());
+    }
+
+    #[test]
+    fn delegated_provider_failure_preserves_typed_private_terminal_evidence() {
+        let root = tempfile::tempdir().expect("root");
+        let id = "sub-typed-provider-failure";
+        let execution_generation = 81_337;
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let mut record = record_fixture(root.path(), id, "running");
+        record.execution_generation = Some(execution_generation);
+        record.owner_lease = Some(lease_id.clone());
+        write_subagent_record(root.path(), &record).expect("running subagent record");
+        crate::daemons::task::TASK_MANAGER
+            .register_task(id.to_string(), "subagent")
+            .expect("register delegated task");
+
+        let secret = "delegated-provider-private-secret".to_string();
+        let sensitive_values = vec![secret.clone()];
+        let failure = crate::llm::LlmError::new(
+            crate::llm::LlmErrorClass::Authentication,
+            crate::llm::LlmErrorPhase::HttpResponse,
+            crate::llm::RetryDisposition::NotRetryable,
+            crate::llm::LlmErrorMetadata::new(
+                "openai",
+                "responses",
+                Some("fixture-model"),
+                Some(401),
+                &sensitive_values,
+            ),
+            format!("provider rejected private credential {secret}"),
+        );
+        let summary = crate::agent::AgentRunSummary {
+            session_id: format!("child-{id}"),
+            run_id: "0123456789abcdef0123456789abcdef".to_string(),
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: crate::agent::state::AgentState::Done,
+            outcome: "llm_stream_failed".to_string(),
+            failure: Some(failure),
+            bound_reached: false,
+            trace: vec!["reconciliation".to_string(), "done".to_string()],
+        };
+
+        persist_subagent_outcome(
+            root.path(),
+            id,
+            execution_generation,
+            &lease_id,
+            Ok(summary),
+        )
+        .expect("persist delegated provider failure");
+
+        let persisted =
+            get_subagent_record_unreconciled(root.path(), id).expect("persisted delegated record");
+        assert_eq!(persisted.status, "failed");
+        let result = persisted.result.expect("delegated failure result");
+        assert_eq!(result["outcome"], "llm_stream_failed");
+        assert!(result["last_message"].is_null());
+        assert_eq!(result["failure"]["class"], "authentication");
+        assert_eq!(result["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(result["failure"]["provider"], "openai");
+        assert_eq!(result["failure"]["transport"], "responses");
+        assert_eq!(result["failure"]["http_status"], 401);
+
+        let observed = crate::daemons::task::TASK_MANAGER
+            .get_task(id)
+            .expect("delegated task observer");
+        assert_eq!(observed["status"], "failed");
+        assert_eq!(
+            observed["result"]["failure"]["class"],
+            result["failure"]["class"]
+        );
+        assert_eq!(
+            observed["result"]["failure"]["incident_code"],
+            result["failure"]["incident_code"]
+        );
+        let encoded = format!(
+            "{}\n{}",
+            serde_json::to_string(&result).unwrap(),
+            serde_json::to_string(&observed).unwrap()
+        );
+        assert!(!encoded.contains(&secret));
+        assert!(!encoded.contains("provider rejected private credential"));
     }
 
     #[test]
@@ -8100,5 +8187,65 @@ mod tests {
             git(root.path(), &["show-ref", "--hash", "--verify", &reference]),
             moved_oid
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn delegation_accepts_a_dos_short_project_root_and_persists_canonical_ownership() {
+        fn git(root: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("git starts");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().expect("delegation DOS-alias repository");
+        git(root.path(), &["init", "-q"]);
+        git(
+            root.path(),
+            &["config", "user.email", "nib@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "nib"]);
+        std::fs::write(root.path().join(".gitignore"), ".nib/\n").expect("gitignore");
+        std::fs::write(root.path().join("README.md"), "fixture\n").expect("fixture");
+        git(root.path(), &["add", ".gitignore", "README.md"]);
+        git(root.path(), &["commit", "-qm", "initial"]);
+        let mut config = crate::config::NibConfig::default();
+        config.execution.plan_mode = false;
+        crate::config::save_nib_config_full(root.path(), &mut config).expect("save config");
+
+        let canonical_root = root.path().canonicalize().expect("canonical repository");
+        let short_root = crate::fs_security::windows_dos_short_path_for_test(&canonical_root)
+            .expect("DOS short project root");
+        if short_root == crate::fs_security::path_without_windows_verbatim_prefix(&canonical_root) {
+            return;
+        }
+
+        let started = spawn_subagent(
+            &json!({"prompt": "Return a bounded fixture response.", "max_steps": 1}),
+            &short_root,
+        )
+        .expect("delegate through DOS short root");
+        let id = started["subagent_id"].as_str().expect("subagent id");
+        let record = get_subagent_record(&short_root, id).expect("delegation record");
+        assert!(record.worktree_path.starts_with(&canonical_root));
+        assert!(!record.worktree_path.starts_with(&short_root));
+
+        match resolve_subagent_cancellation(&short_root, id) {
+            CancelSubagentResolution::Cancelled { .. }
+            | CancelSubagentResolution::Terminal { .. } => {}
+            CancelSubagentResolution::Unresolved { error, .. } => {
+                panic!("DOS-alias delegation cancellation was unresolved: {error}")
+            }
+        }
+        crate::sandbox::worktree::Worktree::remove(&short_root, id)
+            .expect("remove delegated worktree through DOS short root");
     }
 }

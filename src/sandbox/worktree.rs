@@ -4313,6 +4313,26 @@ pub(crate) fn validate_managed_worktree_ownership(
     )
 }
 
+pub(crate) fn validate_managed_worktree_for_read(
+    ownership: &ManagedWorktreeReceipt,
+) -> Result<PathBuf, String> {
+    validate_managed_worktree_ownership(ownership)?;
+    let owned_branch = {
+        let state = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .owned_branch
+            .as_ref()
+            .cloned()
+            .ok_or("managed worktree branch ownership receipt is unavailable")?
+    };
+    validate_owned_worktree_sync(&ownership.path, &owned_branch)?;
+    validate_managed_worktree_ownership(ownership)?;
+    Ok(ownership.path.clone())
+}
+
 fn validate_managed_worktree_directories(ownership: &ManagedWorktreeReceipt) -> Result<(), String> {
     let path_parent = ownership
         .path
@@ -7453,6 +7473,31 @@ mod tests {
                 .expect("durable cleanup tombstone");
         assert_eq!(tombstone.record.phase, DurableOwnershipPhase::Complete);
         assert!(!canonical_worktree_path.exists());
+
+        let created_id = "dos-short-create";
+        let created = Worktree::create(&short_root, created_id)
+            .expect("create registered worktree through DOS short project root");
+        assert_eq!(
+            created.path,
+            canonical_root
+                .join(".nib/worktrees/subagents")
+                .join(created_id)
+        );
+        assert!(created.path.join(".git").is_file());
+        Worktree::remove(&short_root, created_id)
+            .expect("remove registered worktree through DOS short project root");
+        let created_tombstone = load_durable_ownership_revision(
+            &canonical_root,
+            ManagedWorktreeKind::Subagent,
+            created_id,
+        )
+        .expect("reload created ownership through canonical root")
+        .expect("created cleanup tombstone");
+        assert_eq!(
+            created_tombstone.record.phase,
+            DurableOwnershipPhase::Complete
+        );
+        assert!(!created.path.exists());
     }
 
     #[cfg(windows)]

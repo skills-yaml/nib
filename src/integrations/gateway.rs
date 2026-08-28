@@ -606,7 +606,8 @@ pub fn gateway_session_id(message: &GatewayMessage) -> String {
 mod tests {
     use super::*;
     use crate::agent::{AgentLoopConfig, CancellationSignal};
-    use crate::config::{save_nib_config_full, NibConfig};
+    use crate::config::{save_nib_config_full, LlmApiMode, NibConfig, ProviderEntry};
+    use crate::llm::test_support::serve_once;
     use crate::llm::StreamEvent;
     use crate::session::SessionStore;
     use std::cell::Cell;
@@ -857,6 +858,152 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[tokio::test]
+    async fn typed_provider_failure_is_safe_and_does_not_poison_the_gateway_session() {
+        const SECRET: &str = "gateway/secret+token";
+        const SECRET_PERCENT: &str = "gateway%2Fsecret%2Btoken";
+        const SECRET_BASE64: &str = "Z2F0ZXdheS9zZWNyZXQrdG9rZW4=";
+        const REMOTE_BODY: &str = "REMOTE_GATEWAY_PROVIDER_BODY";
+        let root = tempdir().expect("gateway failure repository");
+        let (base_url, request_rx) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            json!({
+                "error": {
+                    "code": "invalid_api_key",
+                    "message": format!(
+                        "{REMOTE_BODY} {SECRET} {SECRET_PERCENT} {SECRET_BASE64} <red>[bold] \u{1b}[31m"
+                    )
+                }
+            })
+            .to_string(),
+        );
+        let mut config = NibConfig::default();
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        config.skills.enabled = false;
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.clear();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                base_url: Some(base_url),
+                api: Some(LlmApiMode::ChatCompletions),
+                ..ProviderEntry::default()
+            },
+        );
+        save_nib_config_full(root.path(), &mut config).expect("gateway failure config");
+
+        let first_message = gateway_message("C-failure-recovery", "1", "first gateway goal");
+        let session_id = gateway_session_id(&first_message);
+        let report = dispatch_gateway_request(
+            root.path(),
+            GatewayRequest {
+                message: first_message,
+            },
+            AgentLoopConfig {
+                max_steps: 4,
+                provider: Some("openai".to_string()),
+                auto_approve: true,
+                ..AgentLoopConfig::default()
+            },
+        )
+        .await
+        .expect_err("typed provider failure must be returned to the gateway adapter");
+        assert_eq!(report.matches("LLM request failed").count(), 1, "{report}");
+        for expected in [
+            "LLM request failed [LLM-AUTH]",
+            "Cause: authentication during planning",
+            "Provider: openai (chat_completions), model: fixture-model",
+            "HTTP: 401; retry: not retryable",
+            &format!("Session: {session_id}"),
+        ] {
+            assert!(report.contains(expected), "missing {expected}: {report}");
+        }
+        for forbidden in [
+            SECRET,
+            SECRET_PERCENT,
+            SECRET_BASE64,
+            REMOTE_BODY,
+            "invalid_api_key",
+            "[red]",
+            "[bold]",
+            "\u{1b}",
+            "Agent run failed",
+        ] {
+            assert!(!report.contains(forbidden), "found {forbidden}: {report}");
+        }
+        assert!(
+            report.len() <= 512,
+            "gateway report length: {}",
+            report.len()
+        );
+        assert!(report.chars().all(|character| {
+            !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+        }));
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured gateway provider request");
+        assert!(
+            request.starts_with("POST /chat/completions HTTP/1.1"),
+            "{request}"
+        );
+
+        let store = SessionStore::for_project(root.path()).expect("gateway session store");
+        let failed = store.load(&session_id).expect("failed gateway session");
+        failed
+            .validate_message_sequence()
+            .expect("failed gateway message sequence");
+        assert!(failed
+            .messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content == "first gateway goal" }));
+        assert!(!failed.messages.iter().any(|message| {
+            message.role == "assistant"
+                && (message.content.contains("LLM") || message.content.contains("failed"))
+        }));
+        let failure = failed
+            .events
+            .iter()
+            .find(|event| event.kind == "reconciliation")
+            .expect("typed failure reconciliation");
+        assert_eq!(failure.details["outcome"], "planning_failed");
+        assert_eq!(failure.details["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(failure.details["failure"]["class"], "authentication");
+
+        let recovered = dispatch_gateway_request(
+            root.path(),
+            GatewayRequest {
+                message: gateway_message("C-failure-recovery", "2", "second gateway goal"),
+            },
+            mock_loop_config(),
+        )
+        .await
+        .expect("gateway session remains usable after typed failure");
+        assert_eq!(
+            recovered.text,
+            "Final answer: task complete. (mock LLM response)"
+        );
+        let recovered = store.load(&session_id).expect("recovered gateway session");
+        recovered
+            .validate_message_sequence()
+            .expect("recovered gateway message sequence");
+        assert!(recovered
+            .messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content == "second gateway goal" }));
+        assert!(recovered.messages.iter().any(|message| {
+            message.role == "assistant"
+                && message.content == "Final answer: task complete. (mock LLM response)"
+        }));
+        let serialized = serde_json::to_string(&recovered).expect("gateway session JSON");
+        for forbidden in [SECRET, SECRET_PERCENT, SECRET_BASE64, REMOTE_BODY] {
+            assert!(!serialized.contains(forbidden), "{serialized}");
+        }
     }
 
     #[tokio::test]

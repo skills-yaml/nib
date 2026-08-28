@@ -1,4 +1,5 @@
 use nib::config::{save_nib_config_full, NibConfig};
+use nib::session::SessionStore;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -109,6 +110,7 @@ fn plain_help_lists_ft019_commands_and_incomplete_slash_is_not_a_goal() {
         "/fork",
         "/rename",
         "/copy",
+        "/history",
         "/ps",
         "/stop",
         "/providers",
@@ -119,8 +121,15 @@ fn plain_help_lists_ft019_commands_and_incomplete_slash_is_not_a_goal() {
     ] {
         assert!(stdout.contains(command), "missing {command} in {stdout}");
     }
-    assert!(stdout.contains("unavailable: explicit compact waits on T003"));
-    assert!(stdout.contains("unavailable: session-owned process listing waits on FT-017"));
+    assert!(stdout.contains("/stop [task-id]"), "{stdout}");
+    assert!(
+        !stdout.contains("explicit compact waits on T003"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("process listing waits on FT-017"),
+        "{stdout}"
+    );
     assert_eq!(session_count(project.path()), 1);
 
     let incomplete = configured_project();
@@ -150,6 +159,63 @@ fn plain_status_reports_session_identity_and_queue() {
         "{stdout}"
     );
     assert!(stdout.contains("queue"), "{stdout}");
+}
+
+#[test]
+fn plain_compact_and_background_commands_use_session_scoped_runtime_effects() {
+    let project = configured_project();
+    let output = run_with_input(
+        project.path(),
+        &["--plain"],
+        b"/ps\n/stop\n/compact\n/quit\n",
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(stdout.contains("Session-owned background work"), "{stdout}");
+    assert!(
+        stdout.contains("Session-owned running background work"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("context_unchanged"), "{stdout}");
+    assert!(!stdout.contains("waits on T003"), "{stdout}");
+    assert!(!stdout.contains("waits on FT-017"), "{stdout}");
+
+    let store = SessionStore::for_project(project.path()).expect("session store");
+    let ids = store.list_result().expect("session IDs");
+    assert_eq!(ids.len(), 1);
+    let session = store.load_result(&ids[0]).unwrap().unwrap();
+    assert!(
+        session.messages.is_empty(),
+        "compact must not synthesize chat"
+    );
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "compression_requested")
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "run_started")
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "run_terminal")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -184,7 +250,8 @@ fn help_and_one_shot_run_keep_their_non_interactive_contracts() {
         String::from_utf8_lossy(&run.stderr)
     );
     let run_stdout = String::from_utf8(run.stdout).expect("UTF-8 run output");
-    assert!(run_stdout.contains("nib run: finish the release smoke"));
+    assert!(run_stdout.contains("nib run: starting"));
+    assert!(!run_stdout.contains("finish the release smoke"));
     assert!(run_stdout.contains("Agent run completed for session"));
     assert!(!run_stdout.contains("mode: plain"));
     assert_eq!(session_count(run_project.path()), 1);

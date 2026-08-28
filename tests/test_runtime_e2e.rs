@@ -172,6 +172,141 @@ fn serve_responses_sequence(responses: Vec<Value>) -> (String, std::sync::mpsc::
     (format!("http://{address}/v1"), request_rx)
 }
 
+fn serve_stream_sequence(bodies: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("stream fixture listener");
+    let address = listener.local_addr().expect("stream fixture address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for body in bodies {
+            let (mut stream, _) = listener.accept().expect("stream fixture connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("stream fixture read timeout");
+            let request = read_http_request(&mut stream);
+            request_tx
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .expect("capture stream fixture request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("stream fixture response");
+        }
+    });
+    (format!("http://{address}"), request_rx)
+}
+
+#[derive(Clone, Copy)]
+enum NativeRuntimeAdapter {
+    Chat,
+    Anthropic,
+    Gemini,
+}
+
+impl NativeRuntimeAdapter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    fn provider(self) -> &'static str {
+        match self {
+            Self::Chat => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "google",
+        }
+    }
+
+    fn expected_path(self) -> &'static str {
+        match self {
+            Self::Chat => "/v1/chat/completions",
+            Self::Anthropic => "/v1/messages",
+            Self::Gemini => "/v1beta/models/fixture-model:streamGenerateContent?alt=sse",
+        }
+    }
+
+    fn endpoint(self, base_url: &str) -> String {
+        match self {
+            Self::Chat => format!("{base_url}/v1/chat/completions"),
+            Self::Anthropic | Self::Gemini => base_url.to_string(),
+        }
+    }
+
+    fn fixtures(self) -> Vec<String> {
+        match self {
+            Self::Chat => vec![
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"private-chat-plan\",\"function\":{\"name\":\"submit_plan\",\"arguments\":\"{\\\"steps\\\":[\\\"inspect the workspace\\\"]}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_string(),
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"private-chat-runtime\",\"function\":{\"name\":\"list_directory\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_string(),
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Workspace inspected.\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_string(),
+            ],
+            Self::Anthropic => vec![
+                concat!(
+                    "event: content_block_start\n",
+                    "data: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"private-anthropic-plan\",\"name\":\"submit_plan\"}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"steps\\\":[\\\"inspect the workspace\\\"]}\"}}\n\n",
+                    "event: content_block_stop\ndata: {\"index\":0}\n\n",
+                    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+                    "event: message_stop\ndata: {}\n\n"
+                )
+                .to_string(),
+                concat!(
+                    "event: content_block_start\n",
+                    "data: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"private-anthropic-runtime\",\"name\":\"list_directory\"}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\".\\\"}\"}}\n\n",
+                    "event: content_block_stop\ndata: {\"index\":0}\n\n",
+                    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+                    "event: message_stop\ndata: {}\n\n"
+                )
+                .to_string(),
+                concat!(
+                    "event: content_block_delta\n",
+                    "data: {\"index\":0,\"delta\":{\"text\":\"Workspace inspected.\"}}\n\n",
+                    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                    "event: message_stop\ndata: {}\n\n"
+                )
+                .to_string(),
+            ],
+            Self::Gemini => vec![
+                format!(
+                    "data: {}\n\n",
+                    json!({"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "submit_plan", "args": {"steps": ["inspect the workspace"]}}}]}, "finishReason": "STOP"}]})
+                ),
+                format!(
+                    "data: {}\n\n",
+                    json!({"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "list_directory", "args": {"path": "."}}}]}, "finishReason": "STOP"}]})
+                ),
+                format!(
+                    "data: {}\n\n",
+                    json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "Workspace inspected."}]}, "finishReason": "STOP"}]})
+                ),
+            ],
+        }
+    }
+}
+
 fn serve_planner_then_compression_failure(
     secret: &'static str,
 ) -> (String, std::sync::mpsc::Receiver<String>) {
@@ -389,6 +524,158 @@ fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
 fn captured_json_body(request: &str) -> Value {
     let (_, body) = request.split_once("\r\n\r\n").expect("captured HTTP body");
     serde_json::from_str(body).expect("captured JSON body")
+}
+
+#[tokio::test]
+async fn native_chat_anthropic_and_gemini_agent_loops_round_trip_approved_tool_results() {
+    for adapter in [
+        NativeRuntimeAdapter::Chat,
+        NativeRuntimeAdapter::Anthropic,
+        NativeRuntimeAdapter::Gemini,
+    ] {
+        let root = git_repository();
+        let (base_url, request_rx) = serve_stream_sequence(adapter.fixtures());
+        let mut config = mock_runtime_config();
+        config.llm.active_provider = Some(adapter.provider().to_string());
+        config.llm.providers.clear();
+        config.llm.providers.insert(
+            adapter.provider().to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some("fixture-key".to_string()),
+                base_url: Some(adapter.endpoint(&base_url)),
+                api: matches!(adapter, NativeRuntimeAdapter::Chat)
+                    .then_some(nib::config::LlmApiMode::ChatCompletions),
+                ..ProviderEntry::default()
+            },
+        );
+        save_nib_config_full(root.path(), &mut config).expect("native runtime config");
+        let session_id = format!("{}-runtime-round-trip", adapter.label());
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(128);
+
+        let summary = run_agent_loop(
+            root.path().to_path_buf(),
+            &session_id,
+            "inspect the workspace through a tool",
+            AgentLoopConfig {
+                max_steps: 8,
+                auto_approve: true,
+                stream_tx: Some(stream_tx),
+                ..AgentLoopConfig::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{} agent run failed: {error}", adapter.label()));
+
+        assert_eq!(summary.outcome, "completed", "{} outcome", adapter.label());
+        assert_eq!(summary.tool_call_count, 1, "{} tool count", adapter.label());
+        let requests = (0..3)
+            .map(|_| {
+                request_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("{} captured request", adapter.label()))
+            })
+            .collect::<Vec<_>>();
+        assert!(requests.iter().all(|request| {
+            request
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(adapter.expected_path()))
+        }));
+        let bodies = requests
+            .iter()
+            .map(|request| captured_json_body(request))
+            .collect::<Vec<_>>();
+        let continued = &bodies[2];
+        let continued_wire = serde_json::to_string(continued).unwrap();
+        assert!(continued_wire.contains("list_directory"));
+        assert!(continued_wire.contains("AGENTS.md"));
+        match adapter {
+            NativeRuntimeAdapter::Chat => {
+                let messages = continued["messages"].as_array().expect("Chat messages");
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "assistant"
+                        && message["tool_calls"][0]["id"] == "private-chat-runtime"
+                }));
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "tool"
+                        && message["tool_call_id"] == "private-chat-runtime"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|value| value.contains("AGENTS.md"))
+                }));
+            }
+            NativeRuntimeAdapter::Anthropic => {
+                let messages = continued["messages"]
+                    .as_array()
+                    .expect("Anthropic messages");
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "assistant"
+                        && message["content"].as_array().is_some_and(|content| {
+                            content.iter().any(|item| {
+                                item["type"] == "tool_use"
+                                    && item["id"] == "private-anthropic-runtime"
+                            })
+                        })
+                }));
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().is_some_and(|content| {
+                            content.iter().any(|item| {
+                                item["type"] == "tool_result"
+                                    && item["tool_use_id"] == "private-anthropic-runtime"
+                                    && item["content"]
+                                        .as_str()
+                                        .is_some_and(|value| value.contains("AGENTS.md"))
+                            })
+                        })
+                }));
+            }
+            NativeRuntimeAdapter::Gemini => {
+                let contents = continued["contents"].as_array().expect("Gemini contents");
+                assert!(contents.iter().any(|content| {
+                    content["role"] == "model"
+                        && content["parts"].as_array().is_some_and(|parts| {
+                            parts
+                                .iter()
+                                .any(|part| part["functionCall"]["name"] == "list_directory")
+                        })
+                }));
+                assert!(contents.iter().any(|content| {
+                    content["role"] == "user"
+                        && content["parts"].as_array().is_some_and(|parts| {
+                            parts.iter().any(|part| {
+                                part["functionResponse"]["name"] == "list_directory"
+                                    && part["functionResponse"]["response"]
+                                        .to_string()
+                                        .contains("AGENTS.md")
+                            })
+                        })
+                }));
+            }
+        }
+
+        let persisted = SessionStore::for_project(root.path())
+            .unwrap()
+            .load(&session_id)
+            .expect("native provider session");
+        let persisted_json = serde_json::to_string(&persisted).unwrap();
+        for private_id in [
+            "private-chat-runtime",
+            "private-anthropic-runtime",
+            "private-chat-plan",
+            "private-anthropic-plan",
+        ] {
+            assert!(!persisted_json.contains(private_id));
+        }
+        let mut public_events = Vec::new();
+        while let Ok(event) = stream_rx.try_recv() {
+            public_events.push(event);
+        }
+        let public_debug = format!("{public_events:?}");
+        assert!(!public_debug.contains("private-chat-runtime"));
+        assert!(!public_debug.contains("private-anthropic-runtime"));
+    }
 }
 
 #[tokio::test]
@@ -664,10 +951,24 @@ async fn responses_process_kill_and_restart_does_not_replay_completed_tool() {
         .spawn()
         .expect("launch restarted nib process");
 
-    let restarted_request = request_rx
-        .recv()
-        .await
-        .expect("fresh restarted planner request");
+    let restarted_request =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), request_rx.recv()).await {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                panic!("Responses interruption fixture closed before the restarted request")
+            }
+            Err(_) => {
+                let restarted_output = restarted
+                    .wait_with_output()
+                    .expect("inspect restarted nib process after request timeout");
+                panic!(
+                    "restarted nib made no provider request: status={} stdout={} stderr={}",
+                    restarted_output.status,
+                    String::from_utf8_lossy(&restarted_output.stdout),
+                    String::from_utf8_lossy(&restarted_output.stderr)
+                );
+            }
+        };
     assert!(restarted_request.starts_with("POST /v1/responses HTTP/1.1"));
     let restarted_body = captured_json_body(&restarted_request);
     assert_eq!(restarted_body["tools"][0]["name"], "submit_plan");

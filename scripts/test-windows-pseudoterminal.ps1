@@ -15,8 +15,28 @@ $result = Invoke-WindowsPseudoTerminal `
     -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $probe) `
     -TimeoutMilliseconds 30000
 if ($result.ExitCode -ne 0 -or
-    -not $result.Output.Contains("NIB_PSEUDOTERMINAL_READY")) {
+    -not $result.Output.Contains("NIB_PSEUDOTERMINAL_READY") -or
+    -not $result.ConsoleModesRestored -or
+    -not $result.ChildConsoleModesRestored) {
     throw "Windows pseudoterminal did not expose an interactive stderr handle: $($result.Output)"
+}
+
+$inputProbe = @'
+$line = [Console]::ReadLine()
+[Console]::WriteLine("NIB_PSEUDOTERMINAL_INPUT:" + $line)
+'@
+$inputResult = Invoke-WindowsPseudoTerminal `
+    -Executable $pwshPath `
+    -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $inputProbe) `
+    -InputChunks @(
+        [pscustomobject]@{ Text = "bounded-input`r`n"; DelayMilliseconds = 250 }
+    ) `
+    -TimeoutMilliseconds 30000
+if ($inputResult.ExitCode -ne 0 -or
+    -not $inputResult.Output.Contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input") -or
+    -not $inputResult.ConsoleModesRestored -or
+    -not $inputResult.ChildConsoleModesRestored) {
+    throw "Windows pseudoterminal did not preserve bounded delayed input"
 }
 
 $exitProbe = @'
@@ -28,7 +48,9 @@ $exitResult = Invoke-WindowsPseudoTerminal `
     -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $exitProbe) `
     -TimeoutMilliseconds 30000
 if ($exitResult.ExitCode -ne 23 -or
-    -not $exitResult.Output.Contains("NIB_PSEUDOTERMINAL_EXIT")) {
+    -not $exitResult.Output.Contains("NIB_PSEUDOTERMINAL_EXIT") -or
+    -not $exitResult.ConsoleModesRestored -or
+    -not $exitResult.ChildConsoleModesRestored) {
     throw "Windows pseudoterminal did not preserve output and exit status"
 }
 
@@ -84,6 +106,11 @@ try {
     } catch {
         if ($_.Exception.Message -ne "Windows pseudoterminal host exceeded its bounded timeout") {
             throw
+        }
+        $modeEvidence = [string]$_.Exception.Data["NibConsoleModeEvidence"]
+        if ([string]::IsNullOrWhiteSpace($modeEvidence) -or
+            -not [bool](($modeEvidence | ConvertFrom-Json).restored)) {
+            throw "Windows pseudoterminal timeout did not prove caller console restoration"
         }
         $timeoutFailed = $true
     } finally {

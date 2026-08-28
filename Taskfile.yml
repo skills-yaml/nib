@@ -63,10 +63,25 @@ tasks:
     cmds:
       - cargo test -- --test-threads=1
 
+  test:llm-conformance:
+    desc: Run credential-free provider-neutral LLM adapter conformance tests
+    cmds:
+      - 'cargo test --lib llm::gemini::tests::idless_parallel_continuation_ -- --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::factory_rejects_every_unused_mock_transport_or_credential_field -- --exact --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::factory_mock_consumes_model_fields_for_complete_and_stream -- --exact --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::reviewed_http_client_override_is_limited_to_openai_compatible_adapters -- --exact --test-threads=1'
+      - 'cargo test --lib config::tests::mock_rejects_unused_transport_and_credential_fields_but_keeps_model_catalog_fields -- --exact --test-threads=1'
+      - 'cargo test --lib llm::conformance::tests:: -- --test-threads=1'
+
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
     cmds:
       - cargo test --test durable_tasks -- --test-threads=1
+
+  test:runtime-e2e:
+    desc: Run the full agent runtime end-to-end integration tests
+    cmds:
+      - cargo test --test test_runtime_e2e -- --test-threads=1
 
   test:managed-process-capability:
     desc: Verify the exact managed-process backend probe independently
@@ -122,10 +137,29 @@ tasks:
     cmds:
       - cargo test --test installers -- --test-threads=1
 
+  test:interactive:
+    desc: Run deterministic plain/TUI interaction semantics without a pseudo-terminal
+    cmds:
+      - 'cargo test --lib exact_run_steering -- --test-threads=1'
+      - 'cargo test --lib interactive::tests:: -- --test-threads=1'
+      - 'cargo test --lib tui::tests:: -- --test-threads=1'
+      - 'cargo test --bin nib console::tests:: -- --test-threads=1'
+      - 'cargo test --bin nib chat::tests:: -- --test-threads=1'
+      - cargo test --test interactive_cli -- --test-threads=1
+      - >-
+        cargo test --test installers
+        interactive_release_smoke_is_offline_bounded_and_restoration_aware --
+        --exact --test-threads=1
+
   test:llm-live:offline:
     desc: Run credential-free live LLM harness, matrix, planner, and report tests
     cmds:
       - cargo test --test llm_live -- --test-threads=1
+
+  test:llm-release:
+    desc: Run deterministic T021 release-binary harness contract tests
+    cmds:
+      - cargo test --test release_binary_qualification -- --test-threads=1
 
   test:llm-live:catalog:
     desc: Discover and reconcile live provider model catalogs (explicit opt-in)
@@ -207,11 +241,40 @@ tasks:
       - scripts/check-managed-process-release.sh
 
   smoke:interactive:
-    desc: Exercise the release interactive launcher in redirected and Linux PTY modes
-    platforms: [linux]
+    desc: Qualify offline interaction semantics and release Unix PTY restoration
+    platforms: [linux, darwin]
     cmds:
+      - task: test:interactive
       - task: build
+      - task: smoke:interactive:binary
+
+  smoke:interactive:binary:
+    desc: Exercise the existing release binary through offline redirected and native Unix PTY flows
+    platforms: [linux, darwin]
+    cmds:
       - scripts/check-interactive-release.sh
+
+  smoke:interactive:windows:binary:
+    desc: Exercise the existing release binary through offline Windows ConPTY and TERM=dumb flows
+    platforms: [windows]
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/check-interactive-release.ps1
+
+  qualify:llm-release:
+    desc: Exercise the optimized nib binary against exact-revision local LLM fixtures
+    vars:
+      SOURCE_COMMIT:
+        sh: git rev-parse HEAD
+    env:
+      NIB_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
+      NIB_EXPECTED_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
+    cmds:
+      - task: test:llm-release
+      - task: build
+      - >-
+        cargo test --test release_binary_qualification
+        exact_release_binary_qualification --
+        --ignored --exact --nocapture --test-threads=1
 
   dev:
     desc: Quick dev check (Rust-only core)

@@ -796,6 +796,16 @@ impl NibConfig {
                     "llm.providers.{name}.api and reasoning_effort are supported only by OpenAI-compatible providers"
                 ));
             }
+            if name == "mock"
+                && (provider.api_key.is_some()
+                    || !provider.api_keys.is_empty()
+                    || provider.base_url.is_some())
+            {
+                issues.push(
+                    "llm.providers.mock api_key, api_keys, and base_url are not supported"
+                        .to_string(),
+                );
+            }
             if let Some(key) = &provider.api_key {
                 if key.trim().is_empty() {
                     issues.push(format!(
@@ -1168,6 +1178,31 @@ impl NibConfig {
 
         let mut values = values.into_iter().collect::<Vec<_>>();
         values.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        values
+    }
+
+    /// Rejects a public session identifier that would disclose configured sensitive data.
+    ///
+    /// Session identifiers are rendered by CLI and interactive lifecycle surfaces and are
+    /// persisted as filenames. Keep this check fail-closed and return a constant diagnostic so
+    /// the rejected identifier cannot be reflected by the validation path itself.
+    pub fn validate_public_session_id(&self, session_id: &str) -> Result<(), String> {
+        let redacted = crate::tools::executor::redact_text_with_encoded_sensitive_values(
+            session_id,
+            self.public_session_sensitive_values(),
+        );
+        if redacted != session_id {
+            Err("session identifier conflicts with configured sensitive data".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn public_session_sensitive_values(&self) -> Vec<String> {
+        let mut values = self.sensitive_values();
+        values.extend(crate::llm::factory::provider_environment_credentials());
+        values.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        values.dedup();
         values
     }
 }
@@ -2817,6 +2852,51 @@ request_timeot_secs = 10
     }
 
     #[test]
+    fn mock_rejects_unused_transport_and_credential_fields_but_keeps_model_catalog_fields() {
+        for entry in [
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                api_key: Some("private-primary".to_string()),
+                ..ProviderEntry::default()
+            },
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                api_keys: vec!["private-backup".to_string()],
+                ..ProviderEntry::default()
+            },
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                base_url: Some("http://127.0.0.1:9".to_string()),
+                ..ProviderEntry::default()
+            },
+        ] {
+            let mut config = NibConfig::default();
+            config.llm.providers.insert("mock".to_string(), entry);
+            config.llm.active_provider = Some("mock".to_string());
+            let error = config
+                .validate()
+                .expect_err("unused Mock field")
+                .to_string();
+            assert!(error.contains("api_key, api_keys, and base_url are not supported"));
+            assert!(!error.contains("private-"));
+        }
+
+        let mut valid = NibConfig::default();
+        valid.llm.providers.insert(
+            "mock".to_string(),
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                models: Some(vec!["mock-model".to_string(), "mock-alt".to_string()]),
+                ..ProviderEntry::default()
+            },
+        );
+        valid.llm.active_provider = Some("mock".to_string());
+        valid
+            .validate()
+            .expect("Mock model catalog fields are consumed");
+    }
+
+    #[test]
     fn sensitive_values_are_deduplicated_and_sorted_longest_first() {
         let mut config = NibConfig::default();
         config.llm.providers.insert(
@@ -2854,6 +2934,50 @@ request_timeot_secs = 10
             config.sensitive_values(),
             ["longer-secret-value", "medium-secret", "short-token"]
         );
+    }
+
+    #[test]
+    fn public_session_ids_cannot_embed_raw_or_encoded_credentials() {
+        let mut config = NibConfig::default();
+        config.llm.providers.insert(
+            "inactive-openai".to_string(),
+            ProviderEntry {
+                model: "fixture".to_string(),
+                api_key: Some("foo".to_string()),
+                api_keys: vec!["active/credential".to_string()],
+                ..ProviderEntry::default()
+            },
+        );
+
+        config
+            .validate_public_session_id("ordinary-session")
+            .expect("ordinary identifier");
+        for identifier in ["foo", "prefix-foo-suffix", "Zm9v", r#"active\/credential"#] {
+            let error = config
+                .validate_public_session_id(identifier)
+                .expect_err("credential-derived session identifier");
+            assert_eq!(
+                error,
+                "session identifier conflicts with configured sensitive data"
+            );
+            assert!(!error.contains("foo"));
+            assert!(!error.contains("Zm9v"));
+        }
+
+        let previous = std::env::var_os("GOOGLE_API_KEY");
+        std::env::set_var("GOOGLE_API_KEY", "private-env-session");
+        let environment_error = config
+            .validate_public_session_id("private-env-session")
+            .expect_err("environment credential session identifier");
+        match previous {
+            Some(value) => std::env::set_var("GOOGLE_API_KEY", value),
+            None => std::env::remove_var("GOOGLE_API_KEY"),
+        }
+        assert_eq!(
+            environment_error,
+            "session identifier conflicts with configured sensitive data"
+        );
+        assert!(!environment_error.contains("private-env-session"));
     }
 
     #[test]

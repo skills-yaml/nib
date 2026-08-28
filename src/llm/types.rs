@@ -11,6 +11,7 @@ pub(crate) const MAX_CONTINUATION_ITEMS: usize = 256;
 pub(crate) const MAX_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CALL_ID_BYTES: usize = 512;
 const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_LLM_USAGE_TOKENS: u64 = 1_000_000_000;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProviderCallId {
@@ -59,10 +60,16 @@ impl fmt::Debug for ProviderCallId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LlmRequestScope {
     pub session_id: String,
     pub run_id: String,
+}
+
+impl fmt::Debug for LlmRequestScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LlmRequestScope(<redacted>)")
+    }
 }
 
 impl LlmRequestScope {
@@ -468,7 +475,7 @@ pub struct ProviderContinuation {
     transport: &'static str,
     scope: Option<LlmRequestScope>,
     pending_invocations: Vec<ToolInvocationId>,
-    tool_outputs: BTreeMap<ToolInvocationId, String>,
+    tool_results: BTreeMap<ToolInvocationId, ToolResult>,
     encoded_bytes: usize,
     require_ordered_results: bool,
     state: Box<dyn Any + Send>,
@@ -572,42 +579,32 @@ impl ProviderContinuation {
             transport,
             scope: Some(scope),
             pending_invocations,
-            tool_outputs: BTreeMap::new(),
+            tool_results: BTreeMap::new(),
             encoded_bytes,
             require_ordered_results,
             state: Box::new(state),
         })
     }
 
-    pub fn record_tool_output(
-        &mut self,
-        invocation_id: ToolInvocationId,
-        output: &Value,
-    ) -> Result<(), String> {
+    pub fn record_tool_result(&mut self, result: ToolResult) -> Result<(), String> {
+        let invocation_id = result.invocation_id();
         if !self.pending_invocations.contains(&invocation_id) {
             return Err("tool invocation ID does not belong to this continuation".to_string());
         }
-        if self.tool_outputs.contains_key(&invocation_id) {
+        if self.tool_results.contains_key(&invocation_id) {
             return Err("tool invocation ID was already completed".to_string());
         }
         if self.require_ordered_results
             && self
                 .pending_invocations
-                .get(self.tool_outputs.len())
+                .get(self.tool_results.len())
                 .is_some_and(|expected| *expected != invocation_id)
         {
             return Err("provider continuation tool outputs are out of order".to_string());
         }
-        let output = serde_json::to_string(output)
-            .map_err(|error| format!("failed to encode tool output: {error}"))?;
-        if output.len() > MAX_TOOL_OUTPUT_BYTES {
-            return Err(format!(
-                "tool output exceeds the {MAX_TOOL_OUTPUT_BYTES}-byte continuation limit"
-            ));
-        }
         let next_bytes = self
             .encoded_bytes
-            .checked_add(output.len())
+            .checked_add(result.encoded_bytes())
             .ok_or_else(|| "provider continuation byte count overflowed".to_string())?;
         if next_bytes > MAX_CONTINUATION_BYTES {
             return Err(format!(
@@ -615,7 +612,7 @@ impl ProviderContinuation {
             ));
         }
         self.encoded_bytes = next_bytes;
-        self.tool_outputs.insert(invocation_id, output);
+        self.tool_results.insert(invocation_id, result);
         Ok(())
     }
 
@@ -625,7 +622,7 @@ impl ProviderContinuation {
         model: &str,
         transport: &'static str,
         scope: Option<&LlmRequestScope>,
-    ) -> Result<(T, BTreeMap<ToolInvocationId, String>), String> {
+    ) -> Result<(T, BTreeMap<ToolInvocationId, ToolResult>), String> {
         if self.provider != provider
             || self.model != model
             || self.transport != transport
@@ -636,13 +633,109 @@ impl ProviderContinuation {
                     .to_string(),
             );
         }
-        if self.tool_outputs.len() != self.pending_invocations.len() {
+        if self.tool_results.len() != self.pending_invocations.len() {
             return Err("provider continuation is missing one or more tool outputs".to_string());
         }
         let state = self.state.downcast::<T>().map_err(|_| {
             "provider continuation state does not match the selected adapter".to_string()
         })?;
-        Ok((*state, self.tool_outputs))
+        Ok((*state, self.tool_results))
+    }
+}
+
+/// Provider-neutral classification of a completed tool invocation.
+///
+/// Adapters must use this value for native error fields instead of inferring an
+/// outcome from the JSON result payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultClass {
+    Success,
+    Error,
+}
+
+impl ToolResultClass {
+    pub fn from_success(success: bool) -> Self {
+        if success {
+            Self::Success
+        } else {
+            Self::Error
+        }
+    }
+
+    pub fn is_error(self) -> bool {
+        self == Self::Error
+    }
+}
+
+/// One bounded, provider-neutral result for a durable nib tool invocation.
+#[derive(Clone, PartialEq)]
+pub struct ToolResult {
+    invocation_id: ToolInvocationId,
+    output: Value,
+    classification: ToolResultClass,
+    encoded_bytes: usize,
+}
+
+impl ToolResult {
+    pub fn new(
+        invocation_id: ToolInvocationId,
+        output: Value,
+        classification: ToolResultClass,
+    ) -> Result<Self, String> {
+        let encoded_bytes = serde_json::to_vec(&output)
+            .map_err(|error| format!("failed to encode tool output: {error}"))?
+            .len();
+        if encoded_bytes > MAX_TOOL_OUTPUT_BYTES {
+            return Err(format!(
+                "tool output exceeds the {MAX_TOOL_OUTPUT_BYTES}-byte continuation limit"
+            ));
+        }
+        Ok(Self {
+            invocation_id,
+            output,
+            classification,
+            encoded_bytes,
+        })
+    }
+
+    pub fn success(invocation_id: ToolInvocationId, output: Value) -> Result<Self, String> {
+        Self::new(invocation_id, output, ToolResultClass::Success)
+    }
+
+    pub fn error(invocation_id: ToolInvocationId, output: Value) -> Result<Self, String> {
+        Self::new(invocation_id, output, ToolResultClass::Error)
+    }
+
+    pub fn invocation_id(&self) -> ToolInvocationId {
+        self.invocation_id
+    }
+
+    pub fn output(&self) -> &Value {
+        &self.output
+    }
+
+    pub fn classification(&self) -> ToolResultClass {
+        self.classification
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    pub(crate) fn encoded_output(&self) -> String {
+        serde_json::to_string(&self.output)
+            .expect("serde_json::Value validated at ToolResult construction remains encodable")
+    }
+}
+
+impl fmt::Debug for ToolResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolResult")
+            .field("invocation_id", &self.invocation_id)
+            .field("classification", &self.classification)
+            .field("encoded_bytes", &self.encoded_bytes)
+            .field("output", &"<redacted>")
+            .finish()
     }
 }
 
@@ -684,13 +777,162 @@ pub enum LlmTerminalStatus {
     Refused,
 }
 
+/// Finite provider-neutral classification for a privately validated terminal turn.
+///
+/// Truncation, content filtering, safety blocks, malformed values, and unknown native
+/// reasons are protocol failures and therefore cannot inhabit a successful
+/// `LlmResponse`. Adapters map native terminal values only after validating the
+/// assembled content and tool-call set.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmFinishReason {
+    Complete,
+    ToolCalls,
+    Refusal,
+}
+
+impl LlmFinishReason {
+    pub fn terminal_status(self) -> LlmTerminalStatus {
+        match self {
+            Self::Complete | Self::ToolCalls => LlmTerminalStatus::Completed,
+            Self::Refusal => LlmTerminalStatus::Refused,
+        }
+    }
+}
+
+/// Bounded, provider-neutral token accounting for one logical provider response.
+///
+/// `input_tokens` and `output_tokens` include their optional cached and reasoning
+/// subsets respectively. The exact total is validated so callers never need to
+/// trust or reconcile provider arithmetic themselves.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(try_from = "LlmUsageWire")]
+pub struct LlmUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlmUsageWire {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    #[serde(default)]
+    cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    reasoning_output_tokens: Option<u64>,
+}
+
+impl TryFrom<LlmUsageWire> for LlmUsage {
+    type Error = String;
+
+    fn try_from(wire: LlmUsageWire) -> Result<Self, Self::Error> {
+        Self::new(
+            wire.input_tokens,
+            wire.output_tokens,
+            wire.total_tokens,
+            wire.cached_input_tokens,
+            wire.reasoning_output_tokens,
+        )
+    }
+}
+
+impl LlmUsage {
+    pub fn new(
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        cached_input_tokens: Option<u64>,
+        reasoning_output_tokens: Option<u64>,
+    ) -> Result<Self, String> {
+        for (label, count) in [
+            ("input", input_tokens),
+            ("output", output_tokens),
+            ("total", total_tokens),
+        ] {
+            if count > MAX_LLM_USAGE_TOKENS {
+                return Err(format!(
+                    "LLM {label} usage exceeds the {MAX_LLM_USAGE_TOKENS}-token limit"
+                ));
+            }
+        }
+        if input_tokens.checked_add(output_tokens) != Some(total_tokens) {
+            return Err("LLM total usage must equal input plus output tokens".to_string());
+        }
+        if cached_input_tokens
+            .is_some_and(|cached| cached > input_tokens || cached > MAX_LLM_USAGE_TOKENS)
+        {
+            return Err("LLM cached input usage must be a bounded input subset".to_string());
+        }
+        if reasoning_output_tokens
+            .is_some_and(|reasoning| reasoning > output_tokens || reasoning > MAX_LLM_USAGE_TOKENS)
+        {
+            return Err("LLM reasoning usage must be a bounded output subset".to_string());
+        }
+        Ok(Self {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens,
+            reasoning_output_tokens,
+        })
+    }
+
+    /// Checked aggregation for multi-request scenarios. Optional breakdowns remain
+    /// available only when both responses supplied them; absence is never guessed as
+    /// zero.
+    pub fn checked_add(self, other: Self) -> Result<Self, String> {
+        fn add_required(left: u64, right: u64, label: &str) -> Result<u64, String> {
+            left.checked_add(right)
+                .ok_or_else(|| format!("LLM {label} usage overflowed while aggregating"))
+        }
+        fn add_optional(
+            left: Option<u64>,
+            right: Option<u64>,
+            label: &str,
+        ) -> Result<Option<u64>, String> {
+            match (left, right) {
+                (Some(left), Some(right)) => left
+                    .checked_add(right)
+                    .map(Some)
+                    .ok_or_else(|| format!("LLM {label} usage overflowed while aggregating")),
+                _ => Ok(None),
+            }
+        }
+
+        Self::new(
+            add_required(self.input_tokens, other.input_tokens, "input")?,
+            add_required(self.output_tokens, other.output_tokens, "output")?,
+            add_required(self.total_tokens, other.total_tokens, "total")?,
+            add_optional(
+                self.cached_input_tokens,
+                other.cached_input_tokens,
+                "cached input",
+            )?,
+            add_optional(
+                self.reasoning_output_tokens,
+                other.reasoning_output_tokens,
+                "reasoning output",
+            )?,
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct LlmResponse {
     pub terminal_status: LlmTerminalStatus,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallRequest>>,
-    pub finish_reason: String,
+    pub finish_reason: LlmFinishReason,
     pub continuation: Option<ProviderContinuation>,
+    pub usage: Option<LlmUsage>,
+    pub attempts: crate::llm::RetryAttemptMetadata,
 }
 
 impl LlmResponse {
@@ -699,8 +941,11 @@ impl LlmResponse {
             terminal_status: LlmTerminalStatus::Completed,
             content: Some(content.into()),
             tool_calls: None,
-            finish_reason: "stop".to_string(),
+            finish_reason: LlmFinishReason::Complete,
             continuation: None,
+            usage: None,
+            // Local/Mock responses perform no network attempt.
+            attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
         }
     }
 
@@ -709,12 +954,48 @@ impl LlmResponse {
             terminal_status: LlmTerminalStatus::Completed,
             content: None,
             tool_calls: Some(calls),
-            finish_reason: "tool_calls".to_string(),
+            finish_reason: LlmFinishReason::ToolCalls,
             continuation: None,
+            usage: None,
+            // Local/Mock responses perform no network attempt.
+            attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
         }
+    }
+
+    pub fn with_retry_attempts(mut self, attempts: crate::llm::RetryAttemptMetadata) -> Self {
+        self.attempts = attempts;
+        self
+    }
+
+    pub fn with_usage(mut self, usage: Option<LlmUsage>) -> Self {
+        self.usage = usage;
+        self
     }
 }
 
+/// Sanitized provider-stream data. This type deliberately has no agent, workload,
+/// approval, reconciliation, or UI lifecycle variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmDelta {
+    Content(String),
+    ToolCallChunk {
+        index: usize,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+}
+
+/// Provider-neutral stream output. The terminal is normalized rather than retaining
+/// a provider-native string; the private completed response remains authoritative for
+/// tool authorization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmStreamEvent {
+    Delta(LlmDelta),
+    Terminal(LlmFinishReason),
+}
+
+/// Agent/workload lifecycle events projected to CLI, TUI, gateway, and MCP observers.
+/// Provider adapters never construct this type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     Content(String),
@@ -731,7 +1012,6 @@ pub enum StreamEvent {
     },
     ApprovalRequired {
         tool_name: String,
-        arguments: Value,
     },
     QuestionRequired {
         question: String,
@@ -739,7 +1019,6 @@ pub enum StreamEvent {
     },
     ToolStarted {
         tool_name: String,
-        arguments: Value,
     },
     TerminalOutput {
         tool_name: String,
@@ -780,12 +1059,12 @@ struct PendingToolCall {
 }
 
 impl ToolCallAccumulator {
-    pub fn push(&mut self, event: &StreamEvent) {
-        let StreamEvent::ToolCallChunk {
+    pub fn push(&mut self, delta: &LlmDelta) {
+        let LlmDelta::ToolCallChunk {
             index,
             name,
             arguments,
-        } = event
+        } = delta
         else {
             return;
         };
@@ -806,6 +1085,7 @@ impl ToolCallAccumulator {
         self,
         mut call_ids: BTreeMap<usize, ProviderCallId>,
     ) -> Result<Vec<ToolCallRequest>, String> {
+        crate::llm::ensure_response_item_count(self.calls.len(), "provider tool calls")?;
         let calls = self
             .calls
             .into_iter()
@@ -847,19 +1127,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_scope_debug_never_exposes_private_session_or_run_identity() {
+        let session_id = "private-session-debug-sentinel";
+        let run_id = "private-run-debug-sentinel";
+        let scope = LlmRequestScope::new(session_id, run_id).unwrap();
+        let scope_debug = format!("{scope:?}");
+        assert_eq!(scope_debug, "LlmRequestScope(<redacted>)");
+
+        let messages = [LlmMessage::user("safe prompt")];
+        let request = LlmRequest::new(&messages, None).with_scope(scope);
+        let request_debug = format!("{request:?}");
+        assert!(request_debug.contains("scope: Some(LlmRequestScope(<redacted>))"));
+        assert!(!request_debug.contains(session_id));
+        assert!(!request_debug.contains(run_id));
+    }
+
+    #[test]
+    fn finish_reason_wire_is_finite_and_provider_neutral() {
+        for (reason, encoded) in [
+            (LlmFinishReason::Complete, r#""complete""#),
+            (LlmFinishReason::ToolCalls, r#""tool_calls""#),
+            (LlmFinishReason::Refusal, r#""refusal""#),
+        ] {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), encoded);
+            assert_eq!(
+                serde_json::from_str::<LlmFinishReason>(encoded).unwrap(),
+                reason
+            );
+        }
+        for native_or_unknown in [
+            r#""stop""#,
+            r#""end_turn""#,
+            r#""STOP""#,
+            r#""length""#,
+            r#""content_filter""#,
+            r#""safety""#,
+            r#""future_provider_reason""#,
+            "null",
+            "{}",
+        ] {
+            assert!(
+                serde_json::from_str::<LlmFinishReason>(native_or_unknown).is_err(),
+                "accepted non-neutral finish reason {native_or_unknown}"
+            );
+        }
+    }
+
+    #[test]
     fn accumulates_interleaved_tool_chunks_deterministically() {
         let mut accumulator = ToolCallAccumulator::default();
-        accumulator.push(&StreamEvent::ToolCallChunk {
+        accumulator.push(&LlmDelta::ToolCallChunk {
             index: 1,
             name: Some("second".to_string()),
             arguments: Some("{\"b\":".to_string()),
         });
-        accumulator.push(&StreamEvent::ToolCallChunk {
+        accumulator.push(&LlmDelta::ToolCallChunk {
             index: 0,
             name: Some("first".to_string()),
             arguments: Some("{\"a\":1}".to_string()),
         });
-        accumulator.push(&StreamEvent::ToolCallChunk {
+        accumulator.push(&LlmDelta::ToolCallChunk {
             index: 1,
             name: None,
             arguments: Some("2}".to_string()),
@@ -877,7 +1204,7 @@ mod tests {
     #[test]
     fn rejects_malformed_streamed_arguments() {
         let mut accumulator = ToolCallAccumulator::default();
-        accumulator.push(&StreamEvent::ToolCallChunk {
+        accumulator.push(&LlmDelta::ToolCallChunk {
             index: 0,
             name: Some("broken".to_string()),
             arguments: Some("{".to_string()),
@@ -891,7 +1218,7 @@ mod tests {
     #[test]
     fn privately_attaches_provider_call_ids_by_stream_index() {
         let mut accumulator = ToolCallAccumulator::default();
-        accumulator.push(&StreamEvent::ToolCallChunk {
+        accumulator.push(&LlmDelta::ToolCallChunk {
             index: 2,
             name: Some("inspect".to_string()),
             arguments: Some("{}".to_string()),
@@ -934,24 +1261,47 @@ mod tests {
         .unwrap_err();
         assert!(byte_error.contains("byte limit"));
 
+        let output_error = ToolResult::success(
+            invocation_id,
+            serde_json::json!("x".repeat(MAX_TOOL_OUTPUT_BYTES)),
+        )
+        .unwrap_err();
+        assert!(output_error.contains("tool output exceeds"));
+    }
+
+    #[test]
+    fn typed_tool_results_preserve_durable_identity_and_explicit_classification() {
+        let scope = LlmRequestScope::new("session", "run").unwrap();
+        let invocation_id = ToolInvocationId::new();
         let mut continuation = ProviderContinuation::new(
             "openai",
             "gpt",
             "responses",
-            Some(scope),
+            Some(scope.clone()),
             vec![invocation_id],
             1,
             0,
             (),
         )
         .unwrap();
-        let output_error = continuation
-            .record_tool_output(
-                invocation_id,
-                &serde_json::json!("x".repeat(MAX_TOOL_OUTPUT_BYTES)),
-            )
-            .unwrap_err();
-        assert!(output_error.contains("tool output exceeds"));
+        let result = ToolResult::error(
+            invocation_id,
+            json!({"success": true, "private": "tool-result-secret"}),
+        )
+        .unwrap();
+        assert_eq!(result.invocation_id(), invocation_id);
+        assert_eq!(result.classification(), ToolResultClass::Error);
+        assert!(result.classification().is_error());
+        assert!(!format!("{result:?}").contains("tool-result-secret"));
+        continuation.record_tool_result(result).unwrap();
+
+        let (_, results): ((), BTreeMap<ToolInvocationId, ToolResult>) = continuation
+            .consume("openai", "gpt", "responses", Some(&scope))
+            .unwrap();
+        let result = results.get(&invocation_id).expect("typed result");
+        assert_eq!(result.invocation_id(), invocation_id);
+        assert_eq!(result.output()["success"], true);
+        assert_eq!(result.classification(), ToolResultClass::Error);
     }
 
     #[test]
@@ -971,6 +1321,39 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn usage_is_bounded_sane_serializable_and_checked_when_aggregated() {
+        let first = LlmUsage::new(10, 6, 16, Some(4), Some(2)).unwrap();
+        let second = LlmUsage::new(8, 3, 11, Some(1), Some(1)).unwrap();
+        assert_eq!(
+            first.checked_add(second).unwrap(),
+            LlmUsage::new(18, 9, 27, Some(5), Some(3)).unwrap()
+        );
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert_eq!(serde_json::from_str::<LlmUsage>(&encoded).unwrap(), first);
+
+        for invalid in [
+            json!({"input_tokens": 2, "output_tokens": 3, "total_tokens": 4}),
+            json!({"input_tokens": 2, "output_tokens": 3, "total_tokens": 5, "cached_input_tokens": 3}),
+            json!({"input_tokens": 2, "output_tokens": 3, "total_tokens": 5, "reasoning_output_tokens": 4}),
+            json!({"input_tokens": MAX_LLM_USAGE_TOKENS + 1, "output_tokens": 0, "total_tokens": MAX_LLM_USAGE_TOKENS + 1}),
+            json!({"input_tokens": 2, "output_tokens": 3, "total_tokens": 5, "unknown": 1}),
+        ] {
+            assert!(serde_json::from_value::<LlmUsage>(invalid).is_err());
+        }
+
+        let near_limit =
+            LlmUsage::new(MAX_LLM_USAGE_TOKENS, 0, MAX_LLM_USAGE_TOKENS, None, None).unwrap();
+        assert!(near_limit.checked_add(first).is_err());
+        assert_eq!(
+            first
+                .checked_add(LlmUsage::new(1, 1, 2, None, None).unwrap())
+                .unwrap()
+                .cached_input_tokens,
+            None
+        );
     }
 
     #[test]

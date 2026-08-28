@@ -139,3 +139,17 @@ and `--plain` child-process tests. `/compact`, `/ps`, `/stop`, and steer remain
 explicitly gated. Canonical `task docs:check` and `task check` evidence is recorded
 on the completing revision. Umbrella FT-019 stays in development for remaining
 steer/compact/process bodies and native macOS/Windows terminal jobs.
+
+## Final Independent Review Evidence (2026-08-27)
+
+A fresh independent spec-compliance review passed all 8/8 T031 acceptance criteria,
+and a separate fresh code-quality/security review passed with no unresolved findings.
+The reviews covered the now-shipped registry/reducer, modal framing, queue and failure
+dispositions, exact-run steering, terminal reconciliation, and profile/session/worktree
+authority. Later FT019 child slices supersede the historical note above that
+`/compact`, `/ps`, `/stop`, and steering were gated; T031's delivered model and ledger
+boundaries remain compatible with their implementations. Focused validation passed
+all 160 interactive tests, including the lazy console-input broker regression, all 39
+installer/static-contract tests, `task docs:check`,
+`task check:all-targets`, and `git diff --check`. Native FT019 completion evidence
+remains owned by T034 and the development umbrella rather than this completed slice.

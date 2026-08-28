@@ -8,6 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 pub mod anthropic;
+pub(crate) mod compatible;
 pub mod conformance;
 pub mod error;
 pub mod factory;
@@ -18,26 +19,71 @@ pub mod registry;
 pub mod responses;
 pub mod types;
 
-pub use error::{LlmError, LlmErrorClass, LlmErrorMetadata, LlmErrorPhase, RetryDisposition};
+pub use error::{
+    LlmError, LlmErrorClass, LlmErrorMetadata, LlmErrorPhase, LlmProviderErrorDiscriminator,
+    RetryDisposition,
+};
 pub use factory::{create_client, provider_ready};
 pub use mock::MockLlmClient;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-    GenerationOptions, LlmMessage, LlmMessageRole, LlmRequest, LlmRequestScope, LlmResponse,
-    LlmTerminalStatus, ProviderCallId, ProviderContinuation, ReasoningOption, StreamEvent,
-    ToolCallAccumulator, ToolCallRequest, ToolDefinition,
+    GenerationOptions, LlmDelta, LlmFinishReason, LlmMessage, LlmMessageRole, LlmRequest,
+    LlmRequestScope, LlmResponse, LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId,
+    ProviderContinuation, ReasoningOption, StreamEvent, ToolCallAccumulator, ToolCallRequest,
+    ToolDefinition, ToolResult, ToolResultClass,
 };
 
 pub(crate) const MAX_LLM_COMPLETE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_LLM_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_LLM_STREAM_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_LLM_STREAM_EVENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_LLM_RESPONSE_ITEMS: usize = 256;
+pub(crate) const MAX_LLM_STREAM_EVENTS: usize = 65_536;
 
 pub(crate) struct ResponseByteBudget {
     consumed: usize,
     limit: usize,
     label: &'static str,
+}
+
+pub(crate) struct ResponseItemBudget {
+    consumed: usize,
+    limit: usize,
+    label: &'static str,
+}
+
+impl ResponseItemBudget {
+    pub(crate) fn new(limit: usize, label: &'static str) -> Self {
+        Self {
+            consumed: 0,
+            limit,
+            label,
+        }
+    }
+
+    pub(crate) fn account(&mut self, items: usize) -> Result<(), String> {
+        self.consumed = self
+            .consumed
+            .checked_add(items)
+            .ok_or_else(|| format!("{} item count overflowed", self.label))?;
+        if self.consumed > self.limit {
+            return Err(format!(
+                "{} exceeds the {}-item limit",
+                self.label, self.limit
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn ensure_response_item_count(items: usize, label: &'static str) -> Result<(), String> {
+    if items > MAX_LLM_RESPONSE_ITEMS {
+        return Err(format!(
+            "{label} exceeds the {MAX_LLM_RESPONSE_ITEMS}-item limit"
+        ));
+    }
+    Ok(())
 }
 
 impl ResponseByteBudget {
@@ -88,7 +134,7 @@ pub(crate) fn ensure_stream_event_size(bytes: usize, label: &'static str) -> Res
 }
 
 pub(crate) async fn next_stream_item_or_closed<S>(
-    sender: &Sender<Result<StreamEvent, LlmStreamFailure>>,
+    sender: &Sender<Result<LlmStreamEvent, LlmStreamFailure>>,
     stream: &mut S,
 ) -> Option<S::Item>
 where
@@ -102,16 +148,32 @@ where
 }
 
 pub(crate) async fn send_stream_event(
-    sender: &Sender<Result<StreamEvent, LlmStreamFailure>>,
-    event: Result<StreamEvent, LlmStreamFailure>,
+    sender: &Sender<Result<LlmStreamEvent, LlmStreamFailure>>,
+    event: Result<LlmStreamEvent, LlmStreamFailure>,
 ) -> bool {
     sender.send(event).await.is_ok()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum LlmStreamFailure {
     Protocol(String),
     Typed(LlmError),
+}
+
+impl std::fmt::Debug for LlmStreamFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protocol(message) => formatter
+                .debug_struct("Protocol")
+                .field("message_bytes", &message.len())
+                .finish(),
+            Self::Typed(error) => formatter
+                .debug_struct("Typed")
+                .field("class", &error.class)
+                .field("phase", &error.phase)
+                .finish(),
+        }
+    }
 }
 
 impl From<String> for LlmStreamFailure {
@@ -133,12 +195,12 @@ impl From<LlmError> for LlmStreamFailure {
 }
 
 pub struct LlmStream {
-    receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+    receiver: Receiver<Result<LlmStreamEvent, LlmStreamFailure>>,
     private_completion: Option<oneshot::Receiver<Result<LlmResponse, LlmStreamFailure>>>,
     error_context: Option<error::LlmErrorContext>,
     content: String,
     tool_calls: ToolCallAccumulator,
-    finish_reason: Option<String>,
+    finish_reason: Option<LlmFinishReason>,
     stream_error: Option<LlmError>,
     exhausted: bool,
 }
@@ -147,9 +209,9 @@ impl std::fmt::Debug for LlmStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmStream")
             .field("private_completion", &self.private_completion.is_some())
-            .field("error_context", &self.error_context)
+            .field("has_error_context", &self.error_context.is_some())
             .field("content_bytes", &self.content.len())
-            .field("finish_reason", &self.finish_reason)
+            .field("has_finish_reason", &self.finish_reason.is_some())
             .field("has_error", &self.stream_error.is_some())
             .field("exhausted", &self.exhausted)
             .finish_non_exhaustive()
@@ -158,7 +220,7 @@ impl std::fmt::Debug for LlmStream {
 
 impl LlmStream {
     pub(crate) fn from_public_receiver(
-        receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+        receiver: Receiver<Result<LlmStreamEvent, LlmStreamFailure>>,
     ) -> Self {
         Self {
             receiver,
@@ -173,7 +235,7 @@ impl LlmStream {
     }
 
     pub(crate) fn with_private_completion(
-        receiver: Receiver<Result<StreamEvent, LlmStreamFailure>>,
+        receiver: Receiver<Result<LlmStreamEvent, LlmStreamFailure>>,
         completion: oneshot::Receiver<Result<LlmResponse, LlmStreamFailure>>,
     ) -> Self {
         Self {
@@ -192,28 +254,30 @@ impl LlmStream {
         let (completion_tx, completion_rx) = oneshot::channel();
         let content = response.content.clone();
         let calls = response.tool_calls.clone().unwrap_or_default();
-        let finish_reason = response.finish_reason.clone();
+        let finish_reason = response.finish_reason;
         tokio::spawn(async move {
             if let Some(content) = content {
-                if !send_stream_event(&tx, Ok(StreamEvent::Content(content))).await {
+                if !send_stream_event(&tx, Ok(LlmStreamEvent::Delta(LlmDelta::Content(content))))
+                    .await
+                {
                     return;
                 }
             }
             for (index, call) in calls.into_iter().enumerate() {
                 if !send_stream_event(
                     &tx,
-                    Ok(StreamEvent::ToolCallChunk {
+                    Ok(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                         index,
                         name: Some(call.name),
                         arguments: Some(call.arguments.to_string()),
-                    }),
+                    })),
                 )
                 .await
                 {
                     return;
                 }
             }
-            if !send_stream_event(&tx, Ok(StreamEvent::End(finish_reason))).await {
+            if !send_stream_event(&tx, Ok(LlmStreamEvent::Terminal(finish_reason))).await {
                 return;
             }
             let _ = completion_tx.send(Ok(response));
@@ -221,21 +285,30 @@ impl LlmStream {
         Self::with_private_completion(rx, completion_rx)
     }
 
-    pub async fn recv(&mut self) -> Option<Result<StreamEvent, Box<LlmError>>> {
+    /// Consumes one unvalidated provider event inside the LLM adapter boundary.
+    ///
+    /// This is intentionally unavailable outside `crate::llm`: a delta can precede an
+    /// in-band error, refusal, malformed terminal, or premature EOF and therefore is not a
+    /// public observation. Application consumers must use `finish()` and project only the
+    /// returned terminal-authoritative response.
+    pub(in crate::llm) async fn recv_private(
+        &mut self,
+    ) -> Option<Result<LlmStreamEvent, Box<LlmError>>> {
         let next = self
             .receiver
             .recv()
             .await
             .map(|result| result.map_err(|error| Box::new(self.stream_failure(error))));
         match &next {
-            Some(Ok(event)) => {
-                self.tool_calls.push(event);
-                match event {
-                    StreamEvent::Content(fragment) => self.content.push_str(fragment),
-                    StreamEvent::End(reason) => self.finish_reason = Some(reason.clone()),
-                    _ => {}
+            Some(Ok(event)) => match event {
+                LlmStreamEvent::Delta(delta) => {
+                    self.tool_calls.push(delta);
+                    if let LlmDelta::Content(fragment) = delta {
+                        self.content.push_str(fragment);
+                    }
                 }
-            }
+                LlmStreamEvent::Terminal(reason) => self.finish_reason = Some(*reason),
+            },
             Some(Err(error)) => {
                 if self.stream_error.is_none() {
                     self.stream_error = Some((**error).clone());
@@ -248,7 +321,7 @@ impl LlmStream {
 
     pub async fn finish(mut self) -> Result<LlmResponse, LlmError> {
         while !self.exhausted {
-            if self.recv().await.is_none() {
+            if self.recv_private().await.is_none() {
                 break;
             }
         }
@@ -275,18 +348,33 @@ impl LlmStream {
             Ok(tool_calls) => tool_calls,
             Err(error) => return Err(self.stream_failure(error.into())),
         };
+        let terminal_status = finish_reason.terminal_status();
+        let finish_matches_calls = match finish_reason {
+            LlmFinishReason::Complete | LlmFinishReason::Refusal => tool_calls.is_empty(),
+            LlmFinishReason::ToolCalls => !tool_calls.is_empty(),
+        };
+        if !finish_matches_calls {
+            return Err(self.stream_failure(
+                "provider terminal reason did not match the completed tool-call set".into(),
+            ));
+        }
         Ok(LlmResponse {
-            terminal_status: LlmTerminalStatus::Completed,
+            terminal_status,
             content: (!self.content.trim().is_empty()).then_some(self.content),
             tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             finish_reason,
             continuation: None,
+            usage: None,
+            attempts: RetryAttemptMetadata::no_network_attempt(),
         })
     }
 
     fn stream_failure(&self, failure: LlmStreamFailure) -> LlmError {
         match failure {
-            LlmStreamFailure::Typed(error) => error,
+            LlmStreamFailure::Typed(error) => match self.error_context.as_ref() {
+                Some(context) => context.attach_retry_attempts(error),
+                None => error,
+            },
             LlmStreamFailure::Protocol(message) => match self.error_context.as_ref() {
                 Some(context) => context.protocol(LlmErrorPhase::Stream, message),
                 None => LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Stream, message),
@@ -345,15 +433,140 @@ impl Default for RetryPolicy {
     }
 }
 
-pub fn is_transient_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
-}
-
-pub fn is_anthropic_transient_status(status: StatusCode) -> bool {
-    is_transient_status(status) || status.as_u16() == 529
-}
-
+const MAX_RETRY_ATTEMPTS: usize = 3;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(try_from = "RetryAttemptMetadataWire")]
+pub struct RetryAttemptMetadata {
+    attempts: u8,
+    credential_rotation_occurred: bool,
+    retry_exhausted: bool,
+    final_retry_after_seconds: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryAttemptMetadataWire {
+    attempts: u8,
+    credential_rotation_occurred: bool,
+    retry_exhausted: bool,
+    final_retry_after_seconds: Option<u64>,
+}
+
+impl TryFrom<RetryAttemptMetadataWire> for RetryAttemptMetadata {
+    type Error = &'static str;
+
+    fn try_from(wire: RetryAttemptMetadataWire) -> Result<Self, Self::Error> {
+        if wire.attempts > MAX_RETRY_ATTEMPTS as u8 {
+            return Err("retry attempt count exceeds the global limit");
+        }
+        if wire.credential_rotation_occurred && wire.attempts < 2 {
+            return Err("credential rotation requires at least two attempts");
+        }
+        if (wire.retry_exhausted || wire.final_retry_after_seconds.is_some()) && wire.attempts == 0
+        {
+            return Err("retry outcome metadata requires a network attempt");
+        }
+        if wire
+            .final_retry_after_seconds
+            .is_some_and(|seconds| seconds > MAX_RETRY_AFTER.as_secs())
+        {
+            return Err("Retry-After metadata exceeds the bounded limit");
+        }
+        Ok(Self {
+            attempts: wire.attempts,
+            credential_rotation_occurred: wire.credential_rotation_occurred,
+            retry_exhausted: wire.retry_exhausted,
+            final_retry_after_seconds: wire.final_retry_after_seconds,
+        })
+    }
+}
+
+impl RetryAttemptMetadata {
+    pub const fn no_network_attempt() -> Self {
+        Self {
+            attempts: 0,
+            credential_rotation_occurred: false,
+            retry_exhausted: false,
+            final_retry_after_seconds: None,
+        }
+    }
+
+    fn new(
+        attempts: usize,
+        credential_rotation_occurred: bool,
+        retry_exhausted: bool,
+        final_retry_after: Option<Duration>,
+    ) -> Self {
+        debug_assert!(attempts <= MAX_RETRY_ATTEMPTS);
+        Self {
+            attempts: attempts.min(MAX_RETRY_ATTEMPTS) as u8,
+            credential_rotation_occurred,
+            retry_exhausted,
+            final_retry_after_seconds: final_retry_after
+                .filter(|delay| *delay <= MAX_RETRY_AFTER)
+                .map(|delay| delay.as_secs()),
+        }
+    }
+
+    pub fn attempts(self) -> u8 {
+        self.attempts
+    }
+
+    pub fn credential_rotation_occurred(self) -> bool {
+        self.credential_rotation_occurred
+    }
+
+    pub fn retry_exhausted(self) -> bool {
+        self.retry_exhausted
+    }
+
+    pub fn final_retry_after_seconds(self) -> Option<u64> {
+        self.final_retry_after_seconds
+    }
+
+    /// Maps a terminal retry failure into its error-only public disposition.
+    /// Successful responses retain the numeric facts above and do not use this method.
+    pub fn error_disposition(self) -> RetryDisposition {
+        if self.attempts == 0 {
+            RetryDisposition::NotAttempted
+        } else if !self.retry_exhausted {
+            RetryDisposition::NotRetryable
+        } else if self.credential_rotation_occurred {
+            RetryDisposition::ExhaustedAfterCredentialRotation
+        } else {
+            RetryDisposition::Exhausted
+        }
+    }
+}
+
+impl Default for RetryAttemptMetadata {
+    fn default() -> Self {
+        Self::no_network_attempt()
+    }
+}
+
+#[derive(Debug)]
+pub struct RetryOutcome<T> {
+    pub value: T,
+    pub attempts: RetryAttemptMetadata,
+}
+
+#[derive(Debug)]
+pub struct RetryFailure<E> {
+    pub error: E,
+    pub attempts: RetryAttemptMetadata,
+}
+
+impl<E> RetryFailure<E> {
+    fn map_error<M>(self, map: impl FnOnce(E) -> M) -> RetryFailure<M> {
+        RetryFailure {
+            error: map(self.error),
+            attempts: self.attempts,
+        }
+    }
+}
 
 /// Sends a provider request with bounded retry and credential rotation.
 ///
@@ -362,24 +575,17 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub async fn send_with_retry<F>(
     request_factory: F,
     credential_count: usize,
-) -> Result<Response, String>
+    retry_capabilities: registry::ProviderRetryCapabilities,
+) -> Result<RetryOutcome<Response>, RetryFailure<String>>
 where
     F: FnMut(usize) -> RequestBuilder,
 {
-    send_with_retry_for(request_factory, credential_count, is_transient_status).await
-}
-
-pub async fn send_with_retry_for<F, RetryStatus>(
-    mut request_factory: F,
-    credential_count: usize,
-    retry_status: RetryStatus,
-) -> Result<Response, String>
-where
-    F: FnMut(usize) -> RequestBuilder,
-    RetryStatus: Fn(StatusCode) -> bool,
-{
+    let mut request_factory = request_factory;
     if credential_count == 0 {
-        return Err("provider request requires at least one credential".to_string());
+        return Err(RetryFailure {
+            error: "provider request requires at least one credential".to_string(),
+            attempts: RetryAttemptMetadata::new(0, false, false, None),
+        });
     }
     let policy = RetryPolicy::default();
     let request_timeout = policy.request_timeout;
@@ -392,15 +598,19 @@ where
         credential_count,
         policy,
         |response: &Response| response.status(),
-        retry_status,
-        retry_after_delay,
+        retry_capabilities,
+        |response| retry_after_delay(response, retry_capabilities),
         |error: &reqwest::Error| error.is_timeout() || error.is_connect(),
     )
     .await
+    .map_err(|failure| failure.map_error(|error| error.to_string()))
 }
 
-fn retry_after_delay(response: &Response) -> Option<Duration> {
-    if !matches!(response.status().as_u16(), 429 | 503 | 529) {
+fn retry_after_delay(
+    response: &Response,
+    retry_capabilities: registry::ProviderRetryCapabilities,
+) -> Option<Duration> {
+    if !retry_capabilities.accepts_retry_after(response.status()) {
         return None;
     }
     let value = response
@@ -409,6 +619,10 @@ fn retry_after_delay(response: &Response) -> Option<Duration> {
         .to_str()
         .ok()?
         .trim();
+    parse_retry_after_value(value, chrono::Utc::now())
+}
+
+fn parse_retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
     if let Ok(seconds) = value.parse::<u64>() {
         let delay = Duration::from_secs(seconds);
         return (delay <= MAX_RETRY_AFTER).then_some(delay);
@@ -417,7 +631,7 @@ fn retry_after_delay(response: &Response) -> Option<Duration> {
     let retry_at = chrono::DateTime::parse_from_rfc2822(value)
         .ok()?
         .with_timezone(&chrono::Utc);
-    let delay = retry_at.signed_duration_since(chrono::Utc::now());
+    let delay = retry_at.signed_duration_since(now);
     let milliseconds = delay.num_milliseconds();
     if milliseconds <= 0 {
         return None;
@@ -426,51 +640,73 @@ fn retry_after_delay(response: &Response) -> Option<Duration> {
     (delay <= MAX_RETRY_AFTER).then_some(delay)
 }
 
-async fn send_with_retry_using<T, E, F, Fut, Status, RetryStatus, RetryAfter, RetryError>(
+async fn send_with_retry_using<T, E, F, Fut, Status, RetryAfter, RetryError>(
     mut send: F,
     credential_count: usize,
     policy: RetryPolicy,
     status: Status,
-    retry_status: RetryStatus,
+    retry_capabilities: registry::ProviderRetryCapabilities,
     retry_after: RetryAfter,
     retry_error: RetryError,
-) -> Result<T, String>
+) -> Result<RetryOutcome<T>, RetryFailure<E>>
 where
     F: FnMut(usize) -> Fut,
     Fut: Future<Output = Result<T, E>>,
     Status: Fn(&T) -> StatusCode,
-    RetryStatus: Fn(StatusCode) -> bool,
     RetryAfter: Fn(&T) -> Option<Duration>,
     RetryError: Fn(&E) -> bool,
-    E: ToString,
 {
-    if credential_count == 0 {
-        return Err("provider retry requires at least one credential".to_string());
-    }
-    let attempts = policy.max_attempts.max(1);
+    assert!(
+        credential_count > 0,
+        "retry requires at least one credential"
+    );
+    let attempts = policy.max_attempts.clamp(1, MAX_RETRY_ATTEMPTS);
     let mut credential_index = 0;
+    let mut credential_rotation_occurred = false;
 
     for attempt in 0..attempts {
+        let actual_attempts = attempt + 1;
         match send(credential_index).await {
-            Ok(response) if retry_status(status(&response)) => {
-                if attempt + 1 == attempts {
-                    return Ok(response);
+            Ok(response) if retry_capabilities.retries_status(status(&response)) => {
+                let final_retry_after = retry_after(&response);
+                if actual_attempts == attempts {
+                    return Ok(RetryOutcome {
+                        value: response,
+                        attempts: RetryAttemptMetadata::new(
+                            actual_attempts,
+                            credential_rotation_occurred,
+                            true,
+                            final_retry_after,
+                        ),
+                    });
                 }
                 let response_status = status(&response);
-                let delay = retry_after(&response).unwrap_or_else(|| {
+                let delay = final_retry_after.unwrap_or_else(|| {
                     let multiplier = 1u32 << attempt.min(6);
                     policy
                         .base_delay
                         .saturating_mul(multiplier)
                         .min(MAX_RETRY_AFTER)
                 });
-                if response_status == StatusCode::TOO_MANY_REQUESTS {
-                    credential_index = (credential_index + 1) % credential_count;
+                if retry_capabilities.rotates_credential(response_status) && credential_count > 1 {
+                    let next_credential = (credential_index + 1) % credential_count;
+                    credential_rotation_occurred |= next_credential != credential_index;
+                    credential_index = next_credential;
                 }
                 tokio::time::sleep(delay).await;
             }
-            Ok(response) => return Ok(response),
-            Err(error) if retry_error(&error) && attempt + 1 < attempts => {
+            Ok(response) => {
+                return Ok(RetryOutcome {
+                    value: response,
+                    attempts: RetryAttemptMetadata::new(
+                        actual_attempts,
+                        credential_rotation_occurred,
+                        false,
+                        None,
+                    ),
+                });
+            }
+            Err(error) if retry_error(&error) && actual_attempts < attempts => {
                 let multiplier = 1u32 << attempt.min(6);
                 tokio::time::sleep(
                     policy
@@ -480,15 +716,26 @@ where
                 )
                 .await;
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                let retry_exhausted = retry_error(&error) && actual_attempts == attempts;
+                return Err(RetryFailure {
+                    error,
+                    attempts: RetryAttemptMetadata::new(
+                        actual_attempts,
+                        credential_rotation_occurred,
+                        retry_exhausted,
+                        None,
+                    ),
+                });
+            }
         }
     }
 
-    Err("provider retry loop ended without a response".to_string())
+    unreachable!("bounded provider retry loop always returns")
 }
 
 #[async_trait]
-pub trait LlmClient: Send + Sync {
+pub trait LlmProvider: Send + Sync {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, LlmError>;
 
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
@@ -497,12 +744,43 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// Compatibility name retained for callers while `LlmProvider` is the canonical
+/// provider-neutral contract.
+pub use LlmProvider as LlmClient;
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc::{self, Receiver};
     use std::time::Duration;
+
+    pub struct ScriptedHttpResponse {
+        status: String,
+        content_type: String,
+        body: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl ScriptedHttpResponse {
+        pub fn new(
+            status: impl Into<String>,
+            content_type: impl Into<String>,
+            body: impl Into<String>,
+        ) -> Self {
+            Self {
+                status: status.into(),
+                content_type: content_type.into(),
+                body: body.into(),
+                headers: Vec::new(),
+            }
+        }
+
+        pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
+        }
+    }
 
     pub fn serve_once(
         status: &str,
@@ -512,17 +790,50 @@ pub(crate) mod test_support {
         serve_once_with_declared_length(status, content_type, body, None)
     }
 
+    pub fn serve_once_with_headers(
+        status: &str,
+        content_type: &str,
+        body: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> (String, Receiver<String>) {
+        serve_once_with_declared_length_and_headers(status, content_type, body, None, headers)
+    }
+
     pub fn serve_once_with_declared_length(
         status: &str,
         content_type: &str,
         body: impl Into<String>,
         declared_length: Option<usize>,
     ) -> (String, Receiver<String>) {
+        serve_once_with_declared_length_and_headers(
+            status,
+            content_type,
+            body,
+            declared_length,
+            Vec::new(),
+        )
+    }
+
+    fn serve_once_with_declared_length_and_headers(
+        status: &str,
+        content_type: &str,
+        body: impl Into<String>,
+        declared_length: Option<usize>,
+        headers: Vec<(String, String)>,
+    ) -> (String, Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test HTTP listener");
         let address = listener.local_addr().expect("test HTTP address");
         let status = status.to_string();
         let content_type = content_type.to_string();
         let body = body.into();
+        let headers = headers
+            .into_iter()
+            .map(|(name, value)| {
+                assert!(!name.contains(['\r', '\n']), "test response header name");
+                assert!(!value.contains(['\r', '\n']), "test response header value");
+                format!("{name}: {value}\r\n")
+            })
+            .collect::<String>();
         let (request_tx, request_rx) = mpsc::channel();
 
         std::thread::spawn(move || {
@@ -534,12 +845,51 @@ pub(crate) mod test_support {
             let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
 
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
                 declared_length.unwrap_or(body.len())
             );
             stream
                 .write_all(response.as_bytes())
                 .expect("test HTTP response");
+        });
+
+        (format!("http://{address}"), request_rx)
+    }
+
+    pub fn serve_sequence(responses: Vec<ScriptedHttpResponse>) -> (String, Receiver<String>) {
+        assert!(!responses.is_empty(), "test HTTP sequence");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test HTTP listener");
+        let address = listener.local_addr().expect("test HTTP address");
+        let (request_tx, request_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("test HTTP connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("request read timeout");
+                let request = read_request(&mut stream);
+                let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+                let headers = response
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| {
+                        assert!(!name.contains(['\r', '\n']), "test response header name");
+                        assert!(!value.contains(['\r', '\n']), "test response header value");
+                        format!("{name}: {value}\r\n")
+                    })
+                    .collect::<String>();
+                let encoded = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{}",
+                    response.status,
+                    response.content_type,
+                    response.body.len(),
+                    response.body,
+                );
+                stream
+                    .write_all(encoded.as_bytes())
+                    .expect("test HTTP response");
+            }
         });
 
         (format!("http://{address}"), request_rx)
@@ -618,21 +968,28 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::time::timeout;
+
+    fn common_retry_capabilities() -> registry::ProviderRetryCapabilities {
+        registry::retry_capabilities("openai", registry::ProviderTransport::ChatCompletions)
+    }
 
     #[test]
     fn retry_statuses_are_explicit_and_bounded() {
+        let retry = common_retry_capabilities();
         for code in [408, 425, 429, 500, 502, 503, 504] {
-            assert!(is_transient_status(StatusCode::from_u16(code).unwrap()));
+            assert!(retry.retries_status(StatusCode::from_u16(code).unwrap()));
         }
-        assert!(!is_transient_status(StatusCode::BAD_REQUEST));
-        assert!(!is_transient_status(StatusCode::UNAUTHORIZED));
+        assert!(!retry.retries_status(StatusCode::BAD_REQUEST));
+        assert!(!retry.retries_status(StatusCode::UNAUTHORIZED));
     }
 
     #[test]
     fn retry_policy_has_finite_defaults() {
         let policy = RetryPolicy::default();
-        assert!((2..=5).contains(&policy.max_attempts));
+        assert_eq!(policy.max_attempts, 3);
         assert!(policy.base_delay > Duration::ZERO);
         assert!(policy.request_timeout > Duration::ZERO);
     }
@@ -655,13 +1012,16 @@ mod tests {
                 request_timeout: Duration::from_secs(1),
             },
             |status| *status,
-            is_transient_status,
+            common_retry_capabilities(),
             |_| None,
             |_| false,
         )
         .await
         .expect("backup credential succeeds");
-        assert_eq!(response, StatusCode::OK);
+        assert_eq!(response.value, StatusCode::OK);
+        assert_eq!(response.attempts.attempts(), 2);
+        assert!(response.attempts.credential_rotation_occurred());
+        assert!(!response.attempts.retry_exhausted());
         assert_eq!(credential_indices, [0, 1]);
     }
 
@@ -682,29 +1042,163 @@ mod tests {
             },
             4,
             RetryPolicy {
-                max_attempts: 3,
+                max_attempts: usize::MAX,
                 base_delay: Duration::ZERO,
                 request_timeout: Duration::from_secs(1),
             },
             |status| *status,
-            is_transient_status,
+            common_retry_capabilities(),
             |_| None,
             |_| false,
         )
         .await
         .expect("last transient response is returned to the adapter");
-        assert_eq!(response, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.value, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.attempts.attempts(), 3);
+        assert!(response.attempts.retry_exhausted());
+        assert!(!response.attempts.credential_rotation_occurred());
+        assert_eq!(
+            response.attempts.error_disposition(),
+            RetryDisposition::Exhausted
+        );
         assert_eq!(credential_indices, [0, 0, 0]);
         assert!(responses.is_empty());
+        let encoded = serde_json::to_string(&response.attempts).unwrap();
+        assert!(encoded.len() < 192);
+        assert_eq!(
+            serde_json::from_str::<RetryAttemptMetadata>(&encoded).unwrap(),
+            response.attempts
+        );
+        for invalid in [
+            r#"{"attempts":4,"credential_rotation_occurred":false,"retry_exhausted":true,"final_retry_after_seconds":null}"#,
+            r#"{"attempts":3,"credential_rotation_occurred":false,"retry_exhausted":true,"final_retry_after_seconds":31}"#,
+        ] {
+            assert!(serde_json::from_str::<RetryAttemptMetadata>(invalid).is_err());
+        }
     }
 
     #[test]
     fn anthropic_retry_policy_adds_only_overload() {
-        assert!(is_anthropic_transient_status(
-            StatusCode::from_u16(529).unwrap()
-        ));
-        assert!(!is_transient_status(StatusCode::from_u16(529).unwrap()));
-        assert!(!is_anthropic_transient_status(StatusCode::BAD_REQUEST));
+        let anthropic = registry::retry_capabilities(
+            "anthropic",
+            registry::ProviderTransport::AnthropicMessages,
+        );
+        let common = common_retry_capabilities();
+        assert!(anthropic.retries_status(StatusCode::from_u16(529).unwrap()));
+        assert!(!common.retries_status(StatusCode::from_u16(529).unwrap()));
+        assert!(!anthropic.retries_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn authentication_and_semantic_http_failures_are_not_retried() {
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::BAD_REQUEST] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let outcome = send_with_retry_using(
+                move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok::<StatusCode, String>(status))
+                },
+                2,
+                RetryPolicy {
+                    max_attempts: 3,
+                    base_delay: Duration::ZERO,
+                    request_timeout: Duration::from_secs(1),
+                },
+                |status| *status,
+                common_retry_capabilities(),
+                |_| None,
+                |_| false,
+            )
+            .await
+            .expect("non-retryable response reaches the adapter");
+            assert_eq!(outcome.value, status);
+            assert_eq!(outcome.attempts.attempts(), 1);
+            assert!(!outcome.attempts.retry_exhausted());
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
+
+        let client = reqwest::Client::new();
+        let missing = send_with_retry(
+            |_| client.get("http://127.0.0.1:9"),
+            0,
+            common_retry_capabilities(),
+        )
+        .await
+        .expect_err("missing credentials fail before I/O");
+        assert_eq!(missing.attempts.attempts(), 0);
+        assert_eq!(
+            missing.attempts.error_disposition(),
+            RetryDisposition::NotAttempted
+        );
+    }
+
+    #[test]
+    fn retry_after_seconds_and_dates_are_strict_and_bounded() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-23T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            parse_retry_after_value("12", now),
+            Some(Duration::from_secs(12))
+        );
+        assert_eq!(
+            parse_retry_after_value("Sun, 23 Aug 2026 00:00:20 +0000", now),
+            Some(Duration::from_secs(20))
+        );
+        for invalid in [
+            "invalid",
+            "-1",
+            "31",
+            "Sat, 22 Aug 2026 23:59:59 +0000",
+            "Sun, 23 Aug 2026 00:00:31 +0000",
+        ] {
+            assert_eq!(parse_retry_after_value(invalid, now), None, "{invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_and_drop_during_backoff_start_no_later_attempt() {
+        fn pending_retry(
+            attempts: Arc<AtomicUsize>,
+        ) -> impl Future<Output = Result<RetryOutcome<StatusCode>, RetryFailure<String>>> {
+            send_with_retry_using(
+                move |_| {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok::<StatusCode, String>(StatusCode::SERVICE_UNAVAILABLE))
+                },
+                1,
+                RetryPolicy {
+                    max_attempts: 3,
+                    base_delay: Duration::from_secs(60),
+                    request_timeout: Duration::from_secs(1),
+                },
+                |status| *status,
+                common_retry_capabilities(),
+                |_| None,
+                |_| false,
+            )
+        }
+
+        let aborted_attempts = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn(pending_retry(aborted_attempts.clone()));
+        while aborted_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(aborted_attempts.load(Ordering::SeqCst), 1);
+
+        let dropped_attempts = Arc::new(AtomicUsize::new(0));
+        let mut future = Box::pin(pending_retry(dropped_attempts.clone()));
+        tokio::select! {
+            result = &mut future => panic!("retry completed during backoff: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        drop(future);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(dropped_attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -726,7 +1220,15 @@ mod tests {
     async fn stream_producer_helpers_treat_receiver_drop_as_terminal() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
-        assert!(!send_stream_event(&sender, Ok(StreamEvent::Content("ignored".to_string()))).await);
+        assert!(
+            !send_stream_event(
+                &sender,
+                Ok(LlmStreamEvent::Delta(LlmDelta::Content(
+                    "ignored".to_string()
+                )))
+            )
+            .await
+        );
 
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let producer = tokio::spawn(async move {
@@ -748,15 +1250,15 @@ mod tests {
     async fn projected_tool_deltas_cannot_override_private_completion() {
         let (public_tx, public_rx) = mpsc::channel(4);
         public_tx
-            .send(Ok(StreamEvent::ToolCallChunk {
+            .send(Ok(LlmStreamEvent::Delta(LlmDelta::ToolCallChunk {
                 index: 0,
                 name: Some("untrusted_public_call".to_string()),
                 arguments: Some("{}".to_string()),
-            }))
+            })))
             .await
             .unwrap();
         public_tx
-            .send(Ok(StreamEvent::End("tool_calls".to_string())))
+            .send(Ok(LlmStreamEvent::Terminal(LlmFinishReason::ToolCalls)))
             .await
             .unwrap();
         drop(public_tx);
@@ -766,7 +1268,7 @@ mod tests {
             .unwrap();
 
         let mut stream = LlmStream::with_private_completion(public_rx, completion_rx);
-        while stream.recv().await.is_some() {}
+        while stream.recv_private().await.is_some() {}
         let debug = format!("{stream:?}");
         let completed = stream.finish().await.unwrap();
 
@@ -776,5 +1278,41 @@ mod tests {
         );
         assert!(completed.tool_calls.is_none());
         assert!(!debug.contains("untrusted_public_call"));
+    }
+
+    #[test]
+    fn stream_debug_omits_context_finish_and_protocol_values() {
+        let active = "active/credential-123".to_string();
+        let inactive = "inactive/credential-456".to_string();
+        let variants = [
+            active.as_str(),
+            inactive.as_str(),
+            "active%2Fcredential-123",
+            r#"inactive\/credential-456"#,
+            "YWN0aXZlL2NyZWRlbnRpYWwtMTIz",
+            "aW5hY3RpdmUvY3JlZGVudGlhbC00NTY=",
+            "control\u{1b}sentinel",
+        ];
+        let joined = variants.join("|");
+        let (_sender, receiver) = mpsc::channel(1);
+        let mut stream = LlmStream::from_public_receiver(receiver).with_error_context(
+            error::LlmErrorContext::new(
+                format!("provider-{joined}"),
+                format!("transport-{joined}"),
+                Some(format!("model-{joined}")),
+                vec![active.clone(), inactive.clone()],
+                RetryAttemptMetadata::no_network_attempt(),
+            ),
+        );
+        stream.finish_reason = Some(LlmFinishReason::Complete);
+        let failure = LlmStreamFailure::Protocol(joined);
+
+        for debug in [format!("{stream:?}"), format!("{failure:?}")] {
+            assert!(debug.len() < 1_024);
+            assert!(!debug.contains('\u{1b}'));
+            for variant in variants {
+                assert!(!debug.contains(variant), "Debug leaked {variant}: {debug}");
+            }
+        }
     }
 }

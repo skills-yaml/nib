@@ -55,6 +55,30 @@ pub async fn maybe_compress_session(
     llm: &Arc<dyn LlmClient>,
     cfg: &NibConfig,
 ) -> Result<Option<CompressionReport>, LlmError> {
+    compress_session(store, session_id, llm, cfg, false).await
+}
+
+/// Request compression at an explicit user boundary.
+///
+/// This bypasses only the automatic context-usage threshold. Configuration
+/// validation, the enabled switch, bounded summarization, compare-and-swap session
+/// update, and raw transcript retention are identical to automatic compression.
+pub async fn explicitly_compress_session(
+    store: &SessionStore,
+    session_id: &str,
+    llm: &Arc<dyn LlmClient>,
+    cfg: &NibConfig,
+) -> Result<Option<CompressionReport>, LlmError> {
+    compress_session(store, session_id, llm, cfg, true).await
+}
+
+async fn compress_session(
+    store: &SessionStore,
+    session_id: &str,
+    llm: &Arc<dyn LlmClient>,
+    cfg: &NibConfig,
+    explicit: bool,
+) -> Result<Option<CompressionReport>, LlmError> {
     if !cfg.compression.enabled {
         return Ok(None);
     }
@@ -91,12 +115,21 @@ pub async fn maybe_compress_session(
 
     let threshold_tokens = (cfg.llm.context_length as f64 * cfg.compression.threshold) as usize;
 
-    if before_tokens <= threshold_tokens {
+    if !explicit && before_tokens <= threshold_tokens {
         return Ok(None);
     }
 
-    let target_tokens =
+    if before_tokens == 0 {
+        return Ok(None);
+    }
+
+    let configured_target =
         ((cfg.llm.context_length as f64 * cfg.compression.target_ratio) as usize).max(1);
+    let target_tokens = if explicit {
+        configured_target.min(before_tokens.saturating_div(2).max(1))
+    } else {
+        configured_target
+    };
     let recent_budget = (target_tokens / 2).max(1);
     let mut retained_start = session.messages.len();
     let mut retained_tokens = 0usize;
@@ -156,17 +189,26 @@ pub async fn maybe_compress_session(
         .ok_or_else(|| "compression model returned an empty summary".to_string())?;
 
     let summary_budget = target_tokens.saturating_sub(retained_tokens.min(target_tokens));
-    let bounded_summary = truncate_to_tokens(&summary_content, summary_budget.max(1));
+    let public_sensitive_values = cfg.public_session_sensitive_values();
+    let public_summary = crate::interactive::bounded_public_text(
+        &summary_content,
+        &public_sensitive_values,
+        summary_budget.max(1).saturating_mul(4).min(64 * 1024),
+        true,
+    );
+    let bounded_summary = truncate_to_tokens(&public_summary, summary_budget.max(1));
 
     let expected_summary = session.summary.clone();
     let expected_summary_index = session.summary_index;
-    let expected_prefix = session.messages[..retained_start].to_vec();
+    // Summary publication is a true compare-and-swap over the complete raw chat
+    // history. Accepting an unchanged prefix would let a concurrently appended turn
+    // become covered by a summary computed without seeing it.
+    let expected_messages = session.messages.clone();
     let report = store
         .update_session(session_id, move |current| {
             if current.summary != expected_summary
                 || current.summary_index != expected_summary_index
-                || current.messages.len() < retained_start
-                || current.messages[..retained_start] != expected_prefix
+                || current.messages != expected_messages
             {
                 return Err(SessionError::InvalidMutation(
                     "session history changed while compression was in flight".to_string(),

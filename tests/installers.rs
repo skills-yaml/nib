@@ -63,6 +63,110 @@ fn repository_text_normalization_accepts_windows_line_endings() {
 }
 
 #[test]
+fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
+    let script = read_repository_text("scripts/check-interactive-release.sh");
+    let windows_script = read_repository_text("scripts/check-interactive-release.ps1");
+    let taskfile = read_repository_text("Taskfile.yml");
+    let workflow = read_repository_text(".github/workflows/ci.yml");
+
+    for contract in [
+        "timeout -k 2",
+        "NIB_NO_UPDATE_CHECK=1",
+        "NIB_ENABLE_INTERACTIVE_SMOKE=1",
+        "interactive provider failure smoke",
+        "LLM request failed [LLM-AUTH]",
+        "OPENAI_API_KEY",
+        "TERM=dumb",
+        "NO_COLOR=1",
+        "__NIB_TERMINAL_RESTORED__",
+        "__NIB_INTERACTIVE_CHILD_STATUS__",
+        "bracketed_paste_disable",
+        "alternate_screen_exit",
+        "private_run_ids",
+        "private_sentinel",
+    ] {
+        assert!(
+            script.contains(contract),
+            "missing smoke contract: {contract}"
+        );
+    }
+    assert!(script.contains("mktemp -d"));
+    assert!(script.contains("--provider mock --model mock-model"));
+    assert!(script.contains("Linux | Darwin"));
+    assert!(script.contains("script -q -e -c"));
+    assert!(script.contains("script -q /dev/null /bin/sh -c"));
+    assert!(script.contains("terminate_process_tree"));
+    assert!(script.contains("printf '/status\\n/quit\\n'"));
+    assert!(script.contains("printf 'y\\n\\n'"));
+    assert!(script.contains("for session_file in \"$session_directory\"/*.json; do"));
+    assert!(script.contains("grep -Fq \"$private_sentinel\" \"$session_file\""));
+    assert!(!script.contains("mapfile"));
+    assert!(!script.contains("-maxdepth"));
+    assert!(!script.contains("realpath"));
+    assert!(!script.contains("curl "));
+    assert!(!script.contains("wget "));
+
+    for contract in [
+        "Invoke-WindowsPseudoTerminal",
+        "NIB_NO_UPDATE_CHECK",
+        "NIB_ENABLE_INTERACTIVE_SMOKE",
+        "OPENAI_API_KEY",
+        "active_provider = \"mock\"",
+        "interactive-private-sentinel-windows",
+        "[string][char]17",
+        "/status`r`n/quit`r`n",
+        "TERM = \"dumb\"",
+        "NO_COLOR = \"1\"",
+        "ConsoleModesRestored",
+        "ChildConsoleModesRestored",
+        "[?1049l",
+        "[?2004l",
+    ] {
+        assert!(
+            windows_script.contains(contract),
+            "missing Windows interactive smoke contract: {contract}"
+        );
+    }
+    assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
+    assert!(windows_script.contains("could not remove its isolated fixture"));
+    assert!(!windows_script.contains("Invoke-WebRequest"));
+    assert!(!windows_script.contains("curl"));
+
+    assert!(taskfile.contains("  test:interactive:\n"));
+    assert!(taskfile.contains("      - task: test:interactive\n"));
+    assert!(taskfile.contains("  smoke:interactive:binary:\n"));
+    assert!(taskfile.contains("      - task: smoke:interactive:binary\n"));
+    assert!(taskfile.contains("    platforms: [linux, darwin]\n"));
+    assert!(taskfile.contains("  smoke:interactive:windows:binary:\n"));
+    assert!(taskfile.contains("scripts/check-interactive-release.ps1"));
+
+    let windows_job = workflow
+        .split_once("  windows-tests:\n")
+        .and_then(|(_, remainder)| remainder.split_once("  macos-tests:\n"))
+        .map(|(job, _)| job)
+        .expect("Windows CI job");
+    let windows_build = windows_job
+        .find("run: task build")
+        .expect("Windows release build");
+    let windows_native_smoke = windows_job
+        .find("run: task smoke:interactive:windows:binary")
+        .expect("Windows native interactive smoke");
+    assert!(windows_build < windows_native_smoke);
+
+    let macos_job = workflow
+        .split_once("  macos-tests:\n")
+        .map(|(_, job)| job)
+        .expect("macOS CI job");
+    let macos_build = macos_job
+        .find("run: task build")
+        .expect("macOS release build");
+    let macos_native_smoke = macos_job
+        .find("run: task smoke:interactive:binary")
+        .expect("macOS native interactive smoke");
+    assert!(macos_build < macos_native_smoke);
+}
+
+#[test]
 fn release_workflow_emits_portable_checksum_manifests() {
     let workflow = read_repository_text(".github/workflows/release.yml");
     let enter_dist = workflow
@@ -200,18 +304,37 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_host.contains("$startInfo.RedirectStandardError = $true"));
     assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
     assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_EXIT_MARKER"));
+    assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_MODE_MARKER"));
+    assert!(windows_pty_host.contains("$inputChunks = @($request.input_chunks)"));
+    assert!(windows_pty_host.contains("$process.StandardInput.WriteAsync"));
+    assert!(windows_pty_host.contains("$process.StandardInput.Close()"));
+    assert!(windows_pty_host.contains("console_modes_restored"));
     assert!(windows_pty_host.contains("$process.Kill($true)"));
     assert!(windows_pty_host.contains("$process.WaitForExit(5000)"));
     assert!(windows_pty_host.contains("while ($true)"));
     assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_CHILD_REQUEST"));
     assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_EXIT_MARKER"));
+    assert!(windows_pty_child.contains("NIB_WINDOWS_PTY_MODE_MARKER"));
+    assert!(windows_pty_child.contains("GetConsoleMode"));
+    assert!(windows_pty_child.contains("$consoleModesBefore"));
+    assert!(windows_pty_child.contains("$consoleModesAfter"));
     assert!(windows_pty_child.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_pty_child.contains("[Console]::Out.WriteLine"));
     assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
+    assert!(windows_pty_invoke.contains("[object[]]$InputChunks"));
+    assert!(windows_pty_invoke.contains("64 chunk limit"));
+    assert!(windows_pty_invoke.contains("4096 bytes"));
+    assert!(windows_pty_invoke.contains("32768 bytes"));
+    assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
+    assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));
     assert!(windows_pty_invoke.contains("$process.WaitForExit(5000)"));
     assert!(windows_pty_test.contains(windows_pty_invoke_binding));
     assert!(windows_pty_test.contains("Invoke-WindowsPseudoTerminal"));
+    assert!(windows_pty_test.contains("-InputChunks"));
+    assert!(windows_pty_test.contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input"));
+    assert!(windows_pty_test.contains("ChildConsoleModesRestored"));
+    assert!(windows_pty_test.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
     assert!(windows_pty_test.contains("$result.ExitCode -ne 0"));
     assert!(windows_pty_test.contains("$exitResult.ExitCode -ne 23"));

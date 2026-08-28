@@ -60,6 +60,12 @@ task build
 ./target/release/nib --help
 ```
 
+Release maintainers can exercise the optimized binary's complete credential-free LLM
+smoke with `task qualify:llm-release`. It binds only a localhost fixture, verifies the
+binary's embedded commit against the checkout HEAD, and records the executable SHA-256
+under `target/release-qualification/`. A dirty-worktree run is useful harness evidence
+but is explicitly ineligible as proof of a published exact-revision artifact.
+
 ## Project Setup
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
@@ -90,7 +96,10 @@ nib auth
 The wizard writes the selected provider, model, and API key to `.nib/config.toml`.
 Config writes use owner-only permissions on Unix, but credentials remain plaintext.
 The configured adapters are OpenAI, Anthropic, Google Gemini, xAI Grok, OpenRouter,
-Meta, and the deterministic Mock provider used for tests. Credentials can instead
+Meta, and the deterministic Mock provider used for tests. Meta has no verified public
+default inference endpoint in this adapter and therefore requires an explicit
+OpenAI-compatible `base_url`; readiness fails before network I/O when it is absent.
+Credentials can instead
 come from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`,
 `OPENROUTER_API_KEY`, or `META_API_KEY`.
 
@@ -227,10 +236,13 @@ skill installation, or MCP child-process startup.
 
 New official OpenAI entries created by `nib auth` select `api = "responses"`.
 Existing entries without `api` continue to use `chat_completions`; nib does not rewrite
-them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways also
-retain Chat Completions unless their entry explicitly selects Responses. The selected
-mode is never inferred from a model name, and a rejected request is not retried through
-a different API or with a different reasoning effort.
+them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways retain
+the T021 Chat Completions compatibility default unless their entry explicitly selects
+Responses. xAI now documents Chat Completions as a legacy endpoint and recommends
+Responses for new features; nib reports its selected transport explicitly and does not
+rewrite existing operator configuration. The selected mode is never inferred from a
+model name, and a rejected request is not retried through a different API or with a
+different reasoning effort.
 
 `base_url` may be a provider root or the full endpoint matching `api`. nib appends
 exactly one `/responses` or `/chat/completions` suffix and rejects conflicting or
@@ -243,6 +255,13 @@ nib config show
 nib config validate
 nib doctor
 ```
+
+Provider diagnostics also report the registered implementation, selected wire
+transport, and the adapter's structural support for completion, streaming, function
+tools, typed tool continuation, parallel-tool transport, and configurable reasoning
+effort. These are local implementation facts, not a claim that the configured model
+or gateway accepts every combination. `nib doctor` does not make a provider request
+or probe live model compatibility.
 
 For an active provider named exactly `openai`, doctor treats canonical OpenAI
 Chat Completions with provider-default or enabled reasoning as not ready for nib's
@@ -312,6 +331,9 @@ only in an already trusted environment. Explicit deny policies still take preced
 When the agent calls `ask_question`, the CLI prints the available options and accepts
 either an option number or free-form text on the same input stream. Closed or empty
 question input stops the run and reconciles the session without continuing execution.
+Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. Startup
+and final one-shot status lines are bounded and control-safe and do not echo the full
+goal.
 
 In a normal Git checkout, edits remain in a `nib/session/*` branch under
 `.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
@@ -336,11 +358,15 @@ alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
 Both presentation modes expose these commands:
 
-- `/status` shows session, model, permissions, plan, and queued follow-up count.
+- `/status` shows session, resolved provider/model/transport, approximate persisted
+  context usage and limit, configured approval preset, effective execution/sandbox
+  posture, plan, and queued follow-up count.
 - `/model` or `/model <name>` lists or selects a model.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
-  mode without claiming to weaken AGENTS.md, skill, worktree, sandbox, or platform
-  limits.
+  preset, then recomputes the effective provider/profile/network and platform sandbox
+  posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
+  plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
+  states are labeled in text rather than by color alone.
 - `/plan [prompt]` shows the current plan or starts a planning turn.
 - `/review` and `/diff` show the git workspace diff.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
@@ -348,15 +374,24 @@ Both presentation modes expose these commands:
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
   display name.
 - `/copy` prints the latest completed assistant output.
-- `/compact`, `/ps`, and `/stop` are listed but explain why they are unavailable until
-  T003 and FT-017 expose those operations.
+- `/compact` requests bounded compression for the active session through the configured
+  provider. It may bypass the automatic usage threshold, but still respects the
+  compression enabled switch, preserves every raw message, and reports the resulting
+  budget or a truthful no-op/failure outcome.
+- `/ps` lists a bounded projection of durable background work owned by the active
+  session. `/stop` lists stoppable work and exact-ID guidance; `/stop <task-id>` requests
+  cancellation of exactly one task only when that durable record belongs to the active
+  session. Command text, prompts, results, errors, and work from other sessions are not
+  exposed.
 - `/providers` lists configured providers.
 - `/skills list|install|remove` manages skills.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
-- `queue: <text>` stores a follow-up for the next turn. While a TUI turn is running,
-  Enter queues and never steers. Steer remains unavailable until the agent loop can
-  bind to the exact active run.
+- `queue: <text>` stores a follow-up for the next turn. While a turn is running,
+  `steer: <text>` in plain mode and `Ctrl+S` in TUI mode submit the current draft to
+  the exact active run at its next safe model boundary. Steering is persisted before
+  acknowledgement; the TUI clears the draft only after that persistence succeeds.
+  Enter queues and never steers. Approval and question prompts retain input precedence.
 
 Parity matrix (same command/session effect in both renderers):
 
@@ -365,20 +400,55 @@ Parity matrix (same command/session effect in both renderers):
 | Idle submit | `Enter` | `Enter` |
 | Newline | `Ctrl+J` | continuation / editor |
 | Queue next | `Enter` while running, or `queue: text` | `queue: text` |
-| Steer | `Ctrl+S` reports unavailable | same message in `/help` |
+| Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
 | Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
 | Approvals | dock on the current tool | Y/N prompt |
-| Draft history | `Up`/`Down` when no overlay | previous lines via the terminal |
+| Draft history | `Up`/`Down`; `Ctrl+R` or `/history [query]` search | `/history [query]` numbered search |
+| Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
+| Path attachment | `@` completion, structured context | same `@path` mentions |
+| Compact context | `/compact`, streamed compression/reconciliation | same command and outcomes |
+| Background work | `/ps`; `/stop [task-id]` | same bounded list and exact-ID cancellation |
+
+Interaction state is shared by both renderers and is derived from the authoritative
+session and exact active run rather than from terminal chrome:
+
+| State | Meaning and next action |
+| --- | --- |
+| `idle` | A submitted goal starts one foreground turn; slash commands use the shared registry. |
+| `planning` / `running` | Progress remains bound to the exact run. Steering uses the explicit steer path; Enter or ordinary plain text durably queues the next turn. Commands marked idle-only report an error instead of becoming goals. |
+| `waiting_approval` | Approval owns input before every lower layer. Accepting grants only the displayed bounded action; denial resumes reconciliation. |
+| `waiting_question` | The displayed numbered option or free-form answer owns input before commands and the composer. Empty or out-of-range answers remain local errors. |
+| `reconciling` | Cancellation, completion, or failure is not terminal until workload/session evidence is persisted and the worker is joined. |
+| `completed` | A successfully joined run may claim the FIFO queue head only after the next worker is prepared; each retained item starts at most once. |
+| `cancelled` | Queued work remains retained and its disposition is printed; cancellation never silently launches it. |
+| `failed` | The bounded redaction-safe failure report and session reference are shown; queued work remains retained when startup or execution cannot continue safely. |
+
+At any state, approval, question, destructive confirmation, selector/detail, command
+completion, and composer input are consumed in that order. Reconciliation events are
+accepted only for the active session and exact run. The header reports the profile
+captured at startup and the currently validated session worktree; historical tool-call
+paths cannot relabel either value.
 
 #### Plain mode
 
 Plain mode presents the interactive session as a line-oriented prompt. Agent questions
 share its input stream: answer with the displayed option number or typed text, then
-continue entering commands after the agent turn completes. Model text, tool lifecycle
-events, and reconciliation status stream while each turn is running.
+press Enter once on a separate empty line when the modal asks to return input
+ownership. Any non-empty type-ahead before that delimiter is rejected instead of
+becoming a command or queued goal. Continue entering commands after the agent turn
+completes. Tool lifecycle, approval, question, compression, and reconciliation events
+remain live while a turn is running. Provider data is still consumed incrementally,
+but model text and tool proposals are shown only after the completed provider response
+passes terminal validation.
+
+During an active plain-mode run, use `steer: <text>` to affect that exact run or
+`queue: <text>` to retain a later turn. A plain line without either prefix is also a
+queued follow-up while the run is active. A persisted steer that loses a terminal or
+channel race remains visible as an explicit delivery failure and is never converted to
+queued work.
 
 An incomplete slash-command prefix opens a bounded numbered completion prompt sourced
 from the shared command registry. Select a command or fixed subcommand by number; plain
@@ -411,8 +481,24 @@ turn is running.
 The composer has focus initially. A slash-command prefix opens bounded completion from
 the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
 insert, and `Esc` to close completion without clearing the draft. When completion is
-closed, `Up`/`Down` restore bounded in-process draft history. Unknown and incomplete
-slash commands remain in the composer and show an error instead of becoming agent goals.
+closed, `Up`/`Down` restore bounded in-process draft history. Typing `@` offers
+project-scoped path completion; submitted `@path` mentions become structured
+attachments (bounded file context) rather than expanding the file into the prompt
+string. Unknown and incomplete slash commands remain in the composer and show an error
+instead of becoming agent goals.
+
+Draft history is process-local, retains at most 50 submitted entries, and is never
+persisted or added to model context before a restored draft is submitted again. Press
+`Ctrl+R` or run `/history [query]` to open a bounded keyboard-only search overlay;
+type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitting, or
+`Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
+numbers and requires explicit confirmation before submitting the selection.
+
+The transcript follows new activity by default. `PageUp` and `PageDown` move by the
+current visible rendered rows without relying on raw terminal scrollback. Manual
+upward movement pauses follow-tail so streaming output does not move the viewport;
+the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
+follow-tail. Resizes and narrow terminals clamp the row viewport safely.
 
 Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
 and typing an exact session ID can preview an older session omitted from the bounded
@@ -655,6 +741,10 @@ fields are available in the session's reconciliation event under
 persisted. `nib doctor` shows the resolved local provider and transport without making
 a paid provider request. The interactive session remains available for another command
 after a safely reconciled failure; `nib run` exits nonzero.
+
+Provider deltas remain private until the terminal response is validated. If a streamed
+request later fails, is refused, or is structurally incomplete, nib discards all of its
+partial model text and tool proposals instead of rendering or persisting them.
 
 Official release builds update within their embedded rolling channel:
 

@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_TOOL_OUTPUT_BYTES: usize = MAX_MCP_FRAME_BYTES / 4;
+const MAX_MCP_VALIDATION_ERROR_BYTES: usize = 8 * 1024;
 const MAX_ACTIVE_MCP_REQUESTS: usize = 32;
 const MCP_REQUEST_CANCELLED_CODE: i64 = -32800;
 const MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1733,6 +1734,7 @@ async fn handle_request_with_cancellation(
     }
 
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let public_sensitive_values = config.public_session_sensitive_values();
     let mut cancellation_audit = None;
     let response = Some(match method {
         "initialize" => rpc_result(
@@ -1762,9 +1764,17 @@ async fn handle_request_with_cancellation(
                     cancellation_audit = audit;
                     rpc_result(id, tool_result_content(result))
                 }
-                Err(error) => rpc_error(id, -32602, error),
+                Err(error) => rpc_error(
+                    id,
+                    -32602,
+                    safe_mcp_validation_error(&error, &public_sensitive_values),
+                ),
             },
-            Err(error) => rpc_error(id, -32602, error),
+            Err(error) => rpc_error(
+                id,
+                -32602,
+                safe_mcp_validation_error(&error, &public_sensitive_values),
+            ),
         },
         _ => rpc_error(id, -32601, "Method not found"),
     });
@@ -1906,11 +1916,13 @@ fn validate_mcp_tool_arguments(
         .take(5)
         .map(|error| {
             let path = error.instance_path.to_string();
-            if path.is_empty() {
-                error.to_string()
+            let constraint = error.schema_path.to_string();
+            let location = if path.is_empty() {
+                "at the argument root".to_string()
             } else {
-                format!("at {path}: {error}")
-            }
+                format!("at {path}")
+            };
+            format!("{location}: failed schema constraint {constraint}")
         })
         .collect();
     if errors.is_empty() {
@@ -1921,6 +1933,15 @@ fn validate_mcp_tool_arguments(
             errors.join("; ")
         ))
     }
+}
+
+fn safe_mcp_validation_error(error: &str, sensitive_values: &[String]) -> String {
+    crate::interactive::bounded_public_text(
+        error,
+        sensitive_values,
+        MAX_MCP_VALIDATION_ERROR_BYTES,
+        false,
+    )
 }
 
 async fn call_tool(
@@ -1936,6 +1957,14 @@ async fn call_tool(
         arguments,
         requested_status_id,
     } = prepared;
+    if requested_name == "nib_get_status" {
+        let session_id = requested_status_id
+            .as_deref()
+            .expect("nib_get_status schema requires a session id");
+        if let Err(error) = config.validate_public_session_id(session_id) {
+            return (invalid_tool_result(&requested_name, error), None);
+        }
+    }
     let runtime = match run_mcp_session_io(|| resolve_mcp_runtime(project_root, config)) {
         Ok(runtime) => runtime,
         Err(error) => return (invalid_tool_result(&requested_name, error), None),
@@ -1979,7 +2008,7 @@ async fn call_tool(
         .with_approvals_config(&config.approvals)
         .with_session_store(runtime.session_store)
         .with_environment(&runtime.environment)
-        .with_sensitive_values(config.sensitive_values())
+        .with_sensitive_values(config.public_session_sensitive_values())
         .with_approval_handler(std::sync::Arc::new(DenyInteractiveApproval));
     if let Some(cancellation) = cancellation {
         executor = executor.with_cancellation(cancellation.clone());
@@ -2162,7 +2191,11 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{save_nib_config_full, ProfileConfig, ProfilesConfig};
+    use crate::config::{
+        load_nib_config_full, save_nib_config_full, LlmApiMode, ProfileConfig, ProfilesConfig,
+        ProviderEntry,
+    };
+    use crate::llm::test_support::serve_once;
     use std::pin::Pin;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2172,6 +2205,28 @@ mod tests {
     const MANAGED_PROCESS_FIXTURE_CHILD_ENV: &str = "NIB_TEST_MCP_PROCESS_SCOPE_CHILD";
     const MANAGED_PROCESS_FIXTURE_CHILD_TEST: &str =
         "integrations::mcp_server::tests::managed_process_scope_fixture_child";
+
+    struct EnvironmentGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     struct ManagedProcessFixture {
         store: crate::sandbox::process::ProcessScopeStore,
@@ -3375,6 +3430,123 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn status_rejects_credential_derived_identifiers_before_audit_or_reflection() {
+        const SECRET: &str = "mcp/status-secret";
+        const ENVIRONMENT_SECRET: &str = "environment-status-secret";
+        let root = tempdir().unwrap();
+        let _environment = EnvironmentGuard::set("OPENAI_API_KEY", ENVIRONMENT_SECRET);
+        let mut config = NibConfig::default();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                ..ProviderEntry::default()
+            },
+        );
+
+        for session_id in [
+            SECRET.to_string(),
+            format!("prefix-{SECRET}-suffix"),
+            "mcp%2Fstatus-secret".to_string(),
+            "bWNwL3N0YXR1cy1zZWNyZXQ=".to_string(),
+            r"mcp\/status-secret".to_string(),
+            ENVIRONMENT_SECRET.to_string(),
+            "ZW52aXJvbm1lbnQtc3RhdHVzLXNlY3JldA==".to_string(),
+        ] {
+            let response = handle_request(
+                root.path(),
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "sensitive-status",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_get_status",
+                        "arguments": {"session_id": session_id}
+                    }
+                }),
+            )
+            .await
+            .expect("sensitive status response");
+            let rendered = response.to_string();
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(
+                rendered.contains("session identifier conflicts with configured sensitive data")
+            );
+            assert!(!rendered.contains(SECRET), "{rendered}");
+            assert!(!rendered.contains("bWNwL3N0YXR1cy1zZWNyZXQ"), "{rendered}");
+            assert!(!rendered.contains(ENVIRONMENT_SECRET), "{rendered}");
+            assert!(
+                !rendered.contains("ZW52aXJvbm1lbnQtc3RhdHVzLXNlY3JldA"),
+                "{rendered}"
+            );
+        }
+
+        assert!(
+            !root.path().join(".nib").exists(),
+            "rejected status calls must not initialize profile state or create audit sessions"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn schema_validation_errors_never_reflect_environment_credentials() {
+        const SECRET: &str = "mcp/invalid-arg-secret";
+        const BASE64_SECRET: &str = "bWNwL2ludmFsaWQtYXJnLXNlY3JldA==";
+        let root = tempdir().expect("MCP project");
+        let _environment = EnvironmentGuard::set("OPENAI_API_KEY", SECRET);
+
+        for invalid_value in [
+            SECRET.to_string(),
+            r"mcp\/invalid-arg-secret".to_string(),
+            BASE64_SECRET.to_string(),
+            format!("{SECRET}\u{1b}[2J\u{202e}"),
+        ] {
+            let response = handle_request(
+                root.path(),
+                &NibConfig::default(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "invalid-arguments",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_run",
+                        "arguments": {
+                            "goal": "safe goal",
+                            "max_steps": invalid_value
+                        }
+                    }
+                }),
+            )
+            .await
+            .expect("schema error response");
+            let message = response["error"]["message"]
+                .as_str()
+                .expect("bounded validation message");
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert!(message.contains("/max_steps"), "{message}");
+            assert!(message.contains("schema constraint"), "{message}");
+            for forbidden in [
+                SECRET,
+                r"mcp\/invalid-arg-secret",
+                BASE64_SECRET,
+                "\u{1b}",
+                "\u{202e}",
+            ] {
+                assert!(!message.contains(forbidden), "{message:?}");
+            }
+            assert!(message.len() <= MAX_MCP_VALIDATION_ERROR_BYTES);
+        }
+
+        assert!(
+            !root.path().join(".nib").exists(),
+            "schema rejection must precede audit-session initialization"
+        );
+    }
+
+    #[tokio::test]
     async fn notifications_have_no_response_and_unknown_tools_are_errors() {
         let root = tempdir().unwrap();
         assert!(handle_request(
@@ -3895,6 +4067,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error() {
+        const SECRET: &str = "mcp/provider+secret";
+        const SECRET_PERCENT: &str = "mcp%2Fprovider%2Bsecret";
+        const SECRET_BASE64: &str = "bWNwL3Byb3ZpZGVyK3NlY3JldA==";
+        const REMOTE_BODY: &str = "REMOTE_MCP_PROVIDER_BODY";
+        let root = tempdir().expect("mcp llm-failure repository");
+        initialize_git_repository(root.path());
+        let (base_url, _) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            serde_json::json!({
+                "error": {
+                    "code": "invalid_api_key",
+                    "message": format!(
+                        "{REMOTE_BODY} {SECRET} {SECRET_PERCENT} {SECRET_BASE64} <red>[bold] \u{1b}[31m"
+                    )
+                }
+            })
+            .to_string(),
+        );
+        let mut config = NibConfig::default();
+        config.execution.plan_mode = false;
+        config.skills.enabled = false;
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                base_url: Some(base_url),
+                api: Some(LlmApiMode::ChatCompletions),
+                ..ProviderEntry::default()
+            },
+        );
+        save_nib_config_full(root.path(), &mut config).expect("save config");
+        let config = load_nib_config_full(root.path()).expect("reload config");
+
+        let started = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "run",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_run",
+                    "arguments": {"goal": "inspect the workspace", "max_steps": 1}
+                }
+            }),
+        )
+        .await
+        .expect("nib_run response");
+        assert_eq!(started["result"]["isError"], false, "{started}");
+        let subagent_id = started["result"]["structuredContent"]["subagent_id"]
+            .as_str()
+            .expect("subagent id")
+            .to_string();
+        let started_payload = started.to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let record = loop {
+            let record = crate::tools::delegation::get_subagent_record(root.path(), &subagent_id)
+                .expect("subagent record");
+            if record.status != "running" {
+                assert_eq!(record.status, "failed", "{record:?}");
+                break record;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("subagent did not finish: {record:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let result = record.result.as_ref().expect("typed subagent result");
+        assert_eq!(result["outcome"], "planning_failed");
+        assert_eq!(result["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(result["failure"]["class"], "authentication");
+
+        let child_store = crate::session::SessionStore::for_project(&record.worktree_path)
+            .expect("MCP child session store");
+        let child = child_store
+            .load(&record.child_session_id)
+            .expect("MCP child failure session");
+        child
+            .validate_message_sequence()
+            .expect("MCP child message sequence");
+        assert!(!child.messages.iter().any(|message| {
+            message.role == "assistant"
+                && (message.content.contains("LLM") || message.content.contains("failed"))
+        }));
+
+        let status = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": subagent_id}
+                }
+            }),
+        )
+        .await
+        .expect("status response");
+        let payload = status.to_string();
+        assert_eq!(status["result"]["isError"], false, "{status}");
+        let structured = &status["result"]["structuredContent"];
+        assert_eq!(structured["status"], "failed", "{status}");
+        assert_eq!(structured["result"]["outcome"], "planning_failed");
+        assert_eq!(structured["result"]["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(structured["result"]["failure"]["class"], "authentication");
+
+        let repeated = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "status-repeat",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": subagent_id}
+                }
+            }),
+        )
+        .await
+        .expect("repeated status response");
+        assert_eq!(repeated["result"]["isError"], false, "{repeated}");
+        assert_eq!(
+            repeated["result"]["structuredContent"],
+            status["result"]["structuredContent"]
+        );
+
+        let persisted_record = serde_json::to_string(&record).expect("subagent record JSON");
+        let persisted_session = serde_json::to_string(&child).expect("child session JSON");
+        let repeated_payload = repeated.to_string();
+        for surface in [
+            &started_payload,
+            &payload,
+            &repeated_payload,
+            &persisted_record,
+            &persisted_session,
+        ] {
+            assert!(surface.len() <= 64 * 1024, "observer payload is unbounded");
+            for forbidden in [
+                SECRET,
+                SECRET_PERCENT,
+                SECRET_BASE64,
+                REMOTE_BODY,
+                "invalid_api_key",
+                "<red>",
+                "[red]",
+                "[bold]",
+                "\u{1b}",
+                "\\u001b",
+                "\\u001B",
+            ] {
+                assert!(!surface.contains(forbidden), "found {forbidden}: {surface}");
+            }
+            assert!(surface.chars().all(|character| {
+                !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+            }));
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_tool_calls_never_create_audit_sessions() {
         let root = tempdir().unwrap();
         let invalid_params = [
@@ -3927,5 +4268,70 @@ mod tests {
             !root.path().join(".nib").exists(),
             "invalid calls must not initialize profile state or persist sessions"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn mcp_subagent_flow_accepts_a_dos_short_project_root() {
+        let root = tempdir().expect("MCP DOS-alias repository");
+        initialize_git_repository(root.path());
+        let config = save_profile_config(root.path());
+        let canonical_root = root.path().canonicalize().expect("canonical repository");
+        let short_root = crate::fs_security::windows_dos_short_path_for_test(&canonical_root)
+            .expect("DOS short project root");
+        if short_root == crate::fs_security::path_without_windows_verbatim_prefix(&canonical_root) {
+            return;
+        }
+
+        let started = handle_request(
+            &short_root,
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "dos-alias-run",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_run",
+                    "arguments": {"goal": "Return a bounded fixture response.", "max_steps": 1}
+                }
+            }),
+        )
+        .await
+        .expect("MCP subagent start response");
+        assert_eq!(started["result"]["isError"], false, "{started}");
+        let id = started["result"]["structuredContent"]["subagent_id"]
+            .as_str()
+            .expect("subagent id");
+        let record = crate::tools::delegation::get_subagent_record(&short_root, id)
+            .expect("MCP delegation record");
+        assert!(record.worktree_path.starts_with(&canonical_root));
+        assert!(!record.worktree_path.starts_with(&short_root));
+
+        let status = handle_request(
+            &short_root,
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "dos-alias-status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": id}
+                }
+            }),
+        )
+        .await
+        .expect("MCP status response");
+        assert_eq!(status["result"]["isError"], false, "{status}");
+
+        match crate::tools::delegation::resolve_subagent_cancellation(&short_root, id) {
+            crate::tools::delegation::CancelSubagentResolution::Cancelled { .. }
+            | crate::tools::delegation::CancelSubagentResolution::Terminal { .. } => {}
+            crate::tools::delegation::CancelSubagentResolution::Unresolved { error, .. } => {
+                panic!("DOS-alias MCP cancellation was unresolved: {error}")
+            }
+        }
+        crate::sandbox::worktree::Worktree::remove(&short_root, id)
+            .expect("remove MCP worktree through DOS short root");
     }
 }

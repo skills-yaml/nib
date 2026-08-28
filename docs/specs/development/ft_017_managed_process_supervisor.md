@@ -565,10 +565,29 @@ The final implementation tree passed `task fix`, `task test`, `task check`,
 `task check:all-targets TARGET=x86_64-pc-windows-msvc`. Native Windows execution and
 the exact hosted CI matrix remain open until the pushed revision completes on GitHub.
 
+## FT-019 Session Background Command Reconciliation (T032, 2026-08-26)
+
+T032 exposes durable background work to `/ps` and `/stop <task-id>` through a dedicated
+session-owned projection containing only task ID, kind, status, and timestamps. Exact
+cancellation checks the persisted job owner under the same record lock as the mutation;
+foreign and missing IDs share one unavailable result. `/stop` without an ID is a
+bounded read-only listing. These commands do not move durable workers into the
+foreground supervisor protocol or change this feature's platform containment contract.
+
 ## Remaining Implementation Plan
 
-1. Execute the native Windows Job Object and macOS group-contained tests on hosted
-   runners and design cleanup authority inaccessible to managed workers before enabling
-   either production backend.
+1. Execute the native Windows Job Object and macOS group-contained mechanism tests on
+   hosted runners while retaining the documented production rejection on both
+   platforms. Isolating cleanup authority well enough to enable production delegation
+   there is an explicit future boundary, not remaining FT-017 scope.
 2. Inspect the exact committed CI revision and reconcile FT-015/FT-016/T020 platform
    evidence, then move this spec to `done/` only after every criterion is proven.
+
+## Linux Recovery-Fixture Stabilization (2026-08-23)
+
+The abrupt-supervisor recovery fixture now waits until procfs reports the namespace root
+in the stopped state before killing the supervisor. `kill(SIGSTOP)` only confirms signal
+delivery, so the previous immediate owner kill could let parent-death cleanup win the
+test's intended recovery race under full-suite load. The production recovery path is
+unchanged. The exact focused test passed after the change, and multiple concurrent-tree
+`task check` runs subsequently passed the complete recovery suite.

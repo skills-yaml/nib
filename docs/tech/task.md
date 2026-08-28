@@ -17,6 +17,7 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
 - `task test:durable` — run detached background-task and scheduled-worker process tests
+- `task test:runtime-e2e` — run the full agent runtime end-to-end integration tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
 - `task test:updater` — run self-update and update-notification unit tests
 - `task test:doctor` — run doctor diagnosis, repair, and CLI persistence tests
@@ -25,10 +26,17 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task qualify:release-update:windows` — run the equivalent qualification against a
   supplied development bootstrap artifact on a native Windows release runner
 - `task test:windows-pseudoterminal` — prove the bounded inbox Windows headless-console
-  adapter creates an interactive child terminal and preserves output and exit status
+  adapter creates an interactive child terminal, accepts bounded delayed input,
+  preserves output and exit status, restores console modes, and reaps timed-out trees
 - `task test:installers` — run installer and release-transaction integration tests
+- `task test:interactive` — run deterministic plain/TUI reducer, composer, history,
+  transcript, dock, and redirected-CLI tests without a pseudo-terminal or network
+- `task test:llm-conformance` — run the shared credential-free complete/stream adapter
+  conformance matrix without provider credentials or external provider calls
 - `task test:llm-live:offline` — run the credential-free live-harness parsers, planner,
   matrix, report, and CI-contract tests
+- `task test:llm-release` — run deterministic Task-contract and exact-identity parser
+  tests for the T021 optimized-binary qualification harness
 - `task test:llm-live:catalog` — discover and reconcile a provider's live model catalog
 - `task test:llm-live:canary` — run paid qualification against provider defaults and
   the approved OpenRouter allowlist
@@ -39,9 +47,17 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
 - `task coverage` — enforce the configured runtime line-coverage threshold
 - `task build` — build the locked optimized release binary (optionally for `TARGET`)
-- `task smoke:interactive` — exercise the built Linux release binary through automatic
-  and explicit plain/TUI selection, compatibility aliases, a pseudo-terminal, terminal
-  restoration, and the unchanged one-shot command
+- `task qualify:llm-release` — build the optimized binary with the checkout's exact
+  HEAD identity, exercise the credential-free T021 release path against localhost
+  fixtures, and write its executable SHA-256 evidence under `target/release-qualification/`
+- `task smoke:interactive` — run the deterministic interaction target, build the
+  optimized binary, then exercise isolated Mock-only redirected and real native Unix PTY
+  flows with hard timeouts, privacy assertions, and exact terminal restoration
+- `task smoke:interactive:binary` — rerun only those offline redirected/PTY mechanics
+  against the already-built optimized binary on Linux or macOS
+- `task smoke:interactive:windows:binary` — drive the already-built optimized
+  `nib.exe` through inbox Windows ConPTY and `TERM=dumb` fallback with bounded input,
+  privacy checks, and before/after console-mode evidence
 - `task smoke:managed-process` — build the Linux release binary, kill its active owner,
   and verify a detached supervised descendant is reaped before terminal publication
 - `task fix` — apply Rust formatting and Clippy fixes

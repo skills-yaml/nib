@@ -7,17 +7,22 @@ use reqwest::Url;
 use std::sync::Arc;
 
 use super::anthropic::{normalize_anthropic_endpoint, AnthropicClient};
+use super::compatible::{MetaProvider, OpenAiProvider, OpenRouterProvider, XaiProvider};
 use super::gemini::{normalize_gemini_api_root, GeminiClient};
 use super::mock::MockLlmClient;
-use super::openai::OpenAiCompatClient;
-use super::registry::{provider_descriptor, ProviderDescriptor, ProviderImplementation, PROVIDERS};
-use super::responses::OpenAiResponsesClient;
+use super::registry::{
+    provider_descriptor, ProviderDescriptor, ProviderImplementation, ProviderTransport,
+    ProviderTransportCapabilities, PROVIDERS,
+};
 use super::LlmClient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderDiagnostics {
     pub provider: String,
     pub model: String,
+    pub implementation: ProviderImplementation,
+    pub transport: ProviderTransport,
+    pub capabilities: ProviderTransportCapabilities,
     pub api_mode: String,
     pub endpoint_path: String,
     pub reasoning_effort: String,
@@ -40,6 +45,12 @@ impl ProviderDiagnostics {
         let mut lines = vec![
             format!("Provider: {}", render_value(&self.provider)),
             format!("Model: {}", render_value(&self.model)),
+            format!("Implementation: {}", self.implementation),
+            format!("Transport: {}", self.transport),
+            format!(
+                "Adapter capabilities: {}",
+                self.capabilities.diagnostic_summary()
+            ),
             format!("API mode: {}", render_value(&self.api_mode)),
             format!("Endpoint path: {}", render_value(&self.endpoint_path)),
             format!("Reasoning effort: {}", render_value(&self.reasoning_effort)),
@@ -52,13 +63,11 @@ impl ProviderDiagnostics {
 }
 
 pub fn redact_sensitive_value(value: &str, sensitive_values: &[String]) -> String {
-    if sensitive_values.iter().any(|sensitive| {
-        [sensitive.as_str(), sensitive.trim()]
-            .into_iter()
-            .any(|candidate| {
-                !candidate.is_empty() && contains_at_any_percent_decode_stage(value, candidate)
-            })
-    }) {
+    let redacted = crate::tools::executor::redact_text_with_encoded_sensitive_values(
+        value,
+        sensitive_values.iter().cloned(),
+    );
+    if redacted != value {
         "<redacted>".to_string()
     } else {
         value.to_string()
@@ -95,7 +104,7 @@ pub(crate) fn provider_error_sensitive_values(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ResolvedAdapter {
+pub(crate) enum ResolvedAdapter {
     Mock,
     Anthropic {
         endpoint: String,
@@ -110,8 +119,34 @@ enum ResolvedAdapter {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedProviderConfiguration {
+    adapter: ResolvedAdapter,
+    transport: ProviderTransport,
+    api_mode: String,
+    endpoint_path: String,
+    warning: Option<String>,
+}
+
+pub(crate) type ProviderConfigParser = fn(
+    &'static ProviderDescriptor,
+    Option<&ProviderEntry>,
+    &str,
+) -> Result<ParsedProviderConfiguration, String>;
+
+pub(crate) struct ProviderConstruction {
+    adapter: ResolvedAdapter,
+    model: String,
+    credentials: Vec<String>,
+    diagnostic_secrets: Vec<String>,
+    http_client: Option<reqwest::Client>,
+}
+
+pub(crate) type ProviderConstructor =
+    fn(ProviderConstruction) -> Result<Arc<dyn LlmClient>, String>;
+
+#[derive(Debug, Clone)]
 struct ResolvedProvider {
+    descriptor: &'static ProviderDescriptor,
     diagnostics: ProviderDiagnostics,
     adapter: ResolvedAdapter,
 }
@@ -120,10 +155,30 @@ pub fn create_client(
     llm: &LlmConfig,
     provider_override: Option<&str>,
 ) -> Result<Arc<dyn LlmClient>, String> {
-    create_client_with_sensitive_values(
+    create_client_with_sensitive_values_and_http_client(
         llm,
         provider_override,
         &llm_configured_sensitive_values(llm),
+        None,
+    )
+}
+
+/// Creates an OpenAI-compatible production adapter over a caller-reviewed HTTP client.
+///
+/// This is used by credentialed qualification after it has resolved, rejected, and
+/// pinned a configured endpoint origin. Ordinary runtime callers should use
+/// [`create_client`]. Non-OpenAI-compatible providers reject this override rather than
+/// silently dropping its transport protections.
+pub fn create_client_with_http_client(
+    llm: &LlmConfig,
+    provider_override: Option<&str>,
+    client: reqwest::Client,
+) -> Result<Arc<dyn LlmClient>, String> {
+    create_client_with_sensitive_values_and_http_client(
+        llm,
+        provider_override,
+        &llm_configured_sensitive_values(llm),
+        Some(client),
     )
 }
 
@@ -132,62 +187,46 @@ pub(crate) fn create_client_with_sensitive_values(
     provider_override: Option<&str>,
     configured_sensitive_values: &[String],
 ) -> Result<Arc<dyn LlmClient>, String> {
+    create_client_with_sensitive_values_and_http_client(
+        llm,
+        provider_override,
+        configured_sensitive_values,
+        None,
+    )
+}
+
+fn create_client_with_sensitive_values_and_http_client(
+    llm: &LlmConfig,
+    provider_override: Option<&str>,
+    configured_sensitive_values: &[String],
+    http_client: Option<reqwest::Client>,
+) -> Result<Arc<dyn LlmClient>, String> {
     let resolved = resolve_provider(llm, provider_override)?;
     let provider = resolved.diagnostics.provider.clone();
     let model = resolved.diagnostics.model.clone();
+    let implementation = resolved.diagnostics.implementation;
 
-    if resolved.adapter == ResolvedAdapter::Mock {
-        return Ok(Arc::new(MockLlmClient::new()));
+    if http_client.is_some() && !resolved.descriptor.is_openai_compatible() {
+        return Err(
+            "reviewed HTTP client override requires an OpenAI-compatible provider".to_string(),
+        );
     }
+
     let entry = llm.get_provider(Some(&provider));
-    let credentials = require_credentials(provider_credentials(entry, &provider), &provider)?;
+    let credentials = if implementation == ProviderImplementation::Mock {
+        Vec::new()
+    } else {
+        require_credentials(provider_credentials(entry, &provider), &provider)?
+    };
     let diagnostic_secrets =
         provider_error_sensitive_values(configured_sensitive_values.iter().cloned());
-
-    let client: Arc<dyn LlmClient> = match resolved.adapter {
-        ResolvedAdapter::Mock => unreachable!("mock returned before credential resolution"),
-        ResolvedAdapter::Anthropic { endpoint } => {
-            Arc::new(AnthropicClient::configured_with_diagnostic_secrets(
-                model,
-                credentials,
-                diagnostic_secrets,
-                endpoint,
-            )?)
-        }
-        ResolvedAdapter::Google { api_root } => {
-            Arc::new(GeminiClient::configured_with_diagnostic_secrets(
-                model,
-                credentials,
-                diagnostic_secrets,
-                api_root,
-            )?)
-        }
-        ResolvedAdapter::OpenAiCompatible {
-            api_mode: LlmApiMode::ChatCompletions,
-            endpoint,
-            reasoning_effort,
-        } => Arc::new(OpenAiCompatClient::configured_with_diagnostic_secrets(
-            provider,
-            model,
-            credentials,
-            diagnostic_secrets,
-            endpoint,
-            reasoning_effort,
-        )),
-        ResolvedAdapter::OpenAiCompatible {
-            api_mode: LlmApiMode::Responses,
-            endpoint,
-            reasoning_effort,
-        } => Arc::new(OpenAiResponsesClient::configured_with_diagnostic_secrets(
-            provider,
-            model,
-            credentials,
-            diagnostic_secrets,
-            endpoint,
-            reasoning_effort,
-        )),
-    };
-    Ok(client)
+    (resolved.descriptor.constructor)(ProviderConstruction {
+        adapter: resolved.adapter,
+        model,
+        credentials,
+        diagnostic_secrets,
+        http_client,
+    })
 }
 
 pub fn provider_diagnostics(
@@ -225,9 +264,19 @@ fn resolve_provider(
     }
 
     let entry = llm.get_provider(Some(&provider));
-    if !descriptor.is_openai_compatible()
-        && entry.is_some_and(|entry| entry.api.is_some() || entry.reasoning_effort.is_some())
+    if descriptor.implementation == ProviderImplementation::Mock
+        && entry.is_some_and(|entry| {
+            entry.api_key.is_some() || !entry.api_keys.is_empty() || entry.base_url.is_some()
+        })
     {
+        return Err(
+            "LLM provider 'mock' does not consume api_key, api_keys, or base_url".to_string(),
+        );
+    }
+    if entry.is_some_and(|entry| {
+        (entry.api.is_some() && !descriptor.supports_api_mode_selection())
+            || (entry.reasoning_effort.is_some() && !descriptor.supports_configurable_reasoning())
+    }) {
         return Err(format!(
             "LLM provider '{provider}' does not consume api or reasoning_effort"
         ));
@@ -241,75 +290,229 @@ fn resolve_provider(
         |effort| effort.to_string(),
     );
 
-    let (adapter, api_mode, endpoint_path, warning) = match descriptor.implementation {
-        ProviderImplementation::Mock => (
-            ResolvedAdapter::Mock,
-            "local".to_string(),
-            "local".to_string(),
-            None,
-        ),
-        ProviderImplementation::Anthropic => {
-            let configured = resolved_native_base_url(descriptor, entry)?;
-            let endpoint = normalize_anthropic_endpoint(configured)?;
-            let path = Url::parse(&endpoint)
-                .map_err(|_| "resolved Anthropic endpoint is invalid".to_string())?
-                .path()
-                .to_string();
-            (
-                ResolvedAdapter::Anthropic { endpoint },
-                "provider_native".to_string(),
-                path,
-                None,
+    let parsed = (descriptor.config_parser)(descriptor, entry, &model)?;
+    let capabilities = descriptor
+        .capabilities_for(parsed.transport)
+        .ok_or_else(|| {
+            format!(
+                "LLM provider '{provider}' registry does not declare transport '{}'",
+                parsed.transport
             )
-        }
-        ProviderImplementation::Gemini => {
-            let configured = resolved_native_base_url(descriptor, entry)?;
-            let api_root = normalize_gemini_api_root(configured)?;
-            let path = format!(
-                "{}/models/{model}:generateContent",
-                Url::parse(&api_root)
-                    .map_err(|_| "resolved Gemini API root is invalid".to_string())?
-                    .path()
-                    .trim_end_matches('/')
-            );
-            (
-                ResolvedAdapter::Google { api_root },
-                "provider_native".to_string(),
-                path,
-                None,
-            )
-        }
-        ProviderImplementation::OpenAi
-        | ProviderImplementation::Xai
-        | ProviderImplementation::OpenRouter
-        | ProviderImplementation::Meta => {
-            let api_mode = entry.map_or(LlmApiMode::default(), ProviderEntry::resolved_api_mode);
-            let endpoint = resolve_openai_compatible_endpoint(&provider, entry, api_mode)?;
-            let warning = chat_compatibility_warning(api_mode, endpoint.canonical_openai);
-            (
-                ResolvedAdapter::OpenAiCompatible {
-                    api_mode,
-                    endpoint: endpoint.url,
-                    reasoning_effort: entry.and_then(|entry| entry.reasoning_effort),
-                },
-                api_mode.to_string(),
-                endpoint.path,
-                warning,
-            )
-        }
-    };
+        })?;
 
     Ok(ResolvedProvider {
+        descriptor,
         diagnostics: ProviderDiagnostics {
             provider,
             model,
-            api_mode,
-            endpoint_path,
+            implementation: descriptor.implementation,
+            transport: parsed.transport,
+            capabilities,
+            api_mode: parsed.api_mode,
+            endpoint_path: parsed.endpoint_path,
             reasoning_effort: reasoning_label,
-            warning,
+            warning: parsed.warning,
         },
-        adapter,
+        adapter: parsed.adapter,
     })
+}
+
+pub(crate) fn parse_mock_provider_config(
+    _descriptor: &'static ProviderDescriptor,
+    _entry: Option<&ProviderEntry>,
+    _model: &str,
+) -> Result<ParsedProviderConfiguration, String> {
+    Ok(ParsedProviderConfiguration {
+        adapter: ResolvedAdapter::Mock,
+        transport: ProviderTransport::Local,
+        api_mode: "local".to_string(),
+        endpoint_path: "local".to_string(),
+        warning: None,
+    })
+}
+
+pub(crate) fn parse_anthropic_provider_config(
+    descriptor: &'static ProviderDescriptor,
+    entry: Option<&ProviderEntry>,
+    _model: &str,
+) -> Result<ParsedProviderConfiguration, String> {
+    let configured = resolved_native_base_url(descriptor, entry)?;
+    let endpoint = normalize_anthropic_endpoint(configured)?;
+    let path = Url::parse(&endpoint)
+        .map_err(|_| "resolved Anthropic endpoint is invalid".to_string())?
+        .path()
+        .to_string();
+    Ok(ParsedProviderConfiguration {
+        adapter: ResolvedAdapter::Anthropic { endpoint },
+        transport: ProviderTransport::AnthropicMessages,
+        api_mode: "provider_native".to_string(),
+        endpoint_path: path,
+        warning: None,
+    })
+}
+
+pub(crate) fn parse_gemini_provider_config(
+    descriptor: &'static ProviderDescriptor,
+    entry: Option<&ProviderEntry>,
+    model: &str,
+) -> Result<ParsedProviderConfiguration, String> {
+    let configured = resolved_native_base_url(descriptor, entry)?;
+    let api_root = normalize_gemini_api_root(configured)?;
+    let path = format!(
+        "{}/models/{model}:generateContent",
+        Url::parse(&api_root)
+            .map_err(|_| "resolved Gemini API root is invalid".to_string())?
+            .path()
+            .trim_end_matches('/')
+    );
+    Ok(ParsedProviderConfiguration {
+        adapter: ResolvedAdapter::Google { api_root },
+        transport: ProviderTransport::GeminiGenerateContent,
+        api_mode: "provider_native".to_string(),
+        endpoint_path: path,
+        warning: None,
+    })
+}
+
+fn parse_openai_compatible_provider_config(
+    descriptor: &'static ProviderDescriptor,
+    entry: Option<&ProviderEntry>,
+) -> Result<ParsedProviderConfiguration, String> {
+    let api_mode = entry.map_or(LlmApiMode::default(), ProviderEntry::resolved_api_mode);
+    let endpoint = resolve_openai_compatible_endpoint(descriptor.id, entry, api_mode)?;
+    Ok(ParsedProviderConfiguration {
+        adapter: ResolvedAdapter::OpenAiCompatible {
+            api_mode,
+            endpoint: endpoint.url,
+            reasoning_effort: entry.and_then(|entry| entry.reasoning_effort),
+        },
+        transport: ProviderTransport::from_api_mode(api_mode),
+        api_mode: api_mode.to_string(),
+        endpoint_path: endpoint.path,
+        warning: chat_compatibility_warning(api_mode, endpoint.canonical_openai),
+    })
+}
+
+macro_rules! compatible_config_parser {
+    ($name:ident) => {
+        pub(crate) fn $name(
+            descriptor: &'static ProviderDescriptor,
+            entry: Option<&ProviderEntry>,
+            _model: &str,
+        ) -> Result<ParsedProviderConfiguration, String> {
+            parse_openai_compatible_provider_config(descriptor, entry)
+        }
+    };
+}
+
+compatible_config_parser!(parse_openai_provider_config);
+compatible_config_parser!(parse_xai_provider_config);
+compatible_config_parser!(parse_openrouter_provider_config);
+compatible_config_parser!(parse_meta_provider_config);
+
+type CompatibleConstructionParts = (
+    String,
+    Vec<String>,
+    Vec<String>,
+    String,
+    Option<ReasoningEffort>,
+    LlmApiMode,
+    Option<reqwest::Client>,
+);
+
+fn compatible_construction_parts(
+    construction: ProviderConstruction,
+) -> Result<CompatibleConstructionParts, String> {
+    let ResolvedAdapter::OpenAiCompatible {
+        api_mode,
+        endpoint,
+        reasoning_effort,
+    } = construction.adapter
+    else {
+        return Err("provider constructor received an incompatible resolved adapter".to_string());
+    };
+    Ok((
+        construction.model,
+        construction.credentials,
+        construction.diagnostic_secrets,
+        endpoint,
+        reasoning_effort,
+        api_mode,
+        construction.http_client,
+    ))
+}
+
+macro_rules! compatible_constructor {
+    ($name:ident, $provider:ty) => {
+        pub(crate) fn $name(
+            construction: ProviderConstruction,
+        ) -> Result<Arc<dyn LlmClient>, String> {
+            let (model, credentials, secrets, endpoint, reasoning, api_mode, http_client) =
+                compatible_construction_parts(construction)?;
+            Ok(Arc::new(<$provider>::configured(
+                model,
+                credentials,
+                secrets,
+                endpoint,
+                reasoning,
+                api_mode,
+                http_client,
+            )))
+        }
+    };
+}
+
+compatible_constructor!(construct_openai_provider, OpenAiProvider);
+compatible_constructor!(construct_xai_provider, XaiProvider);
+compatible_constructor!(construct_openrouter_provider, OpenRouterProvider);
+compatible_constructor!(construct_meta_provider, MetaProvider);
+
+pub(crate) fn construct_anthropic_provider(
+    construction: ProviderConstruction,
+) -> Result<Arc<dyn LlmClient>, String> {
+    let ResolvedAdapter::Anthropic { endpoint } = construction.adapter else {
+        return Err("Anthropic constructor received an incompatible resolved adapter".to_string());
+    };
+    if construction.http_client.is_some() {
+        return Err("Anthropic constructor does not accept a reviewed HTTP client".to_string());
+    }
+    Ok(Arc::new(
+        AnthropicClient::configured_with_diagnostic_secrets(
+            construction.model,
+            construction.credentials,
+            construction.diagnostic_secrets,
+            endpoint,
+        )?,
+    ))
+}
+
+pub(crate) fn construct_gemini_provider(
+    construction: ProviderConstruction,
+) -> Result<Arc<dyn LlmClient>, String> {
+    let ResolvedAdapter::Google { api_root } = construction.adapter else {
+        return Err("Gemini constructor received an incompatible resolved adapter".to_string());
+    };
+    if construction.http_client.is_some() {
+        return Err("Gemini constructor does not accept a reviewed HTTP client".to_string());
+    }
+    Ok(Arc::new(GeminiClient::configured_with_diagnostic_secrets(
+        construction.model,
+        construction.credentials,
+        construction.diagnostic_secrets,
+        api_root,
+    )?))
+}
+
+pub(crate) fn construct_mock_provider(
+    construction: ProviderConstruction,
+) -> Result<Arc<dyn LlmClient>, String> {
+    if construction.adapter != ResolvedAdapter::Mock
+        || !construction.credentials.is_empty()
+        || construction.http_client.is_some()
+    {
+        return Err("Mock constructor received incompatible provider configuration".to_string());
+    }
+    Ok(Arc::new(MockLlmClient::new()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,38 +635,6 @@ fn terminal_api_modes(mut path: &str) -> Vec<LlmApiMode> {
             .expect("terminal mode suffix");
     }
     modes
-}
-
-fn contains_at_any_percent_decode_stage(value: &str, needle: &str) -> bool {
-    let Some(needle_stages) = percent_decode_stages(needle) else {
-        return true;
-    };
-    let Some(value_stages) = percent_decode_stages(value) else {
-        return true;
-    };
-    value_stages.iter().any(|value_stage| {
-        needle_stages
-            .iter()
-            .any(|needle_stage| !needle_stage.is_empty() && value_stage.contains(needle_stage))
-    })
-}
-
-fn percent_decode_stages(value: &str) -> Option<Vec<String>> {
-    const MAX_PERCENT_DECODE_PASSES: usize = 8;
-
-    let mut stages = vec![value.to_string()];
-    let mut passes = 0;
-    loop {
-        let next = percent_decode_once(stages.last().expect("decode stage"));
-        if stages.last().is_some_and(|current| current == &next) {
-            return Some(stages);
-        }
-        if passes == MAX_PERCENT_DECODE_PASSES {
-            return None;
-        }
-        stages.push(next);
-        passes += 1;
-    }
 }
 
 fn percent_decode_repeated(value: &str) -> Option<String> {
@@ -715,6 +886,47 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_http_client_override_is_limited_to_openai_compatible_adapters() {
+        let reviewed = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reviewed client");
+        let meta = compatible_config(
+            "meta",
+            Some(LlmApiMode::ChatCompletions),
+            Some("https://meta.example.invalid/v1"),
+            None,
+        );
+        create_client_with_http_client(&meta, None, reviewed.clone())
+            .expect("Meta uses the production compatible adapter with reviewed transport");
+
+        for provider in ["mock", "anthropic", "google"] {
+            let (model, api_key) = if provider == "mock" {
+                ("mock-model", None)
+            } else {
+                ("fixture-model", Some("fixture-key".to_string()))
+            };
+            let config = LlmConfig {
+                active_provider: Some(provider.to_string()),
+                providers: HashMap::from([(
+                    provider.to_string(),
+                    ProviderEntry {
+                        model: model.to_string(),
+                        api_key,
+                        ..ProviderEntry::default()
+                    },
+                )]),
+                context_length: 128_000,
+            };
+            let error = create_client_with_http_client(&config, None, reviewed.clone())
+                .err()
+                .expect("native adapter must not drop reviewed transport");
+            assert!(error.contains("requires an OpenAI-compatible provider"));
+        }
+    }
+
+    #[test]
     fn factory_honors_override_and_rejects_unknown_provider() {
         let config = LlmConfig::default();
         create_client(&config, Some("mock")).expect("mock override");
@@ -722,6 +934,75 @@ mod tests {
             .err()
             .expect("unknown provider");
         assert!(error.contains("unsupported LLM provider"));
+    }
+
+    #[test]
+    fn factory_rejects_every_unused_mock_transport_or_credential_field() {
+        let entries = [
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                api_key: Some("private-primary".to_string()),
+                ..ProviderEntry::default()
+            },
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                api_keys: vec!["private-backup".to_string()],
+                ..ProviderEntry::default()
+            },
+            ProviderEntry {
+                model: "mock-model".to_string(),
+                base_url: Some("http://127.0.0.1:9".to_string()),
+                ..ProviderEntry::default()
+            },
+        ];
+        for entry in entries {
+            let config = LlmConfig {
+                active_provider: Some("mock".to_string()),
+                providers: HashMap::from([("mock".to_string(), entry)]),
+                ..LlmConfig::default()
+            };
+            for operation in ["complete", "stream"] {
+                let error = create_client(&config, None)
+                    .err()
+                    .expect("unused Mock field must fail before either request mode");
+                assert!(error.contains("does not consume api_key, api_keys, or base_url"));
+                assert!(!error.contains("private-"), "{operation}: {error}");
+            }
+            assert!(provider_diagnostics(&config, None).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_mock_consumes_model_fields_for_complete_and_stream() {
+        let config = LlmConfig {
+            active_provider: Some("mock".to_string()),
+            providers: HashMap::from([(
+                "mock".to_string(),
+                ProviderEntry {
+                    model: "mock-selected".to_string(),
+                    models: Some(vec!["mock-selected".to_string(), "mock-alt".to_string()]),
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        };
+        let diagnostics = provider_diagnostics(&config, None).expect("Mock diagnostics");
+        assert_eq!(diagnostics.model, "mock-selected");
+        let client = create_client(&config, None).expect("configured Mock client");
+        let messages = [crate::llm::LlmMessage::user("safe Mock completion")];
+        let complete = client
+            .complete(crate::llm::LlmRequest::new(&messages, None))
+            .await
+            .expect("Mock complete");
+        let streamed = client
+            .stream(crate::llm::LlmRequest::new(&messages, None))
+            .await
+            .expect("Mock stream")
+            .finish()
+            .await
+            .expect("Mock streamed completion");
+        assert_eq!(complete.content, streamed.content);
+        assert_eq!(complete.finish_reason, streamed.finish_reason);
     }
 
     #[test]
@@ -746,8 +1027,14 @@ mod tests {
     fn legacy_and_typed_modes_resolve_one_exact_endpoint() {
         let legacy = compatible_config("openai", None, None, None);
         let legacy = provider_diagnostics(&legacy, None).expect("legacy diagnostics");
+        assert_eq!(legacy.implementation, ProviderImplementation::OpenAi);
+        assert_eq!(legacy.transport, ProviderTransport::ChatCompletions);
         assert_eq!(legacy.api_mode, "chat_completions");
         assert_eq!(legacy.endpoint_path, "/v1/chat/completions");
+        assert_eq!(
+            legacy.capabilities.reasoning,
+            super::super::registry::ProviderReasoningSupport::ConfigurableEffort
+        );
 
         let responses = compatible_config(
             "openai",
@@ -757,10 +1044,49 @@ mod tests {
         );
         create_client(&responses, None).expect("Responses client construction");
         let responses = provider_diagnostics(&responses, None).expect("Responses diagnostics");
+        assert_eq!(responses.implementation, ProviderImplementation::OpenAi);
+        assert_eq!(responses.transport, ProviderTransport::Responses);
         assert_eq!(responses.api_mode, "responses");
         assert_eq!(responses.endpoint_path, "/v1/responses");
         assert_eq!(responses.reasoning_effort, "high");
         assert_eq!(responses.warning, None);
+    }
+
+    #[test]
+    fn factory_diagnostics_select_native_registry_capabilities() {
+        for (provider, implementation, transport) in [
+            (
+                "anthropic",
+                ProviderImplementation::Anthropic,
+                ProviderTransport::AnthropicMessages,
+            ),
+            (
+                "google",
+                ProviderImplementation::Gemini,
+                ProviderTransport::GeminiGenerateContent,
+            ),
+            (
+                "mock",
+                ProviderImplementation::Mock,
+                ProviderTransport::Local,
+            ),
+        ] {
+            let config = LlmConfig {
+                active_provider: Some(provider.to_string()),
+                ..LlmConfig::default()
+            };
+            let diagnostics = provider_diagnostics(&config, None).expect("native diagnostics");
+            assert_eq!(diagnostics.implementation, implementation, "{provider}");
+            assert_eq!(diagnostics.transport, transport, "{provider}");
+            assert_eq!(
+                diagnostics.capabilities,
+                provider_descriptor(provider)
+                    .expect("registered provider")
+                    .capabilities_for(transport)
+                    .expect("registered transport"),
+                "{provider}"
+            );
+        }
     }
 
     #[test]
@@ -835,6 +1161,11 @@ mod tests {
         let lines = diagnostics.lines().join("\n");
         assert!(lines.contains("Provider: openai"));
         assert!(lines.contains("Model: fixture-model"));
+        assert!(lines.contains("Implementation: openai"));
+        assert!(lines.contains("Transport: chat_completions"));
+        assert!(lines.contains(
+            "Adapter capabilities: complete=true, stream=true, tools=true, tool_continuation=true, parallel_tools=true, reasoning=configurable_effort, endpoint_shape=api_root_or_transport_endpoint, terminal_form=chat_finish_reason, refusal_form=chat_message, in_band_error_form=chat_error_envelope, retry_statuses=408/425/429/500/502/503/504, retry_after_statuses=429/503, credential_rotation_statuses=429"
+        ));
         assert!(lines.contains("API mode: chat_completions"));
         assert!(lines.contains("Endpoint path: /v1/chat/completions"));
         assert!(lines.contains("Reasoning effort: medium"));
@@ -871,6 +1202,20 @@ mod tests {
             .join("\n");
         assert!(lines.contains("Model: <redacted>"));
         assert!(!lines.contains("fixture-key"));
+
+        for (model, secret) in [
+            (r#"active\/credential"#, "active/credential"),
+            ("Zm9v", "foo"),
+        ] {
+            let mut config = compatible_config("openai", None, None, None);
+            config.providers.get_mut("openai").unwrap().model = model.to_string();
+            let lines = provider_diagnostics(&config, None)
+                .expect("encoded provider diagnostics")
+                .redacted_lines(&[secret.to_string()])
+                .join("\n");
+            assert!(lines.contains("Model: <redacted>"), "{lines}");
+            assert!(!lines.contains(model), "{lines}");
+        }
     }
 
     #[test]

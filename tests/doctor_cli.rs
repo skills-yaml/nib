@@ -147,6 +147,11 @@ fn doctor_cli_diagnoses_and_fixes_canonical_openai_chat_transport() {
         String::from_utf8_lossy(&repair.stderr)
     );
     assert!(repair_stdout.contains("FIXED (OpenAI now uses Responses)"));
+    assert!(repair_stdout.contains("Implementation: openai"));
+    assert!(repair_stdout.contains("Transport: responses"));
+    assert!(repair_stdout.contains(
+        "Adapter capabilities: complete=true, stream=true, tools=true, tool_continuation=true, parallel_tools=true, reasoning=configurable_effort, endpoint_shape=api_root_or_transport_endpoint, terminal_form=responses_status, refusal_form=responses_output_item, in_band_error_form=responses_error_event, retry_statuses=408/425/429/500/502/503/504, retry_after_statuses=429/503, credential_rotation_statuses=429"
+    ));
     assert!(repair_stdout.contains("API mode: responses"));
     assert!(repair_stdout.contains("Endpoint path: /v1/responses"));
     assert!(!repair_stdout.contains("doctor-cli-secret"));

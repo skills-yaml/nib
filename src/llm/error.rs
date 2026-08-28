@@ -1,5 +1,5 @@
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt;
 
@@ -9,22 +9,43 @@ const MAX_MODEL_BYTES: usize = 512;
 const MAX_MESSAGE_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
+/// Copies a response request-ID header only after bounding the remote value.
+///
+/// Provider adapters remain responsible for selecting their exact documented
+/// header. The returned value must still pass through `LlmError::with_request_id`
+/// for syntax validation and sensitive-value redaction.
+pub(crate) fn bounded_request_id_header(
+    value: Option<&reqwest::header::HeaderValue>,
+) -> Option<String> {
+    let value = value?;
+    if value.as_bytes().len() > MAX_REQUEST_ID_BYTES {
+        return None;
+    }
+    value.to_str().ok().map(str::to_owned)
+}
+
 #[derive(Clone)]
 pub(crate) struct LlmErrorContext {
     provider: String,
     transport: String,
     model: Option<String>,
     sensitive_values: Vec<String>,
+    retry_attempts: crate::llm::RetryAttemptMetadata,
 }
 
 impl fmt::Debug for LlmErrorContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LlmErrorContext")
-            .field("provider", &self.provider)
-            .field("transport", &self.transport)
-            .field("model", &self.model)
+            .field("provider_bytes", &self.provider.len())
+            .field("transport_bytes", &self.transport.len())
+            .field("has_model", &self.model.is_some())
+            .field(
+                "model_bytes",
+                &self.model.as_ref().map_or(0, std::string::String::len),
+            )
             .field("sensitive_value_count", &self.sensitive_values.len())
+            .field("retry_attempts", &self.retry_attempts)
             .finish()
     }
 }
@@ -35,12 +56,16 @@ impl LlmErrorContext {
         transport: impl Into<String>,
         model: Option<String>,
         sensitive_values: Vec<String>,
+        retry_attempts: crate::llm::RetryAttemptMetadata,
     ) -> Self {
+        let provider = provider.into();
+        let transport = transport.into();
         Self {
-            provider: provider.into(),
-            transport: transport.into(),
-            model,
+            provider: sanitize(&provider, &sensitive_values, MAX_PROVIDER_BYTES),
+            transport: sanitize(&transport, &sensitive_values, MAX_TRANSPORT_BYTES),
+            model: model.map(|model| sanitize(&model, &sensitive_values, MAX_MODEL_BYTES)),
             sensitive_values,
+            retry_attempts,
         }
     }
 
@@ -53,6 +78,11 @@ impl LlmErrorContext {
             message,
             &self.sensitive_values,
         )
+        .with_retry_attempts(self.retry_attempts)
+    }
+
+    pub(crate) fn attach_retry_attempts(&self, error: LlmError) -> LlmError {
+        error.with_retry_attempts(self.retry_attempts)
     }
 }
 
@@ -126,7 +156,18 @@ pub enum RetryDisposition {
     NotAttempted,
     NotRetryable,
     Exhausted,
+    ExhaustedAfterCredentialRotation,
     Cancelled,
+}
+
+/// A provider-owned, documented structural fact that is safe for local control flow.
+///
+/// This value is intentionally not serialized. A stored or externally supplied error
+/// record cannot manufacture provider capability evidence; only the active adapter
+/// that decoded the provider's documented envelope can attach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProviderErrorDiscriminator {
+    DocumentedTransportIncompatibility,
 }
 
 impl RetryDisposition {
@@ -135,6 +176,7 @@ impl RetryDisposition {
             Self::NotAttempted => "not attempted",
             Self::NotRetryable => "not retryable",
             Self::Exhausted => "exhausted",
+            Self::ExhaustedAfterCredentialRotation => "exhausted after credential rotation",
             Self::Cancelled => "cancelled",
         }
     }
@@ -145,11 +187,13 @@ impl RetryDisposition {
 /// `safe_message` exists for compatibility with lower-level diagnostics and is already
 /// bounded, escaped, and redacted. User-facing surfaces should use `user_report` rather
 /// than presenting the compatibility message directly.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct LlmError {
     pub class: LlmErrorClass,
     pub phase: LlmErrorPhase,
     pub retry: RetryDisposition,
+    #[serde(default)]
+    pub attempts: crate::llm::RetryAttemptMetadata,
     pub provider: String,
     pub transport: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +210,8 @@ pub struct LlmError {
     operator_action: String,
     #[serde(skip, default)]
     safe_message: String,
+    #[serde(skip, default)]
+    provider_discriminator: Option<LlmProviderErrorDiscriminator>,
 }
 
 impl fmt::Debug for LlmError {
@@ -175,13 +221,23 @@ impl fmt::Debug for LlmError {
             .field("class", &self.class)
             .field("phase", &self.phase)
             .field("retry", &self.retry)
-            .field("provider", &self.provider)
-            .field("transport", &self.transport)
-            .field("model", &self.model)
+            .field("attempts", &self.attempts)
+            .field("provider_bytes", &self.provider.len())
+            .field("transport_bytes", &self.transport.len())
+            .field("has_model", &self.model.is_some())
+            .field(
+                "model_bytes",
+                &self.model.as_ref().map_or(0, std::string::String::len),
+            )
             .field("http_status", &self.http_status)
             .field("retry_after_seconds", &self.retry_after_seconds)
-            .field("request_id", &self.request_id)
+            .field("has_request_id", &self.request_id.is_some())
+            .field(
+                "request_id_bytes",
+                &self.request_id.as_ref().map_or(0, std::string::String::len),
+            )
             .field("incident_code", &self.incident_code())
+            .field("provider_discriminator", &self.provider_discriminator)
             .field("safe_message_bytes", &self.safe_message.len())
             .finish()
     }
@@ -218,13 +274,27 @@ impl LlmErrorPattern for char {
 }
 
 /// Request metadata sanitized into a provider-neutral LLM failure.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct LlmErrorMetadata<'a> {
     provider: &'a str,
     transport: &'a str,
     model: Option<&'a str>,
     http_status: Option<u16>,
     sensitive_values: &'a [String],
+}
+
+impl fmt::Debug for LlmErrorMetadata<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LlmErrorMetadata")
+            .field("provider_bytes", &self.provider.len())
+            .field("transport_bytes", &self.transport.len())
+            .field("has_model", &self.model.is_some())
+            .field("model_bytes", &self.model.map_or(0, str::len))
+            .field("http_status", &self.http_status)
+            .field("sensitive_value_count", &self.sensitive_values.len())
+            .finish()
+    }
 }
 
 impl<'a> LlmErrorMetadata<'a> {
@@ -297,6 +367,7 @@ impl LlmError {
             class,
             phase,
             retry,
+            attempts: crate::llm::RetryAttemptMetadata::no_network_attempt(),
             provider: sanitize(
                 metadata.provider,
                 metadata.sensitive_values,
@@ -320,6 +391,7 @@ impl LlmError {
                 metadata.sensitive_values,
                 MAX_MESSAGE_BYTES,
             ),
+            provider_discriminator: None,
         }
     }
 
@@ -384,7 +456,7 @@ impl LlmError {
         Self::new(
             LlmErrorClass::Transport,
             LlmErrorPhase::Connect,
-            RetryDisposition::Exhausted,
+            RetryDisposition::NotAttempted,
             LlmErrorMetadata::new(provider, transport, model, None, sensitive_values),
             safe_message,
         )
@@ -415,17 +487,11 @@ impl LlmError {
         safe_message: impl AsRef<str>,
         sensitive_values: &[String],
     ) -> Self {
-        let structural_code = structural_code(structured_error);
-        let class = classify_http(provider, status, structural_code);
-        let retry = if is_retryable_status(provider, status) {
-            RetryDisposition::Exhausted
-        } else {
-            RetryDisposition::NotRetryable
-        };
+        let class = classify_http(provider, transport, status, structured_error);
         Self::new(
             class,
             LlmErrorPhase::HttpResponse,
-            retry,
+            RetryDisposition::NotAttempted,
             LlmErrorMetadata::new(
                 provider,
                 transport,
@@ -446,8 +512,7 @@ impl LlmError {
         safe_message: impl AsRef<str>,
         sensitive_values: &[String],
     ) -> Self {
-        let structural_code = structural_code(structured_error);
-        let class = classify_structural_code(provider, structural_code)
+        let class = classify_structural_error(provider, transport, structured_error)
             .unwrap_or(LlmErrorClass::ProviderRejected);
         Self::new(
             class,
@@ -473,15 +538,34 @@ impl LlmError {
             &self.safe_message,
         );
         redacted.retry_after_seconds = self.retry_after_seconds.filter(|value| *value <= 30);
+        redacted.attempts = self.attempts;
+        redacted.class = normalize_retry_backed_class(redacted.class, redacted.attempts);
+        redacted.code = incident_code_for(redacted.class).to_string();
+        redacted.operator_action = action_for(redacted.class).to_string();
         redacted.request_id = self
             .request_id
             .as_deref()
             .and_then(|request_id| validated_request_id(request_id, sensitive_values));
+        redacted.provider_discriminator = self.provider_discriminator;
         redacted
     }
 
     pub fn with_retry_after_seconds(mut self, seconds: u64) -> Self {
         self.retry_after_seconds = (seconds <= 30).then_some(seconds);
+        self
+    }
+
+    pub fn with_retry_attempts(mut self, attempts: crate::llm::RetryAttemptMetadata) -> Self {
+        self.class = normalize_retry_backed_class(self.class, attempts);
+        self.code = incident_code_for(self.class).to_string();
+        self.operator_action = action_for(self.class).to_string();
+        self.retry = if self.class == LlmErrorClass::Cancelled {
+            RetryDisposition::Cancelled
+        } else {
+            attempts.error_disposition()
+        };
+        self.retry_after_seconds = attempts.final_retry_after_seconds();
+        self.attempts = attempts;
         self
     }
 
@@ -495,6 +579,22 @@ impl LlmError {
         self
     }
 
+    /// Attaches provider-owned evidence that an exact documented structural response
+    /// proves the selected transport is incompatible.
+    ///
+    /// Provider adapters must call this only after matching their own transport's
+    /// documented envelope path and discriminator. Numeric HTTP status, a generic
+    /// invalid-request class, or provider prose is not sufficient evidence.
+    pub fn with_documented_transport_incompatibility(mut self) -> Self {
+        self.provider_discriminator =
+            Some(LlmProviderErrorDiscriminator::DocumentedTransportIncompatibility);
+        self
+    }
+
+    pub fn provider_discriminator(&self) -> Option<LlmProviderErrorDiscriminator> {
+        self.provider_discriminator
+    }
+
     pub fn incident_code(&self) -> &'static str {
         let code = incident_code_for(self.class);
         debug_assert!(self.code.is_empty() || self.code == code);
@@ -502,8 +602,10 @@ impl LlmError {
     }
 
     pub fn action(&self) -> &'static str {
-        let action = action_for(self.class);
-        debug_assert!(self.operator_action.is_empty() || self.operator_action == action);
+        let action = action_for(normalize_retry_backed_class(self.class, self.attempts));
+        debug_assert!(
+            self.operator_action.is_empty() || self.operator_action == action_for(self.class)
+        );
         action
     }
 
@@ -548,21 +650,135 @@ impl LlmError {
     }
 }
 
-fn structural_code(value: Option<&Value>) -> Option<&str> {
-    let value = value?;
-    [
-        "/response/error/code",
-        "/response/error/type",
-        "/response/error/status",
-        "/error/code",
-        "/error/type",
-        "/error/status",
-        "/code",
-        "/type",
-        "/status",
-    ]
-    .into_iter()
-    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+#[derive(Deserialize)]
+struct LlmErrorWire {
+    class: LlmErrorClass,
+    phase: LlmErrorPhase,
+    #[serde(rename = "retry")]
+    _retry: RetryDisposition,
+    #[serde(default)]
+    attempts: crate::llm::RetryAttemptMetadata,
+    provider: String,
+    transport: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    http_status: Option<u16>,
+    #[serde(default)]
+    #[serde(rename = "retry_after_seconds")]
+    _retry_after_seconds: Option<u64>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default, rename = "incident_code")]
+    _incident_code: String,
+    #[serde(default, rename = "action")]
+    _operator_action: String,
+}
+
+impl<'de> Deserialize<'de> for LlmError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = LlmErrorWire::deserialize(deserializer)?;
+        let (provider, transport) = normalize_stored_context(&wire.provider, &wire.transport);
+        let model = wire
+            .model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .map(|_| "[stored model redacted]".to_string());
+        let request_id = wire.request_id.as_deref().and_then(|request_id| {
+            if matches!(
+                (provider.as_str(), transport.as_str()),
+                ("openai", "responses" | "chat_completions") | ("anthropic", "anthropic_messages")
+            ) && request_id.starts_with("req_")
+            {
+                validated_request_id(request_id, &[])
+            } else {
+                None
+            }
+        });
+        let retry = if wire.class == LlmErrorClass::Cancelled {
+            RetryDisposition::Cancelled
+        } else {
+            wire.attempts.error_disposition()
+        };
+
+        let class = normalize_retry_backed_class(wire.class, wire.attempts);
+        Ok(Self {
+            class,
+            phase: wire.phase,
+            retry,
+            attempts: wire.attempts,
+            provider,
+            transport,
+            model,
+            http_status: wire
+                .http_status
+                .filter(|status| (100..=599).contains(status)),
+            retry_after_seconds: wire.attempts.final_retry_after_seconds(),
+            request_id,
+            code: incident_code_for(class).to_string(),
+            operator_action: action_for(class).to_string(),
+            safe_message: String::new(),
+            provider_discriminator: None,
+        })
+    }
+}
+
+fn normalize_retry_backed_class(
+    class: LlmErrorClass,
+    attempts: crate::llm::RetryAttemptMetadata,
+) -> LlmErrorClass {
+    if class == LlmErrorClass::ProviderUnavailable && !attempts.retry_exhausted() {
+        LlmErrorClass::ProviderRejected
+    } else {
+        class
+    }
+}
+
+fn normalize_stored_provider(value: &str) -> String {
+    let value = sanitize(value, &[], MAX_PROVIDER_BYTES);
+    match value.as_str() {
+        "nib" | "unknown" | "mock" | "openai" | "anthropic" | "google" | "grok" | "openrouter"
+        | "meta" => value,
+        _ => "unknown".to_string(),
+    }
+}
+
+fn normalize_stored_transport(value: &str) -> String {
+    let value = sanitize(value, &[], MAX_TRANSPORT_BYTES);
+    match value.as_str() {
+        "local"
+        | "legacy"
+        | "mock"
+        | "responses"
+        | "chat_completions"
+        | "anthropic_messages"
+        | "gemini_generate_content" => value,
+        _ => "legacy".to_string(),
+    }
+}
+
+fn normalize_stored_context(provider: &str, transport: &str) -> (String, String) {
+    let provider = normalize_stored_provider(provider);
+    let transport = normalize_stored_transport(transport);
+    if matches!(
+        (provider.as_str(), transport.as_str()),
+        ("nib", "local")
+            | ("unknown", "legacy")
+            | ("mock", "mock")
+            | (
+                "openai" | "grok" | "openrouter" | "meta",
+                "responses" | "chat_completions"
+            )
+            | ("anthropic", "anthropic_messages")
+            | ("google", "gemini_generate_content")
+    ) {
+        (provider, transport)
+    } else {
+        ("unknown".to_string(), "legacy".to_string())
+    }
 }
 
 fn incident_code_for(class: LlmErrorClass) -> &'static str {
@@ -615,44 +831,141 @@ fn action_for(class: LlmErrorClass) -> &'static str {
     }
 }
 
-fn classify_http(provider: &str, status: StatusCode, code: Option<&str>) -> LlmErrorClass {
-    if let Some(class) = classify_structural_code(provider, code) {
+fn classify_http(
+    provider: &str,
+    transport: &str,
+    status: StatusCode,
+    structured_error: Option<&Value>,
+) -> LlmErrorClass {
+    if let Some(class) = classify_structural_error(provider, transport, structured_error) {
         return class;
     }
     match status.as_u16() {
         401 | 403 => LlmErrorClass::Authentication,
         429 => LlmErrorClass::RateLimited,
-        400 | 422 => LlmErrorClass::UnsupportedRequest,
         408 | 425 | 500 | 502 | 503 | 504 | 529 => LlmErrorClass::ProviderUnavailable,
         _ => LlmErrorClass::ProviderRejected,
     }
 }
 
-fn classify_structural_code(provider: &str, code: Option<&str>) -> Option<LlmErrorClass> {
-    let code = code?;
-    let class = match code {
-        "invalid_api_key" | "authentication_error" | "UNAUTHENTICATED" => {
-            LlmErrorClass::Authentication
+fn classify_structural_error(
+    provider: &str,
+    transport: &str,
+    value: Option<&Value>,
+) -> Option<LlmErrorClass> {
+    let value = value?;
+    match (provider, transport) {
+        ("openai", "chat_completions") => {
+            classify_openai_error_object(value.get("error")?.as_object()?)
         }
-        "rate_limit_exceeded" | "rate_limit_error" => LlmErrorClass::RateLimited,
-        "insufficient_quota" | "billing_hard_limit_reached" => LlmErrorClass::QuotaOrBilling,
-        "model_not_found" => LlmErrorClass::ModelUnavailable,
-        "invalid_request_error"
-        | "invalid_request"
-        | "unsupported_parameter"
-        | "INVALID_ARGUMENT" => LlmErrorClass::UnsupportedRequest,
-        "server_error" | "overloaded_error" | "UNAVAILABLE" | "DEADLINE_EXCEEDED" => {
-            LlmErrorClass::ProviderUnavailable
-        }
-        "RESOURCE_EXHAUSTED" if provider == "google" => LlmErrorClass::RateLimited,
-        _ => return None,
-    };
-    Some(class)
+        ("openai", "responses") => classify_openai_responses_error(value),
+        ("anthropic", "anthropic_messages") => classify_anthropic_error(value),
+        ("google", "gemini_generate_content") => classify_gemini_error(value),
+        // Compatible transports own separate provider error contracts. Numeric HTTP
+        // status remains usable, but an OpenAI/Anthropic/Gemini code name is not
+        // inherited merely because a wire codec is shared.
+        ("grok" | "openrouter" | "meta", "chat_completions" | "responses") => None,
+        _ => None,
+    }
 }
 
-fn is_retryable_status(provider: &str, status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
-        || (provider == "anthropic" && status.as_u16() == 529)
+fn classify_openai_responses_error(value: &Value) -> Option<LlmErrorClass> {
+    if let Some(error) = value.get("error").and_then(Value::as_object) {
+        return classify_openai_error_object(error);
+    }
+    if value.get("type").and_then(Value::as_str) == Some("response.failed")
+        && value.pointer("/response/status").and_then(Value::as_str) == Some("failed")
+    {
+        return classify_openai_error_object(value.pointer("/response/error")?.as_object()?);
+    }
+    if value.get("type").and_then(Value::as_str) == Some("error") {
+        return classify_consistent_codes(
+            [value.get("code").and_then(Value::as_str)],
+            classify_openai_code,
+        );
+    }
+    None
+}
+
+fn classify_openai_error_object(error: &serde_json::Map<String, Value>) -> Option<LlmErrorClass> {
+    if error
+        .get("code")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+        || error
+            .get("type")
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        return None;
+    }
+    classify_consistent_codes(
+        [
+            error.get("code").and_then(Value::as_str),
+            error.get("type").and_then(Value::as_str),
+        ],
+        classify_openai_code,
+    )
+}
+
+fn classify_openai_code(code: &str) -> Option<LlmErrorClass> {
+    match code {
+        "invalid_api_key" | "authentication_error" => Some(LlmErrorClass::Authentication),
+        "rate_limit_exceeded" | "rate_limit_error" => Some(LlmErrorClass::RateLimited),
+        "insufficient_quota" | "billing_hard_limit_reached" => Some(LlmErrorClass::QuotaOrBilling),
+        "model_not_found" => Some(LlmErrorClass::ModelUnavailable),
+        "invalid_request_error" | "invalid_request" | "unsupported_parameter" => {
+            Some(LlmErrorClass::UnsupportedRequest)
+        }
+        "server_error" => Some(LlmErrorClass::ProviderUnavailable),
+        _ => None,
+    }
+}
+
+fn classify_anthropic_error(value: &Value) -> Option<LlmErrorClass> {
+    if value.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let error = value.get("error")?.as_object()?;
+    if error.get("type").is_some_and(|value| !value.is_string()) {
+        return None;
+    }
+    match error.get("type")?.as_str()? {
+        "authentication_error" | "permission_error" => Some(LlmErrorClass::Authentication),
+        "rate_limit_error" => Some(LlmErrorClass::RateLimited),
+        "billing_error" => Some(LlmErrorClass::QuotaOrBilling),
+        "not_found_error" => Some(LlmErrorClass::ModelUnavailable),
+        "invalid_request_error" | "request_too_large" => Some(LlmErrorClass::UnsupportedRequest),
+        "api_error" | "overloaded_error" => Some(LlmErrorClass::ProviderUnavailable),
+        _ => None,
+    }
+}
+
+fn classify_gemini_error(value: &Value) -> Option<LlmErrorClass> {
+    let error = value.get("error")?.as_object()?;
+    if error.get("status").is_some_and(|value| !value.is_string()) {
+        return None;
+    }
+    match error.get("status")?.as_str()? {
+        "UNAUTHENTICATED" | "PERMISSION_DENIED" => Some(LlmErrorClass::Authentication),
+        "RESOURCE_EXHAUSTED" => Some(LlmErrorClass::RateLimited),
+        "NOT_FOUND" => Some(LlmErrorClass::ModelUnavailable),
+        "INVALID_ARGUMENT" => Some(LlmErrorClass::UnsupportedRequest),
+        "UNAVAILABLE" | "DEADLINE_EXCEEDED" => Some(LlmErrorClass::ProviderUnavailable),
+        _ => None,
+    }
+}
+
+fn classify_consistent_codes<const N: usize>(
+    codes: [Option<&str>; N],
+    classify: impl Fn(&str) -> Option<LlmErrorClass>,
+) -> Option<LlmErrorClass> {
+    let mut classification = None;
+    for class in codes.into_iter().flatten().filter_map(classify) {
+        if classification.is_some_and(|current| current != class) {
+            return None;
+        }
+        classification = Some(class);
+    }
+    classification
 }
 
 fn validated_request_id(value: &str, sensitive_values: &[String]) -> Option<String> {
@@ -730,6 +1043,117 @@ mod tests {
         assert_eq!(unknown.class, LlmErrorClass::ProviderRejected);
         assert!(!unknown.user_report(None).contains("please_show_this"));
         assert!(!unknown.user_report(None).contains("secret"));
+    }
+
+    #[test]
+    fn structural_classification_is_provider_transport_and_envelope_specific() {
+        let valid = [
+            (
+                "openai",
+                "responses",
+                json!({"error": {"code": "insufficient_quota"}}),
+                LlmErrorClass::QuotaOrBilling,
+            ),
+            (
+                "anthropic",
+                "anthropic_messages",
+                json!({"type": "error", "error": {"type": "overloaded_error"}}),
+                LlmErrorClass::ProviderUnavailable,
+            ),
+            (
+                "google",
+                "gemini_generate_content",
+                json!({"error": {"status": "RESOURCE_EXHAUSTED"}}),
+                LlmErrorClass::RateLimited,
+            ),
+        ];
+        for (provider, transport, envelope, expected) in valid {
+            let error = LlmError::http(
+                provider,
+                transport,
+                Some("model"),
+                StatusCode::IM_A_TEAPOT,
+                Some(&envelope),
+                "safe",
+                &[],
+            );
+            assert_eq!(error.class, expected, "{provider}/{transport}");
+        }
+
+        let provider_negative = [
+            (
+                "anthropic",
+                "anthropic_messages",
+                json!({"error": {"code": "invalid_api_key"}}),
+            ),
+            (
+                "google",
+                "gemini_generate_content",
+                json!({"error": {"type": "overloaded_error"}}),
+            ),
+            (
+                "openrouter",
+                "responses",
+                json!({"error": {"code": "insufficient_quota"}}),
+            ),
+            (
+                "openai",
+                "anthropic_messages",
+                json!({"type": "error", "error": {"type": "authentication_error"}}),
+            ),
+            (
+                "openai",
+                "responses",
+                json!({"error": {"code": "invalid_api_key", "type": 42}}),
+            ),
+        ];
+        for (provider, transport, envelope) in provider_negative {
+            let error = LlmError::http(
+                provider,
+                transport,
+                None,
+                StatusCode::IM_A_TEAPOT,
+                Some(&envelope),
+                "safe",
+                &[],
+            );
+            assert_eq!(
+                error.class,
+                LlmErrorClass::ProviderRejected,
+                "{provider}/{transport}: {envelope}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_bad_request_statuses_are_conservative() {
+        for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+            for provider in [
+                "openai",
+                "grok",
+                "openrouter",
+                "meta",
+                "anthropic",
+                "google",
+            ] {
+                let transport = match provider {
+                    "anthropic" => "anthropic_messages",
+                    "google" => "gemini_generate_content",
+                    _ => "chat_completions",
+                };
+                let error = LlmError::http(
+                    provider,
+                    transport,
+                    Some("model"),
+                    status,
+                    None,
+                    "safe",
+                    &[],
+                );
+                assert_eq!(error.class, LlmErrorClass::ProviderRejected, "{provider}");
+                assert_eq!(error.provider_discriminator(), None);
+            }
+        }
     }
 
     #[test]
@@ -862,6 +1286,75 @@ mod tests {
         assert!(report.contains('\n'));
         assert!(report.len() <= MAX_MESSAGE_BYTES);
         assert!(!format!("{error:?}").contains(&secret));
+
+        let json_secret = "active/credential".to_string();
+        let json_escaped = r#"active\/credential"#;
+        let escaped_error = LlmError::new(
+            LlmErrorClass::Authentication,
+            LlmErrorPhase::HttpResponse,
+            RetryDisposition::NotRetryable,
+            LlmErrorMetadata::new(
+                "openai",
+                "responses",
+                Some(json_escaped),
+                Some(401),
+                std::slice::from_ref(&json_secret),
+            ),
+            "safe",
+        );
+        let escaped_report = escaped_error.user_report(None);
+        assert!(escaped_report.contains("model: [REDACTED]"));
+        assert!(!escaped_report.contains(json_escaped));
+    }
+
+    #[test]
+    fn debug_views_never_render_configured_labels_or_encoded_sensitive_values() {
+        let active = "active/credential-123".to_string();
+        let inactive = "inactive/credential-456".to_string();
+        let sentinels = [
+            active.as_str(),
+            inactive.as_str(),
+            "active%2Fcredential-123",
+            "inactive%2Fcredential-456",
+            r#"active\/credential-123"#,
+            r#"inactive\/credential-456"#,
+            "YWN0aXZlL2NyZWRlbnRpYWwtMTIz",
+            "aW5hY3RpdmUvY3JlZGVudGlhbC00NTY=",
+            "control\u{1b}sentinel",
+        ];
+        let joined = sentinels.join("|");
+        let sensitive_values = vec![active.clone(), inactive.clone()];
+        let context = LlmErrorContext::new(
+            format!("openai-{joined}"),
+            format!("responses-{joined}"),
+            Some(format!("model-{joined}")),
+            sensitive_values.clone(),
+            crate::llm::RetryAttemptMetadata::no_network_attempt(),
+        );
+        let error = LlmError::new(
+            LlmErrorClass::ProviderRejected,
+            LlmErrorPhase::HttpResponse,
+            RetryDisposition::NotRetryable,
+            LlmErrorMetadata::new(
+                &format!("openai-{joined}"),
+                &format!("responses-{joined}"),
+                Some(&format!("model-{joined}")),
+                Some(400),
+                &sensitive_values,
+            ),
+            "safe",
+        );
+
+        for debug in [format!("{context:?}"), format!("{error:?}")] {
+            for sentinel in sentinels {
+                assert!(
+                    !debug.contains(sentinel),
+                    "Debug leaked {sentinel}: {debug}"
+                );
+            }
+            assert!(!debug.contains('\u{1b}'));
+            assert!(debug.len() < 1_024);
+        }
     }
 
     #[test]
@@ -884,6 +1377,107 @@ mod tests {
     }
 
     #[test]
+    fn deserialization_normalizes_hostile_legacy_fields_and_preserves_retry_evidence() {
+        let attempts = crate::llm::RetryAttemptMetadata::new(
+            3,
+            true,
+            true,
+            Some(std::time::Duration::from_secs(12)),
+        );
+        let error = LlmError::new(
+            LlmErrorClass::UnsupportedRequest,
+            LlmErrorPhase::HttpResponse,
+            RetryDisposition::NotRetryable,
+            LlmErrorMetadata::new("openai", "responses", Some("gpt-safe"), Some(422), &[]),
+            "safe",
+        )
+        .with_retry_attempts(attempts)
+        .with_request_id("req_safe-123", &[])
+        .with_documented_transport_incompatibility();
+        let encoded = serde_json::to_string(&error).expect("serialize bounded error");
+        assert!(!encoded.contains("provider_discriminator"));
+        let restored: LlmError = serde_json::from_str(&encoded).expect("restore bounded error");
+        assert_eq!(restored.attempts, attempts);
+        assert_eq!(restored.request_id.as_deref(), Some("req_safe-123"));
+        assert_eq!(restored.retry_after_seconds, Some(12));
+        assert_eq!(restored.provider_discriminator(), None);
+
+        let raw = "legacy/credential-123";
+        let variants = [
+            raw,
+            "legacy%2Fcredential-123",
+            r#"legacy\/credential-123"#,
+            "bGVnYWN5L2NyZWRlbnRpYWwtMTIz",
+            "legacy\u{1b}credential-123",
+        ];
+        let hostile = json!({
+            "class": "authentication",
+            "phase": "http_response",
+            "retry": "exhausted",
+            "attempts": {
+                "attempts": 0,
+                "credential_rotation_occurred": false,
+                "retry_exhausted": false,
+                "final_retry_after_seconds": null
+            },
+            "provider": format!("{}{}", variants.join("|"), "x".repeat(8_192)),
+            "transport": variants.join("|"),
+            "model": format!("{}{}", variants.join("|"), "m".repeat(32_768)),
+            "http_status": 999,
+            "retry_after_seconds": 9_999,
+            "request_id": "bGVnYWN5L2NyZWRlbnRpYWwtMTIz",
+            "incident_code": format!("{}{}", variants.join("|"), "c".repeat(16_384)),
+            "action": format!("{}{}", variants.join("|"), "a".repeat(16_384))
+        });
+        let restored: LlmError =
+            serde_json::from_value(hostile).expect("hostile legacy error remains readable");
+        assert_eq!(restored.provider, "unknown");
+        assert_eq!(restored.transport, "legacy");
+        assert_eq!(restored.model.as_deref(), Some("[stored model redacted]"));
+        assert_eq!(restored.http_status, None);
+        assert_eq!(restored.retry, RetryDisposition::NotAttempted);
+        assert_eq!(restored.retry_after_seconds, None);
+        assert_eq!(restored.request_id, None);
+        assert_eq!(restored.incident_code(), "LLM-AUTH");
+
+        let wrong_header_owner = json!({
+            "class": "provider_rejected",
+            "phase": "http_response",
+            "retry": "not_attempted",
+            "attempts": {
+                "attempts": 0,
+                "credential_rotation_occurred": false,
+                "retry_exhausted": false,
+                "final_retry_after_seconds": null
+            },
+            "provider": "openai",
+            "transport": "anthropic_messages",
+            "http_status": 400,
+            "request_id": "req_wrong-transport"
+        });
+        let restored: LlmError = serde_json::from_value(wrong_header_owner)
+            .expect("cross-transport legacy error remains readable");
+        assert_eq!(restored.provider, "unknown");
+        assert_eq!(restored.transport, "legacy");
+        assert_eq!(restored.request_id, None);
+        let outputs = [
+            restored.user_report(None),
+            format!("{restored:?}"),
+            serde_json::to_string(&restored).expect("serialize normalized error"),
+        ];
+        for output in outputs {
+            assert!(output.len() < MAX_MESSAGE_BYTES + 1_024);
+            assert!(!output.contains('\u{1b}'));
+            for variant in variants {
+                assert!(
+                    !output.contains(variant),
+                    "restored output leaked {variant}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn request_ids_require_a_strict_safe_shape() {
         let error = LlmError::local(
             LlmErrorClass::ProviderRejected,
@@ -895,6 +1489,12 @@ mod tests {
         assert!(error
             .clone()
             .with_request_id("request id with spaces", &[])
+            .request_id
+            .is_none());
+
+        let short_secret = "foo".to_string();
+        assert!(error
+            .with_request_id("Zm9v", std::slice::from_ref(&short_secret))
             .request_id
             .is_none());
     }

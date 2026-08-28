@@ -363,7 +363,7 @@ fn main() {
             .with_approvals_config(&cfg.approvals)
             .with_session_store(session_store)
             .with_environment(profile.custom_env())
-            .with_sensitive_values(cfg.sensitive_values());
+            .with_sensitive_values(cfg.public_session_sensitive_values());
             let args_json = if tool == "run_terminal" {
                 serde_json::json!({"command": arg})
             } else if tool == "grep" {

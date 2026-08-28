@@ -150,9 +150,9 @@ MCP, and delegated agent loops use the same request builder and validation path.
 Both completion modes yield a provider-neutral completed-turn envelope containing
 content, terminal status, tool calls with typed provider call IDs, and an optional
 provider continuation. Streaming returns a private provider-stream handle: the agent
-loop may project sanitized content and tool deltas onto public `StreamEvent`s, while a
-separate private completion channel yields the envelope after all deltas have been
-validated. Partial or public events cannot authorize tool execution. The continuation
+loop can finish it but cannot receive raw provider deltas. After terminal validation,
+the loop derives sanitized content and tool events only from the completed envelope.
+Partial provider events cannot authorize tool execution or reach a public observer. The continuation
 is an ordered, byte/item-bounded provider value bound to the originating provider,
 model, API mode, session, and run. It is returned explicitly to the loop, consumed only
 by the matching next request, and never becomes mutable state hidden inside a shared
@@ -180,10 +180,10 @@ Implement Responses as a separate dialect within `src/llm/`:
 - Keep opaque reasoning/continuation items in memory only for the active run. Persist
   normalized tool intent, approvals, results, errors, and reconciliation evidence in
   the existing provider-neutral session format.
-- Parse Responses SSE event types inside the private provider stream, project only
-  sanitized content/tool deltas to public events, and return one private completed-turn
-  envelope while retaining current byte limits, early receiver-drop behavior,
-  cancellation, retry policy, and credential rotation.
+- Parse Responses SSE event types inside the private provider stream and return one
+  private completed-turn envelope while retaining current byte limits, early
+  receiver-drop behavior, cancellation, retry policy, and credential rotation. Public
+  content/tool events are projected from that envelope only after validation.
 
 `store: false` prevents nib from asking the API to retain application response state;
 it is not presented as a Zero Data Retention guarantee. User documentation must keep
@@ -340,9 +340,9 @@ rule with a deterministic operator-requested repair.
 - [x] Complete and streaming paths return bounded continuation explicitly, reject a
   continuation used with another provider/model/API/session/run, and prove concurrent
   sessions cannot observe or consume each other's call IDs or opaque items.
-- [x] CLI, TUI, MCP, and other public stream observers receive only sanitized projected
-  events and cannot receive provider call IDs, encrypted reasoning, or opaque
-  continuation items.
+- [x] CLI, TUI, MCP, and other public observers receive only terminal-authoritative,
+  sanitized projected events and cannot receive provider call IDs, encrypted
+  reasoning, opaque continuation items, or preterminal provider deltas.
 - [x] Planner and runtime provider failures execute no unauthorized tool, persist a
   bounded redacted failure, and reconcile the session/workload to a truthful terminal
   state.
@@ -390,6 +390,46 @@ technical reviews found no remaining source-code blockers.
 The unchecked release criterion remains blocked on committing the implementation,
 running the complete release-binary smoke against that exact SHA, and obtaining native
 Linux, macOS, and Windows CI evidence. T021 therefore remains in Development.
+
+## Release-Binary Harness Progress (2026-08-23)
+
+The remaining release path now has a repository-owned, credential-free qualification
+target without claiming that this uncommitted worktree is the required artifact:
+
+- `task qualify:llm-release` injects the checkout's full `git rev-parse HEAD` into the
+  locked optimized build and fails if `nib version` reports any other embedded commit.
+- The resulting executable exercises `--help`, `--version`, `version`, and `doctor`,
+  then runs structured planning and one correlated Responses tool-result round trip
+  through bounded `127.0.0.1` fixtures. A second fixture proves a typed, redacted
+  planning failure reaches terminal session reconciliation.
+- The harness computes the executable SHA-256 and writes bounded JSON evidence to
+  `target/release-qualification/t021-release-binary.json`, including platform,
+  architecture, source revision, embedded revision, and the exercised path names.
+- Evidence records whether the source worktree was clean and sets
+  `acceptance_eligible` to that value. The current dirty source can validate harness
+  behavior but cannot satisfy the unchecked exact committed artifact criterion.
+- Deterministic tests enforce the Task contract and exact build-identity parser. The
+  full ignored release-binary test runs only through the explicit Task target and does
+  not read provider environment credentials or make a non-local network request.
+
+The acceptance checkbox remains unchecked until this target passes for the clean,
+committed implementation revision on the required native release artifacts/CI hosts.
+
+## Local Release-Artifact Qualification (2026-08-26)
+
+`task qualify:llm-release` passed against the locked optimized Linux binary. The
+resulting bounded evidence records source revision
+`10389e0b61cf097b4a48f26afbbae75c632f0a1f`, executable SHA-256
+`54bd156293a512e179aa4675c601b440292c7cb350981555b474d43eb2daa5bd`, and successful
+help, embedded-version, doctor, structured-planning, Responses tool-result, and typed
+failure-reconciliation exercises. The sequential success/failure fixture now reloads
+the committed configuration revision before its second mutation, so the harness also
+honors the production stale-snapshot guard.
+
+This evidence deliberately reports `source_worktree_clean = false` and
+`acceptance_eligible = false`. It proves the local harness and exact built executable,
+not the required clean committed cross-platform release artifact; the acceptance
+checkbox and Development state therefore remain unchanged.
 
 ## Affected Areas
 

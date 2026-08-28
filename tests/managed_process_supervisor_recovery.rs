@@ -93,6 +93,7 @@ fn crashed_supervisor_is_recovered_only_after_pid_namespace_exit() {
         0,
         "stop the namespace root so parent-death cleanup cannot win the recovery race"
     );
+    wait_for_process_state(&namespace_init, 'T', Duration::from_secs(10));
 
     assert_eq!(
         unsafe { libc::kill(supervisor.id() as i32, libc::SIGKILL) },
@@ -571,6 +572,33 @@ fn wait_for_identity_exit(identity: &ProcessIdentity, timeout: Duration) {
         "timed out waiting for process {} to exit",
         identity.pid
     );
+}
+
+fn wait_for_process_state(identity: &ProcessIdentity, expected: char, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        assert!(
+            identity.still_matches(),
+            "process {} exited while waiting for state {expected}",
+            identity.pid
+        );
+        let status = std::fs::read_to_string(format!("/proc/{}/status", identity.pid))
+            .expect("process status while waiting for state");
+        let state = status
+            .lines()
+            .find_map(|line| line.strip_prefix("State:"))
+            .and_then(|value| value.trim().chars().next())
+            .expect("process state data");
+        if state == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process {} to enter state {expected}; last state was {state}",
+            identity.pid
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 struct ProcessKillGuard {

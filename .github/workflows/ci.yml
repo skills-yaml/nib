@@ -95,6 +95,9 @@ jobs:
       - name: Build release binary
         run: task build
 
+      - name: Smoke native Windows interaction
+        run: task smoke:interactive:windows:binary
+
       - name: Smoke release binary
         shell: pwsh
         run: |
@@ -155,6 +158,9 @@ jobs:
 
       - name: Build release binary
         run: task build
+
+      - name: Smoke native macOS interaction
+        run: task smoke:interactive:binary
 
       - name: Smoke release binary
         shell: bash

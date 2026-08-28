@@ -1,54 +1,86 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-if [ "$(uname -s)" != "Linux" ]; then
-  printf '%s\n' 'interactive release smoke is Linux-only' >&2
-  exit 1
-fi
+platform="$(uname -s)"
+case "$platform" in
+  Linux | Darwin) ;;
+  *)
+    printf 'interactive release smoke requires native Linux or macOS, found %s\n' "$platform" >&2
+    exit 1
+    ;;
+esac
 
-for command in find git grep head realpath script sed timeout; do
+for command in basename dirname env find git grep head mktemp pgrep script sed sleep sort stty tr uname wc; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'required command is unavailable: %s\n' "$command" >&2
     exit 1
   }
 done
+if [ "$platform" = "Linux" ]; then
+  command -v timeout >/dev/null 2>&1 || {
+    printf '%s\n' 'required command is unavailable: timeout' >&2
+    exit 1
+  }
+fi
 
 binary="${NIB_BINARY:-$(pwd)/target/release/nib}"
 if [ ! -x "$binary" ]; then
   printf 'release binary is unavailable: %s\n' "$binary" >&2
   exit 1
 fi
-binary="$(realpath "$binary")"
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/nib-interactive-smoke.XXXXXX")"
+binary_directory="$(cd "$(dirname "$binary")" && pwd -P)"
+binary="$binary_directory/$(basename "$binary")"
+temporary_root="${TMPDIR:-/tmp}"
+fixture="$(mktemp -d "$temporary_root/nib-interactive-smoke.XXXXXX")"
+current_case='preflight'
 
 cleanup() {
-  rm -rf "$fixture"
+  if [[ -n "${fixture:-}" && "$fixture" == "$temporary_root"/nib-interactive-smoke.* ]]; then
+    rm -rf -- "$fixture"
+  fi
 }
 
-preserve_fixture_on_error() {
+report_error() {
   local status=$?
-  trap - ERR EXIT INT TERM
-  printf 'interactive release smoke failed; fixture retained at %s\n' "$fixture" >&2
+  trap - ERR
+  if [ "${NIB_KEEP_INTERACTIVE_SMOKE_FIXTURE:-0}" = "1" ]; then
+    trap - EXIT
+    printf 'interactive release smoke failed in case %s near line %s; fixture retained at %s\n' \
+      "$current_case" "${BASH_LINENO[0]:-unknown}" "$fixture" >&2
+  else
+    printf 'interactive release smoke failed in case %s near line %s; isolated fixture will be removed\n' \
+      "$current_case" "${BASH_LINENO[0]:-unknown}" >&2
+  fi
   exit "$status"
 }
 
-trap cleanup EXIT INT TERM
-trap preserve_fixture_on_error ERR
+trap cleanup EXIT
+trap report_error ERR
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-mkdir -p "$fixture/.nib"
+isolated_home="$fixture/home"
+isolated_config="$fixture/xdg-config"
+mkdir -p "$fixture/.nib" "$isolated_home" "$isolated_config"
 git -C "$fixture" init --quiet
 git -C "$fixture" config user.email nib-smoke@example.invalid
 git -C "$fixture" config user.name 'nib interactive smoke'
-printf '.nib/\n' >"$fixture/.gitignore"
+printf '.nib/\nhome/\nxdg-config/\n*.txt\n' >"$fixture/.gitignore"
 printf 'interactive smoke fixture\n' >"$fixture/README.md"
 git -C "$fixture" add .gitignore README.md
 git -C "$fixture" commit --quiet -m initial
+
+private_sentinel='interactive-private-sentinel-q7v9k2'
 printf '%s\n' \
   '[llm]' \
   'active_provider = "mock"' \
   '' \
   '[llm.providers.mock]' \
   'model = "mock-model"' \
+  '' \
+  '[llm.providers.openai]' \
+  'model = "gpt-5"' \
+  "api_key = \"$private_sentinel\"" \
   '' \
   '[skills]' \
   'enabled = false' \
@@ -58,34 +90,114 @@ printf '%s\n' \
   'curator_enabled = false' \
   >"$fixture/.nib/config.toml"
 
-plain_output="$fixture/plain-output.txt"
-(
-  cd "$fixture"
-  printf '/quit\n' | env NIB_NO_UPDATE_CHECK=1 "$binary"
-) >"$plain_output" 2>&1
-grep -Fq 'mode: plain' "$plain_output"
+# Every child is credential-free and has an isolated user/config directory. The Mock-
+# only delay is scoped to one queue/steering fixture goal in src/llm/mock.rs.
+offline_environment=(
+  env
+  -u OPENAI_API_KEY
+  -u ANTHROPIC_API_KEY
+  -u GOOGLE_API_KEY
+  -u XAI_API_KEY
+  -u META_API_KEY
+  -u OPENROUTER_API_KEY
+  -u NIB_MANAGED_PROCESS_SCOPE
+  -u NIB_SKILLS_DIR
+  "HOME=$isolated_home"
+  "XDG_CONFIG_HOME=$isolated_config"
+  NIB_NO_UPDATE_CHECK=1
+  NIB_ENABLE_INTERACTIVE_SMOKE=1
+)
 
-(
-  cd "$fixture"
-  printf '/quit\n' | env NIB_NO_UPDATE_CHECK=1 "$binary" chat --plain
-) >"$plain_output" 2>&1
-grep -Fq 'mode: plain' "$plain_output"
-
+session_directory="$fixture/.nib/profiles/default/sessions"
 session_count() {
-  local directory="$fixture/.nib/profiles/default/sessions"
-  if [ ! -d "$directory" ]; then
+  if [ ! -d "$session_directory" ]; then
     printf '0\n'
     return
   fi
-  find "$directory" -maxdepth 1 -type f -name '*.json' -print | wc -l | tr -d ' '
+  find "$session_directory" -type f -name '*.json' -print | wc -l | tr -d ' '
 }
 
+terminate_process_tree() {
+  local parent_pid=$1
+  local signal=$2
+  local child_pid
+  for child_pid in $(pgrep -P "$parent_pid" 2>/dev/null || true); do
+    terminate_process_tree "$child_pid" "$signal"
+  done
+  kill "-$signal" "$parent_pid" 2>/dev/null || true
+}
+
+run_bounded_command() {
+  local limit_seconds=$1
+  local output=$2
+  shift 2
+
+  if [ "$platform" = "Linux" ]; then
+    timeout -k 2 "$limit_seconds" "$@" >"$output" 2>&1
+    return
+  fi
+
+  local timeout_marker="$output.timeout"
+  rm -f -- "$timeout_marker"
+  "$@" <&0 >"$output" 2>&1 &
+  local command_pid=$!
+  (
+    sleep "$limit_seconds"
+    if kill -0 "$command_pid" 2>/dev/null; then
+      : >"$timeout_marker"
+      terminate_process_tree "$command_pid" TERM
+      sleep 2
+      terminate_process_tree "$command_pid" KILL
+    fi
+  ) &
+  local watchdog_pid=$!
+  local status=0
+  wait "$command_pid" || status=$?
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  if [ -f "$timeout_marker" ]; then
+    rm -f -- "$timeout_marker"
+    printf 'bounded command exceeded %s seconds\n' "$limit_seconds" >&2
+    return 124
+  fi
+  return "$status"
+}
+
+plain_output="$fixture/plain-redirected.txt"
+current_case='redirected-plain-fallback'
+(
+  cd "$fixture"
+  printf '/quit\n' | run_bounded_command 20 "$plain_output" "${offline_environment[@]}" "$binary"
+)
+grep -Fq 'mode: plain' "$plain_output"
+grep -Fq 'Goodbye. Session saved' "$plain_output"
+
+(
+  cd "$fixture"
+  printf '/quit\n' |
+    run_bounded_command 20 "$fixture/plain-explicit.txt" "${offline_environment[@]}" "$binary" chat --plain
+)
+grep -Fq 'mode: plain' "$fixture/plain-explicit.txt"
+
+(
+  cd "$fixture"
+  printf '/status\n/quit\n' |
+    run_bounded_command 20 "$fixture/plain-dumb-no-color.txt" "${offline_environment[@]}" TERM=dumb NO_COLOR=1 "$binary"
+)
+grep -Fq 'mode: plain' "$fixture/plain-dumb-no-color.txt"
+grep -Fq 'Configured approval preset:' "$fixture/plain-dumb-no-color.txt"
+if grep -Fq $'\033' "$fixture/plain-dumb-no-color.txt"; then
+  printf '%s\n' 'TERM=dumb/NO_COLOR plain fallback emitted ANSI escapes' >&2
+  exit 1
+fi
+
 sessions_before="$(session_count)"
-forced_error="$fixture/forced-tui-error.txt"
+current_case='redirected-forced-tui-rejection'
+forced_error="$fixture/forced-tui-redirected-error.txt"
 if (
   cd "$fixture"
-  env NIB_NO_UPDATE_CHECK=1 "$binary" --tui
-) >"$forced_error" 2>&1; then
+  run_bounded_command 20 "$forced_error" "${offline_environment[@]}" "$binary" --tui
+); then
   printf '%s\n' 'forced TUI unexpectedly succeeded without a terminal' >&2
   exit 1
 fi
@@ -95,12 +207,13 @@ if [ "$(session_count)" != "$sessions_before" ]; then
   exit 1
 fi
 
+current_case='one-shot-contract'
 (
   cd "$fixture"
-  env NIB_NO_UPDATE_CHECK=1 "$binary" run \
+  run_bounded_command 60 "$fixture/run-output.txt" "${offline_environment[@]}" "$binary" run \
     'finish the release smoke' \
     --provider mock --model mock-model --max-steps 4 --yes
-) >"$fixture/run-output.txt" 2>&1
+)
 grep -Fq 'Agent run completed for session' "$fixture/run-output.txt"
 
 quote_for_sh() {
@@ -110,113 +223,344 @@ quote_for_sh() {
 
 quoted_fixture="$(quote_for_sh "$fixture")"
 quoted_binary="$(quote_for_sh "$binary")"
+quoted_home="$(quote_for_sh "$isolated_home")"
+quoted_config="$(quote_for_sh "$isolated_config")"
+offline_prefix="env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GOOGLE_API_KEY -u XAI_API_KEY -u META_API_KEY -u OPENROUTER_API_KEY -u NIB_MANAGED_PROCESS_SCOPE -u NIB_SKILLS_DIR HOME=$quoted_home XDG_CONFIG_HOME=$quoted_config NIB_NO_UPDATE_CHECK=1 NIB_ENABLE_INTERACTIVE_SMOKE=1"
 alternate_screen_exit="$(printf '\033[?1049l')"
+bracketed_paste_enable="$(printf '\033[?2004h')"
+bracketed_paste_disable="$(printf '\033[?2004l')"
+terminal_restored_marker='__NIB_TERMINAL_RESTORED__'
+child_status_marker='__NIB_INTERACTIVE_CHILD_STATUS__'
 
-run_tui_smoke() {
-  local label=$1
-  local arguments=$2
-  local output="$fixture/$label.txt"
-  local child_command="cd $quoted_fixture && TERM=xterm-256color NIB_NO_UPDATE_CHECK=1 $quoted_binary $arguments"
-
-  { sleep 1; printf '\021'; } |
-    timeout 20 script -q -e -c "$child_command" /dev/null >"$output" 2>&1
-  grep -Fq "$alternate_screen_exit" "$output"
+quit_tui_input() {
+  sleep 0.8
+  printf '\021'
 }
 
-run_tui_smoke automatic ''
-run_tui_smoke compatibility 'tui'
+quit_plain_input() {
+  sleep 0.5
+  printf '/status\n/quit\n'
+}
+
+run_pty_case() {
+  local label=$1
+  local input_function=$2
+  local terminal_environment=$3
+  local arguments=$4
+  local resize=${5:-no}
+  local output="$fixture/$label.txt"
+  current_case="$label"
+  local resize_setup=''
+  local resize_finish=''
+  if [ "$resize" = "yes" ]; then
+    resize_setup='(sleep 3; stty rows 32 cols 100 </dev/tty) & resize_pid=$!;'
+    resize_finish='wait "$resize_pid" || true; stty rows 18 cols 50;'
+  fi
+  local child_command="cd $quoted_fixture || exit 81; stty rows 18 cols 50 || exit 82; before=\$(stty -g) || exit 83; $resize_setup $offline_prefix $terminal_environment $quoted_binary $arguments; child_status=\$?; $resize_finish after=\$(stty -g) || exit 84; if [ \"\$before\" != \"\$after\" ]; then printf '%s\\n' '__NIB_TERMINAL_NOT_RESTORED__'; exit 85; fi; printf '%s\\n' '$terminal_restored_marker'; printf '%s:%s\\n' '$child_status_marker' \"\$child_status\"; exit \"\$child_status\""
+
+  if [ "$platform" = "Linux" ]; then
+    "$input_function" |
+      run_bounded_command 40 "$output" script -q -e -c "$child_command" /dev/null
+  else
+    "$input_function" |
+      run_bounded_command 40 "$output" script -q /dev/null /bin/sh -c "$child_command"
+  fi
+  grep -Fq "$terminal_restored_marker" "$output"
+  if [ "$(grep -F -c "$child_status_marker:" "$output")" -ne 1 ] ||
+    ! grep -Fq "$child_status_marker:0" "$output"; then
+    printf 'PTY case %s did not report one successful child status\n' "$label" >&2
+    exit 1
+  fi
+  if grep -Fq '__NIB_TERMINAL_NOT_RESTORED__' "$output"; then
+    printf 'terminal state was not restored in PTY case %s\n' "$label" >&2
+    exit 1
+  fi
+}
+
+run_tui_case() {
+  local label=$1
+  local input_function=$2
+  local arguments=$3
+  local resize=${4:-no}
+  local terminal_environment=${5:-TERM=xterm-256color}
+  run_pty_case "$label" "$input_function" "$terminal_environment" "$arguments" "$resize"
+  grep -Fq "$alternate_screen_exit" "$fixture/$label.txt"
+  grep -Fq "$bracketed_paste_enable" "$fixture/$label.txt"
+  grep -Fq "$bracketed_paste_disable" "$fixture/$label.txt"
+}
+
+run_tui_case automatic quit_tui_input ''
+run_tui_case compatibility quit_tui_input 'tui'
 grep -Fq 'compatibility alias' "$fixture/compatibility.txt"
 
-plain_pty_output="$fixture/forced-plain-question.txt"
-plain_pty_command="cd $quoted_fixture && TERM=xterm-256color NIB_NO_UPDATE_CHECK=1 $quoted_binary --plain --run 'ask a question before continuing'"
-{ sleep 1; printf 'y\n2\n/quit\n'; } |
-  timeout 20 script -q -e -c "$plain_pty_command" /dev/null >"$plain_pty_output" 2>&1
-grep -Fq 'mode: plain' "$plain_pty_output"
-grep -Fq 'Approval required for approve_plan' "$plain_pty_output"
-grep -Fq 'Answer (number or text):' "$plain_pty_output"
-grep -Fq '"answer":"full"' "$plain_pty_output"
-grep -Fq 'Goodbye. Session saved' "$plain_pty_output"
-
-forced_tui_output="$fixture/forced-tui-cancellation.txt"
-forced_tui_command="cd $quoted_fixture && TERM=xterm-256color NIB_NO_UPDATE_CHECK=1 $quoted_binary --tui --run 'ask a question before continuing'"
-{ sleep 2; printf '\003'; sleep 1; printf '\021'; } |
-  timeout 20 script -q -e -c "$forced_tui_command" /dev/null >"$forced_tui_output" 2>&1
-grep -Fq "$alternate_screen_exit" "$forced_tui_output"
-grep -R -Fq '"outcome": "cancelled_by_user"' \
-  "$fixture/.nib/profiles/default/sessions"
-
-session_directory="$fixture/.nib/profiles/default/sessions"
-if [ "$(session_count)" -lt 2 ]; then
-  printf '%s\n' 'interactive session smoke requires at least two persisted sessions' >&2
+# A PTY with insufficient terminal capabilities must stay usable through the plain
+# renderer; it must not enter raw or alternate-screen mode.
+run_pty_case dumb-terminal-fallback quit_plain_input 'TERM=dumb NO_COLOR=1' ''
+grep -Fq 'mode: plain' "$fixture/dumb-terminal-fallback.txt"
+grep -Fq 'Configured approval preset:' "$fixture/dumb-terminal-fallback.txt"
+if grep -Fq "$alternate_screen_exit" "$fixture/dumb-terminal-fallback.txt"; then
+  printf '%s\n' 'TERM=dumb automatic fallback unexpectedly entered the alternate screen' >&2
   exit 1
 fi
 
-source_creation_output="$fixture/source-session.txt"
-(
-  cd "$fixture"
-  printf '/quit\n' | env NIB_NO_UPDATE_CHECK=1 "$binary" --plain
-) >"$source_creation_output" 2>&1
-source_session="$(
-  sed -n 's/.*session: \([^ ]*\).*/\1/p' "$source_creation_output" | head -n 1
-)"
-if [ -z "$source_session" ] || [ ! -f "$session_directory/$source_session.json" ]; then
-  printf '%s\n' 'could not identify the fresh source session' >&2
+# Keep the project dirty so /review and /diff have an authoritative, harmless target.
+printf 'interactive review smoke change\n' >>"$fixture/README.md"
+
+plain_semantics_input() {
+  printf '%s\n' 'inspect @README.md'
+  sleep 0.8
+  printf '%s\n' 'n' ''
+  sleep 0.8
+  printf '%s\n' \
+    '/sta' \
+    '1' \
+    '/permissions' \
+    '/review' \
+    '/diff' \
+    'queue: retained plain follow-up' \
+    '/history inspect' \
+    '1' \
+    'n' \
+    '/fork' \
+    '/quit'
+}
+
+run_pty_case plain-semantics plain_semantics_input 'TERM=xterm-256color NO_COLOR=1' '--plain'
+grep -Fq 'mode: plain' "$fixture/plain-semantics.txt"
+grep -Fq 'Command completions:' "$fixture/plain-semantics.txt"
+grep -Fq 'Configured approval preset:' "$fixture/plain-semantics.txt"
+grep -Fq 'README.md' "$fixture/plain-semantics.txt"
+grep -Fq 'interactive review smoke change' "$fixture/plain-semantics.txt"
+grep -Fq 'queued follow-up retained on session' "$fixture/plain-semantics.txt"
+grep -Fq 'Draft history matches for inspect:' "$fixture/plain-semantics.txt"
+grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
+
+plain_question_input() {
+  sleep 1.2
+  printf 'y\n\n'
+  sleep 1.2
+  printf '2\n\n'
+  sleep 1.8
+  printf '/quit\n'
+}
+
+run_pty_case \
+  plain-question \
+  plain_question_input \
+  'TERM=xterm-256color NO_COLOR=1' \
+  "--plain --run 'ask a question before continuing'"
+grep -Fq 'Approval required' "$fixture/plain-question.txt"
+grep -Fq 'Action: approve_plan' "$fixture/plain-question.txt"
+grep -Fq 'Answer (number or text):' "$fixture/plain-question.txt"
+grep -Fq '"answer":"full"' "$fixture/plain-question.txt"
+grep -Fq 'Goodbye. Session saved' "$fixture/plain-question.txt"
+
+# A real terminal must remain usable after a typed provider failure. Mock exposes this
+# credential-free fault only under NIB_ENABLE_INTERACTIVE_SMOKE and this exact goal.
+plain_failure_recovery_input() {
+  printf '%s\n' 'interactive provider failure smoke'
+  sleep 0.8
+  printf '%s\n' 'list workspace after provider recovery'
+  sleep 0.8
+  printf 'y\n\n'
+  sleep 1.8
+  printf '/status\n/quit\n'
+}
+
+run_pty_case \
+  plain-provider-failure-recovery \
+  plain_failure_recovery_input \
+  'TERM=xterm-256color NO_COLOR=1' \
+  '--plain'
+if [ "$(grep -F -c 'LLM request failed [LLM-AUTH]' "$fixture/plain-provider-failure-recovery.txt")" -ne 1 ]; then
+  printf '%s\n' 'provider failure did not render exactly one actionable terminal report' >&2
+  exit 1
+fi
+grep -Fq 'Provider: mock (mock), model: mock-model' "$fixture/plain-provider-failure-recovery.txt"
+grep -Fq 'HTTP: 401; retry: not attempted' "$fixture/plain-provider-failure-recovery.txt"
+grep -Fq 'Final answer: task complete. (mock LLM response)' "$fixture/plain-provider-failure-recovery.txt"
+failure_recovery_session_list="$fixture/failure-recovery-sessions.txt"
+grep -F -l 'interactive provider failure smoke' "$session_directory"/*.json \
+  >"$failure_recovery_session_list"
+if [ "$(wc -l <"$failure_recovery_session_list" | tr -d ' ')" -ne 1 ]; then
+  printf '%s\n' 'provider failure recovery did not bind to exactly one session' >&2
+  exit 1
+fi
+failure_recovery_session="$(sed -n '1p' "$failure_recovery_session_list")"
+grep -Fq '"outcome": "planning_failed"' "$failure_recovery_session"
+grep -Fq '"class": "authentication"' "$failure_recovery_session"
+grep -Fq 'list workspace after provider recovery' "$failure_recovery_session"
+grep -Fq '"outcome": "completed"' "$failure_recovery_session"
+if grep -Fq 'LLM request failed' "$failure_recovery_session"; then
+  printf '%s\n' 'rendered provider failure was persisted as chat content' >&2
+  exit 1
+fi
+
+tui_docks_input() {
+  sleep 1.8
+  printf 'y'
+  sleep 1.8
+  printf '\033[B\r'
+  sleep 1.8
+  printf '\021'
+}
+
+run_tui_case \
+  tui-approval-question-docks \
+  tui_docks_input \
+  "--tui --run 'ask a question before continuing'" \
+  no \
+  'TERM=xterm-256color NO_COLOR=1'
+grep -Fq 'ask a question before continuing' "$fixture/tui-approval-question-docks.txt"
+grep -Fq 'approval  Action: approve_plan' "$fixture/tui-approval-question-docks.txt"
+grep -Fq 'Which verification mode?' "$fixture/tui-approval-question-docks.txt"
+grep -Fq 'question  Which verification mode?' "$fixture/tui-approval-question-docks.txt"
+
+tui_composer_input() {
+  sleep 0.8
+  printf '/hel\t\r'
+  sleep 1
+  printf '\033[5~'
+  sleep 0.5
+  printf '\033[6~'
+  sleep 0.5
+  printf '\033[1;5F'
+  sleep 0.5
+  printf '/sta\t\r'
+  sleep 0.8
+  printf '\033[200~edit line\r\nunicode 🙂XY\000\007\033[201~'
+  printf '\033[D\033[3~\r'
+  sleep 1.8
+  printf 'n'
+  sleep 1
+  printf 'inspect @REA\t\r'
+  sleep 1.8
+  printf 'n'
+  sleep 1
+  printf '\022unicode'
+  sleep 0.6
+  printf '\r'
+  sleep 0.6
+  printf '\021'
+}
+
+run_tui_case tui-composer-scroll-history tui_composer_input '--tui' yes
+grep -Fq 'Command' "$fixture/tui-composer-scroll-history.txt"
+grep -Fq 'Completion' "$fixture/tui-composer-scroll-history.txt"
+grep -Fq 'paused row' "$fixture/tui-composer-scroll-history.txt"
+grep -Fq 'tail:following' "$fixture/tui-composer-scroll-history.txt"
+grep -Fq 'History | type' "$fixture/tui-composer-scroll-history.txt"
+grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
+grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
+grep -R -Fq '"path": "README.md"' "$session_directory"
+if grep -R -Eq '\\u0000|\\u0007|\\u001b' "$session_directory"; then
+  printf '%s\n' 'unsafe pasted control data reached the session ledger' >&2
+  exit 1
+fi
+
+tui_queue_input() {
+  sleep 0.8
+  printf 'interactive queue smoke\r'
+  sleep 0.1
+  printf 'steering release verification'
+  printf '\023'
+  sleep 0.2
+  printf 'queued release follow-up\r'
+  sleep 2.5
+  printf '\003'
+  sleep 1.4
+  printf '\021'
+}
+
+run_tui_case tui-queue-steer-cancel tui_queue_input '--tui'
+grep -Fq 'queued follow-up(s) retained on session' "$fixture/tui-queue-steer-cancel.txt"
+grep -Fq 'instruction' "$fixture/tui-queue-steer-cancel.txt"
+grep -Fq 'persisted' "$fixture/tui-queue-steer-cancel.txt"
+grep -Fq 'exact' "$fixture/tui-queue-steer-cancel.txt"
+grep -Fq 'active' "$fixture/tui-queue-steer-cancel.txt"
+queue_session_list="$fixture/queue-sessions.txt"
+grep -F -l 'interactive queue smoke' "$session_directory"/*.json >"$queue_session_list"
+if [ "$(wc -l <"$queue_session_list" | tr -d ' ')" -ne 1 ]; then
+  printf '%s\n' 'queue smoke goal did not bind to exactly one session' >&2
+  exit 1
+fi
+queue_session_file="$(sed -n '1p' "$queue_session_list")"
+grep -Fq 'queued release follow-up' "$queue_session_file"
+grep -Fq 'steering release verification' "$queue_session_file"
+grep -Fq '"kind": "steering_intake"' "$queue_session_file"
+grep -Fq '"kind": "plan_superseded_by_steering"' "$queue_session_file"
+if [ "$(grep -F -c '"kind": "run_terminal"' "$queue_session_file")" -ne 1 ] ||
+  ! grep -Fq '"outcome": "cancelled_by_user"' "$queue_session_file"; then
+  printf '%s\n' 'queue smoke cancellation did not reconcile exactly once' >&2
+  exit 1
+fi
+if grep -Fq 'Run cancelled by user.' "$queue_session_file"; then
+  printf '%s\n' 'cancellation leaked synthetic assistant content into the transcript' >&2
+  exit 1
+fi
+
+# Resume by exact persisted ID through the bounded plain selector, then prove the
+# active session changes only after explicit confirmation.
+create_session() {
+  local output=$1
+  (
+    cd "$fixture"
+    printf '/quit\n' |
+      run_bounded_command 20 "$output" "${offline_environment[@]}" "$binary" --plain
+  )
+  sed -n 's/.*session: \([^ ]*\).*/\1/p' "$output" | head -n 1
+}
+
+source_session="$(create_session "$fixture/resume-source.txt")"
+target_session="$(create_session "$fixture/resume-target.txt")"
+if [ -z "$source_session" ] || [ -z "$target_session" ] || [ "$source_session" = "$target_session" ]; then
+  printf '%s\n' 'could not create distinct resume smoke sessions' >&2
   exit 1
 fi
 quoted_source_session="$(quote_for_sh "$source_session")"
-session_switch_output="$fixture/session-switch.txt"
-session_switch_command="cd $quoted_fixture && stty rows 40 cols 120 && TERM=xterm-256color NIB_NO_UPDATE_CHECK=1 $quoted_binary --tui --session $quoted_source_session"
-resumed_goal='continue the resumed session'
-{
-  sleep 2
-  printf '/pro'
-  sleep 1
-  printf '\t'
-  sleep 0.3
-  printf '\r'
-  sleep 1
-  printf '/session\r'
-  sleep 1
-  printf '\033[B'
-  sleep 0.6
-  printf '\033'
-  sleep 0.6
-  printf '/session\r'
-  sleep 1
-  printf '\033[B'
-  sleep 0.6
-  printf '\r'
-  sleep 0.6
-  printf '\033'
-  sleep 0.6
-  printf '\r'
-  sleep 0.6
-  printf '\r'
-  sleep 1
-  printf '%s\r' "$resumed_goal"
-  sleep 1.5
-  printf '\003'
-  sleep 1
-  printf '\021'
-} | timeout 30 script -q -e -c "$session_switch_command" /dev/null >"$session_switch_output" 2>&1
-grep -Fq 'Command' "$session_switch_output"
-grep -Fq 'Completion' "$session_switch_output"
-grep -Fq 'Configured' "$session_switch_output"
-grep -Fq 'providers:' "$session_switch_output"
-grep -Fq 'Session' "$session_switch_output"
-grep -Fq 'Switcher' "$session_switch_output"
-grep -Fq 'Confirm session switch' "$session_switch_output"
-grep -Fq 'Resumed session' "$session_switch_output"
-mapfile -t resumed_sessions < <(
-  grep -F -l "$resumed_goal" "$session_directory"/*.json
-)
-if [ "${#resumed_sessions[@]}" -ne 1 ]; then
-  printf '%s\n' 'resumed turn was not persisted to exactly one session' >&2
-  exit 1
-fi
-if [ "${resumed_sessions[0]}" = "$session_directory/$source_session.json" ]; then
-  printf '%s\n' 'resumed turn was persisted to the former session' >&2
-  exit 1
-fi
+resume_input() {
+  printf '/resume\n%s\ny\n/quit\n' "$target_session"
+}
+run_pty_case \
+  plain-resume \
+  resume_input \
+  'TERM=xterm-256color NO_COLOR=1' \
+  "--plain --session $quoted_source_session"
+grep -Fq "Resumed session $target_session from persisted state." "$fixture/plain-resume.txt"
+grep -E -q '"forked_from": "[^\"]+' "$session_directory"/*.json
 
-printf '%s\n' 'Interactive release smoke passed.'
+# Lifecycle records retain exact private run IDs in persistence, but terminal
+# presentation must never expose them. The configured secret and raw argument schema
+# likewise stay absent from every captured renderer output.
+private_run_ids_file="$fixture/private-run-ids.list"
+sed -n 's/.*"run_id": "\([0-9a-f]\{32\}\)".*/\1/p' "$session_directory"/*.json |
+  sort -u >"$private_run_ids_file"
+current_case='renderer-privacy-scan'
+if [ ! -s "$private_run_ids_file" ]; then
+  printf '%s\n' 'interactive smoke did not persist an authoritative run identity' >&2
+  exit 1
+fi
+for session_file in "$session_directory"/*.json; do
+  if grep -Fq "$private_sentinel" "$session_file"; then
+    printf 'inactive-provider sentinel persisted through %s\n' "$session_file" >&2
+    exit 1
+  fi
+done
+for output in "$fixture"/*.txt; do
+  if grep -Fq "$private_sentinel" "$output"; then
+    printf 'configured private sentinel leaked through %s\n' "$output" >&2
+    exit 1
+  fi
+  if grep -Fq '"arguments"' "$output"; then
+    printf 'raw tool arguments leaked through %s\n' "$output" >&2
+    exit 1
+  fi
+  while IFS= read -r run_id; do
+    if grep -Fq "$run_id" "$output"; then
+      printf 'private run identity leaked through %s\n' "$output" >&2
+      exit 1
+    fi
+  done <"$private_run_ids_file"
+done
+
+printf 'Interactive release smoke passed (offline %s PTY and redirected modes).\n' "$platform"

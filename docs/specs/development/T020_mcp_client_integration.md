@@ -232,16 +232,19 @@ gates remain open.
 
 ## Remaining Implementation Plan
 
-1. Close the inherited FT-015 mutable Git-configuration and physical-unlink boundaries
-   without weakening fail-closed compensation.
+1. Retain FT-015's documented isolation boundary: mutable same-UID Git interference is
+   outside the threat model, while every attributable cleanup continues to require
+   exact persisted ownership and fail-closed compensation. No stronger arbitrary-peer
+   or pathname-unlink claim is made by T020.
 2. Execute the Windows Job Object and macOS MCP lifecycle suites on their configured
    runners and retain the resulting runtime evidence.
 3. Rerun the canonical Task gates and two-stage review before moving T020 to `done/`.
 
 ## Current Risks
 
-- Same-UID repository/worktree Git-configuration mutation remains an inherited FT-015
-  trust boundary.
+- Same-UID repository/worktree Git-configuration mutation is the explicit inherited
+  FT-015 trust boundary; T020 does not classify it as an unimplemented containment
+  guarantee.
 - A descendant that deliberately escapes the managed Unix process group is outside this
   spec's guarantee and remains owned by FT-017.
 - Windows Job Object and macOS MCP behavior have not been executed on this Linux host.

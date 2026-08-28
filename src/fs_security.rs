@@ -267,6 +267,34 @@ pub(crate) fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
     PathBuf::from(OsString::from_wide(&normalized))
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn windows_dos_short_path_for_test(path: &Path) -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let path = path_without_windows_verbatim_prefix(path);
+    let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    input.push(0);
+    let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut output = vec![0_u16; required as usize];
+    let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if written as usize >= output.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DOS short-path output exceeded its sized buffer",
+        ));
+    }
+    output.truncate(written as usize);
+    Ok(PathBuf::from(OsString::from_wide(&output)))
+}
+
 #[cfg(windows)]
 pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
     path_without_windows_verbatim_prefix(path)
@@ -278,9 +306,8 @@ pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-pub(crate) fn rename_open_entry_no_replace_windows<
-    S: std::os::windows::io::AsRawHandle + ?Sized,
->(
+#[doc(hidden)]
+pub fn rename_open_entry_no_replace_windows<S: std::os::windows::io::AsRawHandle + ?Sized>(
     parent: &cap_std::fs::Dir,
     source: &S,
     destination: &Path,
