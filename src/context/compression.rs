@@ -49,6 +49,9 @@ pub fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
     format!("{head}{marker}{tail}")
 }
 
+// Compression participates in the same typed LLM failure pipeline as normal turns. Keep the
+// phase, retry, and redaction-safe report metadata intact instead of boxing this API in isolation.
+#[allow(clippy::result_large_err)]
 pub async fn maybe_compress_session(
     store: &SessionStore,
     session_id: &str,
@@ -63,6 +66,7 @@ pub async fn maybe_compress_session(
 /// This bypasses only the automatic context-usage threshold. Configuration
 /// validation, the enabled switch, bounded summarization, compare-and-swap session
 /// update, and raw transcript retention are identical to automatic compression.
+#[allow(clippy::result_large_err)]
 pub async fn explicitly_compress_session(
     store: &SessionStore,
     session_id: &str,
@@ -72,6 +76,7 @@ pub async fn explicitly_compress_session(
     compress_session(store, session_id, llm, cfg, true).await
 }
 
+#[allow(clippy::result_large_err)]
 async fn compress_session(
     store: &SessionStore,
     session_id: &str,

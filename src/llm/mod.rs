@@ -319,6 +319,10 @@ impl LlmStream {
         next
     }
 
+    /// Returns the canonical provider-neutral typed failure so terminal validation retains its
+    /// retry, phase, and redaction-safe reporting metadata. Boxing this sole stream boundary would
+    /// split the public LLM error contract while the authoritative error remains unchanged.
+    #[allow(clippy::result_large_err)]
     pub async fn finish(mut self) -> Result<LlmResponse, LlmError> {
         while !self.exhausted {
             if self.recv_private().await.is_none() {

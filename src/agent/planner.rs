@@ -7,6 +7,10 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+// Planning APIs preserve the canonical typed LLM failure (including retry/phase metadata) for
+// their callers. Boxing only these adapters would create a parallel error contract without
+// reducing the authoritative error type.
+#[allow(clippy::result_large_err)]
 pub async fn generate_plan(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
@@ -14,6 +18,7 @@ pub async fn generate_plan(
     generate_plan_with_events(llm, goal, None).await
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn generate_plan_with_events(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
@@ -22,6 +27,7 @@ pub async fn generate_plan_with_events(
     generate_plan_with_events_bounded(llm, goal, event_tx, 128_000).await
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn generate_plan_with_events_bounded(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
@@ -41,6 +47,7 @@ pub async fn generate_plan_with_events_bounded(
         .await
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn generate_plan_with_context_events_bounded(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
@@ -61,6 +68,7 @@ pub async fn generate_plan_with_context_events_bounded(
     .await
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn generate_plan_with_context_events_bounded_scoped(
     llm: &Arc<dyn LlmClient>,
     goal: &str,
@@ -117,6 +125,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
     Ok(plan)
 }
 
+#[allow(clippy::result_large_err)]
 async fn finish_private_planning_stream(
     stream: LlmStream,
 ) -> Result<LlmResponse, crate::llm::LlmError> {

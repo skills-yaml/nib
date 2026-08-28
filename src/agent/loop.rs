@@ -4422,6 +4422,9 @@ fn emit_nonblocking(stream_tx: &Option<Sender<StreamEvent>>, event: StreamEvent)
 /// Network adapters bound event count and bytes before constructing `LlmStream`. Returning
 /// projections only beside a validated, non-refusal response makes it impossible for callers to
 /// accidentally publish a partial stream that later fails terminal validation.
+// Preserve the canonical typed error, including its retry and redaction-safe failure metadata,
+// across this private terminal-authority boundary rather than introducing a boxed error API.
+#[allow(clippy::result_large_err)]
 async fn finish_private_provider_stream(
     stream: LlmStream,
     sensitive_values: &[String],

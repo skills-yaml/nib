@@ -242,6 +242,21 @@ quit_plain_input() {
   printf '/status\n/quit\n'
 }
 
+wait_for_pty_output() {
+  local output=$1
+  local expected=$2
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    if [ -f "$output" ] && grep -Fq "$expected" "$output"; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'PTY output did not reach the expected prompt: %s\n' "$expected" >&2
+  return 1
+}
+
 run_pty_case() {
   local label=$1
   local input_function=$2
@@ -519,7 +534,19 @@ if [ -z "$source_session" ] || [ -z "$target_session" ] || [ "$source_session" =
 fi
 quoted_source_session="$(quote_for_sh "$source_session")"
 resume_input() {
-  printf '/resume\n%s\ny\n/quit\n' "$target_session"
+  local resume_output="$fixture/plain-resume.txt"
+  wait_for_pty_output "$resume_output" 'You> '
+  printf '/resume\n'
+  wait_for_pty_output "$resume_output" 'Session to preview (number or exact ID, blank to cancel): '
+  printf '%s\n' "$target_session"
+  wait_for_pty_output \
+    "$resume_output" \
+    "Resume session $target_session instead of $source_session? [y/N]: "
+  printf 'y\n'
+  wait_for_pty_output \
+    "$resume_output" \
+    "Resumed session $target_session from persisted state."
+  printf '/quit\n'
 }
 run_pty_case \
   plain-resume \

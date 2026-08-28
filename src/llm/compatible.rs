@@ -71,6 +71,9 @@ impl CompatibleWireClient {
         }
     }
 
+    // Delegation must preserve the canonical provider-neutral typed failure. Boxing only this
+    // wire selector would add conversion churn without changing the underlying error contract.
+    #[allow(clippy::result_large_err)]
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
         match self {
             Self::Chat(client) => client.complete(request).await,
@@ -78,6 +81,7 @@ impl CompatibleWireClient {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
         match self {
             Self::Chat(client) => client.stream(request).await,

@@ -84,6 +84,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "alternate_screen_exit",
         "private_run_ids",
         "private_sentinel",
+        "wait_for_pty_output",
     ] {
         assert!(
             script.contains(contract),
@@ -98,6 +99,12 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("terminate_process_tree"));
     assert!(script.contains("printf '/status\\n/quit\\n'"));
     assert!(script.contains("printf 'y\\n\\n'"));
+    assert!(script.contains("wait_for_pty_output \"$resume_output\" 'You> '"));
+    assert!(script.contains("while [ \"$attempts\" -lt 100 ]; do"));
+    assert!(script.contains("sleep 0.1"));
+    assert!(script.contains("Session to preview (number or exact ID, blank to cancel): "));
+    assert!(script.contains("Resume session $target_session instead of $source_session? [y/N]: "));
+    assert!(script.contains("Resumed session $target_session from persisted state."));
     assert!(script.contains("for session_file in \"$session_directory\"/*.json; do"));
     assert!(script.contains("grep -Fq \"$private_sentinel\" \"$session_file\""));
     assert!(!script.contains("mapfile"));
@@ -307,7 +314,8 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_host.contains("NIB_WINDOWS_PTY_MODE_MARKER"));
     assert!(windows_pty_host.contains("$inputChunks = @($request.input_chunks)"));
     assert!(windows_pty_host.contains("$process.StandardInput.WriteAsync"));
-    assert!(windows_pty_host.contains("$process.StandardInput.Close()"));
+    assert!(windows_pty_host.contains("Keep the headless-console input pipe open"));
+    assert!(!windows_pty_host.contains("$process.StandardInput.Close()"));
     assert!(windows_pty_host.contains("console_modes_restored"));
     assert!(windows_pty_host.contains("$process.Kill($true)"));
     assert!(windows_pty_host.contains("$process.WaitForExit(5000)"));

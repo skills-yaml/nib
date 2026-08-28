@@ -111,7 +111,10 @@ try {
             $writeTask.GetAwaiter().GetResult() | Out-Null
             $process.StandardInput.Flush()
         }
-        $process.StandardInput.Close()
+        # Keep the headless-console input pipe open until the console child exits.
+        # conhost treats pipe EOF as terminal closure, so closing it here races a
+        # cold child before it can publish its exit and mode markers. Input remains
+        # bounded above, and the same absolute deadline still kills the whole tree.
         $remainingMilliseconds = $timeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds
         if ($remainingMilliseconds -lt 1 -or
             -not $process.WaitForExit($remainingMilliseconds)) {
