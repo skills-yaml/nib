@@ -34,7 +34,10 @@ fn pause_atomic_publication_phase(path: &Path, encoded: &[u8], phase: &str) -> R
     let ready = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_READY")
         .map(PathBuf::from)
         .ok_or_else(|| "missing atomic publication ready path".to_string())?;
-    std::fs::write(&ready, path.as_os_str().as_encoded_bytes())
+    let publishing = ready.with_extension("publishing");
+    std::fs::write(&publishing, path.as_os_str().as_encoded_bytes())
+        .map_err(|error| format!("failed to prepare atomic phase readiness: {error}"))?;
+    std::fs::rename(&publishing, &ready)
         .map_err(|error| format!("failed to publish atomic phase readiness: {error}"))?;
     let resume = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_RESUME")
         .map(PathBuf::from)
@@ -407,9 +410,10 @@ impl StableDirectory {
         deadline: Instant,
     ) -> Result<Self, String> {
         let mut deadline_guard = || ensure_directory_namespace_deadline(deadline, path);
-        self.create_owned_child_directory_with_guard_and_hooks(
+        self.create_child_directory_with_guard_and_hooks(
             path,
             &mut deadline_guard,
+            true,
             || Ok(()),
             || Ok(()),
         )
@@ -462,18 +466,20 @@ impl StableDirectory {
         mut before_create: impl FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
         let mut deadline_guard = || ensure_directory_namespace_deadline(deadline, path);
-        self.create_owned_child_directory_with_guard_and_hooks(
+        self.create_child_directory_with_guard_and_hooks(
             path,
             &mut deadline_guard,
+            true,
             &mut before_create,
             || Ok(()),
         )
     }
 
-    fn create_owned_child_directory_with_guard_and_hooks(
+    fn create_child_directory_with_guard_and_hooks(
         &self,
         path: &Path,
         namespace_guard: &mut impl FnMut() -> Result<(), String>,
+        delete_capable: bool,
         mut before_create: impl FnMut() -> Result<(), String>,
         mut before_parent_sync: impl FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
@@ -517,7 +523,11 @@ impl StableDirectory {
         namespace_guard()?;
         self.sync_directory()?;
         namespace_guard()?;
-        let child = self.open_owned_child(path)?;
+        let child = if delete_capable {
+            self.open_owned_child(path)?
+        } else {
+            self.open_child(path)?
+        };
         namespace_guard()?;
         child.verify_visible_at(path)?;
         namespace_guard()?;
@@ -585,7 +595,7 @@ impl StableDirectory {
                     namespace_guard()?;
                     current.sync_directory()?;
                     namespace_guard()?;
-                    let child = current.open_owned_child(&child_path)?;
+                    let child = current.open_child(&child_path)?;
                     namespace_guard()?;
                     child
                 }
@@ -598,9 +608,10 @@ impl StableDirectory {
                 None => {
                     before_create(&child_path)?;
                     namespace_guard()?;
-                    current.create_owned_child_directory_with_guard_and_hooks(
+                    current.create_child_directory_with_guard_and_hooks(
                         &child_path,
                         &mut namespace_guard,
+                        false,
                         || Ok(()),
                         || before_parent_sync(&child_path),
                     )?
@@ -3987,7 +3998,7 @@ pub(crate) fn acquire_file_lock_in_until_bound(
     })?;
     let retained_root =
         common_directory_ancestor(&[parent, anchor_parent, protected_directory.path()])?;
-    let root_directory = StableDirectory::open(&retained_root)?;
+    let root_directory = open_lock_capability_root(&retained_root)?;
     let mut namespace_guard = || {
         ensure_daemon_lock_deadline(Some(deadline), lock_path)?;
         protected_directory.verify_visible()?;
@@ -4210,7 +4221,7 @@ fn with_file_lock_in_with_deadline_and_setup_hook<T>(
     {
         let retained_root =
             common_directory_ancestor(&[parent, anchor_parent, protected_directory])?;
-        let root_directory = StableDirectory::open(&retained_root)?;
+        let root_directory = open_lock_capability_root(&retained_root)?;
         let mut namespace_guard = || {
             before_setup_step()?;
             ensure_daemon_lock_deadline(deadline, &lock_path)
@@ -4400,6 +4411,25 @@ fn common_directory_ancestor(paths: &[&Path]) -> Result<PathBuf, String> {
                 first.display()
             )
         })
+}
+
+#[cfg(not(windows))]
+fn open_lock_capability_root(retained_root: &Path) -> Result<StableDirectory, String> {
+    StableDirectory::open(retained_root)
+}
+
+#[cfg(windows)]
+fn open_lock_capability_root(retained_root: &Path) -> Result<StableDirectory, String> {
+    // A retained Windows directory capability may include DELETE access. Reopening
+    // that exact directory through an ambient spelling is not share-compatible on
+    // every filesystem/runner combination, even when the handle itself permits
+    // sharing. Open its parent ambiently, then retain the already-existing common
+    // root handle-relatively before any callback or create-capable descendant walk.
+    let Some(parent) = retained_root.parent() else {
+        return StableDirectory::open(retained_root);
+    };
+    let parent_directory = StableDirectory::open(parent)?;
+    parent_directory.open_child(retained_root)
 }
 
 pub(crate) fn daemon_lock_anchor_path(lock_path: &Path) -> Result<PathBuf, String> {
@@ -6080,6 +6110,67 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lock_common_root_replacement_is_rejected_before_namespace_mutation() {
+        let root = tempdir().expect("tempdir");
+        let project = root.path().join("project");
+        let state_dir = project.join("state");
+        let displaced_project = root.path().join("project.displaced");
+        let lock_path = state_dir.join("shared.json.lock");
+        let anchor_path = daemon_lock_anchor_path(&lock_path).expect("lock anchor");
+        let displaced_anchor = displaced_project.join(
+            anchor_path
+                .strip_prefix(&project)
+                .expect("anchor below common root"),
+        );
+        fs::create_dir_all(&state_dir).expect("state directory");
+        fs::write(state_dir.join("original"), b"original").expect("original sentinel");
+        let mut replaced = false;
+        let mut operation_ran = false;
+
+        let error = with_file_lock_in_until_with_setup_hook(
+            &lock_path,
+            &state_dir,
+            Instant::now() + Duration::from_secs(2),
+            |_| {
+                operation_ran = true;
+                Ok(())
+            },
+            || {
+                if replaced {
+                    return Ok(());
+                }
+                fs::rename(&project, &displaced_project).map_err(|error| error.to_string())?;
+                fs::create_dir_all(&state_dir).map_err(|error| error.to_string())?;
+                fs::write(state_dir.join("replacement"), b"replacement")
+                    .map_err(|error| error.to_string())?;
+                replaced = true;
+                Ok(())
+            },
+        )
+        .expect_err("a replaced common lock root must fail closed");
+
+        assert!(replaced, "test did not replace the common lock root");
+        assert!(
+            !operation_ran,
+            "replacement entered the protected operation"
+        );
+        assert!(error.contains("identity changed"), "{error}");
+        assert_eq!(
+            fs::read(displaced_project.join("state/original")).expect("original sentinel"),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(state_dir.join("replacement")).expect("replacement sentinel"),
+            b"replacement"
+        );
+        assert!(!displaced_project.join("state/shared.json.lock").exists());
+        assert!(!displaced_anchor.exists());
+        assert!(!lock_path.exists());
+        assert!(!anchor_path.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn daemon_lock_open_rejects_a_symlink_inserted_after_inspection() {
@@ -6313,6 +6404,32 @@ mod tests {
             fs::read(state.join("short-parent.json")).expect("canonical publication"),
             b"short-parent"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_descendant_walk_does_not_retain_delete_access_on_namespaces() {
+        let root = tempdir().expect("tempdir");
+        let canonical = root.path().canonicalize().expect("canonical tempdir");
+        let state = canonical.join(".nib");
+        let records = state.join("process-scopes");
+        fs::create_dir(&state).expect("state directory");
+        let root_directory = StableDirectory::open(&canonical).expect("stable canonical directory");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let retained_records = root_directory
+            .open_or_create_descendant_directory_with_guard(
+                &records,
+                || ensure_directory_namespace_deadline(deadline, &records),
+                |_| Ok(()),
+            )
+            .expect("retained stable namespace");
+
+        let reopened_state = StableDirectory::open(&state)
+            .expect("stable descendant capability must not block its ancestor");
+        let reopened_records = reopened_state
+            .open_child(&records)
+            .expect("reopen retained namespace from its ancestor");
+        assert!(retained_records.same_identity(&reopened_records));
     }
 
     #[cfg(windows)]
