@@ -13830,7 +13830,12 @@ mod tests {
     fn prime_fixed_subagent_record_lock_namespace(project_root: &Path) {
         let records = ensure_records_directory_capability_until(project_root, None)
             .expect("authorized records for fixed lock priming");
-        let deadline = Instant::now() + SUBAGENT_RECORD_LOCK_TIMEOUT;
+        let timeout = if cfg!(windows) {
+            Duration::from_secs(15)
+        } else {
+            SUBAGENT_RECORD_LOCK_TIMEOUT
+        };
+        let deadline = Instant::now() + timeout;
         let _fence = acquire_spawn_preparation_fence_until(&records, deadline)
             .expect("global preparation fence for fixed lock priming");
         for stripe in 0..SUBAGENT_RECORD_LOCK_STRIPES {
@@ -15945,12 +15950,22 @@ mod tests {
         for cancellable in [false, true] {
             let root = tempfile::tempdir().expect("handoff expiry project");
             initialize_spawn_test_repository(root.path());
-            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(5));
-            let _cancellation_timeout =
-                SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
-            let _hook = SpawnHandoffPhaseHookGuard::install(|phase| {
+            let operation_timeout = if cfg!(windows) {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(5)
+            };
+            let expiry_delay = operation_timeout + Duration::from_millis(100);
+            let cancellation_timeout = if cfg!(windows) {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(2)
+            };
+            let _timeout = SpawnPreparationTimeoutGuard::set(operation_timeout);
+            let _cancellation_timeout = SubagentCancellationTimeoutGuard::set(cancellation_timeout);
+            let _hook = SpawnHandoffPhaseHookGuard::install(move |phase| {
                 if phase == "before_intent_retirement" {
-                    std::thread::sleep(Duration::from_millis(5_100));
+                    std::thread::sleep(expiry_delay);
                 }
             });
             let args = json!({"prompt": "expire only at final intent retirement"});
@@ -18012,6 +18027,8 @@ mod tests {
 
     #[test]
     fn legacy_running_record_and_orphan_cancellation_fail_closed() {
+        #[cfg(windows)]
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         let legacy = record_fixture(root.path(), "sub-legacy-owner", "running");
         write_subagent_record(root.path(), &legacy).expect("legacy running record");
