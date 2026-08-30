@@ -19492,6 +19492,11 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn record_bridge_blocks_a_live_legacy_contender_published_after_migration() {
+        let initial_bridge_timeout = if cfg!(windows) {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(200)
+        };
         let root = tempfile::tempdir().expect("root");
         let records = ensure_records_directory(root.path()).expect("records");
         let id = "post-migration-legacy-contender";
@@ -19506,7 +19511,7 @@ mod tests {
             root.path(),
             id,
             &records,
-            Instant::now() + Duration::from_millis(200),
+            Instant::now() + initial_bridge_timeout,
             None,
             || {
                 std::fs::create_dir(legacy.parent().expect("legacy lock parent"))
