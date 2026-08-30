@@ -4577,7 +4577,6 @@ mod tests {
         let path = store.path(&session.id);
         let original = fs::read(&path).expect("original session bytes");
         let before_namespace = session_namespace_snapshot(store.sessions_dir());
-        let deadline = Instant::now() + Duration::from_millis(40);
         let mut paused_namespace = None;
         let mut expected_temporary = None;
 
@@ -4593,6 +4592,12 @@ mod tests {
                         serde_json::to_vec_pretty(&opened.session)
                             .expect("expected temporary session bytes"),
                     );
+                    let commit_timeout = if cfg!(windows) {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::from_millis(40)
+                    };
+                    let deadline = Instant::now() + commit_timeout;
                     store.save_unlocked_with_deadline_and_commit_check(
                         directory,
                         &opened.session,

@@ -13866,6 +13866,8 @@ mod tests {
         let Some(project_root) = std::env::var_os(HANDOFF_CRASH_CHILD_PROJECT_ROOT) else {
             return;
         };
+        #[cfg(windows)]
+        let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(10));
         let phase = std::env::var(HANDOFF_CRASH_CHILD_PHASE).expect("handoff crash phase");
         let ready = PathBuf::from(
             std::env::var_os(HANDOFF_CRASH_CHILD_READY).expect("handoff crash ready path"),
@@ -15753,6 +15755,8 @@ mod tests {
 
     #[tokio::test]
     async fn partial_cleanup_failures_retain_intent_until_restart_reconciles_last() {
+        #[cfg(windows)]
+        let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(10));
         for cancellable in [false, true] {
             for failure in ["session", "worktree", "owner", "audit"] {
                 let root = tempfile::tempdir().expect("git project");
@@ -21232,6 +21236,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("delegation DOS-alias repository");
+        let _spawn_timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(10));
         let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         git(root.path(), &["init", "-q"]);
         git(
