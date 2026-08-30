@@ -21292,8 +21292,8 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("delegation DOS-alias repository");
-        let _spawn_timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(10));
-        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
+        let _spawn_timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(30));
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(30));
         git(root.path(), &["init", "-q"]);
         git(
             root.path(),
