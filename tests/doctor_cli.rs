@@ -63,6 +63,44 @@ fn doctor_cli_returns_nonzero_for_invalid_config() {
 }
 
 #[test]
+fn doctor_cli_requires_explicit_offline_attestation_to_migrate_legacy_subagent_locks() {
+    let project = tempfile::tempdir().expect("project");
+    let home = tempfile::tempdir().expect("home");
+    initialize_git(project.path());
+    let mut config = NibConfig::default();
+    config.skills.enabled = false;
+    save_nib_config_full(project.path(), &mut config).expect("save config");
+    let records = project.path().join(".nib/subagents");
+    let locks = records.join(".locks");
+    std::fs::create_dir_all(&locks).expect("legacy lock directory");
+    let visible = locks.join("doctor-offline.lock");
+    std::fs::write(&visible, b"legacy").expect("legacy lock");
+    let anchor = project
+        .path()
+        .join(".nib/subagents/.nib-lock-6-.locks-doctor-offline.lock.anchor");
+    std::fs::hard_link(&visible, &anchor).expect("legacy anchor");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .args(["doctor", "--fix", "--confirm-no-legacy-processes"])
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("run attested doctor migration");
+
+    assert!(
+        output.status.success(),
+        "doctor migration failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 legacy artifacts reconciled"), "{stdout}");
+    assert!(!visible.exists());
+    assert!(!anchor.exists());
+    assert!(records.join(".legacy-lock-migration-v1.json").exists());
+}
+
+#[test]
 fn doctor_cli_initializes_configured_mcp_server() {
     let project = tempfile::tempdir().expect("project");
     let home = tempfile::tempdir().expect("home");

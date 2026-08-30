@@ -7,12 +7,14 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 type ConfigMutex = Mutex<()>;
 
 static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<ConfigMutex>>>> = OnceLock::new();
 const CONFIG_OPERATION_ERROR_SENTINEL: &str = "__nib_config_operation_error__";
+const CONFIG_ATOMIC_TEMPORARY_PREFIX: &str = ".config.toml.tmp-";
 const MAX_CONFIG_DIRECTORY_ENTRIES: usize = 10_000;
 const MAX_CONFIG_DIRECTORY_NAME_BYTES: usize = MAX_CONFIG_DIRECTORY_ENTRIES * 256;
 
@@ -1553,6 +1555,76 @@ pub fn load_nib_config_full(project_root: &Path) -> Result<NibConfig, ConfigErro
     load_nib_config_full_with_source(project_root).map(|(config, _)| config)
 }
 
+pub(crate) fn load_nib_config_full_until(
+    project_root: &Path,
+    deadline: Instant,
+) -> Result<NibConfig, ConfigError> {
+    with_config_lock_until(project_root, deadline, |paths, directory| {
+        load_nib_config_with_source_unlocked(paths, directory).map(|loaded| loaded.config)
+    })
+}
+
+/// Reads a configuration snapshot without creating, migrating, backing up, or
+/// recovering configuration state. Cancellation reconciliation uses this path
+/// because its single absolute deadline must cover every setup step and a
+/// running subagent already has a durable `.nib` namespace.
+pub(crate) fn load_nib_config_full_read_only_until(
+    project_root: &Path,
+    deadline: Instant,
+) -> Result<NibConfig, ConfigError> {
+    ensure_config_lock_deadline(Some(deadline))?;
+    let paths = config_paths(project_root);
+    let directory =
+        crate::daemons::state::StableDirectory::open(&paths.nib_dir).map_err(config_state_error)?;
+    ensure_config_lock_deadline(Some(deadline))?;
+    let config = if let Some(file) = directory
+        .open_atomic_file_read_only_until(&paths.toml, CONFIG_ATOMIC_TEMPORARY_PREFIX, deadline)
+        .map_err(config_state_error)?
+    {
+        load_nib_config_opened_file(&directory, &paths.toml, file)?
+    } else if regular_file_exists(&directory, &paths.json)? {
+        let (content, _) = read_regular_file(&directory, &paths.json)?;
+        let llm: LlmConfig = serde_json::from_str(&content)?;
+        NibConfig {
+            revision: 1,
+            llm,
+            ..NibConfig::default()
+        }
+    } else {
+        NibConfig::default()
+    };
+    ensure_config_lock_deadline(Some(deadline))?;
+    config.validate()?;
+    Ok(config)
+}
+
+/// Resolves configuration for a mutation-free namespace preflight. Unlike the
+/// cancellation-only reader above, a genuinely absent `.nib` directory means
+/// validated defaults; it is never created by this operation.
+pub(crate) fn load_nib_config_full_preflight_read_only_until(
+    project_root: &Path,
+    deadline: Instant,
+) -> Result<NibConfig, ConfigError> {
+    ensure_config_lock_deadline(Some(deadline))?;
+    let paths = config_paths(project_root);
+    match std::fs::symlink_metadata(&paths.nib_dir) {
+        Ok(_) => load_nib_config_full_read_only_until(project_root, deadline),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let config = NibConfig::default();
+            config.validate()?;
+            ensure_config_lock_deadline(Some(deadline))?;
+            match std::fs::symlink_metadata(&paths.nib_dir) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config),
+                Ok(_) => Err(ConfigError::Operation(
+                    "configuration namespace appeared during read-only preflight".to_string(),
+                )),
+                Err(error) => Err(ConfigError::Io(error)),
+            }
+        }
+        Err(error) => Err(ConfigError::Io(error)),
+    }
+}
+
 pub fn load_nib_config_full_with_source(
     project_root: &Path,
 ) -> Result<(NibConfig, ConfigSource), ConfigError> {
@@ -1600,6 +1672,105 @@ pub fn save_nib_config_full(project_root: &Path, cfg: &mut NibConfig) -> Result<
         save_nib_config_atomic(directory, &paths.toml, &next, loaded.expectation())
     })?;
     cfg.revision = committed_revision;
+    Ok(())
+}
+
+/// Bootstraps configuration in a newly created, caller-exclusive worktree.
+///
+/// This deliberately does not create the repository-wide persistent config
+/// lock namespace: the worktree is not yet published to any other nib
+/// operation, and the caller compensates its exact directory on failure.
+#[cfg(test)]
+pub(crate) fn save_nib_config_full_new_unpublished_root(
+    project_root: &Path,
+    cfg: &mut NibConfig,
+) -> Result<(), ConfigError> {
+    cfg.validate()?;
+    if cfg.revision != 0 {
+        return Err(ConfigError::Operation(
+            "unpublished worktree configuration must start at revision zero".to_string(),
+        ));
+    }
+    let paths = config_paths(project_root);
+    let canonical = crate::fs_security::ensure_directory_without_symlinks(&paths.nib_dir)?;
+    let directory =
+        crate::daemons::state::StableDirectory::open(&canonical).map_err(config_state_error)?;
+    if regular_file_exists(&directory, &paths.toml)?
+        || regular_file_exists(&directory, &paths.json)?
+    {
+        return Err(ConfigError::Operation(
+            "unpublished worktree configuration destination is not empty".to_string(),
+        ));
+    }
+    let mut next = cfg.clone();
+    next.revision = 1;
+    save_nib_config_atomic(
+        &directory,
+        &paths.toml,
+        &next,
+        crate::daemons::state::FileExpectation::Missing,
+    )?;
+    cfg.revision = 1;
+    Ok(())
+}
+
+/// Bootstraps configuration in a caller-exclusive worktree while an external
+/// workload authority remains attached. The same absolute deadline and guard
+/// cover directory creation and the atomic config publication.
+pub(crate) fn save_nib_config_full_new_unpublished_root_with_guard(
+    project_root: &Path,
+    cfg: &mut NibConfig,
+    deadline: Instant,
+    mut external_guard: impl FnMut() -> Result<(), String>,
+) -> Result<(), ConfigError> {
+    let mut guard = || {
+        ensure_config_lock_deadline(Some(deadline)).map_err(|error| error.to_string())?;
+        external_guard()?;
+        ensure_config_lock_deadline(Some(deadline)).map_err(|error| error.to_string())
+    };
+    guard().map_err(ConfigError::Operation)?;
+    cfg.validate()?;
+    if cfg.revision != 0 {
+        return Err(ConfigError::Operation(
+            "unpublished worktree configuration must start at revision zero".to_string(),
+        ));
+    }
+    let paths = config_paths(project_root);
+    let root =
+        crate::daemons::state::StableDirectory::open(project_root).map_err(config_state_error)?;
+    let directory = root
+        .open_or_create_descendant_directory_with_guard(&paths.nib_dir, &mut guard, |_| Ok(()))
+        .map_err(config_state_error)?;
+    guard().map_err(ConfigError::Operation)?;
+    if regular_file_exists(&directory, &paths.toml)?
+        || regular_file_exists(&directory, &paths.json)?
+    {
+        return Err(ConfigError::Operation(
+            "unpublished worktree configuration destination is not empty".to_string(),
+        ));
+    }
+    let mut next = cfg.clone();
+    next.revision = 1;
+    next.validate()?;
+    let content = toml::to_string_pretty(&next)?;
+    if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::FileTooLarge {
+            path: paths.toml.display().to_string(),
+            size: content.len() as u64,
+            max: MAX_CONFIG_FILE_BYTES,
+        });
+    }
+    directory
+        .save_bytes_atomically_expected_with_receipt_and_guard(
+            &paths.toml,
+            content.as_bytes(),
+            CONFIG_ATOMIC_TEMPORARY_PREFIX,
+            crate::daemons::state::FileExpectation::Missing,
+            &mut guard,
+        )
+        .map_err(|error| config_state_error(error.message))?;
+    guard().map_err(ConfigError::Operation)?;
+    cfg.revision = 1;
     Ok(())
 }
 
@@ -1710,17 +1881,30 @@ fn with_config_lock<T>(
         &crate::daemons::state::StableDirectory,
     ) -> Result<T, ConfigError>,
 ) -> Result<T, ConfigError> {
-    with_config_lock_with_hook(project_root, |_| Ok(()), operation)
+    with_config_lock_with_hook(project_root, None, |_| Ok(()), operation)
+}
+
+fn with_config_lock_until<T>(
+    project_root: &Path,
+    deadline: Instant,
+    operation: impl FnOnce(
+        &ConfigPaths,
+        &crate::daemons::state::StableDirectory,
+    ) -> Result<T, ConfigError>,
+) -> Result<T, ConfigError> {
+    with_config_lock_with_hook(project_root, Some(deadline), |_| Ok(()), operation)
 }
 
 fn with_config_lock_with_hook<T>(
     project_root: &Path,
+    deadline: Option<Instant>,
     before_lock: impl FnOnce(&ConfigPaths) -> Result<(), ConfigError>,
     operation: impl FnOnce(
         &ConfigPaths,
         &crate::daemons::state::StableDirectory,
     ) -> Result<T, ConfigError>,
 ) -> Result<T, ConfigError> {
+    ensure_config_lock_deadline(deadline)?;
     let paths = config_paths(project_root);
     let directory_existed = paths.nib_dir.is_dir();
     crate::fs_security::ensure_directory_without_symlinks(&paths.nib_dir)?;
@@ -1734,34 +1918,46 @@ fn with_config_lock_with_hook<T>(
     before_lock(&paths)?;
 
     let normalized = normalized_config_path(&paths.toml)?;
-    let process_lock = config_process_lock(&normalized)?;
-    let _guard = process_lock
-        .lock()
-        .map_err(|_| ConfigError::LockPoisoned(normalized.display().to_string()))?;
+    let process_lock = config_process_lock(&normalized, deadline)?;
+    let _guard = acquire_config_mutex(&process_lock, &normalized, deadline)?;
+    ensure_config_lock_deadline(deadline)?;
     let lock_path = paths.nib_dir.join("config.toml.lock");
     let mut operation_error = None;
-    let result =
-        crate::daemons::state::with_file_lock_in(&lock_path, &paths.nib_dir, |directory| {
-            if !directory.same_identity(&expected_directory) {
-                return Err(format!(
-                    "configuration directory identity changed before lock acquisition: {}",
-                    paths.nib_dir.display()
-                ));
+    let locked_operation = |directory: &crate::daemons::state::StableDirectory| {
+        ensure_config_lock_deadline(deadline).map_err(|error| error.to_string())?;
+        if !directory.same_identity(&expected_directory) {
+            return Err(format!(
+                "configuration directory identity changed before lock acquisition: {}",
+                paths.nib_dir.display()
+            ));
+        }
+        ensure_config_lock_deadline(deadline).map_err(|error| error.to_string())?;
+        expected_directory.recover_stale_temporary_files(
+            CONFIG_ATOMIC_TEMPORARY_PREFIX,
+            MAX_CONFIG_DIRECTORY_ENTRIES,
+            MAX_CONFIG_DIRECTORY_NAME_BYTES,
+        )?;
+        ensure_config_lock_deadline(deadline).map_err(|error| error.to_string())?;
+        match operation(&paths, &expected_directory) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let message = error.to_string();
+                operation_error = Some(error);
+                Err(format!("{CONFIG_OPERATION_ERROR_SENTINEL}{message}"))
             }
-            expected_directory.recover_stale_temporary_files(
-                ".config.toml.tmp-",
-                MAX_CONFIG_DIRECTORY_ENTRIES,
-                MAX_CONFIG_DIRECTORY_NAME_BYTES,
-            )?;
-            match operation(&paths, &expected_directory) {
-                Ok(value) => Ok(value),
-                Err(error) => {
-                    let message = error.to_string();
-                    operation_error = Some(error);
-                    Err(format!("{CONFIG_OPERATION_ERROR_SENTINEL}{message}"))
-                }
-            }
-        });
+        }
+    };
+    let result = match deadline {
+        Some(deadline) => crate::daemons::state::with_file_lock_in_until(
+            &lock_path,
+            &paths.nib_dir,
+            deadline,
+            locked_operation,
+        ),
+        None => {
+            crate::daemons::state::with_file_lock_in(&lock_path, &paths.nib_dir, locked_operation)
+        }
+    };
     match result {
         Ok(value) => Ok(value),
         Err(error) => match operation_error {
@@ -1776,11 +1972,13 @@ fn with_config_lock_with_hook<T>(
     }
 }
 
-fn config_process_lock(path: &Path) -> Result<Arc<ConfigMutex>, ConfigError> {
+fn config_process_lock(
+    path: &Path,
+    deadline: Option<Instant>,
+) -> Result<Arc<ConfigMutex>, ConfigError> {
     let registry = CONFIG_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut registry = registry
-        .lock()
-        .map_err(|_| ConfigError::LockPoisoned(path.display().to_string()))?;
+    let mut registry = acquire_config_mutex(registry, path, deadline)?;
+    ensure_config_lock_deadline(deadline)?;
     registry.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = registry.get(path).and_then(Weak::upgrade) {
         return Ok(lock);
@@ -1788,6 +1986,51 @@ fn config_process_lock(path: &Path) -> Result<Arc<ConfigMutex>, ConfigError> {
     let lock = Arc::new(Mutex::new(()));
     registry.insert(path.to_path_buf(), Arc::downgrade(&lock));
     Ok(lock)
+}
+
+fn acquire_config_mutex<'a, T>(
+    mutex: &'a Mutex<T>,
+    path: &Path,
+    deadline: Option<Instant>,
+) -> Result<std::sync::MutexGuard<'a, T>, ConfigError> {
+    let Some(deadline) = deadline else {
+        return mutex
+            .lock()
+            .map_err(|_| ConfigError::LockPoisoned(path.display().to_string()));
+    };
+    loop {
+        ensure_config_lock_deadline(Some(deadline))?;
+        match mutex.try_lock() {
+            Ok(guard) => {
+                ensure_config_lock_deadline(Some(deadline))?;
+                return Ok(guard);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(ConfigError::LockPoisoned(path.display().to_string()));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                ConfigError::Operation("configuration lock deadline elapsed".to_string())
+            })?;
+        if remaining.is_zero() {
+            return Err(ConfigError::Operation(
+                "configuration lock deadline elapsed".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10).min(remaining));
+    }
+}
+
+fn ensure_config_lock_deadline(deadline: Option<Instant>) -> Result<(), ConfigError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(ConfigError::Operation(
+            "configuration lock deadline elapsed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn normalized_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
@@ -1859,11 +2102,31 @@ fn load_nib_config_file(
     Ok((config, file))
 }
 
+fn load_nib_config_opened_file(
+    directory: &crate::daemons::state::StableDirectory,
+    path: &Path,
+    file: File,
+) -> Result<NibConfig, ConfigError> {
+    let (content, _) = read_opened_regular_file(directory, path, file, false)?;
+    let config: NibConfig = toml::from_str(&content)?;
+    config.validate()?;
+    Ok(config)
+}
+
 fn read_regular_file(
     directory: &crate::daemons::state::StableDirectory,
     path: &Path,
 ) -> Result<(String, File), ConfigError> {
     let file = directory.open_read(path).map_err(config_state_error)?;
+    read_opened_regular_file(directory, path, file, true)
+}
+
+fn read_opened_regular_file(
+    directory: &crate::daemons::state::StableDirectory,
+    path: &Path,
+    file: File,
+    verify_visible_identity_after_read: bool,
+) -> Result<(String, File), ConfigError> {
     let opened_metadata = file.metadata()?;
     validate_config_file_metadata(path, &opened_metadata)?;
     #[cfg(test)]
@@ -1879,9 +2142,11 @@ fn read_regular_file(
             max: MAX_CONFIG_FILE_BYTES,
         });
     }
-    directory
-        .verify_file_identity(path, &file)
-        .map_err(config_state_error)?;
+    if verify_visible_identity_after_read {
+        directory
+            .verify_file_identity(path, &file)
+            .map_err(config_state_error)?;
+    }
     directory.verify_visible().map_err(config_state_error)?;
     let contents = String::from_utf8(bytes).map_err(|error| {
         ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
@@ -1939,7 +2204,7 @@ fn save_nib_config_atomic_with_hook(
         .save_bytes_atomically_expected_with_hook(
             path,
             content.as_bytes(),
-            ".config.toml.tmp-",
+            CONFIG_ATOMIC_TEMPORARY_PREFIX,
             true,
             expected,
             before_commit,
@@ -2064,6 +2329,58 @@ mod tests {
     const CONFIG_COMMIT_CHILD_READY: &str = "NIB_CONFIG_COMMIT_CHILD_READY";
     #[cfg(unix)]
     const CONFIG_COMMIT_CHILD_RELEASE: &str = "NIB_CONFIG_COMMIT_CHILD_RELEASE";
+
+    #[test]
+    fn expired_deadline_rejects_a_free_config_mutex() {
+        let mutex = Mutex::new(());
+        let path = Path::new("expired-free-config.toml");
+
+        let error = acquire_config_mutex(
+            &mutex,
+            path,
+            Some(Instant::now() - Duration::from_millis(1)),
+        )
+        .expect_err("an expired deadline must reject an uncontended config mutex");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configuration lock deadline elapsed"),
+            "{error}"
+        );
+        assert!(
+            mutex.try_lock().is_ok(),
+            "failed acquisition retained the mutex"
+        );
+    }
+
+    #[test]
+    fn expired_config_operation_does_not_create_state_or_enter_mutation() {
+        let root = tempdir().expect("project");
+        let mut operation_ran = false;
+
+        let error = with_config_lock_until(
+            root.path(),
+            Instant::now() - Duration::from_millis(1),
+            |_, _| {
+                operation_ran = true;
+                Ok(())
+            },
+        )
+        .expect_err("an expired config operation must fail before setup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configuration lock deadline elapsed"),
+            "{error}"
+        );
+        assert!(!operation_ran, "expired config operation entered mutation");
+        assert!(
+            !root.path().join(".nib").exists(),
+            "expired config operation created its state namespace"
+        );
+    }
 
     #[test]
     fn toml_roundtrip_preserves_llm_config() {
@@ -3428,6 +3745,7 @@ request_timeot_secs = 10
 
         let error = with_config_lock_with_hook(
             root.path(),
+            None,
             move |paths| {
                 fs::rename(&paths.nib_dir, &displaced_for_hook)?;
                 fs::create_dir(&paths.nib_dir)?;

@@ -147,6 +147,17 @@ mod cli_tests {
             panic!("expected doctor command");
         };
         assert!(args.fix);
+        assert!(!args.confirm_no_legacy_processes);
+
+        let parsed =
+            Cli::try_parse_from(["nib", "doctor", "--fix", "--confirm-no-legacy-processes"])
+                .expect("offline legacy migration confirmation");
+        let Some(Commands::Doctor(args)) = parsed.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.fix);
+        assert!(args.confirm_no_legacy_processes);
+        assert!(Cli::try_parse_from(["nib", "doctor", "--confirm-no-legacy-processes"]).is_err());
     }
 }
 
@@ -228,6 +239,10 @@ enum Commands {
         execution_generation: u64,
         #[arg(long, hide = true)]
         owner_lease: String,
+        #[arg(long, hide = true)]
+        cleanup_lease_id: String,
+        #[arg(long, hide = true)]
+        supervisor_registration_nonce: String,
         #[arg(long)]
         worktree: PathBuf,
     },
@@ -459,6 +474,8 @@ fn main() {
             subagent_id,
             execution_generation,
             owner_lease,
+            cleanup_lease_id,
+            supervisor_registration_nonce,
             worktree,
         }) => {
             if let Err(error) = nib::tools::delegation::run_subagent_supervisor(
@@ -466,6 +483,8 @@ fn main() {
                 subagent_id,
                 *execution_generation,
                 owner_lease,
+                cleanup_lease_id,
+                supervisor_registration_nonce,
                 worktree,
             ) {
                 eprintln!("Subagent supervisor error: {error}");

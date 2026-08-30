@@ -271,3 +271,14 @@ state under the existing configuration lock, commits atomically, and performs no
 when no repair is needed, so idempotent runs do not advance the revision. Ordinary
 doctor remains read-only, custom gateways remain excluded, and neither mode performs a
 live provider capability probe.
+
+The separate `nib doctor --fix --confirm-no-legacy-processes` surface is an explicit
+operator attestation for T004/FT-015's one-time offline delegation-lock migration. It
+requires all prior nib binaries to be stopped and disabled, persists an exact
+capability-bound pending/completed epoch, and has no environment-only bypass. `--fix`
+without that confirmation retains the OpenAI-only behavior above; ordinary doctor and
+ordinary runtime operations never consume or delete legacy delegation state.
+The confirmation does not authorize recursive repair of ambiguous native-origin
+staging. Only a sole, valid receipt bound to that exact staging identity can resume;
+unmarked, mismatched, or extra-content staging is preserved with actionable inspection
+and exact-removal guidance.

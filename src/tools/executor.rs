@@ -1241,11 +1241,34 @@ impl ToolExecutor {
         ) {
             if let Some(arguments) = dispatch_arguments.as_object_mut() {
                 arguments.remove("_parent_session_id");
+                arguments.remove("_audit_sessions_dir");
                 if let Some(session) = effective_session {
                     arguments.insert(
                         "_parent_session_id".to_string(),
                         Value::String(session.to_string()),
                     );
+                    if let Some(store) = self.session_store.as_ref() {
+                        let audit_sessions_dir =
+                            match crate::tools::delegation::serialize_subagent_audit_destination(
+                                store,
+                            ) {
+                                Ok(path) => path,
+                                Err(error) => {
+                                    return self.finish_failure(
+                                        &call,
+                                        effective_session,
+                                        start,
+                                        error,
+                                        approval,
+                                        level,
+                                        risk,
+                                        worktree.as_deref(),
+                                        plan_id,
+                                    );
+                                }
+                            };
+                        arguments.insert("_audit_sessions_dir".to_string(), audit_sessions_dir);
+                    }
                 }
             }
         }
@@ -2145,6 +2168,7 @@ fn schema_validation_arguments(call: &ToolCall) -> Value {
     match call.tool_name.as_str() {
         "spawn_subagent" | "invoke_subagent" => {
             object.remove("_parent_session_id");
+            object.remove("_audit_sessions_dir");
         }
         "schedule" | "run_terminal" => {
             object.remove("_session_id");
@@ -3541,6 +3565,71 @@ mod tests {
                 .network,
             "disabled"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_utf8_session_audit_destination_fails_closed_without_partial_delegation() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root
+            .path()
+            .join(OsString::from_vec(b"workspace-\xff".to_vec()));
+        let sessions_dir = workspace
+            .join(".nib")
+            .join("profiles")
+            .join(OsString::from_vec(b"profile-\xfe".to_vec()))
+            .join(OsString::from_vec(b"sessions-\xfd".to_vec()));
+        std::fs::create_dir_all(&sessions_dir).expect("non-UTF-8 session directory");
+        let store = SessionStore::at_dir(sessions_dir);
+        let session = store.create_session_with_id("non-utf8-audit-session");
+        let mut executor = ToolExecutor::new(workspace.clone(), ExecutionConfig::default())
+            .with_session_store(store.clone())
+            .with_auto_approve(true);
+
+        for tool_name in ["spawn_subagent", "invoke_subagent"] {
+            let result = executor
+                .execute(
+                    ToolCall {
+                        invocation_id: crate::tools::ToolInvocationId::new(),
+                        tool_name: tool_name.to_string(),
+                        arguments: json!({"prompt": "must fail before delegation dispatch"}),
+                        session_id: Some(session.id.clone()),
+                        project_root: Some(workspace.clone()),
+                    },
+                    Some(&session.id),
+                )
+                .await;
+
+            assert!(!result.success, "{tool_name} unexpectedly dispatched");
+            assert!(
+                result.error.as_deref().is_some_and(|error| error.contains(
+                    "audit destination cannot be represented without changing its filesystem identity"
+                )),
+                "unexpected {tool_name} error: {:?}",
+                result.error
+            );
+            let audited = store.load(&session.id).expect("audited failure session");
+            let call = audited.tool_calls.last().expect("audited tool failure");
+            assert_eq!(call.tool_name.as_deref(), Some(tool_name));
+            assert!(call.error.as_deref().is_some_and(|error| error.contains(
+                "audit destination cannot be represented without changing its filesystem identity"
+            )));
+        }
+
+        for path in [
+            workspace.join(".nib/subagents"),
+            workspace.join(".nib/subagent-owner-leases"),
+            workspace.join(".nib/worktrees/subagents"),
+        ] {
+            assert!(
+                !path.exists(),
+                "failed path serialization created partial delegation state at {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

@@ -38,18 +38,22 @@ pub struct DoctorArgs {
     /// Apply narrowly scoped, deterministic configuration repairs before validation
     #[arg(long)]
     pub fix: bool,
+
+    /// Attest that every prior nib binary is stopped and disabled, then migrate legacy subagent locks
+    #[arg(long, requires = "fix")]
+    pub confirm_no_legacy_processes: bool,
 }
 
 #[cfg(test)]
 pub fn run_doctor(project: &Path) -> bool {
-    run_doctor_inner(project, false)
+    run_doctor_inner(project, false, false)
 }
 
 pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
-    run_doctor_inner(project, args.fix)
+    run_doctor_inner(project, args.fix, args.confirm_no_legacy_processes)
 }
 
-fn run_doctor_inner(project: &Path, fix: bool) -> bool {
+fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool) -> bool {
     println!("nib doctor");
     println!("==========");
     println!("Build: {}", crate::version::version_display());
@@ -60,6 +64,21 @@ fn run_doctor_inner(project: &Path, fix: bool) -> bool {
         match repair_openai_transport(project) {
             Ok(true) => println!("FIXED (OpenAI now uses Responses)"),
             Ok(false) => println!("OK (no eligible fixes needed)"),
+            Err(error) => {
+                println!("FAILED ({error})");
+                println!("==========");
+                println!("Doctor summary: Some checks FAILED.");
+                return false;
+            }
+        }
+    }
+
+    if confirm_no_legacy_processes {
+        print!("Migrating offline legacy subagent locks... ");
+        match nib::tools::delegation::confirm_no_legacy_subagent_processes(project) {
+            Ok(artifacts) => println!(
+                "FIXED ({artifacts} legacy artifacts reconciled; fixed-stripe locking active)"
+            ),
             Err(error) => {
                 println!("FAILED ({error})");
                 println!("==========");

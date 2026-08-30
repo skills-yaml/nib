@@ -27,7 +27,7 @@ const MCP_SUBAGENT_SHUTDOWN_HANDOFF_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 #[cfg(test)]
 const MCP_SUBAGENT_SHUTDOWN_HANDOFF_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
+    std::time::Duration::from_millis(500);
 
 struct OwnedResponseWriter {
     response_tx: Option<mpsc::Sender<QueuedResponse>>,
@@ -913,13 +913,14 @@ where
                                 &task_cancellation_audit,
                             )
                             .await;
-                            finish_request_lifecycle(
+                            finish_request_lifecycle_async(
                                 &task_lifecycle,
                                 request_generation,
                                 task_root.as_path(),
                                 &task_cancellation_class,
                                 handled,
-                            );
+                            )
+                            .await;
                         },
                     )
                     .await;
@@ -1130,6 +1131,7 @@ impl RequestCancellationClass {
     }
 }
 
+#[cfg(test)]
 fn finish_request_lifecycle(
     lifecycle: &SharedRequestLifecycle,
     generation: u64,
@@ -1137,41 +1139,73 @@ fn finish_request_lifecycle(
     cancellation_class: &RequestCancellationClass,
     mut handled: HandledRequest,
 ) {
+    let Some(subagent_tool_name) =
+        begin_request_lifecycle_finish(lifecycle, generation, cancellation_class, &mut handled)
+    else {
+        return;
+    };
+    let publication = reconcile_started_subagent(project_root, subagent_tool_name, &mut handled);
+    publish_request_lifecycle_reconciliation(lifecycle, generation, publication);
+}
+
+async fn finish_request_lifecycle_async(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    project_root: &Path,
+    cancellation_class: &RequestCancellationClass,
+    mut handled: HandledRequest,
+) {
+    let Some(subagent_tool_name) =
+        begin_request_lifecycle_finish(lifecycle, generation, cancellation_class, &mut handled)
+    else {
+        return;
+    };
+    let publication =
+        reconcile_started_subagent_async(project_root, subagent_tool_name, &mut handled).await;
+    publish_request_lifecycle_reconciliation(lifecycle, generation, publication);
+}
+
+fn begin_request_lifecycle_finish<'a>(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    cancellation_class: &'a RequestCancellationClass,
+    handled: &mut HandledRequest,
+) -> Option<&'a str> {
     let subagent_tool_name = cancellation_class.subagent_tool_name();
-    {
-        let mut state = lock_request_lifecycle(lifecycle);
-        match &*state {
-            RequestLifecycle::Running => {
-                handled.complete_audit();
-                *state = RequestLifecycle::Completed(handled.response.take());
-                return;
-            }
-            RequestLifecycle::CancelRequested
-                if subagent_tool_name.is_some() && handled.cancellation_audit.is_some() =>
-            {
-                *state = RequestLifecycle::Reconciling { generation };
-            }
-            RequestLifecycle::CancelRequested => {
-                handled.complete_audit();
-                *state = RequestLifecycle::Completed(handled.response.take());
-                return;
-            }
-            RequestLifecycle::Completed(_) | RequestLifecycle::CancellationFailed { .. } => {
-                handled.complete_audit();
-                return;
-            }
-            RequestLifecycle::Reconciling { .. } | RequestLifecycle::Cancelled => {
-                handled.disarm_audit();
-                return;
-            }
+    let mut state = lock_request_lifecycle(lifecycle);
+    match &*state {
+        RequestLifecycle::Running => {
+            handled.complete_audit();
+            *state = RequestLifecycle::Completed(handled.response.take());
+            None
+        }
+        RequestLifecycle::CancelRequested
+            if subagent_tool_name.is_some() && handled.cancellation_audit.is_some() =>
+        {
+            *state = RequestLifecycle::Reconciling { generation };
+            subagent_tool_name
+        }
+        RequestLifecycle::CancelRequested => {
+            handled.complete_audit();
+            *state = RequestLifecycle::Completed(handled.response.take());
+            None
+        }
+        RequestLifecycle::Completed(_) | RequestLifecycle::CancellationFailed { .. } => {
+            handled.complete_audit();
+            None
+        }
+        RequestLifecycle::Reconciling { .. } | RequestLifecycle::Cancelled => {
+            handled.disarm_audit();
+            None
         }
     }
+}
 
-    let publication = reconcile_started_subagent(
-        project_root,
-        subagent_tool_name.expect("only subagent starts enter reconciliation"),
-        &mut handled,
-    );
+fn publish_request_lifecycle_reconciliation(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    publication: RequestLifecycle,
+) {
     let mut state = lock_request_lifecycle(lifecycle);
     if matches!(
         &*state,
@@ -1183,6 +1217,7 @@ fn finish_request_lifecycle(
     }
 }
 
+#[cfg(test)]
 fn reconcile_started_subagent(
     project_root: &Path,
     tool_name: &str,
@@ -1191,6 +1226,25 @@ fn reconcile_started_subagent(
     #[cfg(test)]
     pause_at_reconciliation_barrier(handled.response.as_ref());
     let outcome = cancel_started_subagent(project_root, tool_name, handled.response.as_ref());
+    finish_started_subagent_reconciliation(handled, outcome)
+}
+
+async fn reconcile_started_subagent_async(
+    project_root: &Path,
+    tool_name: &str,
+    handled: &mut HandledRequest,
+) -> RequestLifecycle {
+    #[cfg(test)]
+    pause_at_reconciliation_barrier(handled.response.as_ref());
+    let outcome =
+        cancel_started_subagent_async(project_root, tool_name, handled.response.as_ref()).await;
+    finish_started_subagent_reconciliation(handled, outcome)
+}
+
+fn finish_started_subagent_reconciliation(
+    handled: &mut HandledRequest,
+    outcome: SubagentCancellationOutcome,
+) -> RequestLifecycle {
     let response_id = handled
         .response
         .as_ref()
@@ -1251,13 +1305,44 @@ fn pause_at_reconciliation_barrier(response: Option<&Value>) {
     }
 }
 
+#[cfg(test)]
 fn cancel_started_subagent(
     project_root: &Path,
     tool_name: &str,
     response: Option<&Value>,
 ) -> SubagentCancellationOutcome {
+    let subagent_id = match started_subagent_cancellation_target(tool_name, response) {
+        Ok(subagent_id) => subagent_id,
+        Err(outcome) => return outcome,
+    };
+    started_subagent_cancellation_outcome(
+        tool_name,
+        subagent_id,
+        crate::tools::delegation::resolve_subagent_cancellation(project_root, subagent_id),
+    )
+}
+
+async fn cancel_started_subagent_async(
+    project_root: &Path,
+    tool_name: &str,
+    response: Option<&Value>,
+) -> SubagentCancellationOutcome {
+    let subagent_id = match started_subagent_cancellation_target(tool_name, response) {
+        Ok(subagent_id) => subagent_id,
+        Err(outcome) => return outcome,
+    };
+    let resolution =
+        crate::tools::delegation::resolve_subagent_cancellation_async(project_root, subagent_id)
+            .await;
+    started_subagent_cancellation_outcome(tool_name, subagent_id, resolution)
+}
+
+fn started_subagent_cancellation_target<'a>(
+    tool_name: &str,
+    response: Option<&'a Value>,
+) -> Result<&'a str, SubagentCancellationOutcome> {
     let Some(response) = response else {
-        return SubagentCancellationOutcome::Unresolved {
+        return Err(SubagentCancellationOutcome::Unresolved {
             details: json!({
                 "tool_name": tool_name,
                 "outcome": "unresolved",
@@ -1265,18 +1350,18 @@ fn cancel_started_subagent(
                 "error": format!("{tool_name} produced no response"),
             }),
             error: format!("{tool_name} cancellation produced no response to reconcile"),
-        };
+        });
     };
     if response.get("error").is_some() || response["result"]["isError"] == true {
-        return SubagentCancellationOutcome::Cancelled(json!({
+        return Err(SubagentCancellationOutcome::Cancelled(json!({
             "tool_name": tool_name,
             "outcome": "cancelled",
             "reconciled": true,
             "phase": "precommit",
-        }));
+        })));
     }
     let Some(subagent_id) = response["result"]["structuredContent"]["subagent_id"].as_str() else {
-        return SubagentCancellationOutcome::Unresolved {
+        return Err(SubagentCancellationOutcome::Unresolved {
             details: json!({
                 "tool_name": tool_name,
                 "outcome": "unresolved",
@@ -1284,9 +1369,17 @@ fn cancel_started_subagent(
                 "error": format!("successful {tool_name} response omitted subagent_id"),
             }),
             error: format!("successful {tool_name} response omitted its authoritative subagent ID"),
-        };
+        });
     };
-    match crate::tools::delegation::resolve_subagent_cancellation(project_root, subagent_id) {
+    Ok(subagent_id)
+}
+
+fn started_subagent_cancellation_outcome(
+    tool_name: &str,
+    subagent_id: &str,
+    resolution: crate::tools::delegation::CancelSubagentResolution,
+) -> SubagentCancellationOutcome {
+    match resolution {
         crate::tools::delegation::CancelSubagentResolution::Cancelled { record } => {
             SubagentCancellationOutcome::Cancelled(json!({
                 "tool_name": tool_name,
@@ -2781,6 +2874,67 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn nib_get_status_projects_running_subagent_ownership_authority() {
+        let root = tempdir().expect("MCP status project");
+        let config = save_profile_config(root.path());
+        let id = format!("sub-public-mcp-{}", uuid::Uuid::new_v4());
+        let owner_lease = crate::tools::delegation::create_test_subagent_owner_lease(root.path())
+            .expect("live owner lease");
+        crate::tools::delegation::write_subagent_record(
+            root.path(),
+            &crate::tools::delegation::SubagentRecord {
+                id: id.clone(),
+                parent_session_id: Some("parent".to_string()),
+                child_session_id: id.clone(),
+                prompt: "MCP public projection fixture".to_string(),
+                status: "running".to_string(),
+                execution_generation: Some(owner_lease.execution_generation()),
+                owner_lease: Some(owner_lease.lease_id().to_string()),
+                worktree_path: root.path().join("worktree"),
+                branch: format!("nib/subagent/{id}"),
+                branch_oid: None,
+                result: Some(json!({
+                    "_ownership_audit_target": {
+                        "sessions_dir": root.path().join("private-mcp-audit-sessions"),
+                        "directory_identity": "private-mcp-identity",
+                    }
+                })),
+                error: None,
+                verification: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .expect("running subagent record");
+
+        let response = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "public-status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": id},
+                }
+            }),
+        )
+        .await
+        .expect("MCP status response");
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let public = &response["result"]["structuredContent"];
+        assert_eq!(public["status"], "running");
+        assert!(public["result"].is_null());
+        assert!(public.get("execution_generation").is_none());
+        assert!(public.get("owner_lease").is_none());
+        let encoded = response.to_string();
+        assert!(!encoded.contains("_ownership_audit_target"));
+        assert!(!encoded.contains("private-mcp-audit-sessions"));
+        assert!(!encoded.contains("private-mcp-identity"));
+    }
+
     #[test]
     fn cancellation_classification_covers_all_subagent_aliases_and_effect_boundaries() {
         for name in ["nib_run", "spawn_subagent", "invoke_subagent"] {
@@ -3216,7 +3370,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let error = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
             cancel_all_requests(&mut active),
         )
         .await
@@ -3225,12 +3379,138 @@ mod tests {
 
         assert!(active.is_empty());
         assert!(observed_cancellation.is_cancelled());
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(error.contains("durable cancellation reconciliation was handed off"));
         assert!(matches!(
             &*lock_request_lifecycle(&lifecycle),
             RequestLifecycle::CancelRequested
         ));
+    }
+
+    #[tokio::test]
+    async fn subagent_shutdown_joins_held_lock_reconciliation_before_returning() {
+        let root = tempdir().expect("held-lock cancellation repository");
+        let id = format!("sub-held-cancel-{}", uuid::Uuid::new_v4());
+        let store = SessionStore::for_project(root.path()).expect("profile session store");
+        let session = store.try_create_session().expect("audit session");
+        let owner_lease = crate::tools::delegation::create_test_subagent_owner_lease(root.path())
+            .expect("subagent owner lease");
+        crate::tools::delegation::write_subagent_record(
+            root.path(),
+            &crate::tools::delegation::SubagentRecord {
+                id: id.clone(),
+                parent_session_id: Some(session.id.clone()),
+                child_session_id: id.clone(),
+                prompt: "held record lock".to_string(),
+                status: "running".to_string(),
+                execution_generation: Some(owner_lease.execution_generation()),
+                owner_lease: Some(owner_lease.lease_id().to_string()),
+                worktree_path: root.path().to_path_buf(),
+                branch: format!("nib/subagent/{id}"),
+                branch_oid: None,
+                result: None,
+                error: None,
+                verification: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .expect("running subagent record");
+        drop(owner_lease);
+        let held = crate::tools::delegation::hold_subagent_record_lock_for_test(root.path(), &id)
+            .expect("held subagent record lock");
+        crate::daemons::task::TASK_MANAGER
+            .register_task(id.clone(), "subagent")
+            .expect("subagent task");
+        let manager_task = tokio::spawn(std::future::pending::<()>());
+        crate::daemons::task::TASK_MANAGER
+            .attach_abort_handle(&id, manager_task.abort_handle())
+            .expect("subagent abort handle");
+
+        let lifecycle = Arc::new(StdMutex::new(RequestLifecycle::Running));
+        let cancellation = crate::agent::CancellationSignal::new();
+        let task_cancellation = cancellation.clone();
+        let task_lifecycle = Arc::clone(&lifecycle);
+        let task_root = root.path().to_path_buf();
+        let cancellation_class = subagent_start_class("nib_run");
+        let task_cancellation_class = cancellation_class.clone();
+        let response = rpc_result(
+            json!("held-lock-cancel"),
+            json!({
+                "isError": false,
+                "structuredContent": {"subagent_id": id.clone()}
+            }),
+        );
+        let (audit, audit_state) = test_cancellation_audit(&store, &session.id, "nib_run");
+        let audit_slot = Arc::new(CancellationAuditSlot::default());
+        audit_slot.set(audit_state);
+        let task = tokio::spawn(async move {
+            task_cancellation.cancelled().await;
+            finish_request_lifecycle_async(
+                &task_lifecycle,
+                1,
+                &task_root,
+                &task_cancellation_class,
+                HandledRequest {
+                    response: Some(response),
+                    cancellation_audit: Some(audit),
+                },
+            )
+            .await;
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = cancel_active_request(ActiveRequest {
+            generation: 1,
+            id: json!("held-lock-cancel"),
+            task_kind: ActiveTaskKind::Execution,
+            lifecycle: Arc::clone(&lifecycle),
+            cancellation_class,
+            cancellation_audit: audit_slot,
+            cancellation,
+            task,
+        })
+        .await;
+        let CancellationOutcome::Failed(error) = outcome else {
+            panic!("held-lock reconciliation must fail closed");
+        };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "MCP shutdown exceeded its owned reconciliation window"
+        );
+        assert!(!error.contains("handed off"), "{error}");
+        assert!(
+            error.contains("delegation state lock deadline elapsed"),
+            "{error}"
+        );
+        assert!(matches!(
+            &*lock_request_lifecycle(&lifecycle),
+            RequestLifecycle::CancellationFailed { .. }
+        ));
+        assert!(manager_task
+            .await
+            .expect_err("subagent manager task is cancelled")
+            .is_cancelled());
+
+        drop(held);
+        tokio::time::sleep(
+            crate::tools::delegation::SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT * 2,
+        )
+        .await;
+        let record_path = root
+            .path()
+            .join(".nib")
+            .join("subagents")
+            .join(format!("{id}.json"));
+        let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
+            &std::fs::read(record_path).expect("unreconciled subagent record bytes"),
+        )
+        .expect("unreconciled subagent record");
+        assert_eq!(persisted.status, "running");
+        assert!(
+            persisted.result.is_none(),
+            "MCP returned while a detached reconciler could still mutate durable state"
+        );
     }
 
     #[test]
@@ -3642,7 +3922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postcommit_nib_run_cancellation_win_records_exactly_one_rich_audit() {
+    async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_audit() {
         let root = tempdir().expect("cancellation-win repository");
         initialize_git_repository(root.path());
         let id = format!("sub-{}", uuid::Uuid::new_v4());
@@ -3684,7 +3964,7 @@ mod tests {
             .attach_abort_handle(&id, running.abort_handle())
             .expect("subagent abort handle");
         let owner_id = id.clone();
-        let owner_release = std::thread::spawn(move || {
+        let owner_release = tokio::spawn(async move {
             let started = std::time::Instant::now();
             while crate::daemons::task::TASK_MANAGER
                 .get_status(&owner_id)
@@ -3695,7 +3975,7 @@ mod tests {
                     started.elapsed() < std::time::Duration::from_secs(5),
                     "subagent manager never entered cancelled state"
                 );
-                std::thread::yield_now();
+                tokio::task::yield_now().await;
             }
             drop(owner_lease);
         });
@@ -3718,14 +3998,15 @@ mod tests {
             cancellation_audit: Some(audit),
         };
 
-        finish_request_lifecycle(
+        finish_request_lifecycle_async(
             &lifecycle,
             1,
             root.path(),
             &subagent_start_class("nib_run"),
             handled,
-        );
-        owner_release.join().expect("owner lease release thread");
+        )
+        .await;
+        owner_release.await.expect("owner lease release task");
 
         assert!(matches!(
             &*lock_request_lifecycle(&lifecycle),
@@ -3750,9 +4031,24 @@ mod tests {
             "cancelled"
         );
         let cancelled_record = crate::tools::delegation::get_subagent_record(root.path(), &id)
-            .expect("cancelled record with cleanup proof");
+            .expect("public cancelled record");
+        assert!(cancelled_record.execution_generation.is_none());
+        assert!(cancelled_record.owner_lease.is_none());
+        assert!(cancelled_record.result.as_ref().is_none_or(|result| {
+            result.get("ownership_reconciliation").is_none()
+                && result.get("cleanup_proof").is_none()
+        }));
+        let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
+            &std::fs::read(
+                root.path()
+                    .join(".nib/subagents")
+                    .join(format!("{id}.json")),
+            )
+            .expect("persisted cancelled record"),
+        )
+        .expect("persisted cancelled record JSON");
         assert_eq!(
-            cancelled_record.result.as_ref().and_then(|result| {
+            persisted.result.as_ref().and_then(|result| {
                 result
                     .get("ownership_reconciliation")
                     .and_then(|evidence| evidence.get("cleanup_proof"))
@@ -4324,7 +4620,7 @@ mod tests {
         .expect("MCP status response");
         assert_eq!(status["result"]["isError"], false, "{status}");
 
-        match crate::tools::delegation::resolve_subagent_cancellation(&short_root, id) {
+        match crate::tools::delegation::resolve_subagent_cancellation_async(&short_root, id).await {
             crate::tools::delegation::CancelSubagentResolution::Cancelled { .. }
             | crate::tools::delegation::CancelSubagentResolution::Terminal { .. } => {}
             crate::tools::delegation::CancelSubagentResolution::Unresolved { error, .. } => {

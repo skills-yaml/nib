@@ -36,6 +36,7 @@ const CLEANUP_LEASE_DELETE_PREFIX: &str = ".nib-process-cleanup-lease-delete-";
 const SCOPE_DELETE_PREFIX: &str = ".nib-process-scope-delete-";
 const LAUNCH_ABORT_OUTCOME: &str = "gate_eof_before_running";
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAINTENANCE_REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const SUPERVISOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SUPERVISED_OUTPUT_BYTES: usize = 1024 * 1024;
 #[cfg(debug_assertions)]
@@ -82,7 +83,9 @@ const PROCESS_SCOPE_DIRECTORY_LIMITS: ProcessScopeDirectoryLimits = ProcessScope
     max_bytes: MAX_PROCESS_SCOPE_DIRECTORY_BYTES,
 };
 
-static MAINTAINED_PROCESS_SCOPE_STORES: LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
+type ProcessScopeMaintenanceRegistry = Mutex<std::collections::HashSet<PathBuf>>;
+
+static MAINTAINED_PROCESS_SCOPE_STORES: LazyLock<ProcessScopeMaintenanceRegistry> =
     LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,9 +223,20 @@ pub struct ProcessScopeRecord {
     pub workload_kind: String,
     pub execution_generation: u64,
     pub cleanup_lease_id: String,
+    /// Immutable nonce authorizing the hidden supervisor to bind its own OS
+    /// identity before it reads any parent-controlled launch data. Legacy and
+    /// non-subagent scopes do not carry this authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_registration_nonce: Option<String>,
     pub owner: ProcessIdentity,
     pub backend: ProcessScopeBackend,
     pub status: ProcessScopeStatus,
+    /// `None` is the legacy v2 encoding, whose `Running` state already meant
+    /// the OS launch gate had been released. New supervisors persist
+    /// `Some(false)` while the exact child is running behind its gate and
+    /// advance it monotonically to `Some(true)` before releasing that gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_committed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<ProcessIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,10 +270,14 @@ pub struct SupervisedOutput {
     pub cleanup_proof: CleanupProof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ProcessScopeStore {
     project_root: PathBuf,
     directory: PathBuf,
+    directory_capability: crate::daemons::state::StableDirectory,
+    records_binding: Option<crate::daemons::state::StableDirectory>,
+    lock_deadline: Option<Instant>,
+    operation_timeout: Duration,
 }
 
 enum CompletionAuthority<'a> {
@@ -285,25 +303,166 @@ impl CompletionAuthority<'_> {
 }
 
 impl ProcessScopeStore {
+    #[cfg(all(test, target_os = "linux"))]
+    fn try_clone(&self) -> Result<Self, String> {
+        Ok(Self {
+            project_root: self.project_root.clone(),
+            directory: self.directory.clone(),
+            directory_capability: self.directory_capability.try_clone()?,
+            records_binding: self
+                .records_binding
+                .as_ref()
+                .map(crate::daemons::state::StableDirectory::try_clone)
+                .transpose()?,
+            lock_deadline: self.lock_deadline,
+            operation_timeout: self.operation_timeout,
+        })
+    }
+
     pub fn open(project_root: &Path) -> Result<Self, String> {
+        Self::open_with_optional_lock_deadline(project_root, None)
+    }
+
+    pub(crate) fn open_with_lock_deadline(
+        project_root: &Path,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        Self::open_with_optional_lock_deadline(project_root, Some(deadline))
+    }
+
+    fn open_with_optional_lock_deadline(
+        project_root: &Path,
+        lock_deadline: Option<Instant>,
+    ) -> Result<Self, String> {
+        Self::open_with_optional_lock_deadline_and_setup_hook(
+            project_root,
+            lock_deadline,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    fn open_with_lock_deadline_and_setup_hook(
+        project_root: &Path,
+        deadline: Instant,
+        before_setup_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        Self::open_with_optional_lock_deadline_and_setup_hook(
+            project_root,
+            Some(deadline),
+            before_setup_step,
+        )
+    }
+
+    fn open_with_optional_lock_deadline_and_setup_hook(
+        project_root: &Path,
+        lock_deadline: Option<Instant>,
+        mut before_setup_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        ensure_process_scope_deadline(lock_deadline)?;
         let project_root = project_root.canonicalize().map_err(|error| {
             format!(
                 "failed to resolve managed-process project root {}: {error}",
                 project_root.display()
             )
         })?;
+        ensure_process_scope_deadline(lock_deadline)?;
         let nib = project_root.join(".nib");
-        crate::fs_security::ensure_directory_without_symlinks(&nib)
-            .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
         let directory = nib.join(SCOPE_DIRECTORY);
-        crate::fs_security::ensure_directory_without_symlinks(&directory)
-            .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?;
+        let directory_capability = if lock_deadline.is_some() {
+            let project_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+            let mut setup_guard = || {
+                before_setup_step()?;
+                ensure_process_scope_deadline(lock_deadline)
+            };
+            let nib_directory = project_directory
+                .open_or_create_descendant_directory_with_guard(&nib, &mut setup_guard, |_| Ok(()))
+                .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
+            setup_guard()?;
+            nib_directory
+                .open_or_create_descendant_directory_with_guard(
+                    &directory,
+                    &mut setup_guard,
+                    |_| Ok(()),
+                )
+                .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?
+        } else {
+            crate::fs_security::ensure_directory_without_symlinks(&nib)
+                .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
+            crate::fs_security::ensure_directory_without_symlinks(&directory)
+                .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?;
+            crate::daemons::state::StableDirectory::open(&directory)?
+        };
+        ensure_process_scope_deadline(lock_deadline)?;
         let store = Self {
             project_root,
             directory,
+            directory_capability,
+            records_binding: None,
+            lock_deadline,
+            operation_timeout: SCOPE_LOCK_TIMEOUT,
         };
-        store.maintain_once()?;
+        store.maintain_once_with_setup_hook(&mut before_setup_step)?;
         Ok(store)
+    }
+
+    /// Opens an existing process-scope namespace through the exact authorized
+    /// subagent-records capability. This deliberately does not create or run
+    /// cold maintenance: restart reconciliation must classify absence without
+    /// ambient path probes or unrelated namespace mutation.
+    pub(crate) fn open_existing_bound_to_records(
+        project_root: &Path,
+        records: &crate::daemons::state::StableDirectory,
+        deadline: Instant,
+    ) -> Result<Option<Self>, String> {
+        ensure_process_scope_deadline(Some(deadline))?;
+        records.verify_visible()?;
+        let expected_records = project_root.join(".nib").join("subagents");
+        if records.path() != expected_records {
+            return Err(
+                "managed-process records capability is bound to another project".to_string(),
+            );
+        }
+        let nib_path = expected_records
+            .parent()
+            .ok_or("managed-process records capability has no state parent")?;
+        let nib = crate::daemons::state::StableDirectory::open(nib_path)?;
+        let rebound_records = nib.open_owned_child(&expected_records)?;
+        if !rebound_records.same_identity(records) {
+            return Err(
+                "managed-process records capability changed before scope lookup".to_string(),
+            );
+        }
+        let directory = nib_path.join(SCOPE_DIRECTORY);
+        let directory_capability = match nib.entry_kind(&directory)? {
+            None => {
+                records.verify_visible()?;
+                nib.verify_visible()?;
+                ensure_process_scope_deadline(Some(deadline))?;
+                return Ok(None);
+            }
+            Some(crate::daemons::state::StableEntryKind::Directory) => {
+                nib.open_owned_child(&directory)?
+            }
+            Some(crate::daemons::state::StableEntryKind::File) => {
+                return Err(format!(
+                    "managed-process scope namespace is unsafe and was preserved: {}",
+                    directory.display()
+                ));
+            }
+        };
+        records.verify_visible()?;
+        nib.verify_visible()?;
+        directory_capability.verify_visible()?;
+        ensure_process_scope_deadline(Some(deadline))?;
+        Ok(Some(Self {
+            project_root: project_root.to_path_buf(),
+            directory,
+            directory_capability,
+            records_binding: Some(records.try_clone()?),
+            lock_deadline: Some(deadline),
+            operation_timeout: SCOPE_LOCK_TIMEOUT,
+        }))
     }
 
     pub fn prepare(
@@ -314,6 +473,50 @@ impl ProcessScopeStore {
         owner: ProcessIdentity,
         backend: ProcessScopeBackend,
     ) -> Result<ProcessScopeRecord, String> {
+        self.prepare_with_launch_authority(
+            scope_id,
+            workload_kind,
+            execution_generation,
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            owner,
+            backend,
+        )
+    }
+
+    pub(crate) fn prepare_subagent_launch(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        supervisor_registration_nonce: &str,
+        owner: ProcessIdentity,
+        backend: ProcessScopeBackend,
+    ) -> Result<ProcessScopeRecord, String> {
+        self.prepare_with_launch_authority(
+            scope_id,
+            "subagent",
+            execution_generation,
+            cleanup_lease_id.to_string(),
+            Some(supervisor_registration_nonce.to_string()),
+            owner,
+            backend,
+        )
+    }
+
+    // Keep the persisted scope authorities explicit at this lifecycle boundary;
+    // grouping them would obscure which values are independently validated.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_launch_authority(
+        &self,
+        scope_id: &str,
+        workload_kind: &str,
+        execution_generation: u64,
+        cleanup_lease_id: String,
+        supervisor_registration_nonce: Option<String>,
+        owner: ProcessIdentity,
+        backend: ProcessScopeBackend,
+    ) -> Result<ProcessScopeRecord, String> {
         validate_scope_fields(scope_id, workload_kind, execution_generation)?;
         let now = Utc::now();
         let record = ProcessScopeRecord {
@@ -321,10 +524,12 @@ impl ProcessScopeStore {
             scope_id: scope_id.to_string(),
             workload_kind: workload_kind.to_string(),
             execution_generation,
-            cleanup_lease_id: uuid::Uuid::new_v4().to_string(),
+            cleanup_lease_id,
+            supervisor_registration_nonce,
             owner,
             backend,
             status: ProcessScopeStatus::Prepared,
+            launch_committed: Some(false),
             supervisor: None,
             direct_child: None,
             cleanup_reason: None,
@@ -335,38 +540,159 @@ impl ProcessScopeStore {
         };
         validate_record(&record)?;
         let encoded = encode_process_state_bounded(&record, "scope record")?;
-        self.with_scope_lock(scope_id, |directory, path| {
-            ensure_process_scope_publication_budget(
+        self.with_scope_lock(scope_id, |directory, path, deadline| {
+            ensure_process_scope_publication_budget_until(
                 directory,
                 path,
                 encoded.len() as u64,
                 ProcessAtomicKind::Scope,
                 PROCESS_SCOPE_DIRECTORY_LIMITS,
+                Some(deadline),
             )?;
-            directory.save_bytes_atomically_expected(
+            directory.save_bytes_atomically_expected_with_guard_and_hook(
                 path,
                 &encoded,
                 SCOPE_WRITE_PREFIX,
+                true,
                 crate::daemons::state::FileExpectation::Missing,
+                || ensure_process_scope_deadline(Some(deadline)),
+                || Ok(()),
             )?;
             Ok(record.clone())
         })
     }
 
+    /// Opens only the already-published scope namespace. Hidden supervisors use
+    /// this before any parent request, record, worktree, or worker access so a
+    /// missing or replaced scope can never be recreated by a late process.
+    pub(crate) fn open_existing_for_supervisor(project_root: &Path) -> Result<Self, String> {
+        let deadline = Instant::now() + SCOPE_LOCK_TIMEOUT;
+        ensure_process_scope_deadline(Some(deadline))?;
+        if !project_root.is_absolute() {
+            return Err("managed-process supervisor project root is not absolute".to_string());
+        }
+        let project = crate::daemons::state::StableDirectory::open(project_root)?;
+        ensure_process_scope_deadline(Some(deadline))?;
+        let nib_path = project_root.join(".nib");
+        let nib = project.open_owned_child(&nib_path)?;
+        ensure_process_scope_deadline(Some(deadline))?;
+        let directory = nib_path.join(SCOPE_DIRECTORY);
+        let directory_capability = nib.open_owned_child(&directory)?;
+        project.verify_visible()?;
+        nib.verify_visible()?;
+        directory_capability.verify_visible()?;
+        ensure_process_scope_deadline(Some(deadline))?;
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            directory,
+            directory_capability,
+            records_binding: None,
+            lock_deadline: Some(deadline),
+            operation_timeout: SCOPE_LOCK_TIMEOUT,
+        })
+    }
+
+    /// Converts a successfully started supervisor store into the ordinary
+    /// long-lived lock policy without reopening any ambient path. The exact
+    /// directory and records capabilities are cloned from their retained file
+    /// handles; later operations therefore acquire their own bounded lock
+    /// deadline while remaining bound to the original namespace identity.
+    fn rebind_long_lived_after_handoff(&self) -> Result<Self, String> {
+        self.verify_visible()?;
+        let rebound = Self {
+            project_root: self.project_root.clone(),
+            directory: self.directory.clone(),
+            directory_capability: self.directory_capability.try_clone()?,
+            records_binding: self
+                .records_binding
+                .as_ref()
+                .map(crate::daemons::state::StableDirectory::try_clone)
+                .transpose()?,
+            lock_deadline: None,
+            operation_timeout: self.operation_timeout,
+        };
+        rebound.directory_capability.verify_visible()?;
+        if let Some(records) = &rebound.records_binding {
+            records.verify_visible()?;
+        }
+        self.verify_visible()?;
+        Ok(rebound)
+    }
+
+    pub(crate) fn verify_visible(&self) -> Result<(), String> {
+        self.directory_capability.verify_visible()?;
+        if let Some(records) = &self.records_binding {
+            records.verify_visible()?;
+        }
+        ensure_process_scope_deadline(self.lock_deadline)
+    }
+
     pub fn load(&self, scope_id: &str) -> Result<ProcessScopeRecord, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.load_until(scope_id, deadline)
+    }
+
+    fn load_until(&self, scope_id: &str, deadline: Instant) -> Result<ProcessScopeRecord, String> {
         validate_scope_id(scope_id)?;
-        self.with_scope_lock(scope_id, |directory, path| {
-            read_scope_record(directory, path)
+        self.with_scope_lock_until(scope_id, deadline, |directory, path, _deadline| {
+            let record = read_scope_record(directory, path)?;
+            if record.scope_id != scope_id {
+                return Err(
+                    "managed-process scope filename key does not match its record".to_string(),
+                );
+            }
+            Ok(record)
         })
     }
 
     pub fn try_load(&self, scope_id: &str) -> Result<Option<ProcessScopeRecord>, String> {
         validate_scope_id(scope_id)?;
-        self.with_scope_lock(scope_id, |directory, path| {
-            if !directory.path_exists(path)? {
+        self.with_scope_lock(scope_id, |directory, path, deadline| {
+            let quarantine =
+                directory.deterministic_artifact_path(path, SCOPE_DELETE_PREFIX, ".quarantine")?;
+            let canonical_exists = directory.path_exists(path)?;
+            let quarantine_exists = directory.path_exists(&quarantine)?;
+            if canonical_exists && quarantine_exists {
+                return Err(
+                    "managed-process scope has ambiguous canonical and deletion-quarantine state"
+                        .to_string(),
+                );
+            }
+            let lease_path = self.cleanup_lease_path(scope_id)?;
+            let lease_quarantine = directory.deterministic_artifact_path(
+                &lease_path,
+                CLEANUP_LEASE_DELETE_PREFIX,
+                ".quarantine",
+            )?;
+            if !canonical_exists && !quarantine_exists {
+                if directory.path_exists(&lease_path)?
+                    || directory.path_exists(&lease_quarantine)?
+                {
+                    return Err(
+                        "managed-process cleanup authority exists without its exact scope"
+                            .to_string(),
+                    );
+                }
+                ensure_process_scope_deadline(Some(deadline))?;
                 return Ok(None);
             }
-            read_scope_record(directory, path).map(Some)
+            let source = if canonical_exists { path } else { &quarantine };
+            let opened = directory.open_read(source)?;
+            let record: ProcessScopeRecord = read_bounded_json(&opened, source)?;
+            validate_record(&record)?;
+            if record.scope_id != scope_id {
+                return Err(
+                    "managed-process scope filename key does not match its record".to_string(),
+                );
+            }
+            let _live_cleanup = recover_cleanup_lease_deletion_until(
+                directory,
+                &lease_path,
+                &record,
+                Some(deadline),
+            )?;
+            ensure_process_scope_deadline(Some(deadline))?;
+            Ok(Some(record))
         })
     }
 
@@ -374,10 +700,19 @@ impl ProcessScopeStore {
         &self,
         record: &ProcessScopeRecord,
     ) -> Result<CleanupLeaseState, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.cleanup_lease_state_until(record, deadline)
+    }
+
+    fn cleanup_lease_state_until(
+        &self,
+        record: &ProcessScopeRecord,
+        deadline: Instant,
+    ) -> Result<CleanupLeaseState, String> {
         validate_record(record)?;
         let path = self.cleanup_lease_path(&record.scope_id)?;
-        self.with_scope_lock(&record.scope_id, |directory, _| {
-            if recover_cleanup_lease_deletion(directory, &path, record)? {
+        self.with_scope_lock_until(&record.scope_id, deadline, |directory, _, deadline| {
+            if recover_cleanup_lease_deletion_until(directory, &path, record, Some(deadline))? {
                 return Ok(CleanupLeaseState::Live);
             }
             if !directory.path_exists(&path)? {
@@ -406,8 +741,9 @@ impl ProcessScopeStore {
 
     pub fn remove_prepared(&self, expected: &ProcessScopeRecord) -> Result<(), String> {
         validate_record(expected)?;
-        self.with_scope_lock(&expected.scope_id, |directory, path| {
-            if recover_scope_deletion_for_expected(directory, path, expected)? {
+        self.with_scope_lock(&expected.scope_id, |directory, path, deadline| {
+            if recover_scope_deletion_for_expected_until(directory, path, expected, Some(deadline))?
+            {
                 return Ok(());
             }
             let opened = directory.open_read(path)?;
@@ -426,7 +762,9 @@ impl ProcessScopeStore {
                         .to_string(),
                 );
             }
-            directory.remove_file_if_matches(path, &opened, SCOPE_DELETE_PREFIX)
+            directory.remove_file_if_matches_with_guard(path, &opened, SCOPE_DELETE_PREFIX, || {
+                ensure_process_scope_deadline(Some(deadline))
+            })
         })
     }
 
@@ -462,8 +800,23 @@ impl ProcessScopeStore {
         workload_execution_generation: u64,
         workload_authority: CompletionAuthority<'_>,
     ) -> Result<bool, String> {
+        self.retire_completed_scope_with_guard(
+            scope_id,
+            workload_execution_generation,
+            workload_authority,
+            || Ok(()),
+        )
+    }
+
+    fn retire_completed_scope_with_guard(
+        &self,
+        scope_id: &str,
+        workload_execution_generation: u64,
+        workload_authority: CompletionAuthority<'_>,
+        mut before_namespace_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<bool, String> {
         validate_scope_id(scope_id)?;
-        self.with_scope_lock(scope_id, |directory, path| {
+        self.with_scope_lock(scope_id, |directory, path, deadline| {
             let quarantine =
                 directory.deterministic_artifact_path(path, SCOPE_DELETE_PREFIX, ".quarantine")?;
             let source = if directory.path_exists(path)? {
@@ -471,6 +824,21 @@ impl ProcessScopeStore {
             } else if directory.path_exists(&quarantine)? {
                 &quarantine
             } else {
+                let cleanup_lease = self.cleanup_lease_path(scope_id)?;
+                let cleanup_quarantine = directory.deterministic_artifact_path(
+                    &cleanup_lease,
+                    CLEANUP_LEASE_DELETE_PREFIX,
+                    ".quarantine",
+                )?;
+                if directory.path_exists(&cleanup_lease)?
+                    || directory.path_exists(&cleanup_quarantine)?
+                {
+                    return Err(
+                        "managed-process cleanup authority exists without its exact scope"
+                            .to_string(),
+                    );
+                }
+                ensure_process_scope_deadline(Some(deadline))?;
                 return Ok(false);
             };
             let opened = directory.open_read(source)?;
@@ -494,7 +862,12 @@ impl ProcessScopeStore {
                 );
             }
             let cleanup_lease = self.cleanup_lease_path(scope_id)?;
-            if recover_cleanup_lease_deletion(directory, &cleanup_lease, &record)? {
+            if recover_cleanup_lease_deletion_until(
+                directory,
+                &cleanup_lease,
+                &record,
+                Some(deadline),
+            )? {
                 return Err(
                     "managed-process scope cannot retire while cleanup-lease finalization is live"
                         .to_string(),
@@ -507,9 +880,26 @@ impl ProcessScopeStore {
                 );
             }
             if source == quarantine {
-                directory.remove_visible_file_if_matches_direct(&quarantine, &opened)?;
+                before_namespace_step()?;
+                ensure_process_scope_deadline(Some(deadline))?;
+                directory.remove_visible_file_if_matches_direct_with_guard(
+                    &quarantine,
+                    &opened,
+                    || {
+                        before_namespace_step()?;
+                        ensure_process_scope_deadline(Some(deadline))
+                    },
+                )?;
             } else {
-                directory.remove_file_if_matches(path, &opened, SCOPE_DELETE_PREFIX)?;
+                directory.remove_file_if_matches_with_guard(
+                    path,
+                    &opened,
+                    SCOPE_DELETE_PREFIX,
+                    || {
+                        before_namespace_step()?;
+                        ensure_process_scope_deadline(Some(deadline))
+                    },
+                )?;
             }
             Ok(true)
         })
@@ -547,7 +937,145 @@ impl ProcessScopeStore {
         })
     }
 
+    /// The hidden supervisor's first durable action. The immutable nonce makes
+    /// this an exact CAS for the preplanned launch, while the scope lock orders
+    /// it against restart removal of an unregistered Prepared scope.
+    pub(crate) fn self_register_launch_supervisor(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        supervisor_registration_nonce: &str,
+        supervisor: ProcessIdentity,
+    ) -> Result<ProcessScopeRecord, String> {
+        validate_canonical_process_uuid(
+            supervisor_registration_nonce,
+            "supervisor registration nonce",
+        )?;
+        self.with_scope_lock(scope_id, |directory, path, deadline| {
+            let opened = directory.open_read(path)?;
+            let mut record: ProcessScopeRecord = read_bounded_json(&opened, path)?;
+            validate_record(&record)?;
+            if record.execution_generation != execution_generation
+                || record.cleanup_lease_id != cleanup_lease_id
+            {
+                return Err("stale managed-process scope generation was rejected".to_string());
+            }
+            if record.workload_kind != "subagent"
+                || record.status != ProcessScopeStatus::Prepared
+                || record.launch_committed != Some(false)
+                || record.direct_child.is_some()
+                || record.supervisor_registration_nonce.as_deref()
+                    != Some(supervisor_registration_nonce)
+            {
+                return Err(
+                    "managed-process supervisor registration authority does not match the exact prepared launch"
+                        .to_string(),
+                );
+            }
+            let previous = record.clone();
+            match &record.supervisor {
+                Some(observed) if observed == &supervisor => return Ok(record),
+                Some(_) => {
+                    return Err(
+                        "managed-process scope already has another launch supervisor".to_string(),
+                    );
+                }
+                None => record.supervisor = Some(supervisor),
+            }
+            record.updated_at = Utc::now();
+            validate_record(&record)?;
+            validate_process_scope_transition(&previous, &record)?;
+            let encoded = encode_process_state_bounded(&record, "scope record")?;
+            ensure_process_scope_publication_budget_until(
+                directory,
+                path,
+                encoded.len() as u64,
+                ProcessAtomicKind::Scope,
+                PROCESS_SCOPE_DIRECTORY_LIMITS,
+                Some(deadline),
+            )?;
+            directory.save_bytes_atomically_expected_with_guard_and_hook(
+                path,
+                &encoded,
+                SCOPE_WRITE_PREFIX,
+                true,
+                crate::daemons::state::FileExpectation::Present(&opened),
+                || ensure_process_scope_deadline(Some(deadline)),
+                || Ok(()),
+            )?;
+            Ok(record)
+        })
+    }
+
+    /// Parent-side observation only. `None` means the exact preplanned scope is
+    /// still unregistered; any differing authority is an error rather than a
+    /// second publisher.
+    pub(crate) fn observe_registered_launch_supervisor(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        supervisor_registration_nonce: &str,
+        supervisor: &ProcessIdentity,
+    ) -> Result<Option<ProcessScopeRecord>, String> {
+        validate_scope_id(scope_id)?;
+        validate_canonical_process_uuid(
+            supervisor_registration_nonce,
+            "supervisor registration nonce",
+        )?;
+        self.with_scope_lock(scope_id, |directory, path, _deadline| {
+            let record = read_scope_record(directory, path)?;
+            if record.scope_id != scope_id
+                || record.execution_generation != execution_generation
+                || record.cleanup_lease_id != cleanup_lease_id
+                || record.supervisor_registration_nonce.as_deref()
+                    != Some(supervisor_registration_nonce)
+                || record.workload_kind != "subagent"
+                || record.status != ProcessScopeStatus::Prepared
+                || record.launch_committed != Some(false)
+                || record.direct_child.is_some()
+            {
+                return Err(
+                    "managed-process parent observation does not match the exact prepared launch"
+                        .to_string(),
+                );
+            }
+            match record.supervisor.as_ref() {
+                None => Ok(None),
+                Some(observed) if observed == supervisor => Ok(Some(record)),
+                Some(_) => Err(
+                    "managed-process self-registered supervisor identity differs from the spawned child"
+                        .to_string(),
+                ),
+            }
+        })
+    }
+
     pub fn mark_running(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        supervisor: ProcessIdentity,
+        direct_child: ProcessIdentity,
+    ) -> Result<ProcessScopeRecord, String> {
+        self.mutate(scope_id, execution_generation, cleanup_lease_id, |record| {
+            if record.status != ProcessScopeStatus::Prepared {
+                return Err(format!(
+                    "managed process scope cannot start from status {:?}",
+                    record.status
+                ));
+            }
+            record.supervisor = Some(supervisor);
+            record.direct_child = Some(direct_child);
+            record.status = ProcessScopeStatus::Running;
+            record.launch_committed = Some(true);
+            Ok(())
+        })
+    }
+
+    fn mark_gated_running(
         &self,
         scope_id: &str,
         execution_generation: u64,
@@ -567,6 +1095,31 @@ impl ProcessScopeStore {
             record.status = ProcessScopeStatus::Running;
             Ok(())
         })
+    }
+
+    pub(crate) fn commit_running_launch(
+        &self,
+        expected: &ProcessScopeRecord,
+    ) -> Result<ProcessScopeRecord, String> {
+        validate_record(expected)?;
+        self.mutate(
+            &expected.scope_id,
+            expected.execution_generation,
+            &expected.cleanup_lease_id,
+            |record| {
+                if record != expected
+                    || record.status != ProcessScopeStatus::Running
+                    || record.launch_committed != Some(false)
+                {
+                    return Err(
+                        "managed process launch commit lost its exact gated scope authority"
+                            .to_string(),
+                    );
+                }
+                record.launch_committed = Some(true);
+                Ok(())
+            },
+        )
     }
 
     fn register_gated_child(
@@ -604,20 +1157,7 @@ impl ProcessScopeStore {
     ) -> Result<ProcessScopeRecord, String> {
         let reason = reason.into();
         self.mutate(scope_id, execution_generation, cleanup_lease_id, |record| {
-            if !matches!(
-                record.status,
-                ProcessScopeStatus::Running
-                    | ProcessScopeStatus::CleanupInProgress
-                    | ProcessScopeStatus::RecoveryRequired
-            ) {
-                return Err(format!(
-                    "managed process scope cannot begin cleanup from status {:?}",
-                    record.status
-                ));
-            }
-            record.status = ProcessScopeStatus::CleanupInProgress;
-            record.cleanup_reason = Some(reason);
-            Ok(())
+            begin_cleanup_mutation(record, reason)
         })
     }
 
@@ -631,40 +1171,16 @@ impl ProcessScopeStore {
     ) -> Result<ProcessScopeRecord, String> {
         let outcome = outcome.into();
         self.mutate(scope_id, execution_generation, cleanup_lease_id, |record| {
-            if !matches!(
-                record.status,
-                ProcessScopeStatus::Running | ProcessScopeStatus::CleanupInProgress
-            ) {
-                return Err(format!(
-                    "managed process cleanup cannot complete from status {:?}",
-                    record.status
-                ));
-            }
-            let direct_child = record
-                .direct_child
-                .clone()
-                .ok_or("managed process scope has no registered direct child")?;
-            if !descendants_reaped {
-                return Err(
-                    "managed process scope cannot complete without descendant cleanup proof"
-                        .to_string(),
-                );
-            }
-            record.cleanup_proof = Some(CleanupProof {
+            complete_cleanup_mutation(
+                record,
                 execution_generation,
-                cleanup_lease_id: cleanup_lease_id.to_string(),
-                backend: record.backend,
-                direct_child,
+                cleanup_lease_id,
                 outcome,
                 descendants_reaped,
-                completed_at: Utc::now(),
-            });
-            record.status = ProcessScopeStatus::Complete;
-            Ok(())
+            )
         })
     }
 
-    #[cfg(target_os = "linux")]
     fn complete_launch_abort(
         &self,
         scope_id: &str,
@@ -672,29 +1188,7 @@ impl ProcessScopeStore {
         cleanup_lease_id: &str,
     ) -> Result<ProcessScopeRecord, String> {
         self.mutate(scope_id, execution_generation, cleanup_lease_id, |record| {
-            if record.status != ProcessScopeStatus::Prepared {
-                return Err(format!(
-                    "managed process launch abort cannot complete from status {:?}",
-                    record.status
-                ));
-            }
-            let supervisor = record
-                .supervisor
-                .clone()
-                .ok_or("managed process launch abort has no supervisor identity")?;
-            record.cleanup_reason = Some(LAUNCH_ABORT_OUTCOME.to_string());
-            record.launch_abort_proof = Some(LaunchAbortProof {
-                execution_generation,
-                cleanup_lease_id: cleanup_lease_id.to_string(),
-                backend: record.backend,
-                supervisor,
-                namespace_root: record.direct_child.clone(),
-                outcome: LAUNCH_ABORT_OUTCOME.to_string(),
-                workload_never_launched: true,
-                completed_at: Utc::now(),
-            });
-            record.status = ProcessScopeStatus::Complete;
-            Ok(())
+            complete_launch_abort_mutation(record, execution_generation, cleanup_lease_id)
         })
     }
 
@@ -725,6 +1219,7 @@ impl ProcessScopeStore {
         &self,
         expected: &ProcessScopeRecord,
     ) -> Result<ProcessScopeRecord, String> {
+        let operation_deadline = self.effective_operation_deadline()?;
         validate_record(expected)?;
         if expected.backend != ProcessScopeBackend::LinuxPidNamespace {
             return Err(
@@ -749,8 +1244,10 @@ impl ProcessScopeStore {
             .as_ref()
             .ok_or("managed process recovery has no supervisor identity")?;
         let direct_child = expected.direct_child.as_ref();
-        let cleanup_lease = match self.cleanup_lease_state(expected)? {
-            CleanupLeaseState::Recoverable => self.acquire_cleanup_lease(expected)?,
+        let cleanup_lease = match self.cleanup_lease_state_until(expected, operation_deadline)? {
+            CleanupLeaseState::Recoverable => {
+                self.acquire_cleanup_lease_until(expected, operation_deadline)?
+            }
             CleanupLeaseState::Missing
                 if expected.status == ProcessScopeStatus::Prepared
                     && expected.direct_child.is_none() =>
@@ -761,12 +1258,12 @@ impl ProcessScopeStore {
                             .to_string(),
                     );
                 }
-                if self.load(&expected.scope_id)? != *expected {
+                if self.load_until(&expected.scope_id, operation_deadline)? != *expected {
                     return Err(
                         "managed process scope changed before prepared launch recovery".to_string(),
                     );
                 }
-                self.acquire_cleanup_lease(expected)?
+                self.acquire_cleanup_lease_until(expected, operation_deadline)?
             }
             CleanupLeaseState::Live => {
                 return Err("managed process cleanup lease is still live".to_string());
@@ -778,7 +1275,7 @@ impl ProcessScopeStore {
                 );
             }
         };
-        let deadline = Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT;
+        let deadline = (Instant::now() + SUPERVISOR_CLEANUP_TIMEOUT).min(operation_deadline);
         let mut namespace_init_signalled = false;
         loop {
             let supervisor_live = linux_identity_still_matches(supervisor)?;
@@ -786,27 +1283,8 @@ impl ProcessScopeStore {
                 .map(linux_identity_still_matches)
                 .transpose()?
                 .unwrap_or(false);
-            if !supervisor_live && direct_child_live && !namespace_init_signalled {
-                if let Err(error) = signal_linux_process_identity(
-                    direct_child.expect("live direct child has an identity"),
-                ) {
-                    let reason =
-                        format!("failed to terminate recovered Linux namespace init: {error}");
-                    if expected.status != ProcessScopeStatus::Prepared {
-                        let _ = self.mark_recovery_required(
-                            &expected.scope_id,
-                            expected.execution_generation,
-                            &expected.cleanup_lease_id,
-                            &reason,
-                        );
-                    }
-                    return Err(reason);
-                }
-                namespace_init_signalled = true;
-                thread::sleep(SUPERVISOR_POLL_INTERVAL);
-                continue;
-            }
             if !supervisor_live && !direct_child_live {
+                ensure_process_scope_deadline(Some(operation_deadline))?;
                 break;
             }
             if Instant::now() >= deadline {
@@ -814,49 +1292,111 @@ impl ProcessScopeStore {
                     "Linux supervisor-loss recovery remained unproven (supervisor_live={supervisor_live}, direct_child_live={direct_child_live})"
                 );
                 if expected.status != ProcessScopeStatus::Prepared {
-                    let _ = self.mark_recovery_required(
+                    let _ = self.mutate_with_commit_check_until(
                         &expected.scope_id,
                         expected.execution_generation,
                         &expected.cleanup_lease_id,
-                        &reason,
+                        operation_deadline,
+                        |record| {
+                            if record.status != ProcessScopeStatus::Prepared {
+                                record.status = ProcessScopeStatus::RecoveryRequired;
+                            }
+                            record.cleanup_reason = Some(reason.clone());
+                            Ok(())
+                        },
+                        || Ok(()),
                     );
                 }
                 return Err(reason);
             }
-            thread::sleep(SUPERVISOR_POLL_INTERVAL);
+            if !supervisor_live && direct_child_live && !namespace_init_signalled {
+                if let Err(error) = signal_linux_process_identity(
+                    direct_child.expect("live direct child has an identity"),
+                ) {
+                    let reason =
+                        format!("failed to terminate recovered Linux namespace init: {error}");
+                    if expected.status != ProcessScopeStatus::Prepared {
+                        let _ = self.mutate_with_commit_check_until(
+                            &expected.scope_id,
+                            expected.execution_generation,
+                            &expected.cleanup_lease_id,
+                            operation_deadline,
+                            |record| {
+                                if record.status != ProcessScopeStatus::Prepared {
+                                    record.status = ProcessScopeStatus::RecoveryRequired;
+                                }
+                                record.cleanup_reason = Some(reason.clone());
+                                Ok(())
+                            },
+                            || Ok(()),
+                        );
+                    }
+                    return Err(reason);
+                }
+                namespace_init_signalled = true;
+                sleep_until_supervisor_poll(deadline);
+                continue;
+            }
+            sleep_until_supervisor_poll(deadline);
         }
 
-        let launch_aborted = expected.status == ProcessScopeStatus::Prepared;
+        let launch_aborted = expected.status == ProcessScopeStatus::Prepared
+            || expected.launch_committed == Some(false);
         let completed = if launch_aborted {
-            self.complete_launch_abort(
+            self.mutate_with_commit_check_until(
                 &expected.scope_id,
                 expected.execution_generation,
                 &expected.cleanup_lease_id,
+                operation_deadline,
+                |record| {
+                    complete_launch_abort_mutation(
+                        record,
+                        expected.execution_generation,
+                        &expected.cleanup_lease_id,
+                    )
+                },
+                || Ok(()),
             )?
         } else {
-            let cleaning = self.begin_cleanup(
+            let cleaning = self.mutate_with_commit_check_until(
                 &expected.scope_id,
                 expected.execution_generation,
                 &expected.cleanup_lease_id,
-                "supervisor_lost_linux_pid_namespace",
+                operation_deadline,
+                |record| {
+                    begin_cleanup_mutation(
+                        record,
+                        "supervisor_lost_linux_pid_namespace".to_string(),
+                    )
+                },
+                || Ok(()),
             )?;
-            self.complete_cleanup(
+            self.mutate_with_commit_check_until(
                 &cleaning.scope_id,
                 cleaning.execution_generation,
                 &cleaning.cleanup_lease_id,
-                "supervisor_lost_linux_pid_namespace",
-                true,
+                operation_deadline,
+                |record| {
+                    complete_cleanup_mutation(
+                        record,
+                        cleaning.execution_generation,
+                        &cleaning.cleanup_lease_id,
+                        "supervisor_lost_linux_pid_namespace".to_string(),
+                        true,
+                    )
+                },
+                || Ok(()),
             )?
         };
         let proof = completed.cleanup_proof.as_ref();
         if let Some(proof) = proof {
-            cleanup_lease.release_after_proof(proof)?;
+            cleanup_lease.release_after_proof_until(proof, operation_deadline, || Ok(()))?;
         } else {
             let proof = completed
                 .launch_abort_proof
                 .as_ref()
                 .ok_or("recovered managed-process scope has no completion proof")?;
-            cleanup_lease.release_after_launch_abort(proof)?;
+            cleanup_lease.release_after_launch_abort_until(proof, operation_deadline, || Ok(()))?;
         }
         Ok(completed)
     }
@@ -882,6 +1422,15 @@ impl ProcessScopeStore {
         &self,
         record: &ProcessScopeRecord,
     ) -> Result<CleanupLease, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.acquire_cleanup_lease_until(record, deadline)
+    }
+
+    fn acquire_cleanup_lease_until(
+        &self,
+        record: &ProcessScopeRecord,
+        deadline: Instant,
+    ) -> Result<CleanupLease, String> {
         validate_record(record)?;
         let path = self.cleanup_lease_path(&record.scope_id)?;
         let expected = CleanupLeaseRecord {
@@ -892,64 +1441,81 @@ impl ProcessScopeStore {
         };
         validate_cleanup_lease_record(&expected)?;
         let encoded = encode_process_state_bounded(&expected, "cleanup lease")?;
-        self.with_scope_lock(&record.scope_id, |directory, record_path| {
-            let authoritative = read_scope_record(directory, record_path)?;
-            if authoritative != *record {
-                return Err(
-                    "managed-process scope changed before cleanup-lease acquisition".to_string(),
-                );
-            }
-            if recover_cleanup_lease_deletion(directory, &path, &authoritative)? {
-                return Err(format!(
-                    "managed-process cleanup lease is already live: {}",
-                    path.display()
-                ));
-            }
-            if directory.path_exists(&path)? {
-                let file = directory.open_read_write(&path)?;
-                let observed: CleanupLeaseRecord = read_bounded_json(&file, &path)?;
-                if observed != expected {
+        self.with_scope_lock_until(
+            &record.scope_id,
+            deadline,
+            |directory, record_path, deadline| {
+                let authoritative = read_scope_record(directory, record_path)?;
+                if authoritative != *record {
                     return Err(
-                        "managed-process cleanup lease belongs to another generation".to_string(),
+                        "managed-process scope changed before cleanup-lease acquisition"
+                            .to_string(),
                     );
                 }
-                acquire_file_lock(&file, &path)?;
-                return Ok(CleanupLease {
-                    directory: crate::daemons::state::StableDirectory::open(&self.directory)?,
-                    path: path.clone(),
-                    file: Some(file),
-                    record: expected.clone(),
-                });
-            }
-            ensure_process_scope_publication_budget(
-                directory,
-                &path,
-                encoded.len() as u64,
-                ProcessAtomicKind::CleanupLease,
-                PROCESS_SCOPE_DIRECTORY_LIMITS,
-            )?;
-            let receipt = directory
-                .save_bytes_atomically_expected_with_receipt(
+                if recover_cleanup_lease_deletion_until(
+                    directory,
                     &path,
-                    &encoded,
-                    CLEANUP_LEASE_WRITE_PREFIX,
-                    crate::daemons::state::FileExpectation::Missing,
-                )
-                .map_err(|error| error.message)?;
-            if !receipt.exact_identity {
-                return Err(
-                    "managed-process cleanup lease requires exact no-replace publication"
-                        .to_string(),
-                );
-            }
-            acquire_file_lock(&receipt.file, &path)?;
-            Ok(CleanupLease {
-                directory: crate::daemons::state::StableDirectory::open(&self.directory)?,
-                path: path.clone(),
-                file: Some(receipt.file),
-                record: expected.clone(),
-            })
-        })
+                    &authoritative,
+                    Some(deadline),
+                )? {
+                    return Err(format!(
+                        "managed-process cleanup lease is already live: {}",
+                        path.display()
+                    ));
+                }
+                if directory.path_exists(&path)? {
+                    let file = directory.open_read_write(&path)?;
+                    let observed: CleanupLeaseRecord = read_bounded_json(&file, &path)?;
+                    if observed != expected {
+                        return Err(
+                            "managed-process cleanup lease belongs to another generation"
+                                .to_string(),
+                        );
+                    }
+                    acquire_file_lock(&file, &path)?;
+                    return Ok(CleanupLease {
+                        directory: self.directory_capability.try_clone()?,
+                        path: path.clone(),
+                        file: Some(file),
+                        record: expected.clone(),
+                        lock_deadline: self.lock_deadline,
+                        operation_timeout: self.operation_timeout,
+                    });
+                }
+                ensure_process_scope_publication_budget_until(
+                    directory,
+                    &path,
+                    encoded.len() as u64,
+                    ProcessAtomicKind::CleanupLease,
+                    PROCESS_SCOPE_DIRECTORY_LIMITS,
+                    Some(deadline),
+                )?;
+                let receipt = directory
+                    .save_bytes_atomically_expected_with_receipt_and_guard(
+                        &path,
+                        &encoded,
+                        CLEANUP_LEASE_WRITE_PREFIX,
+                        crate::daemons::state::FileExpectation::Missing,
+                        || ensure_process_scope_deadline(Some(deadline)),
+                    )
+                    .map_err(|error| error.message)?;
+                if !receipt.exact_identity {
+                    return Err(
+                        "managed-process cleanup lease requires exact no-replace publication"
+                            .to_string(),
+                    );
+                }
+                acquire_file_lock(&receipt.file, &path)?;
+                Ok(CleanupLease {
+                    directory: self.directory_capability.try_clone()?,
+                    path: path.clone(),
+                    file: Some(receipt.file),
+                    record: expected.clone(),
+                    lock_deadline: self.lock_deadline,
+                    operation_timeout: self.operation_timeout,
+                })
+            },
+        )
     }
 
     fn mutate(
@@ -959,8 +1525,48 @@ impl ProcessScopeStore {
         cleanup_lease_id: &str,
         mutation: impl FnOnce(&mut ProcessScopeRecord) -> Result<(), String>,
     ) -> Result<ProcessScopeRecord, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.mutate_with_commit_check_until(
+            scope_id,
+            execution_generation,
+            cleanup_lease_id,
+            deadline,
+            mutation,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    fn mutate_with_commit_check(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        mutation: impl FnOnce(&mut ProcessScopeRecord) -> Result<(), String>,
+        before_commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<ProcessScopeRecord, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.mutate_with_commit_check_until(
+            scope_id,
+            execution_generation,
+            cleanup_lease_id,
+            deadline,
+            mutation,
+            before_commit,
+        )
+    }
+
+    fn mutate_with_commit_check_until(
+        &self,
+        scope_id: &str,
+        execution_generation: u64,
+        cleanup_lease_id: &str,
+        deadline: Instant,
+        mutation: impl FnOnce(&mut ProcessScopeRecord) -> Result<(), String>,
+        before_commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<ProcessScopeRecord, String> {
         validate_scope_id(scope_id)?;
-        self.with_scope_lock(scope_id, |directory, path| {
+        self.with_scope_lock_until(scope_id, deadline, |directory, path, deadline| {
             let opened = directory.open_read(path)?;
             let mut record: ProcessScopeRecord = read_bounded_json(&opened, path)?;
             validate_record(&record)?;
@@ -975,18 +1581,24 @@ impl ProcessScopeStore {
             validate_record(&record)?;
             validate_process_scope_transition(&previous, &record)?;
             let encoded = encode_process_state_bounded(&record, "scope record")?;
-            ensure_process_scope_publication_budget(
+            ensure_process_scope_publication_budget_until(
                 directory,
                 path,
                 encoded.len() as u64,
                 ProcessAtomicKind::Scope,
                 PROCESS_SCOPE_DIRECTORY_LIMITS,
+                Some(deadline),
             )?;
-            directory.save_bytes_atomically_expected(
+            before_commit()?;
+            ensure_process_scope_deadline(Some(deadline))?;
+            directory.save_bytes_atomically_expected_with_guard_and_hook(
                 path,
                 &encoded,
                 SCOPE_WRITE_PREFIX,
+                true,
                 crate::daemons::state::FileExpectation::Present(&opened),
+                || ensure_process_scope_deadline(Some(deadline)),
+                || Ok(()),
             )?;
             Ok(record)
         })
@@ -995,49 +1607,158 @@ impl ProcessScopeStore {
     fn with_scope_lock<T>(
         &self,
         scope_id: &str,
-        operation: impl FnOnce(&crate::daemons::state::StableDirectory, &Path) -> Result<T, String>,
+        operation: impl FnOnce(
+            &crate::daemons::state::StableDirectory,
+            &Path,
+            Instant,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.with_scope_lock_until(scope_id, deadline, operation)
+    }
+
+    fn with_scope_lock_until<T>(
+        &self,
+        scope_id: &str,
+        deadline: Instant,
+        operation: impl FnOnce(
+            &crate::daemons::state::StableDirectory,
+            &Path,
+            Instant,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_scope_lock_until_and_recovery_hook(scope_id, deadline, operation, || Ok(()))
+    }
+
+    fn with_scope_lock_until_and_recovery_hook<T>(
+        &self,
+        scope_id: &str,
+        deadline: Instant,
+        operation: impl FnOnce(
+            &crate::daemons::state::StableDirectory,
+            &Path,
+            Instant,
+        ) -> Result<T, String>,
+        mut before_recovery_step: impl FnMut() -> Result<(), String>,
     ) -> Result<T, String> {
         validate_scope_id(scope_id)?;
         let path = self.record_path(scope_id)?;
-        self.with_store_lock(|directory| {
-            recover_process_atomic_transaction(
+        self.with_store_lock_until(deadline, |directory| {
+            before_recovery_step()?;
+            ensure_process_scope_deadline(Some(deadline))?;
+            recover_process_atomic_transaction_until(
                 directory,
                 &path,
                 SCOPE_WRITE_PREFIX,
                 ProcessAtomicKind::Scope,
+                Some(deadline),
             )?;
             let cleanup_lease = self.cleanup_lease_path(scope_id)?;
-            recover_process_atomic_transaction(
+            before_recovery_step()?;
+            ensure_process_scope_deadline(Some(deadline))?;
+            recover_process_atomic_transaction_until(
                 directory,
                 &cleanup_lease,
                 CLEANUP_LEASE_WRITE_PREFIX,
                 ProcessAtomicKind::CleanupLease,
+                Some(deadline),
             )?;
-            operation(directory, &path)
+            ensure_process_scope_deadline(Some(deadline))?;
+            let result = operation(directory, &path, deadline)?;
+            ensure_process_scope_deadline(Some(deadline))?;
+            Ok(result)
         })
     }
 
-    fn with_store_lock<T>(
+    fn with_store_lock_until<T>(
         &self,
+        deadline: Instant,
         operation: impl FnOnce(&crate::daemons::state::StableDirectory) -> Result<T, String>,
     ) -> Result<T, String> {
-        let lock = self.project_root.join(".nib").join(SCOPE_STORE_LOCK);
-        let deadline = Instant::now() + SCOPE_LOCK_TIMEOUT;
-        crate::daemons::state::with_file_lock_in_until(&lock, &self.directory, deadline, operation)
+        self.with_store_lock_until_and_setup_hook(deadline, operation, || Ok(()))
     }
 
+    fn with_store_lock_until_and_setup_hook<T>(
+        &self,
+        deadline: Instant,
+        operation: impl FnOnce(&crate::daemons::state::StableDirectory) -> Result<T, String>,
+        mut before_setup_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<T, String> {
+        let lock = self.project_root.join(".nib").join(SCOPE_STORE_LOCK);
+        ensure_process_scope_deadline(Some(deadline))?;
+        crate::daemons::state::with_file_lock_in_until_with_setup_hook(
+            &lock,
+            &self.directory,
+            deadline,
+            |directory| {
+                if !directory.same_identity(&self.directory_capability) {
+                    return Err(
+                        "managed-process scope capability changed before locked operation"
+                            .to_string(),
+                    );
+                }
+                self.verify_retained_capabilities(deadline)?;
+                let result = operation(directory);
+                self.verify_retained_capabilities(deadline)?;
+                result
+            },
+            &mut before_setup_step,
+        )
+    }
+
+    fn effective_operation_deadline(&self) -> Result<Instant, String> {
+        let deadline = self
+            .lock_deadline
+            .unwrap_or_else(|| Instant::now() + self.operation_timeout);
+        ensure_process_scope_deadline(Some(deadline))?;
+        Ok(deadline)
+    }
+
+    fn verify_retained_capabilities(&self, deadline: Instant) -> Result<(), String> {
+        ensure_process_scope_deadline(Some(deadline))?;
+        if let Some(records) = &self.records_binding {
+            records.verify_visible()?;
+        }
+        self.directory_capability.verify_visible()?;
+        ensure_process_scope_deadline(Some(deadline))
+    }
+
+    #[cfg(test)]
     fn maintain_once(&self) -> Result<(), String> {
-        if MAINTAINED_PROCESS_SCOPE_STORES
-            .lock()
-            .map_err(|_| "managed-process maintenance registry is poisoned".to_string())?
-            .contains(&self.directory)
-        {
+        self.maintain_once_in(&MAINTAINED_PROCESS_SCOPE_STORES)
+    }
+
+    fn maintain_once_with_setup_hook(
+        &self,
+        before_setup_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.maintain_once_in_with_setup_hook(&MAINTAINED_PROCESS_SCOPE_STORES, before_setup_step)
+    }
+
+    #[cfg(test)]
+    fn maintain_once_in(&self, registry: &ProcessScopeMaintenanceRegistry) -> Result<(), String> {
+        self.maintain_once_in_with_setup_hook(registry, || Ok(()))
+    }
+
+    fn maintain_once_in_with_setup_hook(
+        &self,
+        registry: &ProcessScopeMaintenanceRegistry,
+        before_setup_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = self.effective_operation_deadline()?;
+        let maintained = lock_process_scope_maintenance_registry(registry, Some(deadline))?;
+        if maintained.contains(&self.directory) {
+            ensure_process_scope_deadline(Some(deadline))?;
             return Ok(());
         }
-        self.with_store_lock(|directory| maintain_process_scope_directory(directory, false))?;
-        let mut maintained = MAINTAINED_PROCESS_SCOPE_STORES
-            .lock()
-            .map_err(|_| "managed-process maintenance registry is poisoned".to_string())?;
+        drop(maintained);
+        self.with_store_lock_until_and_setup_hook(
+            deadline,
+            |directory| maintain_process_scope_directory_until(directory, false, Some(deadline)),
+            before_setup_step,
+        )?;
+        let mut maintained = lock_process_scope_maintenance_registry(registry, Some(deadline))?;
+        ensure_process_scope_deadline(Some(deadline))?;
         if maintained.len() >= 1_024 {
             maintained.clear();
         }
@@ -1059,6 +1780,54 @@ impl ProcessScopeStore {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+}
+
+fn ensure_process_scope_deadline(deadline: Option<Instant>) -> Result<(), String> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err("managed-process scope lock deadline elapsed".to_string());
+    }
+    Ok(())
+}
+
+fn lock_process_scope_maintenance_registry<'a>(
+    registry: &'a ProcessScopeMaintenanceRegistry,
+    deadline: Option<Instant>,
+) -> Result<std::sync::MutexGuard<'a, std::collections::HashSet<PathBuf>>, String> {
+    let Some(deadline) = deadline else {
+        return registry
+            .lock()
+            .map_err(|_| "managed-process maintenance registry is poisoned".to_string());
+    };
+    loop {
+        ensure_process_scope_deadline(Some(deadline))?;
+        match registry.try_lock() {
+            Ok(maintained) => {
+                ensure_process_scope_deadline(Some(deadline))?;
+                return Ok(maintained);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("managed-process maintenance registry is poisoned".to_string());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err("managed-process scope lock deadline elapsed".to_string());
+        };
+        if remaining.is_zero() {
+            return Err("managed-process scope lock deadline elapsed".to_string());
+        }
+        thread::sleep(MAINTENANCE_REGISTRY_POLL_INTERVAL.min(remaining));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sleep_until_supervisor_poll(deadline: Instant) {
+    if let Some(remaining) = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+    {
+        thread::sleep(SUPERVISOR_POLL_INTERVAL.min(remaining));
     }
 }
 
@@ -1116,6 +1885,38 @@ where
     R: Read + Send + 'static,
     F: FnOnce(&ProcessScopeRecord) -> Result<(), String>,
 {
+    supervise_foreground_with_claimed_cleanup_and_commit(
+        store,
+        prepared,
+        cleanup_lease,
+        owner_eof,
+        command,
+        ready,
+        |_| Ok(()),
+        |_| Ok(()),
+    )
+}
+
+#[doc(hidden)]
+// READY, COMMIT, and STARTED are deliberately separate protocol callbacks, and
+// the cleanup lease remains a distinct linear authority.
+#[allow(clippy::too_many_arguments)]
+pub fn supervise_foreground_with_claimed_cleanup_and_commit<R, F, C, S>(
+    store: &ProcessScopeStore,
+    prepared: &ProcessScopeRecord,
+    cleanup_lease: CleanupLease,
+    owner_eof: R,
+    command: SupervisedCommand,
+    ready: F,
+    commit: C,
+    started: S,
+) -> Result<SupervisedOutput, String>
+where
+    R: Read + Send + 'static,
+    F: FnOnce(&ProcessScopeRecord) -> Result<(), String>,
+    C: FnOnce(&ProcessScopeRecord) -> Result<(), String>,
+    S: FnOnce(&ProcessScopeRecord) -> Result<(), String>,
+{
     validate_record(prepared)?;
     if prepared.status != ProcessScopeStatus::Prepared {
         return Err("managed-process supervisor requires a prepared scope".to_string());
@@ -1146,7 +1947,7 @@ where
         direct_child.clone(),
     )?;
     pause_before_running_publication(&child_scope.scope_root)?;
-    let running = store.mark_running(
+    let running = store.mark_gated_running(
         &gated.scope_id,
         gated.execution_generation,
         &gated.cleanup_lease_id,
@@ -1188,7 +1989,43 @@ where
         .ok_or("supervised child stderr is unavailable")?;
     let stdout_reader = spawn_bounded_reader(stdout, "stdout")?;
     let stderr_reader = spawn_bounded_reader(stderr, "stderr")?;
-    ready(&running)?;
+    let committed = match ready(&running)
+        .and_then(|()| commit(&running))
+        .and_then(|()| store.commit_running_launch(&running))
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            child_scope.terminate()?;
+            let _ = child_scope.wait_bounded()?;
+            let stdout = join_bounded_reader(stdout_reader, "stdout")?;
+            let stderr = join_bounded_reader(stderr_reader, "stderr")?;
+            let descendants_reaped = child_scope.verify_descendants_reaped()?;
+            if !descendants_reaped {
+                return Err(format!(
+                "managed-process gated launch cleanup was not proven after protocol failure: {error}"
+            ));
+            }
+            let completed = store.complete_launch_abort(
+                &running.scope_id,
+                running.execution_generation,
+                &running.cleanup_lease_id,
+            )?;
+            let proof = completed
+                .launch_abort_proof
+                .as_ref()
+                .ok_or("gated managed-process abort has no launch-abort proof")?;
+            cleanup_lease.release_after_launch_abort(proof)?;
+            drop(owner_watcher);
+            let output_detail = if stdout.is_empty() && stderr.is_empty() {
+                String::new()
+            } else {
+                "; gated child output was suppressed".to_string()
+            };
+            return Err(format!(
+                "managed-process launch commit was rejected: {error}{output_detail}"
+            ));
+        }
+    };
 
     let mut owner_lost = false;
     let mut cancelled = false;
@@ -1204,6 +2041,35 @@ where
     } else {
         None
     };
+    let handoff_started = pending_owner_signal.is_none();
+    let mut protocol_error = if handoff_started {
+        started(&committed)
+            .and_then(|()| store.verify_visible())
+            .err()
+    } else {
+        None
+    };
+    let mut cleanup_lease = cleanup_lease;
+    let long_lived_store = if handoff_started && protocol_error.is_none() {
+        match store.rebind_long_lived_after_handoff().and_then(|rebound| {
+            cleanup_lease.rebind_long_lived_after_handoff(store, &rebound)?;
+            Ok(rebound)
+        }) {
+            Ok(rebound) => Some(rebound),
+            Err(error) => {
+                protocol_error = Some(format!(
+                    "managed-process scope authority could not be retained after STARTED: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if protocol_error.is_some() {
+        pending_owner_signal = Some(true);
+    }
+    let store = long_lived_store.as_ref().unwrap_or(store);
     let exit_status = loop {
         if let Some(cancellation_requested) = pending_owner_signal
             .take()
@@ -1282,14 +2148,20 @@ where
         .clone()
         .ok_or("completed managed-process scope has no cleanup proof")?;
     cleanup_lease.release_after_proof(&proof)?;
-    Ok(SupervisedOutput {
+    let output = SupervisedOutput {
         exit_code: exit_status.code(),
         stdout,
         stderr,
         owner_lost,
         cancelled,
         cleanup_proof: proof,
-    })
+    };
+    match protocol_error {
+        Some(error) => Err(format!(
+            "managed-process STARTED acknowledgement failed after launch commit: {error}"
+        )),
+        None => Ok(output),
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -2558,6 +3430,8 @@ pub struct CleanupLease {
     path: PathBuf,
     file: Option<File>,
     record: CleanupLeaseRecord,
+    lock_deadline: Option<Instant>,
+    operation_timeout: Duration,
 }
 
 impl CleanupLease {
@@ -2569,7 +3443,48 @@ impl CleanupLease {
         &self.record.cleanup_lease_id
     }
 
-    pub fn release_after_proof(mut self, proof: &CleanupProof) -> Result<(), String> {
+    fn rebind_long_lived_after_handoff(
+        &mut self,
+        startup_store: &ProcessScopeStore,
+        long_lived_store: &ProcessScopeStore,
+    ) -> Result<(), String> {
+        startup_store.verify_visible()?;
+        if !self
+            .directory
+            .same_identity(&long_lived_store.directory_capability)
+        {
+            return Err(
+                "managed-process cleanup lease is bound to another scope namespace".to_string(),
+            );
+        }
+        let directory = long_lived_store.directory_capability.try_clone()?;
+        startup_store.verify_visible()?;
+        self.directory = directory;
+        self.lock_deadline = None;
+        self.operation_timeout = long_lived_store.operation_timeout;
+        Ok(())
+    }
+
+    pub fn release_after_proof(self, proof: &CleanupProof) -> Result<(), String> {
+        self.release_after_proof_with_guard(proof, || Ok(()))
+    }
+
+    fn release_after_proof_with_guard(
+        self,
+        proof: &CleanupProof,
+        before_namespace_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.release_after_proof_until(proof, deadline, before_namespace_step)
+    }
+
+    fn release_after_proof_until(
+        mut self,
+        proof: &CleanupProof,
+        deadline: Instant,
+        mut before_namespace_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        ensure_process_scope_deadline(Some(deadline))?;
         if proof.execution_generation != self.record.execution_generation
             || proof.cleanup_lease_id != self.record.cleanup_lease_id
             || !proof.descendants_reaped
@@ -2581,6 +3496,7 @@ impl CleanupLease {
             .with_file_name(format!("{}.json", self.record.scope_id));
         let scope_file = self.directory.open_read(&scope_path)?;
         let scope: ProcessScopeRecord = read_bounded_json(&scope_file, &scope_path)?;
+        ensure_process_scope_deadline(Some(deadline))?;
         validate_record(&scope)?;
         if scope.status != ProcessScopeStatus::Complete
             || scope.cleanup_proof.as_ref() != Some(proof)
@@ -2593,11 +3509,39 @@ impl CleanupLease {
             .file
             .take()
             .ok_or("managed-process cleanup lease is already released")?;
-        self.directory
-            .remove_file_if_matches(&self.path, &file, CLEANUP_LEASE_DELETE_PREFIX)
+        self.directory.remove_file_if_matches_with_guard(
+            &self.path,
+            &file,
+            CLEANUP_LEASE_DELETE_PREFIX,
+            || {
+                before_namespace_step()?;
+                ensure_process_scope_deadline(Some(deadline))
+            },
+        )?;
+        self.directory.verify_visible()?;
+        ensure_process_scope_deadline(Some(deadline))
     }
 
-    pub fn release_after_launch_abort(mut self, proof: &LaunchAbortProof) -> Result<(), String> {
+    pub fn release_after_launch_abort(self, proof: &LaunchAbortProof) -> Result<(), String> {
+        self.release_after_launch_abort_with_guard(proof, || Ok(()))
+    }
+
+    fn release_after_launch_abort_with_guard(
+        self,
+        proof: &LaunchAbortProof,
+        before_namespace_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = self.effective_operation_deadline()?;
+        self.release_after_launch_abort_until(proof, deadline, before_namespace_step)
+    }
+
+    fn release_after_launch_abort_until(
+        mut self,
+        proof: &LaunchAbortProof,
+        deadline: Instant,
+        mut before_namespace_step: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        ensure_process_scope_deadline(Some(deadline))?;
         if proof.execution_generation != self.record.execution_generation
             || proof.cleanup_lease_id != self.record.cleanup_lease_id
             || !proof.workload_never_launched
@@ -2609,6 +3553,7 @@ impl CleanupLease {
             .with_file_name(format!("{}.json", self.record.scope_id));
         let scope_file = self.directory.open_read(&scope_path)?;
         let scope: ProcessScopeRecord = read_bounded_json(&scope_file, &scope_path)?;
+        ensure_process_scope_deadline(Some(deadline))?;
         validate_record(&scope)?;
         if scope.status != ProcessScopeStatus::Complete
             || scope.launch_abort_proof.as_ref() != Some(proof)
@@ -2622,9 +3567,118 @@ impl CleanupLease {
             .file
             .take()
             .ok_or("managed-process cleanup lease is already released")?;
-        self.directory
-            .remove_file_if_matches(&self.path, &file, CLEANUP_LEASE_DELETE_PREFIX)
+        self.directory.remove_file_if_matches_with_guard(
+            &self.path,
+            &file,
+            CLEANUP_LEASE_DELETE_PREFIX,
+            || {
+                before_namespace_step()?;
+                ensure_process_scope_deadline(Some(deadline))
+            },
+        )?;
+        self.directory.verify_visible()?;
+        ensure_process_scope_deadline(Some(deadline))
     }
+
+    fn effective_operation_deadline(&self) -> Result<Instant, String> {
+        let deadline = self
+            .lock_deadline
+            .unwrap_or_else(|| Instant::now() + self.operation_timeout);
+        ensure_process_scope_deadline(Some(deadline))?;
+        Ok(deadline)
+    }
+}
+
+fn begin_cleanup_mutation(record: &mut ProcessScopeRecord, reason: String) -> Result<(), String> {
+    if !matches!(
+        record.status,
+        ProcessScopeStatus::Running
+            | ProcessScopeStatus::CleanupInProgress
+            | ProcessScopeStatus::RecoveryRequired
+    ) {
+        return Err(format!(
+            "managed process scope cannot begin cleanup from status {:?}",
+            record.status
+        ));
+    }
+    record.status = ProcessScopeStatus::CleanupInProgress;
+    record.cleanup_reason = Some(reason);
+    Ok(())
+}
+
+fn complete_cleanup_mutation(
+    record: &mut ProcessScopeRecord,
+    execution_generation: u64,
+    cleanup_lease_id: &str,
+    outcome: String,
+    descendants_reaped: bool,
+) -> Result<(), String> {
+    if !matches!(
+        record.status,
+        ProcessScopeStatus::Running | ProcessScopeStatus::CleanupInProgress
+    ) {
+        return Err(format!(
+            "managed process cleanup cannot complete from status {:?}",
+            record.status
+        ));
+    }
+    let direct_child = record
+        .direct_child
+        .clone()
+        .ok_or("managed process scope has no registered direct child")?;
+    if !descendants_reaped {
+        return Err(
+            "managed process scope cannot complete without descendant cleanup proof".to_string(),
+        );
+    }
+    record.cleanup_proof = Some(CleanupProof {
+        execution_generation,
+        cleanup_lease_id: cleanup_lease_id.to_string(),
+        backend: record.backend,
+        direct_child,
+        outcome,
+        descendants_reaped,
+        completed_at: Utc::now(),
+    });
+    record.status = ProcessScopeStatus::Complete;
+    Ok(())
+}
+
+fn complete_launch_abort_mutation(
+    record: &mut ProcessScopeRecord,
+    execution_generation: u64,
+    cleanup_lease_id: &str,
+) -> Result<(), String> {
+    if record.status != ProcessScopeStatus::Prepared
+        && !(matches!(
+            record.status,
+            ProcessScopeStatus::Running
+                | ProcessScopeStatus::CleanupInProgress
+                | ProcessScopeStatus::RecoveryRequired
+        ) && record.launch_committed == Some(false))
+    {
+        return Err(format!(
+            "managed process launch abort cannot complete from status {:?}",
+            record.status
+        ));
+    }
+    let supervisor = record
+        .supervisor
+        .clone()
+        .ok_or("managed process launch abort has no supervisor identity")?;
+    record.cleanup_reason = Some(LAUNCH_ABORT_OUTCOME.to_string());
+    record.launch_abort_proof = Some(LaunchAbortProof {
+        execution_generation,
+        cleanup_lease_id: cleanup_lease_id.to_string(),
+        backend: record.backend,
+        supervisor,
+        namespace_root: record.direct_child.clone(),
+        outcome: LAUNCH_ABORT_OUTCOME.to_string(),
+        workload_never_launched: true,
+        completed_at: Utc::now(),
+    });
+    record.status = ProcessScopeStatus::Complete;
+    Ok(())
 }
 
 fn validate_scope_fields(
@@ -2675,10 +3729,15 @@ fn validate_record_contents(record: &ProcessScopeRecord) -> Result<(), String> {
         &record.workload_kind,
         record.execution_generation,
     )?;
-    let cleanup_lease = uuid::Uuid::parse_str(&record.cleanup_lease_id)
-        .map_err(|_| "managed-process cleanup lease identifier is invalid".to_string())?;
-    if cleanup_lease.to_string() != record.cleanup_lease_id {
-        return Err("managed-process cleanup lease identifier is not canonical".to_string());
+    validate_canonical_process_uuid(&record.cleanup_lease_id, "cleanup lease identifier")?;
+    if let Some(nonce) = record.supervisor_registration_nonce.as_deref() {
+        validate_canonical_process_uuid(nonce, "supervisor registration nonce")?;
+        if record.workload_kind != "subagent" || record.launch_committed.is_none() {
+            return Err(
+                "managed-process supervisor registration nonce is not bound to a new subagent launch"
+                    .to_string(),
+            );
+        }
     }
     validate_process_identity(&record.owner, "owner")?;
     if let Some(supervisor) = &record.supervisor {
@@ -2700,6 +3759,7 @@ fn validate_record_contents(record: &ProcessScopeRecord) -> Result<(), String> {
                     || proof.backend != record.backend
                     || Some(&proof.direct_child) != record.direct_child.as_ref()
                     || !proof.descendants_reaped
+                    || record.launch_committed == Some(false)
                 {
                     return Err(
                         "managed-process cleanup proof does not match its scope".to_string()
@@ -2719,6 +3779,7 @@ fn validate_record_contents(record: &ProcessScopeRecord) -> Result<(), String> {
                     || proof.namespace_root != record.direct_child
                     || proof.outcome != LAUNCH_ABORT_OUTCOME
                     || !proof.workload_never_launched
+                    || record.launch_committed == Some(true)
                 {
                     return Err(
                         "managed-process launch-abort proof does not match its scope".to_string(),
@@ -2737,6 +3798,15 @@ fn validate_record_contents(record: &ProcessScopeRecord) -> Result<(), String> {
         }
     } else if record.cleanup_proof.is_some() || record.launch_abort_proof.is_some() {
         return Err("nonterminal managed-process scope carries a completion proof".to_string());
+    }
+    Ok(())
+}
+
+fn validate_canonical_process_uuid(value: &str, label: &str) -> Result<(), String> {
+    let parsed =
+        uuid::Uuid::parse_str(value).map_err(|_| format!("managed-process {label} is invalid"))?;
+    if parsed.to_string() != value {
+        return Err(format!("managed-process {label} is not canonical"));
     }
     Ok(())
 }
@@ -2771,23 +3841,35 @@ fn encode_process_state_bounded<T: Serialize>(value: &T, label: &str) -> Result<
     Ok(encoded)
 }
 
-fn maintain_process_scope_directory(
+fn maintain_process_scope_directory_until(
     directory: &crate::daemons::state::StableDirectory,
     reserve_new_scope: bool,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
-    maintain_process_scope_directory_with_limits(
+    maintain_process_scope_directory_with_limits_until(
         directory,
         reserve_new_scope,
         PROCESS_SCOPE_DIRECTORY_LIMITS,
+        deadline,
     )
 }
 
+#[cfg(test)]
 fn maintain_process_scope_directory_with_limits(
     directory: &crate::daemons::state::StableDirectory,
     reserve_new_scope: bool,
     limits: ProcessScopeDirectoryLimits,
 ) -> Result<(), String> {
-    let usage = process_scope_directory_usage_with_limits(directory, limits)?;
+    maintain_process_scope_directory_with_limits_until(directory, reserve_new_scope, limits, None)
+}
+
+fn maintain_process_scope_directory_with_limits_until(
+    directory: &crate::daemons::state::StableDirectory,
+    reserve_new_scope: bool,
+    limits: ProcessScopeDirectoryLimits,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    let usage = process_scope_directory_usage_with_limits_until(directory, limits, deadline)?;
     let reserved = usize::from(reserve_new_scope);
     if usage.records > limits.max_records.saturating_sub(reserved) {
         return Err(format!(
@@ -2798,22 +3880,34 @@ fn maintain_process_scope_directory_with_limits(
     Ok(())
 }
 
+#[cfg(test)]
 fn process_scope_directory_usage_with_limits(
     directory: &crate::daemons::state::StableDirectory,
     limits: ProcessScopeDirectoryLimits,
 ) -> Result<ProcessScopeDirectoryUsage, String> {
-    recover_all_process_atomic_transactions(directory, limits)?;
-    recover_stale_process_temporaries(
+    process_scope_directory_usage_with_limits_until(directory, limits, None)
+}
+
+fn process_scope_directory_usage_with_limits_until(
+    directory: &crate::daemons::state::StableDirectory,
+    limits: ProcessScopeDirectoryLimits,
+    deadline: Option<Instant>,
+) -> Result<ProcessScopeDirectoryUsage, String> {
+    ensure_process_scope_deadline(deadline)?;
+    recover_all_process_atomic_transactions_until(directory, limits, deadline)?;
+    recover_stale_process_temporaries_until(
         directory,
         SCOPE_WRITE_PREFIX,
         ProcessAtomicKind::Scope,
         limits,
+        deadline,
     )?;
-    recover_stale_process_temporaries(
+    recover_stale_process_temporaries_until(
         directory,
         CLEANUP_LEASE_WRITE_PREFIX,
         ProcessAtomicKind::CleanupLease,
         limits,
+        deadline,
     )?;
 
     let mut usage = ProcessScopeDirectoryUsage::default();
@@ -2906,6 +4000,7 @@ fn process_scope_directory_usage_with_limits(
     Ok(usage)
 }
 
+#[cfg(test)]
 fn ensure_process_scope_publication_budget(
     directory: &crate::daemons::state::StableDirectory,
     target: &Path,
@@ -2913,12 +4008,30 @@ fn ensure_process_scope_publication_budget(
     kind: ProcessAtomicKind,
     limits: ProcessScopeDirectoryLimits,
 ) -> Result<(), String> {
+    ensure_process_scope_publication_budget_until(
+        directory,
+        target,
+        encoded_len,
+        kind,
+        limits,
+        None,
+    )
+}
+
+fn ensure_process_scope_publication_budget_until(
+    directory: &crate::daemons::state::StableDirectory,
+    target: &Path,
+    encoded_len: u64,
+    kind: ProcessAtomicKind,
+    limits: ProcessScopeDirectoryLimits,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
     if encoded_len > MAX_SCOPE_RECORD_BYTES {
         return Err(format!(
             "managed-process publication exceeds the {MAX_SCOPE_RECORD_BYTES}-byte record limit"
         ));
     }
-    let usage = process_scope_directory_usage_with_limits(directory, limits)?;
+    let usage = process_scope_directory_usage_with_limits_until(directory, limits, deadline)?;
     let target_exists = directory.path_exists(target)?;
     let temporary = directory.deterministic_artifact_path(target, kind.write_prefix(), ".tmp")?;
     let transaction_peer = if target_exists {
@@ -3002,12 +4115,14 @@ impl ProcessAtomicKind {
     }
 }
 
-fn recover_stale_process_temporaries(
+fn recover_stale_process_temporaries_until(
     directory: &crate::daemons::state::StableDirectory,
     temporary_prefix: &str,
     kind: ProcessAtomicKind,
     limits: ProcessScopeDirectoryLimits,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
+    ensure_process_scope_deadline(deadline)?;
     let mut temporary_names = Vec::new();
     directory.for_each_entry_bounded(limits.max_entries, limits.max_name_bytes, |name| {
         if crate::daemons::state::StableDirectory::is_atomic_transaction_artifact_name(
@@ -3050,15 +4165,21 @@ fn recover_stale_process_temporaries(
         {
             continue;
         }
-        directory.remove_visible_file_if_matches_direct(&path, &file)?;
+        ensure_process_scope_deadline(deadline)?;
+        directory.remove_visible_file_if_matches_direct_with_guard(&path, &file, || {
+            ensure_process_scope_deadline(deadline)
+        })?;
     }
+    ensure_process_scope_deadline(deadline)?;
     directory.sync_directory()
 }
 
-fn recover_all_process_atomic_transactions(
+fn recover_all_process_atomic_transactions_until(
     directory: &crate::daemons::state::StableDirectory,
     limits: ProcessScopeDirectoryLimits,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
+    ensure_process_scope_deadline(deadline)?;
     let mut transactions = Vec::new();
     directory.for_each_entry_bounded(limits.max_entries, limits.max_name_bytes, |name| {
         for (prefix, kind) in [
@@ -3076,22 +4197,25 @@ fn recover_all_process_atomic_transactions(
     transactions.sort_by(|left, right| left.0.cmp(&right.0));
     transactions.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
     for (target, prefix, kind) in transactions {
-        recover_process_atomic_transaction(
+        recover_process_atomic_transaction_until(
             directory,
             &directory.path().join(target),
             prefix,
             kind,
+            deadline,
         )?;
     }
     Ok(())
 }
 
-fn recover_process_atomic_transaction(
+fn recover_process_atomic_transaction_until(
     directory: &crate::daemons::state::StableDirectory,
     target: &Path,
     temporary_prefix: &str,
     kind: ProcessAtomicKind,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
+    ensure_process_scope_deadline(deadline)?;
     let temporary = directory.deterministic_artifact_path(target, temporary_prefix, ".tmp")?;
     let previous = directory.deterministic_previous_artifact_path(target, temporary_prefix)?;
     let temporary_file = if directory.path_exists(&temporary)? {
@@ -3150,10 +4274,12 @@ fn recover_process_atomic_transaction(
                 previous_payload_file.expect("previous payload handle"),
                 kind,
             )?;
-            directory.restore_visible_file_no_replace_if_matches(
+            ensure_process_scope_deadline(deadline)?;
+            directory.restore_visible_file_no_replace_if_matches_with_guard(
                 &previous,
                 previous_file,
                 target,
+                || ensure_process_scope_deadline(deadline),
             )?;
         }
         (Some(target_file), Some(previous_file)) => {
@@ -3166,7 +4292,12 @@ fn recover_process_atomic_transaction(
                 kind,
             )?;
             directory.verify_file_identity(target, target_file)?;
-            directory.remove_visible_file_if_matches_direct(&previous, previous_file)?;
+            ensure_process_scope_deadline(deadline)?;
+            directory.remove_visible_file_if_matches_direct_with_guard(
+                &previous,
+                previous_file,
+                || ensure_process_scope_deadline(deadline),
+            )?;
         }
         (Some(target_file), None) => {
             validate_process_atomic_payload(
@@ -3181,9 +4312,15 @@ fn recover_process_atomic_transaction(
     }
     if let Some(temporary_file) = temporary_file {
         if directory.path_exists(&temporary)? {
-            directory.remove_visible_file_if_matches_direct(&temporary, &temporary_file)?;
+            ensure_process_scope_deadline(deadline)?;
+            directory.remove_visible_file_if_matches_direct_with_guard(
+                &temporary,
+                &temporary_file,
+                || ensure_process_scope_deadline(deadline),
+            )?;
         }
     }
+    ensure_process_scope_deadline(deadline)?;
     directory.sync_directory()
 }
 
@@ -3361,6 +4498,7 @@ fn validate_process_scope_transition(
         && previous.workload_kind == target.workload_kind
         && previous.execution_generation == target.execution_generation
         && previous.cleanup_lease_id == target.cleanup_lease_id
+        && previous.supervisor_registration_nonce == target.supervisor_registration_nonce
         && previous.owner == target.owner
         && previous.backend == target.backend
         && previous.created_at == target.created_at;
@@ -3371,10 +4509,26 @@ fn validate_process_scope_transition(
         || previous.cleanup_proof == target.cleanup_proof)
         && (previous.launch_abort_proof.is_none()
             || previous.launch_abort_proof == target.launch_abort_proof);
+    let launch_commit_is_monotonic = previous.launch_committed == target.launch_committed
+        || (previous.launch_committed == Some(false) && target.launch_committed == Some(true))
+        || (previous.launch_committed.is_none()
+            && previous.status == ProcessScopeStatus::Prepared
+            && target.status == ProcessScopeStatus::Running
+            && target.launch_committed == Some(true));
     let launch_abort_is_valid = matches!(
         (previous.status, target.status),
         (ProcessScopeStatus::Prepared, ProcessScopeStatus::Complete)
-    ) && previous.supervisor.is_some()
+            | (ProcessScopeStatus::Running, ProcessScopeStatus::Complete)
+            | (
+                ProcessScopeStatus::CleanupInProgress,
+                ProcessScopeStatus::Complete
+            )
+            | (
+                ProcessScopeStatus::RecoveryRequired,
+                ProcessScopeStatus::Complete
+            )
+    ) && previous.launch_committed != Some(true)
+        && previous.supervisor.is_some()
         && previous.supervisor == target.supervisor
         && previous.direct_child == target.direct_child
         && target.cleanup_reason.as_deref() == Some(LAUNCH_ABORT_OUTCOME)
@@ -3422,6 +4576,7 @@ fn validate_process_scope_transition(
     if immutable_matches
         && identities_are_monotonic
         && proof_is_monotonic
+        && launch_commit_is_monotonic
         && status_is_monotonic
         && target.updated_at >= previous.updated_at
     {
@@ -3462,11 +4617,13 @@ fn validate_cleanup_lease_contents(record: &CleanupLeaseRecord) -> Result<(), St
     Ok(())
 }
 
-fn recover_cleanup_lease_deletion(
+fn recover_cleanup_lease_deletion_until(
     directory: &crate::daemons::state::StableDirectory,
     lease_path: &Path,
     scope: &ProcessScopeRecord,
+    deadline: Option<Instant>,
 ) -> Result<bool, String> {
+    ensure_process_scope_deadline(deadline)?;
     let quarantine = directory.deterministic_artifact_path(
         lease_path,
         CLEANUP_LEASE_DELETE_PREFIX,
@@ -3476,7 +4633,12 @@ fn recover_cleanup_lease_deletion(
         return Ok(false);
     }
     if directory.path_exists(lease_path)? {
-        directory.recover_quarantined_file(lease_path, CLEANUP_LEASE_DELETE_PREFIX)?;
+        ensure_process_scope_deadline(deadline)?;
+        directory.recover_quarantined_file_guarded(
+            lease_path,
+            CLEANUP_LEASE_DELETE_PREFIX,
+            &mut || ensure_process_scope_deadline(deadline),
+        )?;
         return Ok(false);
     }
     if scope.status != ProcessScopeStatus::Complete
@@ -3503,7 +4665,12 @@ fn recover_cleanup_lease_deletion(
     }
     match try_cleanup_lease_lock(&file) {
         Ok(()) => {
-            directory.remove_visible_file_if_matches_direct(&quarantine, &file)?;
+            ensure_process_scope_deadline(deadline)?;
+            directory.remove_visible_file_if_matches_direct_with_guard(
+                &quarantine,
+                &file,
+                || ensure_process_scope_deadline(deadline),
+            )?;
             Ok(false)
         }
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
@@ -3514,18 +4681,23 @@ fn recover_cleanup_lease_deletion(
     }
 }
 
-fn recover_scope_deletion_for_expected(
+fn recover_scope_deletion_for_expected_until(
     directory: &crate::daemons::state::StableDirectory,
     scope_path: &Path,
     expected: &ProcessScopeRecord,
+    deadline: Option<Instant>,
 ) -> Result<bool, String> {
+    ensure_process_scope_deadline(deadline)?;
     let quarantine =
         directory.deterministic_artifact_path(scope_path, SCOPE_DELETE_PREFIX, ".quarantine")?;
     if !directory.path_exists(&quarantine)? {
         return Ok(false);
     }
     if directory.path_exists(scope_path)? {
-        directory.recover_quarantined_file(scope_path, SCOPE_DELETE_PREFIX)?;
+        ensure_process_scope_deadline(deadline)?;
+        directory.recover_quarantined_file_guarded(scope_path, SCOPE_DELETE_PREFIX, &mut || {
+            ensure_process_scope_deadline(deadline)
+        })?;
         return Ok(false);
     }
     let file = directory.open_read(&quarantine)?;
@@ -3537,7 +4709,10 @@ fn recover_scope_deletion_for_expected(
                 .to_string(),
         );
     }
-    directory.remove_visible_file_if_matches_direct(&quarantine, &file)?;
+    ensure_process_scope_deadline(deadline)?;
+    directory.remove_visible_file_if_matches_direct_with_guard(&quarantine, &file, || {
+        ensure_process_scope_deadline(deadline)
+    })?;
     Ok(true)
 }
 
@@ -3548,6 +4723,7 @@ fn read_scope_record(
     let file = directory.open_read(path)?;
     let record = read_bounded_json(&file, path)?;
     validate_record(&record)?;
+    validate_process_atomic_scope_key(path, &record.scope_id)?;
     Ok(record)
 }
 
@@ -3767,10 +4943,539 @@ fn platform_process_start_marker(_pid: u32) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn process_namespace_snapshot(path: &Path) -> Vec<(OsString, Vec<u8>)> {
+        let mut snapshot = std::fs::read_dir(path)
+            .expect("read process namespace")
+            .map(|entry| {
+                let entry = entry.expect("process namespace entry");
+                (
+                    entry.file_name(),
+                    std::fs::read(entry.path()).expect("process namespace bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
     fn git_project() -> tempfile::TempDir {
         let root = tempfile::tempdir().expect("temp project");
         std::fs::create_dir(root.path().join(".nib")).expect("state root");
         root
+    }
+
+    #[test]
+    fn preexpired_open_does_not_create_managed_process_namespace() {
+        let root = tempfile::tempdir().expect("temp project");
+
+        let error = ProcessScopeStore::open_with_lock_deadline(
+            root.path(),
+            Instant::now() - Duration::from_millis(1),
+        )
+        .expect_err("an expired open must fail before namespace creation");
+
+        assert!(error.contains("managed-process scope lock deadline elapsed"));
+        assert!(
+            !root.path().join(".nib").exists(),
+            "expired open created managed-process state"
+        );
+    }
+
+    #[test]
+    fn supervisor_self_registration_is_exact_idempotent_and_late_cas_fails() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let owner = ProcessIdentity::current().expect("owner identity");
+        let cleanup_lease_id = uuid::Uuid::new_v4().to_string();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        #[cfg(target_os = "linux")]
+        let backend = ProcessScopeBackend::LinuxPidNamespace;
+        #[cfg(windows)]
+        let backend = ProcessScopeBackend::WindowsJobObject;
+        #[cfg(target_os = "macos")]
+        let backend = ProcessScopeBackend::MacosProcessGroup;
+        let prepared = store
+            .prepare_subagent_launch(
+                "sub-self-register",
+                41,
+                &cleanup_lease_id,
+                &nonce,
+                owner.clone(),
+                backend,
+            )
+            .expect("preplanned scope");
+        let supervisor = ProcessIdentity::current().expect("supervisor identity");
+        assert!(store
+            .observe_registered_launch_supervisor(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                &nonce,
+                &supervisor,
+            )
+            .expect("unregistered observation")
+            .is_none());
+        let registered = store
+            .self_register_launch_supervisor(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                &nonce,
+                supervisor.clone(),
+            )
+            .expect("self registration");
+        assert_eq!(registered.supervisor.as_ref(), Some(&supervisor));
+        assert_eq!(
+            store
+                .self_register_launch_supervisor(
+                    &prepared.scope_id,
+                    prepared.execution_generation,
+                    &prepared.cleanup_lease_id,
+                    &nonce,
+                    supervisor.clone(),
+                )
+                .expect("idempotent self registration"),
+            registered
+        );
+        assert_eq!(
+            store
+                .observe_registered_launch_supervisor(
+                    &prepared.scope_id,
+                    prepared.execution_generation,
+                    &prepared.cleanup_lease_id,
+                    &nonce,
+                    &supervisor,
+                )
+                .expect("registered observation"),
+            Some(registered.clone())
+        );
+        let mismatch = ProcessIdentity {
+            pid: supervisor.pid,
+            start_marker: format!("{}-mismatch", supervisor.start_marker),
+        };
+        let error = store
+            .self_register_launch_supervisor(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                &nonce,
+                mismatch,
+            )
+            .expect_err("second supervisor identity must fail closed");
+        assert!(error.contains("another launch supervisor"), "{error}");
+        let error = store
+            .observe_registered_launch_supervisor(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &supervisor,
+            )
+            .expect_err("wrong registration nonce must fail closed");
+        assert!(error.contains("exact prepared launch"), "{error}");
+
+        let late_cleanup = uuid::Uuid::new_v4().to_string();
+        let late_nonce = uuid::Uuid::new_v4().to_string();
+        let late = store
+            .prepare_subagent_launch(
+                "sub-late-self-register",
+                42,
+                &late_cleanup,
+                &late_nonce,
+                owner,
+                backend,
+            )
+            .expect("late scope");
+        store
+            .remove_prepared(&late)
+            .expect("restart wins exact removal");
+        let error = store
+            .self_register_launch_supervisor(
+                &late.scope_id,
+                late.execution_generation,
+                &late.cleanup_lease_id,
+                &late_nonce,
+                supervisor,
+            )
+            .expect_err("late supervisor CAS must fail after retirement");
+        assert!(
+            error.contains("failed to open") || error.contains("No such file"),
+            "{error}"
+        );
+        assert!(store
+            .try_load(&late.scope_id)
+            .expect("late scope lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn bounded_process_store_setup_retries_directory_and_lock_finalization() {
+        let root = git_project();
+        let scope_directory = root.path().join(".nib").join(SCOPE_DIRECTORY);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut paused_after_scope_create = false;
+        let error = ProcessScopeStore::open_with_lock_deadline_and_setup_hook(
+            root.path(),
+            deadline,
+            || {
+                if scope_directory.is_dir() && !paused_after_scope_create {
+                    paused_after_scope_create = true;
+                    while Instant::now() < deadline {
+                        thread::yield_now();
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect_err("expiry after process-scope directory create must win");
+        assert!(paused_after_scope_create);
+        assert!(
+            error.contains("timed out acquiring daemon state lock")
+                || error.contains("managed-process scope lock deadline elapsed"),
+            "{error}"
+        );
+        assert!(
+            scope_directory.is_dir(),
+            "exact scope directory is retained"
+        );
+
+        ProcessScopeStore::open_with_lock_deadline(
+            root.path(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .expect("fresh deadline finalizes the retained process directory");
+
+        let lock_root = git_project();
+        let protected = lock_root.path().join(".nib").join(SCOPE_DIRECTORY);
+        std::fs::create_dir(&protected).expect("process scope directory");
+        let lock_path = lock_root.path().join(".nib").join(SCOPE_STORE_LOCK);
+        let anchor_path = crate::daemons::state::daemon_lock_anchor_path(&lock_path)
+            .expect("process lock anchor");
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut paused_after_anchor_link = false;
+        let error = ProcessScopeStore::open_with_lock_deadline_and_setup_hook(
+            lock_root.path(),
+            deadline,
+            || {
+                if lock_path.exists() && anchor_path.exists() && !paused_after_anchor_link {
+                    paused_after_anchor_link = true;
+                    while Instant::now() < deadline {
+                        thread::yield_now();
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect_err("expiry after process lock anchor publication must win");
+        assert!(paused_after_anchor_link);
+        assert!(
+            error.contains("timed out acquiring daemon state lock")
+                || error.contains("managed-process scope lock deadline elapsed"),
+            "{error}"
+        );
+        let visible = std::fs::File::open(&lock_path).expect("recoverable process lock");
+        let anchor = std::fs::File::open(&anchor_path).expect("recoverable process anchor");
+        assert!(
+            crate::daemons::state::same_open_file_identity(&visible, &anchor)
+                .expect("same process lock identity")
+        );
+
+        ProcessScopeStore::open_with_lock_deadline(
+            lock_root.path(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .expect("fresh deadline repairs and finalizes the process lock");
+        assert!(
+            !anchor_path.exists(),
+            "successful process-store retry cleans its transient anchor"
+        );
+    }
+
+    #[test]
+    fn preexpired_maintenance_rejects_a_cached_store() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        assert!(
+            MAINTAINED_PROCESS_SCOPE_STORES
+                .lock()
+                .expect("maintenance registry")
+                .contains(&store.directory),
+            "fixture store was not cached"
+        );
+        let bounded = ProcessScopeStore {
+            lock_deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..store
+        };
+
+        let error = bounded
+            .maintain_once()
+            .expect_err("an expired cache hit must not report maintenance success");
+
+        assert!(error.contains("managed-process scope lock deadline elapsed"));
+    }
+
+    #[test]
+    fn held_maintenance_registry_is_bounded_without_late_mutation() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let sentinel = store.directory.join("held-registry-sentinel");
+        std::fs::write(&sentinel, b"preserve").expect("sentinel");
+        let registry: ProcessScopeMaintenanceRegistry = Mutex::new(Default::default());
+        let held_registry = registry.lock().expect("hold maintenance registry");
+        let budget = Duration::from_millis(75);
+        let bounded = ProcessScopeStore {
+            lock_deadline: Some(Instant::now() + budget),
+            ..store
+        };
+        let started = Instant::now();
+
+        let error = bounded
+            .maintain_once_in(&registry)
+            .expect_err("maintenance registry contention must obey the deadline");
+
+        assert!(error.contains("managed-process scope lock deadline elapsed"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(held_registry.is_empty(), "contended registry was mutated");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel remains"),
+            b"preserve"
+        );
+        thread::sleep(budget * 2);
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel remains after grace period"),
+            b"preserve",
+            "deadline-aware maintenance mutated state after returning"
+        );
+    }
+
+    #[test]
+    fn scope_publication_rechecks_deadline_at_the_commit_boundary() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-expired-commit",
+                "subagent",
+                71,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("scope fixture");
+        let path = store.record_path(&record.scope_id).expect("scope path");
+        let original = std::fs::read(&path).expect("original scope bytes");
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let bounded = ProcessScopeStore {
+            project_root: store.project_root.clone(),
+            directory: store.directory.clone(),
+            directory_capability: store
+                .directory_capability
+                .try_clone()
+                .expect("clone scope capability"),
+            records_binding: None,
+            lock_deadline: Some(deadline),
+            operation_timeout: SCOPE_LOCK_TIMEOUT,
+        };
+        let mut paused_namespace = None;
+
+        let error = bounded
+            .mutate_with_commit_check(
+                &record.scope_id,
+                record.execution_generation,
+                &record.cleanup_lease_id,
+                |scope| {
+                    scope.cleanup_reason = Some("must not publish".to_string());
+                    Ok(())
+                },
+                || {
+                    paused_namespace = Some(process_namespace_snapshot(&store.directory));
+                    while Instant::now() < deadline {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("an expired precommit must reject the scope mutation");
+
+        assert!(
+            error.contains("timed out acquiring daemon state lock"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("unchanged scope bytes"),
+            original
+        );
+        let paused_namespace = paused_namespace.expect("captured precommit namespace");
+        assert_eq!(
+            process_namespace_snapshot(&store.directory),
+            paused_namespace,
+            "expired scope cleanup mutated transaction artifacts"
+        );
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            process_namespace_snapshot(&store.directory),
+            paused_namespace,
+            "expired scope cleanup mutated transaction artifacts later"
+        );
+    }
+
+    #[test]
+    fn long_lived_scope_mutation_uses_one_deadline_through_precommit() {
+        let root = git_project();
+        let mut store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-long-lived-precommit",
+                "subagent",
+                711,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("scope fixture");
+        store.operation_timeout = Duration::from_millis(60);
+        let path = store.record_path(&record.scope_id).expect("scope path");
+        let original = std::fs::read(&path).expect("original scope bytes");
+        let namespace = process_namespace_snapshot(&store.directory);
+
+        let error = store
+            .mutate_with_commit_check(
+                &record.scope_id,
+                record.execution_generation,
+                &record.cleanup_lease_id,
+                |scope| {
+                    scope.cleanup_reason = Some("must not publish late".to_string());
+                    Ok(())
+                },
+                || {
+                    thread::sleep(Duration::from_millis(90));
+                    Ok(())
+                },
+            )
+            .expect_err("long-lived mutation must not renew its precommit deadline");
+
+        assert!(
+            error.contains("timed out acquiring daemon state lock"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).expect("scope bytes"), original);
+        assert_eq!(
+            process_namespace_snapshot(&store.directory),
+            namespace,
+            "expired long-lived mutation changed the process namespace"
+        );
+    }
+
+    #[test]
+    fn long_lived_scope_atomic_recovery_obeys_the_outer_deadline() {
+        let root = git_project();
+        let mut store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-long-lived-recovery",
+                "subagent",
+                712,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("scope fixture");
+        store.operation_timeout = Duration::from_millis(60);
+        let path = store.record_path(&record.scope_id).expect("scope path");
+        let previous = store
+            .directory_capability
+            .deterministic_previous_artifact_path(&path, SCOPE_WRITE_PREFIX)
+            .expect("previous path");
+        std::fs::rename(&path, &previous).expect("install recoverable previous state");
+        let namespace = process_namespace_snapshot(&store.directory);
+        let deadline = store
+            .effective_operation_deadline()
+            .expect("operation deadline");
+        let mut paused = false;
+
+        let error = store
+            .with_scope_lock_until_and_recovery_hook(
+                &record.scope_id,
+                deadline,
+                |_directory, _path, _deadline| Ok(()),
+                || {
+                    if !paused {
+                        paused = true;
+                        thread::sleep(Duration::from_millis(90));
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("nested recovery must use the outer operation deadline");
+
+        assert!(
+            error.contains("timed out acquiring daemon state lock"),
+            "{error}"
+        );
+        assert_eq!(
+            process_namespace_snapshot(&store.directory),
+            namespace,
+            "expired nested recovery changed its transaction namespace"
+        );
+        assert!(!path.exists());
+        assert!(previous.is_file());
+        assert_eq!(
+            store.load(&record.scope_id).expect("fresh recovery retry"),
+            record
+        );
+        assert!(path.is_file());
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn preexpired_cleanup_lease_publication_and_cold_maintenance_do_not_mutate() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-expired-lease",
+                "subagent",
+                72,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("scope fixture");
+        let lease_path = store
+            .cleanup_lease_path(&record.scope_id)
+            .expect("lease path");
+        let stale = store
+            .directory
+            .join(format!("{SCOPE_WRITE_PREFIX}{}-stale.tmp", record.scope_id));
+        std::fs::write(&stale, b"preserve stale maintenance fixture").expect("stale fixture");
+        let bounded = ProcessScopeStore {
+            project_root: store.project_root.clone(),
+            directory: store.directory.clone(),
+            directory_capability: store
+                .directory_capability
+                .try_clone()
+                .expect("clone scope capability"),
+            records_binding: None,
+            lock_deadline: Some(Instant::now() - Duration::from_millis(1)),
+            operation_timeout: SCOPE_LOCK_TIMEOUT,
+        };
+
+        let lease_error = bounded
+            .acquire_cleanup_lease(&record)
+            .err()
+            .expect("expired cleanup lease publication must fail");
+        assert!(lease_error.contains("managed-process scope lock deadline elapsed"));
+        assert!(!lease_path.exists(), "expired cleanup lease was published");
+
+        let registry: ProcessScopeMaintenanceRegistry = Mutex::new(Default::default());
+        let maintenance_error = bounded
+            .maintain_once_in(&registry)
+            .expect_err("expired cold maintenance must fail");
+        assert!(maintenance_error.contains("managed-process scope lock deadline elapsed"));
+        assert_eq!(
+            std::fs::read(&stale).expect("stale fixture remains"),
+            b"preserve stale maintenance fixture"
+        );
+        assert!(
+            registry.lock().expect("maintenance registry").is_empty(),
+            "expired maintenance cached the store"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -3965,6 +5670,326 @@ mod tests {
     }
 
     #[test]
+    fn legacy_prepared_mark_running_is_one_successful_committed_transition() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let prepared = store
+            .prepare(
+                "sub-legacy-running",
+                "subagent",
+                411,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let path = store.record_path(&prepared.scope_id).expect("scope path");
+        let mut legacy = prepared.clone();
+        legacy.launch_committed = None;
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&legacy).expect("encode legacy scope"),
+        )
+        .expect("install legacy v2 scope");
+        let supervisor = ProcessIdentity::current().expect("supervisor identity");
+        let direct_child = supervisor.clone();
+
+        let running = store
+            .mark_running(
+                &legacy.scope_id,
+                legacy.execution_generation,
+                &legacy.cleanup_lease_id,
+                supervisor.clone(),
+                direct_child.clone(),
+            )
+            .expect("legacy mark-running succeeds atomically");
+
+        assert_eq!(running.status, ProcessScopeStatus::Running);
+        assert_eq!(running.launch_committed, Some(true));
+        assert_eq!(running.supervisor, Some(supervisor));
+        assert_eq!(running.direct_child, Some(direct_child));
+        assert_eq!(
+            store
+                .load(&legacy.scope_id)
+                .expect("persisted running scope"),
+            running,
+            "successful return and durable state must be the same transition"
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_scope_whose_filename_key_does_not_match_its_id() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let record = store
+            .prepare(
+                "sub-canonical-key",
+                "subagent",
+                412,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let source = store.record_path(&record.scope_id).expect("scope path");
+        let mismatched = store
+            .record_path("sub-mismatched-key")
+            .expect("mismatched scope path");
+        std::fs::copy(source, mismatched).expect("install mismatched-key scope");
+
+        let error = store
+            .load("sub-mismatched-key")
+            .expect_err("scope filename/id mismatch must fail closed");
+
+        assert!(error.contains("mismatched key"), "{error}");
+    }
+
+    #[test]
+    fn cleanup_lease_final_delete_preserves_quarantine_after_deadline_expiry() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let identity = ProcessIdentity::current().expect("process identity");
+        let prepared = store
+            .prepare(
+                "sub-cleanup-lease-deadline",
+                "subagent",
+                42,
+                identity.clone(),
+                ProcessScopeBackend::current().expect("process backend"),
+            )
+            .expect("prepare scope");
+        let initial_lease = store
+            .acquire_cleanup_lease(&prepared)
+            .expect("initial cleanup lease");
+        store
+            .mark_running(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                identity.clone(),
+                identity,
+            )
+            .expect("running scope");
+        store
+            .begin_cleanup(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                "deadline-fixture",
+            )
+            .expect("begin cleanup");
+        let complete = store
+            .complete_cleanup(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                "deadline-fixture",
+                true,
+            )
+            .expect("complete cleanup");
+        let proof = complete.cleanup_proof.clone().expect("cleanup proof");
+        drop(initial_lease);
+
+        let mut long_lived = store
+            .rebind_long_lived_after_handoff()
+            .expect("capability-identical long-lived store");
+        long_lived.operation_timeout = Duration::from_millis(100);
+        let lease = long_lived
+            .acquire_cleanup_lease(&complete)
+            .expect("long-lived cleanup lease");
+        let lease_path = long_lived
+            .cleanup_lease_path(&complete.scope_id)
+            .expect("cleanup lease path");
+        let directory = crate::daemons::state::StableDirectory::open(&long_lived.directory)
+            .expect("process state directory");
+        let quarantine = directory
+            .deterministic_artifact_path(&lease_path, CLEANUP_LEASE_DELETE_PREFIX, ".quarantine")
+            .expect("cleanup lease quarantine");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let cleanup_path = lease_path.clone();
+        let cleanup_quarantine = quarantine.clone();
+        let worker = std::thread::spawn(move || {
+            let mut paused = false;
+            lease.release_after_proof_with_guard(&proof, || {
+                if !paused && cleanup_quarantine.exists() && !cleanup_path.exists() {
+                    paused = true;
+                    ready_tx
+                        .send(())
+                        .expect("publish cleanup-lease quarantine pause");
+                    resume_rx.recv().expect("resume cleanup-lease deletion");
+                }
+                Ok(())
+            })
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleanup lease reached final quarantine");
+        assert!(!lease_path.exists(), "cleanup lease source was quarantined");
+        assert!(quarantine.is_file(), "cleanup lease quarantine is retained");
+        std::thread::sleep(Duration::from_millis(300));
+        let quarantined = std::fs::read(&quarantine).expect("cleanup lease bytes");
+        let scope_bytes = std::fs::read(
+            long_lived
+                .record_path(&complete.scope_id)
+                .expect("scope record path"),
+        )
+        .expect("complete scope bytes");
+        resume_tx.send(()).expect("resume expired lease deletion");
+
+        let error = worker
+            .join()
+            .expect("cleanup lease worker")
+            .expect_err("expired cleanup-lease deletion must fail closed");
+        assert!(
+            error.contains("managed-process scope lock deadline elapsed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&quarantine).expect("retained cleanup lease quarantine"),
+            quarantined
+        );
+        assert_eq!(
+            std::fs::read(
+                long_lived
+                    .record_path(&complete.scope_id)
+                    .expect("scope record path")
+            )
+            .expect("retained complete scope"),
+            scope_bytes
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            std::fs::read(&quarantine).expect("later cleanup lease quarantine"),
+            quarantined,
+            "expired cleanup lease mutated after its owner returned"
+        );
+        assert_eq!(
+            store
+                .cleanup_lease_state(&complete)
+                .expect("recover retained cleanup lease quarantine"),
+            CleanupLeaseState::Missing
+        );
+    }
+
+    #[test]
+    fn launch_abort_lease_delete_preserves_quarantine_and_retries_with_fresh_deadline() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let identity = ProcessIdentity::current().expect("process identity");
+        let prepared = store
+            .prepare(
+                "sub-launch-abort-lease-deadline",
+                "subagent",
+                43,
+                identity.clone(),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let initial_lease = store
+            .acquire_cleanup_lease(&prepared)
+            .expect("initial cleanup lease");
+        let registered = store
+            .register_launch_supervisor(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                identity,
+            )
+            .expect("registered supervisor");
+        let complete = store
+            .complete_launch_abort(
+                &registered.scope_id,
+                registered.execution_generation,
+                &registered.cleanup_lease_id,
+            )
+            .expect("complete launch abort");
+        let proof = complete
+            .launch_abort_proof
+            .clone()
+            .expect("launch-abort proof");
+        drop(initial_lease);
+
+        let mut long_lived = store
+            .rebind_long_lived_after_handoff()
+            .expect("capability-identical long-lived store");
+        long_lived.operation_timeout = Duration::from_millis(100);
+        let lease = long_lived
+            .acquire_cleanup_lease(&complete)
+            .expect("long-lived cleanup lease");
+        let lease_path = long_lived
+            .cleanup_lease_path(&complete.scope_id)
+            .expect("cleanup lease path");
+        let quarantine = long_lived
+            .directory_capability
+            .deterministic_artifact_path(&lease_path, CLEANUP_LEASE_DELETE_PREFIX, ".quarantine")
+            .expect("cleanup lease quarantine");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let cleanup_path = lease_path.clone();
+        let cleanup_quarantine = quarantine.clone();
+        let worker = std::thread::spawn(move || {
+            let mut paused = false;
+            lease.release_after_launch_abort_with_guard(&proof, || {
+                if !paused && cleanup_quarantine.exists() && !cleanup_path.exists() {
+                    paused = true;
+                    ready_tx
+                        .send(())
+                        .expect("publish launch-abort lease quarantine pause");
+                    resume_rx
+                        .recv()
+                        .expect("resume launch-abort lease deletion");
+                }
+                Ok(())
+            })
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("launch-abort lease reached final quarantine");
+        assert!(!lease_path.exists(), "cleanup lease source was quarantined");
+        assert!(quarantine.is_file(), "cleanup lease quarantine is retained");
+        let quarantined = std::fs::read(&quarantine).expect("cleanup lease bytes");
+        let scope_bytes = std::fs::read(
+            long_lived
+                .record_path(&complete.scope_id)
+                .expect("scope record path"),
+        )
+        .expect("complete scope bytes");
+        thread::sleep(Duration::from_millis(150));
+        resume_tx.send(()).expect("resume expired lease deletion");
+
+        let error = worker
+            .join()
+            .expect("cleanup lease worker")
+            .expect_err("expired launch-abort lease deletion must fail closed");
+        assert!(
+            error.contains("managed-process scope lock deadline elapsed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&quarantine).expect("retained cleanup lease quarantine"),
+            quarantined
+        );
+        assert_eq!(
+            std::fs::read(
+                long_lived
+                    .record_path(&complete.scope_id)
+                    .expect("scope record path")
+            )
+            .expect("retained complete scope"),
+            scope_bytes
+        );
+        assert_eq!(
+            store
+                .cleanup_lease_state(&complete)
+                .expect("fresh retry recovers launch-abort lease quarantine"),
+            CleanupLeaseState::Missing
+        );
+        assert!(!lease_path.exists());
+        assert!(!quarantine.exists());
+    }
+
+    #[test]
     fn live_cleanup_lease_excludes_a_second_supervisor() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");
@@ -4128,6 +6153,146 @@ mod tests {
             store
                 .cleanup_lease_state(&completed)
                 .expect("released recovery lease"),
+            CleanupLeaseState::Missing
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_identity_recovery_obeys_outer_deadline_without_late_mutation() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let live_identity = ProcessIdentity::current().expect("live process identity");
+        let prepared = store
+            .prepare(
+                "sub-bounded-live-recovery",
+                "subagent",
+                43,
+                live_identity.clone(),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let cleanup_lease = store
+            .acquire_cleanup_lease(&prepared)
+            .expect("cleanup lease");
+        let running = store
+            .mark_running(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                live_identity.clone(),
+                live_identity,
+            )
+            .expect("running scope");
+        drop(cleanup_lease);
+        assert_eq!(
+            store
+                .cleanup_lease_state(&running)
+                .expect("recoverable cleanup lease"),
+            CleanupLeaseState::Recoverable
+        );
+
+        let recovery_budget = Duration::from_millis(75);
+        let deadline = Instant::now() + recovery_budget;
+        let bounded = ProcessScopeStore::open_with_lock_deadline(root.path(), deadline)
+            .expect("deadline-aware scope store");
+        let started = Instant::now();
+        let error = bounded
+            .recover_linux_supervisor_loss(&running)
+            .expect_err("live identities cannot prove recovery before the outer deadline");
+
+        assert!(error.contains("remained unproven"), "{error}");
+        assert!(error.contains("supervisor_live=true"), "{error}");
+        assert!(error.contains("direct_child_live=true"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "live-identity recovery exceeded the inherited deadline"
+        );
+        assert_eq!(
+            store.load(&running.scope_id).expect("scope after timeout"),
+            running
+        );
+
+        thread::sleep(recovery_budget * 2);
+        assert_eq!(
+            store
+                .load(&running.scope_id)
+                .expect("scope after grace period"),
+            running,
+            "deadline-aware recovery mutated durable scope state after returning"
+        );
+        assert_eq!(
+            store
+                .cleanup_lease_state(&running)
+                .expect("cleanup lease after timeout"),
+            CleanupLeaseState::Recoverable
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retry_recovers_uncommitted_scope_after_recovery_required_transition() {
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let prepared = store
+            .prepare(
+                "sub-uncommitted-recovery-retry",
+                "subagent",
+                44,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let cleanup_lease = store
+            .acquire_cleanup_lease(&prepared)
+            .expect("cleanup lease");
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn gated identity fixture");
+        let identity = ProcessIdentity::capture(child.id()).expect("gated identity");
+        let gated = store
+            .mark_gated_running(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                identity.clone(),
+                identity,
+            )
+            .expect("persist gated scope");
+        let recovery_required = store
+            .mark_recovery_required(
+                &gated.scope_id,
+                gated.execution_generation,
+                &gated.cleanup_lease_id,
+                "first recovery attempt was interrupted",
+            )
+            .expect("persist recovery-required retry state");
+        assert_eq!(
+            recovery_required.status,
+            ProcessScopeStatus::RecoveryRequired
+        );
+        assert_eq!(recovery_required.launch_committed, Some(false));
+        drop(cleanup_lease);
+        child.kill().expect("kill gated identity fixture");
+        child.wait().expect("reap gated identity fixture");
+
+        let completed = store
+            .recover_linux_supervisor_loss(&recovery_required)
+            .expect("retry proves launch abort");
+        assert_eq!(completed.status, ProcessScopeStatus::Complete);
+        assert!(completed.cleanup_proof.is_none());
+        assert!(completed
+            .launch_abort_proof
+            .as_ref()
+            .is_some_and(|proof| proof.workload_never_launched));
+        assert_eq!(
+            store
+                .cleanup_lease_state(&completed)
+                .expect("released cleanup lease"),
             CleanupLeaseState::Missing
         );
     }
@@ -4333,6 +6498,13 @@ mod tests {
             CleanupLeaseState::Live
         );
         assert!(lease_quarantine.exists());
+        assert_eq!(
+            store
+                .try_load(&complete.scope_id)
+                .expect("coherent lookup while cleanup quarantine is live"),
+            Some(complete.clone()),
+            "a cleanup-lease quarantine must never be classified as absent"
+        );
         assert!(store.acquire_cleanup_lease(&complete).is_err());
         assert!(store
             .retire_complete(&record.scope_id, record.execution_generation, &proof)
@@ -4353,6 +6525,13 @@ mod tests {
             .expect("scope quarantine");
         std::fs::rename(&scope_path, &scope_quarantine)
             .expect("simulate crash after scope quarantine");
+        assert_eq!(
+            store
+                .try_load(&complete.scope_id)
+                .expect("coherent lookup from scope quarantine"),
+            Some(complete.clone()),
+            "a scope deletion quarantine must remain exact retirement authority"
+        );
         assert!(store
             .retire_complete(&record.scope_id, record.execution_generation + 1, &proof)
             .is_err());
@@ -4373,6 +6552,187 @@ mod tests {
             .try_load(&record.scope_id)
             .expect("retired scope lookup")
             .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_scope_quarantine_crash_child() {
+        let Some(mode) = std::env::var_os("NIB_TEST_PROCESS_RETIRE_CRASH_MODE") else {
+            return;
+        };
+        let root = PathBuf::from(
+            std::env::var_os("NIB_TEST_PROCESS_RETIRE_ROOT").expect("crash fixture root"),
+        );
+        let id = std::env::var("NIB_TEST_PROCESS_RETIRE_ID").expect("crash fixture id");
+        let ready = PathBuf::from(
+            std::env::var_os("NIB_TEST_PROCESS_RETIRE_READY").expect("crash ready path"),
+        );
+        let store = ProcessScopeStore::open(&root).expect("child scope store");
+        let scope = store.load(&id).expect("child complete scope");
+        let proof = scope.cleanup_proof.clone().expect("child cleanup proof");
+        let scope_path = store.record_path(&id).expect("scope path");
+        let lease_path = store.cleanup_lease_path(&id).expect("lease path");
+        let directory = crate::daemons::state::StableDirectory::open(&store.directory)
+            .expect("scope directory");
+        let (canonical, quarantine) = if mode == "lease" {
+            (
+                lease_path.clone(),
+                directory
+                    .deterministic_artifact_path(
+                        &lease_path,
+                        CLEANUP_LEASE_DELETE_PREFIX,
+                        ".quarantine",
+                    )
+                    .expect("lease quarantine"),
+            )
+        } else {
+            (
+                scope_path.clone(),
+                directory
+                    .deterministic_artifact_path(&scope_path, SCOPE_DELETE_PREFIX, ".quarantine")
+                    .expect("scope quarantine"),
+            )
+        };
+        let mut pause = || {
+            if quarantine.exists() && !canonical.exists() {
+                std::fs::write(&ready, b"quarantined").expect("publish crash boundary");
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+            Ok(())
+        };
+        if mode == "lease" {
+            store
+                .acquire_cleanup_lease(&scope)
+                .expect("child cleanup lease")
+                .release_after_proof_with_guard(&proof, &mut pause)
+                .expect("parent kills child at lease quarantine");
+        } else {
+            store
+                .retire_completed_scope_with_guard(
+                    &id,
+                    scope.execution_generation,
+                    CompletionAuthority::Cleanup(&proof),
+                    &mut pause,
+                )
+                .expect("parent kills child at scope quarantine");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigkill_at_scope_and_cleanup_quarantines_retries_exact_retirement_first() {
+        for mode in ["lease", "scope"] {
+            let root = git_project();
+            let store = ProcessScopeStore::open(root.path()).expect("scope store");
+            let id = format!("sub-retire-crash-{mode}");
+            let identity = ProcessIdentity::current().expect("process identity");
+            let prepared = store
+                .prepare(
+                    &id,
+                    "subagent",
+                    if mode == "lease" { 81 } else { 82 },
+                    identity.clone(),
+                    ProcessScopeBackend::current().expect("process backend"),
+                )
+                .expect("prepare scope");
+            let initial_lease = store
+                .acquire_cleanup_lease(&prepared)
+                .expect("initial cleanup lease");
+            store
+                .mark_running(
+                    &id,
+                    prepared.execution_generation,
+                    &prepared.cleanup_lease_id,
+                    identity.clone(),
+                    identity,
+                )
+                .expect("running scope");
+            store
+                .begin_cleanup(
+                    &id,
+                    prepared.execution_generation,
+                    &prepared.cleanup_lease_id,
+                    "crash-retirement-fixture",
+                )
+                .expect("begin cleanup");
+            let complete = store
+                .complete_cleanup(
+                    &id,
+                    prepared.execution_generation,
+                    &prepared.cleanup_lease_id,
+                    "crash-retirement-fixture",
+                    true,
+                )
+                .expect("complete cleanup");
+            let proof = complete.cleanup_proof.clone().expect("cleanup proof");
+            if mode == "scope" {
+                initial_lease
+                    .release_after_proof(&proof)
+                    .expect("release lease before scope-retirement crash");
+            } else {
+                drop(initial_lease);
+            }
+            let external = root.path().join("external-compensation-sentinel");
+            std::fs::write(&external, b"preserve until scope retirement")
+                .expect("external sentinel");
+            let ready = root.path().join(format!("{mode}.quarantined"));
+            let mut child = Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "sandbox::process::tests::process_scope_quarantine_crash_child",
+                    "--nocapture",
+                ])
+                .env("NIB_TEST_PROCESS_RETIRE_CRASH_MODE", mode)
+                .env("NIB_TEST_PROCESS_RETIRE_ROOT", root.path())
+                .env("NIB_TEST_PROCESS_RETIRE_ID", &id)
+                .env("NIB_TEST_PROCESS_RETIRE_READY", &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn quarantine child");
+            let wait_deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && Instant::now() < wait_deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.is_file(), "child did not reach {mode} quarantine");
+            child.kill().expect("SIGKILL quarantine child");
+            child.wait().expect("reap quarantine child");
+            assert_eq!(
+                std::fs::read(&external).expect("external state remains"),
+                b"preserve until scope retirement"
+            );
+
+            let retry = ProcessScopeStore::open(root.path()).expect("fresh retry store");
+            assert_eq!(
+                retry.try_load(&id).expect("coherent retry lookup"),
+                Some(complete.clone()),
+                "quarantine must not be misclassified as absent"
+            );
+            assert_eq!(
+                std::fs::read(&external).expect("external state before retirement"),
+                b"preserve until scope retirement"
+            );
+            assert!(
+                retry
+                    .retire_complete(&id, complete.execution_generation, &proof)
+                    .expect("fresh exact retirement"),
+                "fresh retry retires canonical or quarantined exact scope"
+            );
+            assert!(
+                retry
+                    .try_load(&id)
+                    .expect("post-retirement lookup")
+                    .is_none(),
+                "scope and cleanup lease are absent only after exact retirement"
+            );
+            assert_eq!(
+                std::fs::read(&external).expect("unrelated external state preserved"),
+                b"preserve until scope retirement"
+            );
+        }
     }
 
     #[test]
@@ -4900,7 +7260,7 @@ mod tests {
             survived_path.display(),
         );
         let (owner_read, owner_write) = UnixStream::pair().expect("owner EOF pipe");
-        let worker_store = store.clone();
+        let worker_store = store.try_clone().expect("clone scope store");
         let worker_record = record.clone();
         let worker_root = root.path().to_path_buf();
         let supervisor = std::thread::spawn(move || {

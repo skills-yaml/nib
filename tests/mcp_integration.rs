@@ -589,6 +589,73 @@ async fn read_response(stdout: &mut BufReader<tokio::process::ChildStdout>) -> s
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn nib_run_start_response_exposes_only_public_job_and_session_identity() {
+    let project = tempfile::tempdir().expect("MCP public-start project");
+    initialize_server_fixture(project.path());
+    let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
+
+    write_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "public-start",
+            "method": "tools/call",
+            "params": {
+                "name": "nib_run",
+                "arguments": {"goal": "return a bounded fixture", "max_steps": 1}
+            }
+        }),
+    )
+    .await;
+    let response = read_response(&mut stdout).await;
+    assert_eq!(response["id"], "public-start", "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let public = response["result"]["structuredContent"]
+        .as_object()
+        .expect("structured public start response");
+    assert_eq!(public.len(), 4, "unexpected public fields: {response}");
+    assert_eq!(public["status"], "started");
+    let subagent_id = public["subagent_id"].as_str().expect("subagent id");
+    assert!(public["child_session_id"].as_str().is_some());
+    assert!(public.contains_key("parent_session_id"));
+    let encoded = response.to_string();
+    for private in [
+        "process_scope",
+        "execution_generation",
+        "cleanup_lease_id",
+        "owner_lease",
+        "directory_identity",
+        "worktree_path",
+        "branch_oid",
+        "_ownership_audit_target",
+    ] {
+        assert!(!encoded.contains(private), "leaked {private}: {response}");
+    }
+
+    let persisted: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .path()
+                .join(".nib/subagents")
+                .join(format!("{subagent_id}.json")),
+        )
+        .expect("persisted subagent record"),
+    )
+    .expect("persisted subagent JSON");
+    assert!(persisted["execution_generation"].as_u64().is_some());
+    assert!(persisted["owner_lease"].as_str().is_some());
+    assert!(persisted.to_string().contains("_ownership_audit_target"));
+
+    drop(stdin);
+    let status = tokio::time::timeout(Duration::from_secs(10), server.wait())
+        .await
+        .expect("MCP server shutdown")
+        .expect("MCP server status");
+    assert!(status.success(), "MCP server failed: {status}");
+}
+
+#[cfg(target_os = "linux")]
 fn process_details(pid: i32) -> Option<(char, i32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, fields) = stat.rsplit_once(") ")?;
@@ -2353,9 +2420,21 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
             .is_some_and(|text| text.contains("registrations were preserved")),
         "{response}"
     );
-    let records = nib::tools::delegation::list_subagents(project.path())
-        .expect("subagent records after compensation");
-    assert!(records.is_empty(), "failed spawn persisted {records:?}");
+    let reconciliation = nib::tools::delegation::list_subagents(project.path())
+        .expect_err("unattributed Git registration must keep preparation fail closed");
+    assert!(
+        reconciliation
+            .contains("post-snapshot Git worktree registration lacks exact creation attribution"),
+        "{reconciliation}"
+    );
+    let preparations = project.path().join(".nib/subagents/.preparations");
+    assert!(
+        std::fs::read_dir(&preparations)
+            .expect("retained spawn preparation namespace")
+            .next()
+            .is_some(),
+        "indeterminate worktree constructor error retired its recovery intent"
+    );
     let worktree_root = project.path().join(".nib/worktrees/subagents");
     assert!(
         !worktree_root.exists()

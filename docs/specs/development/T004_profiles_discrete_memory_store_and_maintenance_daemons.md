@@ -239,9 +239,41 @@ a stale worker is claimed for reconciliation resume to one terminal outcome.
   operations resolve relative to retained directory capabilities. A pure transition
   aborts when detachment is known before commit; after an external effect, the paired
   transition commits atomically to the original directory and reports attachment loss.
-- [x] Startup performs bounded, streaming cleanup of untouched legacy task and
-  delegation per-ID locks. A live legacy owner fails migration closed, and current
-  stripe/admission controls are never interpreted as legacy artifacts.
+- [x] Startup performs bounded, streaming cleanup of untouched legacy task locks.
+  Delegation per-ID locks require an explicit offline migration: the operator stops and
+  disables every prior nib binary, then runs
+  `nib doctor --fix --confirm-no-legacy-processes`. Ordinary record operations never
+  delete or recreate legacy artifacts.
+- [x] A genuinely new delegation-record namespace is no-replace-published by the
+  current build with a versioned native-origin receipt already inside it. An existing
+  clean but unmarked namespace, a pending/rejected migration receipt, or legacy state
+  introduced after a completed epoch fails closed with the same actionable doctor
+  instruction.
+- [x] Native-origin staging creation and no-replace publication use one absolute
+  deadline through the final namespace mutation, parent sync, identity reopen, and
+  visibility check. An expired publication never reports success and leaves exact
+  receipt-bound state recoverable. Doctor preserves unmarked, foreign-identity, or
+  extra-content staging byte-for-byte; an operator must inspect and explicitly remove
+  that exact ambiguous directory before retrying.
+- [x] The same absolute deadline covers delegation setup from capability-relative
+  `.nib`, lock-parent, and anchor-parent creation through visible lock publication,
+  exact anchor linking, parent sync, identity reopen, and final visibility. Expiry wins
+  over success and retains any exact partial lock pair for a bounded fresh retry.
+- [x] Records initialization derives its effective absolute deadline once and shares
+  that exact instant across native setup, authorization, and legacy migration. A child
+  directory created before expiry but not yet parent-synced is incomplete: a fresh
+  bounded retry must capability-reopen the exact child and sync its parent before it can
+  report success.
+- [x] Deadline-aware shared file locks, including session cancellation audit and
+  managed-process scope storage, use the same retained-capability setup for lock and
+  anchor parents, visible file, exact link, durable sync, reopen, and final visibility;
+  process-store namespace creation and maintenance consume the caller's same deadline.
+- [x] The doctor confirmation is the authoritative external quiescence attestation. Its
+  pending receipt is bound to the exact records-directory identity and exact legacy
+  artifact manifest, authorizes only bounded doctor cleanup/resume, and becomes an
+  ordinary-operation authorization only after cleanup is durably complete. Crash retry
+  is idempotent; changed, ambiguous, or live state is preserved and needs a fresh
+  confirmation.
 - [x] Deterministic child-process regressions hold each original lock while replacing
   visible paths and prove contenders block or fail closed until identity is restored.
 - [x] Every durable execution has a persisted generation included in terminal and
@@ -273,7 +305,12 @@ evidence.
 - `src/daemons/task.rs` and `src/tools/core.rs` correlate terminal and schedule session,
   tool-call, and audit evidence by execution generation with an exact legacy fallback.
 - `src/tools/delegation.rs` places record locks in a fixed stripe namespace outside the
-  replaceable records directory and globally migrates the old per-ID namespace.
+  replaceable records directory. It atomically publishes native-origin namespace
+  evidence and gates the one old per-ID cleanup through an exact, versioned offline
+  doctor epoch rather than attempting live coexistence with prior binaries.
+- `src/doctor.rs` exposes the explicit
+  `--fix --confirm-no-legacy-processes` operator workflow; the confirmation text defines
+  the required stop/disable precondition and no environment-only bypass exists.
 
 ### Validation Evidence
 
@@ -284,9 +321,17 @@ evidence.
   failure, original-directory paired commit, terminal/schedule ID reuse, deterministic
   legacy migration, reconciliation loss before/after delivery, and actual killed worker
   publication before/after effects with late-owner fencing.
-- Delegation tests cover bounded global legacy migration and a child writer paused while
-  the complete records directory is replaced; Cron covers directory replacement after
-  the scheduled job effect.
+- Delegation tests cover clean-unmarked rejection, native-origin receipt publication,
+  deadline-bound native staging/publication, byte-exact hostile staging preservation,
+  exact-receipt staging resume, every directory/file/link boundary in bounded lock
+  setup, retained-pair retry after expiry before final sync, parent-fsync retry for an
+  already-created exact child, one aggregate setup-and-migration deadline, bounded
+  shared session/process lock setup, bounded attested migration, post-epoch legacy
+  injection, crash/quarantine retry, and a prior-version child paused after opening the
+  exact legacy inode but before locking it.
+  The child state is preserved by ordinary operations, and doctor cleanup is accepted
+  only after the child exits. A separate child writer covers complete records-directory
+  replacement; Cron covers directory replacement after the scheduled job effect.
 
 ### Validation Gates
 
@@ -778,6 +823,153 @@ probe and all state assertions.
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS
    daemon, curator, memory, and task runtime gates on their configured platforms.
 2. Rerun the canonical Task gates and two-stage review before moving T004 to `done/`.
+
+## Delegation Preparation Isolation Follow-up (2026-08-29)
+
+Profile session initialization performed for a direct subagent spawn is a transactional
+preparation, not an independently committed profile migration. Cleanup removes the
+transaction's exact session leaf first. A marker, anchor, profile state directory, or
+session directory is removed only when the preparation created that exact identity and it
+is still empty; a concurrently committed session adopts and preserves the shared
+infrastructure. Preparation create/cleanup operations serialize per canonical session
+namespace, and ambiguous or replacement identities fail closed.
+
+The read-only preflight also freezes the workspace-selected profile id together with its
+sessions destination and runtime configuration. Child bootstrap reduces the copied
+profile configuration to that selected id; it must not fall back to the global default
+profile or inherit another profile's environment, skills, or state paths.
+
+Acceptance and validation include deterministic A-prepares/B-commits/A-fails namespace
+identity/byte preservation and a same-workspace non-default-profile child bootstrap with
+distinct environment and skill fixtures.
+
+Before the first fallback profile/session mutation, the durable preparation intent also
+records a versioned namespace plan: the retained ancestor capability identity, the exact
+post-worktree missing-component chain, the retained marker/anchor state, and
+transaction-scoped marker bytes. Newly initialized session identity markers persist
+those bytes before anchor publication. Restart cleanup first validates the complete
+planned topology and marker/link identity; unrelated entries, substituted identities,
+or mismatched bytes preserve the namespace fail closed. Directory removal is leaf-first,
+empty-only, capability-bound, and checked against the same bounded cleanup deadline.
+
+Validation additionally kills a subprocess immediately after the first planned directory
+creation, marker durability, anchor publication, parent sync, and final visibility check.
+Each restart must remove the exact partial transaction and no unrelated state. Separate
+byte-snapshot regressions require hostile sentinels and ambiguous marker content to remain
+unchanged.
+
+The spawn-preparation workload intent is the write-ahead authority for the whole fallback
+transaction, not only the session namespace. Its initial `planned` revision is published
+and finalized before worktree reservation, child configuration, owner lease, or audit
+mutation. It contains pre-generated worktree path/branch/base OID/durable receipt identity,
+owner generation/lease, audit destination, and namespace nonce plan. Later revisions record
+resource preparation, the exact planned session leaf, and its published identity. All
+revisions and the session leaf use guarded atomic publication with exact receipt adoption;
+an error receipt and any cleanup/finalization failure are durable reconciliation input and
+must never be discarded.
+
+Restart first authorizes and retains the exact Policy-B records-directory capability, then
+recovers canonical, temporary, previous, and deletion-quarantine transaction state before
+bounded intent enumeration. A subagent record supersedes an intent only when its canonical
+identity and complete persisted generation, lease, worktree, child/audit session, pinned
+audit target, committed handoff evidence, and durable execution evidence exactly match.
+A merely published or registered `running` record remains a compensable preparation
+artifact. Ambiguous, stale, unrelated, pending-handoff, or evidence-free records and
+transaction artifacts preserve the intent and resources fail closed. Intent retirement is
+last and a normal-path retirement error is surfaced and compensated rather than ignored.
+
+One persistent bounded authority serializes the complete intent lifetime: the writer holds
+the global migration fence and its fixed per-id record stripe, in canonical order, from
+before `planned` publication through record commit or full compensation and intent
+retirement. List/get reconciliation takes the same global fence before transaction
+recovery or enumeration, so it cannot observe an evacuated live revision or compete with
+the writer's deletion quarantine. The fence and stripe are fixed infrastructure rather
+than per-spawn artifacts. Cleanup of session, owner, or worktree state is guarded before
+and after each namespace mutation by the exact retained records-directory capability and
+the bounded cleanup deadline; replacement preserves the transaction fail closed.
+
+Planned session-leaf recovery is strict and receipt-driven. Before canonical
+classification it resolves the deterministic temporary/previous/quarantine namespace
+under the retained session-directory capability. Canonical and temporary links may be
+finalized only when they identify the same unlocked file with the exact planned bytes;
+live, mismatched, prior, or ambiguous state remains untouched. Successful reconciliation
+requires the complete transaction-owned session namespace—including leaf artifacts,
+identity marker/anchor, and empty created ancestors—to be finalized before deleting the
+spawn intent.
+
+Spawn compensation and intent retirement share the one absolute preparation deadline.
+Expiry or an indeterminate constructor/cleanup result preserves the durable intent; it is
+never retired merely because another cleanup step succeeded. Fresh bounded reconciliation
+validates and removes the exact session/worktree/owner artifacts first and deletes the
+intent last. Coverage includes session temporary and canonical publication boundaries,
+worktree reservation, post-audit cancellation, and injected cleanup failures in both
+synchronous and cancellable delegation paths.
+
+TaskManager admission is paused until a durable execution handoff is acknowledged. Intent
+revisions cover record publication, manager registration, and handoff proof; the matching
+record then receives an exact committed marker before the start gate is released. Native
+supervision uses a version-4 intent that preplans the exact cleanup lease and registration
+nonce. The parent publishes a matching `Prepared`, `launch_committed=false` scope, and the
+spawned supervisor's first workload-state operation exact-CASes its verified OS identity
+into that scope under the same fixed process-scope lock used by restart. It does so before
+reading the parent protocol, record, worktree, or other external launch resource. The
+parent validates this already-persisted identity rather than publishing it. The supervisor
+then keeps the real OS child launch gate closed while publishing nonce-bound `READY`; only an exact parent
+`COMMIT` sent after durable intent/record handoff may advance that same scope to true,
+release the worker, and produce `STARTED`. The version-4 preparation intent retains the
+exact READY scope identity and authority for restart comparison. TaskManager release and
+intent retirement follow `STARTED`. EOF, partial/malformed frames, identity mismatch,
+timeout, or parent death before that point produce exact never-launched cleanup proof. On
+restart, process state is opened through the retained authorized records capability and
+classified once under the exact store lock after canonical/temp/previous plus scope- and
+cleanup-lease-quarantine recovery. Only exact `subagent` key, generation, cleanup lease,
+owner/backend/supervisor/child authority with `launch_committed=true` in a committed-compatible
+state, or an exactly matching terminal cleanup proof, can supersede an intent. Prepared,
+false, legacy missing flags, or mismatched authority fail closed. An uncommitted scope from
+any preparation phase is cleanup authority and its exact scope and cleanup lease retire
+before owner/audit/worktree/record/intent compensation. The legacy public `mark_running`
+operation preserves its prior committed semantics with one atomic Prepared-to-Running
+publication, so a version-2 Prepared record cannot be changed durably and then return an
+error. TaskManager presence alone never supersedes the intent. Crash-boundary and
+final-retirement regressions, including SIGKILL at scope/cleanup-lease quarantines and a
+real-binary parent SIGKILL between `READY` and `COMMIT`, require that restart yields either a
+valid launched workload or complete exact compensation, never an orphan `running` or
+`recovery_required` record.
+
+The supervisor's startup deadline is confined to the capability-only open,
+self-registration, and `READY`/`COMMIT`/`STARTED` handoff. After `STARTED` succeeds, the
+supervisor rebinds both the exact retained process-scope directory and its already-held
+cleanup lease to long-lived authorities without reopening an ambient path or changing
+their identities. Each later process-scope or cleanup-lease mutation receives a fresh
+bounded operation deadline, so a worker may run longer than the startup lock timeout
+without making terminal cleanup impossible. The startup deadline is never renewed before
+commit. Production-path completion and cancellation coverage runs the gated worker beyond
+that timeout and requires exact descendant cleanup plus retirement of the scope and lease.
+
+Every version-4 intent revision and atomic prior/target successor retains the identical
+preplanned cleanup lease and registration nonce. One shared structural and runtime validator
+binds that plan to the READY scope and later observed scope before atomic recovery,
+execution-evidence acceptance, or restart cleanup. Missing or changed nonce, changed lease,
+or plan substitution is ambiguous authority: the transaction and all resources remain
+byte-exact and no cleanup or supersession proceeds. Version-2/3 compatibility remains
+plan-absent and fail closed; migration never invents version-4 authority.
+
+The persisted preparation schema is version-exact. Version 2 permits neither a process
+plan nor a `READY` snapshot in any phase and cannot treat matching committed process state
+as handoff proof. Version 3 permits no plan and adds its exact legacy `READY` snapshot only
+when advancing from `ManagerRegistered` to `HandoffProven`; version 4 requires the current
+plan-bound representation. The matrix is enforced before encoding, atomic temporary or
+previous recovery, revision adoption, evidence evaluation, and restart cleanup. Any
+forbidden field or non-monotonic addition/removal leaves the entire transaction namespace
+unchanged and requires explicit recovery rather than silently rewriting legacy authority.
+
+An exact version-4 Prepared scope with no persisted supervisor, direct child, or cleanup
+lease may be retired only while holding that self-registration lock. The resulting race is
+linear: self-registration wins and restart aborts/reaps the exact persisted identity, or
+retirement wins and a late supervisor exits on its failed CAS before accessing launch
+resources. Production-linked SIGKILL coverage exercises both Prepared-before-spawn and
+spawn-before-self-registration boundaries and requires scope retirement before any external
+compensation, with no worker sentinel or resource reappearance after the late child exits.
 
 ## Current Risks
 

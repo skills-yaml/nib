@@ -311,8 +311,31 @@ The main sections are:
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
 
 Run `nib doctor` after manual configuration changes. It validates local readiness and
-credential presence, not live provider connectivity. `--fix` only applies the bounded
-local OpenAI transport repair described above; it is not a live capability probe.
+credential presence, not live provider connectivity. `--fix` by itself only applies
+the bounded local OpenAI transport repair described above; it is not a live capability
+probe.
+
+#### Offline migration from legacy subagent locks
+
+Older nib builds used a per-subagent record-lock namespace. Live coexistence between
+that protocol and the current fixed stripe set is not supported. Before migrating,
+stop and disable every prior nib binary that can access the repository. Then make the
+required external quiescence attestation explicitly:
+
+```bash
+nib doctor --fix --confirm-no-legacy-processes
+```
+
+The confirmation flag requires `--fix`. It writes a versioned receipt bound to the
+exact delegation-record directory, reconciles only the exact legacy artifact manifest,
+and marks the epoch complete after bounded cleanup. A crash can resume the pending
+epoch, but pending state never authorizes ordinary delegation. Existing clean but
+unmarked state, live or ambiguous legacy locks, and legacy artifacts introduced after a
+completed epoch all fail closed and remain available for inspection. Stop the prior
+binary and repeat the explicit command; there is no environment-variable bypass.
+Native namespace staging resumes only when its exact identity-bound receipt is its sole
+content. Doctor preserves unmarked, mismatched, or extra-content staging byte-for-byte
+and reports its path; inspect it and remove only that exact directory before retrying.
 
 ## Use
 
