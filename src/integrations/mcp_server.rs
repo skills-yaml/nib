@@ -4573,6 +4573,9 @@ mod tests {
     #[tokio::test]
     async fn mcp_subagent_flow_accepts_a_dos_short_project_root() {
         let root = tempdir().expect("MCP DOS-alias repository");
+        let _timeout = crate::tools::delegation::SubagentCancellationTimeoutGuard::set(
+            std::time::Duration::from_secs(2),
+        );
         initialize_git_repository(root.path());
         let config = save_profile_config(root.path());
         let canonical_root = root.path().canonicalize().expect("canonical repository");

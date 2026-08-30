@@ -3783,7 +3783,8 @@ mod tests {
                 let entry = entry.expect("session namespace entry");
                 (
                     entry.file_name(),
-                    fs::read(entry.path()).expect("session namespace bytes"),
+                    crate::fs_security::read_namespace_snapshot_file(&entry.path())
+                        .expect("session namespace bytes"),
                 )
             })
             .collect::<Vec<_>>();

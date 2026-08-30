@@ -440,6 +440,25 @@ pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn read_namespace_snapshot_file(path: &Path) -> io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        #[cfg(windows)]
+        Err(error)
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION as i32)
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) =>
+        {
+            // Windows byte-range locks are mandatory, so a second handle cannot
+            // read even an empty lock file. Its complete byte content is still
+            // known exactly from the zero length without bypassing the lock.
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 const MAX_REMOVAL_ENTRIES: usize = 200_000;
 const MAX_REMOVAL_DEPTH: usize = 64;
 const MAX_REMOVAL_NAME_UNITS: usize = 255;

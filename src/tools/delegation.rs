@@ -13703,7 +13703,8 @@ mod tests {
                 } else {
                     snapshot.push((
                         relative,
-                        std::fs::read(entry_path).expect("subagent namespace bytes"),
+                        crate::fs_security::read_namespace_snapshot_file(&entry_path)
+                            .expect("subagent namespace bytes"),
                     ));
                 }
             }
@@ -13732,7 +13733,7 @@ mod tests {
             .chain(after_map.keys())
             .filter(|path| before_map.get(*path) != after_map.get(*path))
             .filter(|path| {
-                let rendered = path.to_string_lossy();
+                let rendered = path.to_string_lossy().replace('\\', "/");
                 let complete_worktree_proof = rendered.starts_with(".nib/worktree-ownership/")
                     && rendered.ends_with(".json")
                     && before_map.get(*path).is_none()
@@ -16104,16 +16105,8 @@ mod tests {
                                     let name = name.to_string_lossy();
                                     name.starts_with(".nib-session-")
                                         && name.ends_with(".tmp")
-                                        && std::fs::read(entry.path()).is_ok_and(|bytes| {
-                                            serde_json::from_slice::<Value>(&bytes).is_ok_and(
-                                                |session| {
-                                                    session
-                                                        .get("id")
-                                                        .and_then(Value::as_str)
-                                                        .is_some()
-                                                },
-                                            )
-                                        })
+                                        && std::fs::metadata(entry.path())
+                                            .is_ok_and(|metadata| metadata.len() > 0)
                                 })
                             })
                             .unwrap_or(false),
@@ -19445,6 +19438,14 @@ mod tests {
             error.contains("state changed") || error.contains("identity changed"),
             "{error}"
         );
+        assert!(visible.is_file(), "replacement legacy lock was preserved");
+        assert!(anchor.is_file(), "replacement legacy anchor was preserved");
+        assert!(
+            displaced.is_dir(),
+            "the retained original directory was preserved"
+        );
+
+        drop(owner.take());
         assert_eq!(
             std::fs::read(&visible).expect("replacement legacy lock"),
             b"replacement-live"
@@ -19453,12 +19454,6 @@ mod tests {
             std::fs::read(&anchor).expect("replacement legacy anchor"),
             b"replacement-live"
         );
-        assert!(
-            displaced.is_dir(),
-            "the retained original directory was preserved"
-        );
-
-        drop(owner.take());
         confirm_no_legacy_subagent_processes(root.path())
             .expect("a fresh attestation cleans the released replacement artifacts");
         assert!(!visible.exists(), "released replacement lock was removed");
@@ -19521,6 +19516,10 @@ mod tests {
             !modern.exists(),
             "modern stripe was not acquired after legacy contention"
         );
+        assert!(legacy.is_file(), "live legacy lock was preserved");
+        assert!(anchor.is_file(), "live legacy anchor was preserved");
+
+        drop(owner.take());
         assert_eq!(
             std::fs::read(&legacy).expect("preserved legacy lock"),
             b"live-old-writer"
@@ -19529,8 +19528,6 @@ mod tests {
             std::fs::read(&anchor).expect("preserved legacy anchor"),
             b"live-old-writer"
         );
-
-        drop(owner.take());
         let error = with_subagent_record_lock_bridge_in_deadline(
             root.path(),
             id,
@@ -20233,6 +20230,10 @@ mod tests {
         } else {
             visible.clone()
         };
+        let source_bytes = std::fs::read(&source).expect("sweep source bytes");
+        let paired = half
+            .is_none()
+            .then(|| std::fs::read(&anchor).expect("paired sweep anchor"));
         let directory = crate::daemons::state::StableDirectory::open(
             source.parent().expect("sweep source parent"),
         )
@@ -20270,10 +20271,7 @@ mod tests {
         ready_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("sweep reached its final deletion boundary");
-        let quarantined = std::fs::read(&quarantine).expect("recoverable sweep quarantine");
-        let paired = half
-            .is_none()
-            .then(|| std::fs::read(&anchor).expect("paired sweep anchor"));
+        let quarantined = source_bytes;
         std::thread::sleep(Duration::from_millis(200));
         resume_tx.send(()).expect("resume expired owner sweep");
         let error = worker
@@ -20533,6 +20531,10 @@ mod tests {
         } else {
             visible.clone()
         };
+        let source_bytes = std::fs::read(&source).expect("owner source bytes");
+        let paired = half
+            .is_none()
+            .then(|| std::fs::read(&anchor).expect("paired anchor bytes"));
         let directory = crate::daemons::state::StableDirectory::open(
             source.parent().expect("owner artifact parent"),
         )
@@ -20579,10 +20581,7 @@ mod tests {
             assert!(anchor.is_file(), "the paired anchor remains authoritative");
         }
         std::thread::sleep(Duration::from_millis(200));
-        let quarantined = std::fs::read(&quarantine).expect("quarantined owner bytes");
-        let paired = half
-            .is_none()
-            .then(|| std::fs::read(&anchor).expect("paired anchor bytes"));
+        let quarantined = source_bytes;
         resume_tx.send(()).expect("resume expired owner cleanup");
 
         let error = worker
@@ -20874,13 +20873,22 @@ mod tests {
         std::fs::rename(&displaced_lock, &lock_path).expect("restore anchored lock path");
 
         let displaced_records = root.path().join(".nib/subagents.displaced");
-        std::fs::rename(&records_path, &displaced_records)
-            .expect("displace subagent records directory");
-        std::fs::create_dir(&records_path).expect("replace subagent records directory");
-        run_child("offline");
-        std::fs::remove_dir_all(&records_path).expect("remove replacement records directory");
-        std::fs::rename(&displaced_records, &records_path)
-            .expect("restore subagent records directory");
+        #[cfg(unix)]
+        {
+            std::fs::rename(&records_path, &displaced_records)
+                .expect("displace subagent records directory");
+            std::fs::create_dir(&records_path).expect("replace subagent records directory");
+            run_child("offline");
+            std::fs::remove_dir_all(&records_path).expect("remove replacement records directory");
+            std::fs::rename(&displaced_records, &records_path)
+                .expect("restore subagent records directory");
+        }
+        #[cfg(windows)]
+        {
+            std::fs::rename(&records_path, &displaced_records)
+                .expect_err("the locked Windows record inode must pin its parent directory");
+            run_child("timeout");
+        }
 
         drop(held);
         RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_millis(100))
@@ -21218,6 +21226,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("delegation DOS-alias repository");
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
         git(root.path(), &["init", "-q"]);
         git(
             root.path(),

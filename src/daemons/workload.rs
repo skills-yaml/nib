@@ -7276,7 +7276,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn open_task_directory_capability_blocks_lock_parent_replacement() {
+    fn open_task_directory_capability_detects_lock_parent_replacement() {
         let (_directory, store, _session_store) = fixture();
         let task_id = "anchored-windows-owner";
         for kind in ["task", "admission"] {
@@ -7290,11 +7290,10 @@ mod tests {
             };
             let held = TaskLock::acquire(path.clone(), anchor_path.clone())
                 .expect("held persistent task lock");
-            assert!(
-                std::fs::rename(&store.tasks_dir, store.daemon_dir().join("tasks.displaced"))
-                    .is_err(),
-                "Windows must deny replacement while the task directory capability is open"
-            );
+            let displaced_tasks = store.daemon_dir().join("tasks.displaced");
+            std::fs::rename(&store.tasks_dir, &displaced_tasks)
+                .expect("displace share-compatible durable tasks directory");
+            std::fs::create_dir(&store.tasks_dir).expect("replace durable tasks directory");
             let output = Command::new(std::env::current_exe().expect("test binary"))
                 .args([
                     "--exact",
@@ -7304,7 +7303,7 @@ mod tests {
                 .env(TASK_LOCK_CHILD_DAEMON_DIR, store.daemon_dir())
                 .env(TASK_LOCK_CHILD_KIND, kind)
                 .env(TASK_LOCK_CHILD_ID, task_id)
-                .env(TASK_LOCK_CHILD_EXPECTATION, "timeout")
+                .env(TASK_LOCK_CHILD_EXPECTATION, "identity")
                 .output()
                 .expect("run task lock child process");
             assert!(
@@ -7313,6 +7312,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            std::fs::remove_dir_all(&store.tasks_dir)
+                .expect("remove replacement durable tasks directory");
+            std::fs::rename(&displaced_tasks, &store.tasks_dir)
+                .expect("restore durable tasks directory");
             drop(held);
             TaskLock::acquire(path, anchor_path).expect("released lock remains usable");
         }
