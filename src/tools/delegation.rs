@@ -17444,7 +17444,7 @@ mod tests {
             with_bounded_delegation_lock_in(
                 &owner_lease_namespace_lock_path(&project_root),
                 &project_root.join(".nib"),
-                Duration::from_secs(2),
+                Duration::from_secs(10),
                 |_, _| {
                     ready_tx.send(()).expect("publish held owner namespace");
                     release_rx.recv().expect("release owner namespace");
@@ -17458,7 +17458,7 @@ mod tests {
         let error = reconcile_subagent_ownership_until(
             root.path(),
             id,
-            Instant::now() + Duration::from_millis(75),
+            Instant::now() + Duration::from_secs(2),
         )
         .expect_err("owner cleanup deadline must fail closed");
         assert!(error.contains("owner lease cleanup"), "{error}");

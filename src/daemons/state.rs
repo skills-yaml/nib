@@ -3250,12 +3250,44 @@ impl StableDirectory {
             ));
         };
         if parent != self.path {
-            self.verify_visible_at(parent).map_err(|_| {
-                format!(
-                    "state path is not a direct child of the opened directory: {}",
-                    path.display()
-                )
-            })?;
+            #[cfg(not(windows))]
+            return Err(format!(
+                "state path is not a direct child of the opened directory: {}",
+                path.display()
+            ));
+            #[cfg(windows)]
+            {
+                let requested =
+                    crate::fs_security::canonicalize_existing_directory_without_symlinks(parent)
+                        .map_err(|_| {
+                            format!(
+                                "state path is not a direct child of the opened directory: {}",
+                                path.display()
+                            )
+                        })?;
+                let retained =
+                    crate::fs_security::canonicalize_existing_directory_without_symlinks(
+                        &self.path,
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "state path is not a direct child of the opened directory: {}",
+                            path.display()
+                        )
+                    })?;
+                if requested != retained {
+                    return Err(format!(
+                        "state path is not a direct child of the opened directory: {}",
+                        path.display()
+                    ));
+                }
+                self.verify_visible().map_err(|_| {
+                    format!(
+                        "state path is not a direct child of the opened directory: {}",
+                        path.display()
+                    )
+                })?;
+            }
         }
         Ok(Path::new(file_name))
     }
@@ -6255,13 +6287,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn direct_child_capability_accepts_an_equivalent_dos_short_parent() {
+    fn delete_capable_child_accepts_an_equivalent_dos_short_parent() {
         let root = tempdir().expect("tempdir");
         let canonical = root.path().canonicalize().expect("canonical tempdir");
-        let short = crate::fs_security::windows_dos_short_path_for_test(&canonical)
-            .expect("DOS short tempdir");
-        let directory = StableDirectory::open(&canonical).expect("stable canonical directory");
-        let short_target = short.join("short-parent.json");
+        let state = canonical.join(".nib");
+        fs::create_dir(&state).expect("state directory");
+        let short_state = crate::fs_security::windows_dos_short_path_for_test(&state)
+            .expect("DOS short state directory");
+        let root_directory = StableDirectory::open(&canonical).expect("stable canonical directory");
+        let directory = root_directory
+            .open_owned_child(&state)
+            .expect("delete-capable state directory");
+        let short_target = short_state.join("short-parent.json");
 
         directory
             .save_bytes_atomically_expected(
@@ -6273,7 +6310,7 @@ mod tests {
             .expect("publish through equivalent DOS short parent");
 
         assert_eq!(
-            fs::read(canonical.join("short-parent.json")).expect("canonical publication"),
+            fs::read(state.join("short-parent.json")).expect("canonical publication"),
             b"short-parent"
         );
     }
