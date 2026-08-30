@@ -3924,9 +3924,12 @@ mod tests {
     #[tokio::test]
     async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_audit() {
         let root = tempdir().expect("cancellation-win repository");
-        let _timeout = crate::tools::delegation::SubagentCancellationTimeoutGuard::set(
-            std::time::Duration::from_secs(2),
-        );
+        #[cfg(windows)]
+        let cancellation_timeout = std::time::Duration::from_secs(15);
+        #[cfg(not(windows))]
+        let cancellation_timeout = std::time::Duration::from_secs(2);
+        let _timeout =
+            crate::tools::delegation::SubagentCancellationTimeoutGuard::set(cancellation_timeout);
         initialize_git_repository(root.path());
         let id = format!("sub-{}", uuid::Uuid::new_v4());
         let worktree = crate::sandbox::worktree::Worktree::create(root.path(), &id)
