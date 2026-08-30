@@ -7136,6 +7136,7 @@ struct SyncManagedChild {
     reaped: bool,
 }
 
+#[cfg(any(unix, test))]
 fn should_create_inner_process_group(is_macos: bool, managed_scope: bool) -> bool {
     !(is_macos && managed_scope)
 }

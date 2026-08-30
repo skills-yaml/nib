@@ -14244,7 +14244,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn directory_tree_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn visit(root: &Path, current: &Path, snapshot: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut entries = std::fs::read_dir(current)

@@ -832,6 +832,7 @@ impl StableDirectory {
         }
     }
 
+    #[cfg(not(windows))]
     fn remove_file_bound_without_sync(&self, path: &Path) -> Result<(), String> {
         let relative = self.relative_file(path)?;
         self.directory
