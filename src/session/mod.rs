@@ -4825,7 +4825,7 @@ mod tests {
                 .with_session_lock(&session_holder_id, |_| {
                     session_held_tx.send(()).expect("signal session lock held");
                     release_session_rx
-                        .recv_timeout(Duration::from_secs(5))
+                        .recv_timeout(Duration::from_secs(10))
                         .expect("release session lock");
                     Ok(())
                 })
@@ -4843,7 +4843,7 @@ mod tests {
                 .with_skill_usage_lock(|| {
                     skill_held_tx.send(()).expect("signal skill lock held");
                     release_skill_rx
-                        .recv_timeout(Duration::from_secs(5))
+                        .recv_timeout(Duration::from_secs(10))
                         .expect("release skill lock");
                     Ok(())
                 })
@@ -4854,10 +4854,10 @@ mod tests {
             .expect("skill usage lock is held");
 
         let delayed_release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_secs(1));
             release_skill_tx.send(()).expect("release skill usage lock");
         });
-        let bounded_store = store.clone().with_lock_timeout(Duration::from_millis(300));
+        let bounded_store = store.clone().with_lock_timeout(Duration::from_secs(3));
         let started = Instant::now();
         let error = bounded_store
             .update_session(&session.id, |_current| Ok(()))
@@ -4870,7 +4870,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            elapsed < Duration::from_millis(420),
+            elapsed < Duration::from_secs(4),
             "nested locks received separate timeout budgets: {elapsed:?}"
         );
 

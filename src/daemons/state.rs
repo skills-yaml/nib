@@ -3237,13 +3237,27 @@ impl StableDirectory {
     }
 
     fn relative_file<'a>(&self, path: &'a Path) -> Result<&'a Path, String> {
-        if path.parent() != Some(self.path.as_path()) || path.file_name().is_none() {
+        let Some(parent) = path.parent() else {
             return Err(format!(
                 "state path is not a direct child of the opened directory: {}",
                 path.display()
             ));
+        };
+        let Some(file_name) = path.file_name() else {
+            return Err(format!(
+                "state path is not a direct child of the opened directory: {}",
+                path.display()
+            ));
+        };
+        if parent != self.path {
+            self.verify_visible_at(parent).map_err(|_| {
+                format!(
+                    "state path is not a direct child of the opened directory: {}",
+                    path.display()
+                )
+            })?;
         }
-        Ok(Path::new(path.file_name().expect("checked file name")))
+        Ok(Path::new(file_name))
     }
 }
 
@@ -6237,6 +6251,31 @@ mod tests {
 
         assert_eq!(fs::read(existing).expect("updated state"), b"new");
         assert_eq!(fs::read(missing).expect("created state"), b"created");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn direct_child_capability_accepts_an_equivalent_dos_short_parent() {
+        let root = tempdir().expect("tempdir");
+        let canonical = root.path().canonicalize().expect("canonical tempdir");
+        let short = crate::fs_security::windows_dos_short_path_for_test(&canonical)
+            .expect("DOS short tempdir");
+        let directory = StableDirectory::open(&canonical).expect("stable canonical directory");
+        let short_target = short.join("short-parent.json");
+
+        directory
+            .save_bytes_atomically_expected(
+                &short_target,
+                b"short-parent",
+                ".short-parent-publication-",
+                FileExpectation::Missing,
+            )
+            .expect("publish through equivalent DOS short parent");
+
+        assert_eq!(
+            fs::read(canonical.join("short-parent.json")).expect("canonical publication"),
+            b"short-parent"
+        );
     }
 
     #[cfg(windows)]

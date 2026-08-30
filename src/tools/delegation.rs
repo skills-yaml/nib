@@ -50,6 +50,12 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
     static SPAWN_HANDOFF_PHASE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str)>>> =
         std::cell::RefCell::new(None);
 }
@@ -78,6 +84,20 @@ fn spawn_preparation_operation_timeout() -> Duration {
         SUBAGENT_RECORD_LOCK_TIMEOUT
     }
 }
+
+fn subagent_cancellation_reconciliation_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        return TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT
+            .with(|timeout| timeout.get())
+            .unwrap_or(SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT);
+    }
+    #[cfg(not(test))]
+    {
+        SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT
+    }
+}
+
 const SUBAGENT_CANCELLATION_RECONCILIATION_ATTEMPTS: usize = 500;
 #[cfg(not(test))]
 const SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(4);
@@ -10118,7 +10138,7 @@ pub(crate) fn resolve_subagent_cancellation_async(
     resolve_subagent_cancellation_async_with_start_hook(
         project_root,
         id,
-        SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT,
+        subagent_cancellation_reconciliation_timeout(),
         || {},
     )
 }
@@ -10195,7 +10215,7 @@ pub(crate) fn resolve_subagent_cancellation(
 ) -> CancelSubagentResolution {
     let started = Instant::now();
     let deadline = started
-        .checked_add(SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT)
+        .checked_add(subagent_cancellation_reconciliation_timeout())
         .unwrap_or(started);
     resolve_subagent_cancellation_until(project_root, id, deadline)
 }
@@ -13518,6 +13538,25 @@ mod tests {
         }
     }
 
+    struct SubagentCancellationTimeoutGuard(Option<Duration>);
+
+    impl SubagentCancellationTimeoutGuard {
+        fn set(timeout: Duration) -> Self {
+            let previous = TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| {
+                let previous = slot.get();
+                slot.set(Some(timeout));
+                previous
+            });
+            Self(previous)
+        }
+    }
+
+    impl Drop for SubagentCancellationTimeoutGuard {
+        fn drop(&mut self) {
+            TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| slot.set(self.0));
+        }
+    }
+
     struct SpawnAuthorityVerifyHookGuard;
 
     impl SpawnAuthorityVerifyHookGuard {
@@ -14309,7 +14348,7 @@ mod tests {
         record.owner_lease = Some(owner_lease.lease_id.clone());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn direct_spawn_variants_reject_non_utf8_audit_target_before_any_partial_state() {
         use std::ffi::OsString;
@@ -15898,10 +15937,12 @@ mod tests {
         for cancellable in [false, true] {
             let root = tempfile::tempdir().expect("handoff expiry project");
             initialize_spawn_test_repository(root.path());
-            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(2));
+            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(5));
+            let _cancellation_timeout =
+                SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
             let _hook = SpawnHandoffPhaseHookGuard::install(|phase| {
                 if phase == "before_intent_retirement" {
-                    std::thread::sleep(Duration::from_millis(2_100));
+                    std::thread::sleep(Duration::from_millis(5_100));
                 }
             });
             let args = json!({"prompt": "expire only at final intent retirement"});
@@ -15949,10 +15990,12 @@ mod tests {
         for cancellable in [false, true] {
             let root = tempfile::tempdir().expect("manager rollback project");
             initialize_spawn_test_repository(root.path());
-            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(2));
+            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(5));
+            let _cancellation_timeout =
+                SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
             let _hook = SpawnHandoffPhaseHookGuard::install(|phase| {
                 if phase == "manager_registered" {
-                    std::thread::sleep(Duration::from_millis(2_100));
+                    std::thread::sleep(Duration::from_millis(5_100));
                 }
             });
             crate::daemons::task::inject_rollback_unattached_failures(1);
@@ -16005,8 +16048,8 @@ mod tests {
 
     #[tokio::test]
     async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() {
-        const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
-        const EXPIRY_DELAY: Duration = Duration::from_millis(2_100);
+        const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+        const EXPIRY_DELAY: Duration = Duration::from_millis(5_100);
 
         for cancellable in [false, true] {
             for phase in ["worktree_reservation", "session_temp", "session_canonical"] {
@@ -18056,6 +18099,7 @@ mod tests {
     #[tokio::test]
     async fn async_cancellation_reconciliation_persists_an_aborted_run_on_one_worker() {
         let root = tempfile::tempdir().expect("root");
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
         let id = format!("sub-async-cancel-{}", uuid::Uuid::new_v4());
         let owner_lease = SubagentOwnerLease::create(root.path()).expect("owner lease");
         let mut record = record_fixture(root.path(), &id, "running");

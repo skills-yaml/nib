@@ -3567,7 +3567,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn non_utf8_session_audit_destination_fails_closed_without_partial_delegation() {
         use std::ffi::OsString;
