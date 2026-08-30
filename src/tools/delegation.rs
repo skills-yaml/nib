@@ -13853,6 +13853,8 @@ mod tests {
         let Some(project_root) = std::env::var_os(PREPARATION_CRASH_CHILD_PROJECT_ROOT) else {
             return;
         };
+        #[cfg(windows)]
+        let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(15));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -20435,6 +20437,17 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn initial_and_revision_publications_stop_before_namespace_mutation_after_expiry() {
+        let operation_timeout = if cfg!(windows) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(150)
+        };
+        let expiry_delay = operation_timeout + Duration::from_millis(50);
+        let boundary_wait = if cfg!(windows) {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        };
         let root = tempfile::tempdir().expect("root");
         let initial = record_fixture(root.path(), "sub-initial-publication-expiry", "running");
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -20446,7 +20459,7 @@ mod tests {
             write_subagent_record_with_refresh_hooks_and_timeout(
                 &project_root,
                 &worker_initial,
-                Duration::from_millis(150),
+                operation_timeout,
                 || {
                     if !paused {
                         paused = true;
@@ -20459,11 +20472,11 @@ mod tests {
             )
         });
         ready_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(boundary_wait)
             .expect("initial publication reached atomic namespace boundary");
         let records = records_dir(root.path());
         let before_initial = subagent_namespace_snapshot(&records);
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(expiry_delay);
         resume_tx
             .send(())
             .expect("resume expired initial publication");
@@ -20504,7 +20517,7 @@ mod tests {
                 &project_root,
                 &revised,
                 &mut expected,
-                Duration::from_millis(150),
+                operation_timeout,
                 || {
                     if !paused {
                         paused = true;
@@ -20517,10 +20530,10 @@ mod tests {
             )
         });
         ready_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(boundary_wait)
             .expect("revision publication reached atomic namespace boundary");
         let before_revision = subagent_namespace_snapshot(&records);
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(expiry_delay);
         resume_tx
             .send(())
             .expect("resume expired revision publication");
