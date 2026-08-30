@@ -5416,6 +5416,7 @@ mod tests {
         );
         assert!(!path.exists());
         assert!(previous.is_file());
+        store.operation_timeout = SCOPE_LOCK_TIMEOUT;
         assert_eq!(
             store.load(&record.scope_id).expect("fresh recovery retry"),
             record

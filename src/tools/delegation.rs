@@ -16015,12 +16015,22 @@ mod tests {
         for cancellable in [false, true] {
             let root = tempfile::tempdir().expect("manager rollback project");
             initialize_spawn_test_repository(root.path());
-            let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(5));
-            let _cancellation_timeout =
-                SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
-            let _hook = SpawnHandoffPhaseHookGuard::install(|phase| {
+            let operation_timeout = if cfg!(windows) {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(5)
+            };
+            let expiry_delay = operation_timeout + Duration::from_millis(100);
+            let cancellation_timeout = if cfg!(windows) {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(2)
+            };
+            let _timeout = SpawnPreparationTimeoutGuard::set(operation_timeout);
+            let _cancellation_timeout = SubagentCancellationTimeoutGuard::set(cancellation_timeout);
+            let _hook = SpawnHandoffPhaseHookGuard::install(move |phase| {
                 if phase == "manager_registered" {
-                    std::thread::sleep(Duration::from_millis(5_100));
+                    std::thread::sleep(expiry_delay);
                 }
             });
             crate::daemons::task::inject_rollback_unattached_failures(1);
@@ -20169,6 +20179,17 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn owner_creation_stops_before_anchor_publication_when_its_deadline_expires() {
+        let operation_timeout = if cfg!(windows) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(150)
+        };
+        let expiry_delay = operation_timeout + Duration::from_millis(50);
+        let boundary_wait = if cfg!(windows) {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        };
         let root = tempfile::tempdir().expect("root");
         let owner_directory = owner_lease_directory(root.path());
         let anchor_directory = root.path().join(".nib");
@@ -20182,7 +20203,7 @@ mod tests {
             let mut paused = false;
             SubagentOwnerLease::create_with_timeout_and_guard(
                 &project_root,
-                Duration::from_millis(150),
+                operation_timeout,
                 &owner_plan,
                 || {
                     let visible_count = std::fs::read_dir(&worker_owner_directory)
@@ -20212,7 +20233,7 @@ mod tests {
         });
 
         ready_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(boundary_wait)
             .expect("owner creation reached its anchor publication boundary");
         let before_expiry = subagent_namespace_snapshot(&owner_directory);
         assert_eq!(
@@ -20230,7 +20251,7 @@ mod tests {
                     .starts_with(OWNER_LEASE_ANCHOR_PREFIX.as_bytes())),
             "owner anchor was not published before the pause"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(expiry_delay);
         resume_tx.send(()).expect("resume expired owner creation");
         let error = worker
             .join()
