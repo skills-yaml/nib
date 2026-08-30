@@ -19148,7 +19148,12 @@ mod tests {
         let legacy = records.join(".locks");
         std::fs::create_dir_all(&legacy).expect("legacy lock directory");
         let mut legacy_pairs = Vec::new();
-        for index in 0..96 {
+        let legacy_pair_count = if cfg!(windows) {
+            SUBAGENT_RECORD_LOCK_STRIPES + 1
+        } else {
+            96
+        };
+        for index in 0..legacy_pair_count {
             let visible = legacy.join(format!("untouched-{index}.lock"));
             let anchor = crate::daemons::state::daemon_lock_anchor_path(&visible)
                 .expect("legacy anchor path");
