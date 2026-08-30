@@ -936,6 +936,94 @@ pub(crate) fn open_directory_observation_windows(path: &Path) -> io::Result<std:
     Ok(file)
 }
 
+#[cfg(windows)]
+pub(crate) fn open_directory_child_windows(
+    parent: &cap_std::fs::Dir,
+    path: &Path,
+    delete_access: bool,
+) -> io::Result<std::fs::File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+    };
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut components = path.components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a direct child",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a direct child",
+        ));
+    }
+    let mut name = name.encode_wide().collect::<Vec<_>>();
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    if name_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a non-empty child name",
+        ));
+    }
+    let unicode_name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &unicode_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES;
+    if delete_access {
+        access |= DELETE;
+    }
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut io_status,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status < 0 {
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(invalid_directory_component(path));
+    }
+    Ok(file)
+}
+
 fn build_removal_plan(
     root: &cap_std::fs::Dir,
     root_identity: RemovalIdentity,

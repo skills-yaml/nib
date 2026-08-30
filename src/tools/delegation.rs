@@ -55,6 +55,28 @@ thread_local! {
 }
 
 #[cfg(test)]
+pub(crate) struct SubagentCancellationTimeoutGuard(Option<Duration>);
+
+#[cfg(test)]
+impl SubagentCancellationTimeoutGuard {
+    pub(crate) fn set(timeout: Duration) -> Self {
+        let previous = TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(timeout));
+            previous
+        });
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SubagentCancellationTimeoutGuard {
+    fn drop(&mut self) {
+        TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| slot.set(self.0));
+    }
+}
+
+#[cfg(test)]
 thread_local! {
     static SPAWN_HANDOFF_PHASE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str)>>> =
         std::cell::RefCell::new(None);
@@ -13535,25 +13557,6 @@ mod tests {
     impl Drop for SpawnPreparationTimeoutGuard {
         fn drop(&mut self) {
             TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT.with(|slot| slot.set(self.0));
-        }
-    }
-
-    struct SubagentCancellationTimeoutGuard(Option<Duration>);
-
-    impl SubagentCancellationTimeoutGuard {
-        fn set(timeout: Duration) -> Self {
-            let previous = TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| {
-                let previous = slot.get();
-                slot.set(Some(timeout));
-                previous
-            });
-            Self(previous)
-        }
-    }
-
-    impl Drop for SubagentCancellationTimeoutGuard {
-        fn drop(&mut self) {
-            TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT.with(|slot| slot.set(self.0));
         }
     }
 

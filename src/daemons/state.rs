@@ -299,16 +299,11 @@ impl StableDirectory {
         })?;
         #[cfg(windows)]
         let directory = {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true)._cap_fs_ext_maybe_dir(true);
-            configure_capability_no_follow(&mut options);
-            let file = self
-                .directory
-                .open_with(relative, &options)
-                .map(cap_std::fs::File::into_std)
-                .map_err(|error| {
-                    format!("failed to open state directory {}: {error}", path.display())
-                })?;
+            let file =
+                crate::fs_security::open_directory_child_windows(&self.directory, relative, false)
+                    .map_err(|error| {
+                        format!("failed to open state directory {}: {error}", path.display())
+                    })?;
             let metadata = file.metadata().map_err(|error| {
                 format!(
                     "failed to inspect state directory {}: {error}",
@@ -342,17 +337,14 @@ impl StableDirectory {
         })?;
         #[cfg(windows)]
         let directory = {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true)._cap_fs_ext_maybe_dir(true);
-            configure_capability_no_follow(&mut options);
-            configure_capability_delete_access(&mut options, true, false);
-            let file = self
-                .directory
-                .open_with(relative, &options)
-                .map(cap_std::fs::File::into_std)
-                .map_err(|error| {
-                    format!("failed to open state directory {}: {error}", path.display())
-                })?;
+            // Keep the long-lived capability share-compatible with future
+            // readers. DELETE access is acquired against this exact identity
+            // only at the final rename or removal boundary.
+            let file =
+                crate::fs_security::open_directory_child_windows(&self.directory, relative, false)
+                    .map_err(|error| {
+                        format!("failed to open state directory {}: {error}", path.display())
+                    })?;
             let metadata = file.metadata().map_err(|error| {
                 format!(
                     "failed to inspect state directory {}: {error}",
@@ -1090,10 +1082,15 @@ impl StableDirectory {
         }
         self.verify_visible()?;
         expected.verify_visible_at(source)?;
+        #[cfg(windows)]
+        let mutation_directory = self.open_directory_for_mutation(source, expected)?;
         rename_open_directory_no_replace_platform(
             &self.directory,
             self.relative_file(source)?,
+            #[cfg(not(windows))]
             &expected.directory,
+            #[cfg(windows)]
+            &mutation_directory,
             self.relative_file(destination)?,
         )
         .map_err(|error| {
@@ -1125,7 +1122,26 @@ impl StableDirectory {
         expected: &Self,
         destination: &Path,
         deadline: Instant,
+        before_publication: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.rename_child_directory_until_with_hooks(
+            source,
+            expected,
+            destination,
+            deadline,
+            before_publication,
+            || Ok(()),
+        )
+    }
+
+    fn rename_child_directory_until_with_hooks(
+        &self,
+        source: &Path,
+        expected: &Self,
+        destination: &Path,
+        deadline: Instant,
         mut before_publication: impl FnMut() -> Result<(), String>,
+        after_capability_acquisition: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         ensure_directory_namespace_deadline(deadline, source)?;
         #[cfg(windows)]
@@ -1158,6 +1174,10 @@ impl StableDirectory {
         ensure_directory_namespace_deadline(deadline, source)?;
         before_publication()?;
         ensure_directory_namespace_deadline(deadline, source)?;
+        #[cfg(windows)]
+        let mutation_directory = self.open_directory_for_mutation(source, expected)?;
+        after_capability_acquisition()?;
+        ensure_directory_namespace_deadline(deadline, source)?;
 
         // Publication and its parent-directory sync are one indivisible boundary:
         // there is intentionally no pausable/user callback after the rename. If
@@ -1166,7 +1186,10 @@ impl StableDirectory {
         rename_open_directory_no_replace_platform(
             &self.directory,
             source_relative,
+            #[cfg(not(windows))]
             &expected.directory,
+            #[cfg(windows)]
+            &mutation_directory,
             destination_relative,
         )
         .map_err(|error| {
@@ -1195,7 +1218,22 @@ impl StableDirectory {
         &self,
         path: &Path,
         expected: Self,
+        guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.remove_empty_child_directory_if_matches_with_guard_and_hook(
+            path,
+            expected,
+            guard,
+            || Ok(()),
+        )
+    }
+
+    fn remove_empty_child_directory_if_matches_with_guard_and_hook(
+        &self,
+        path: &Path,
+        expected: Self,
         mut guard: impl FnMut() -> Result<(), String>,
+        after_capability_acquisition: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         guard()?;
         #[cfg(windows)]
@@ -1212,14 +1250,11 @@ impl StableDirectory {
         guard()?;
         #[cfg(windows)]
         {
-            let Self {
-                directory,
-                identity,
-                path: _,
-                delete_capable: _,
-            } = expected;
-            drop(identity);
-            let path_bound = directory.into_std_file();
+            let path_bound = self.open_directory_for_mutation(path, &expected)?;
+            after_capability_acquisition()?;
+            drop(expected);
+            let path_bound = path_bound.into_std_file();
+            guard()?;
             delete_open_file_platform(&path_bound).map_err(|error| {
                 format!(
                     "failed to remove the expected open state directory {}: {error}",
@@ -1229,13 +1264,15 @@ impl StableDirectory {
             drop(path_bound);
         }
         #[cfg(not(windows))]
-        drop(expected);
-        #[cfg(not(windows))]
-        let relative = self.relative_file(path)?;
-        #[cfg(not(windows))]
-        self.directory
-            .remove_dir(relative)
-            .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        {
+            after_capability_acquisition()?;
+            drop(expected);
+            let relative = self.relative_file(path)?;
+            guard()?;
+            self.directory
+                .remove_dir(relative)
+                .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        }
         self.sync_directory()?;
         guard()?;
         if self.entry_kind(path)?.is_some() {
@@ -1246,6 +1283,35 @@ impl StableDirectory {
         }
         self.verify_visible()?;
         guard()
+    }
+
+    #[cfg(windows)]
+    fn open_directory_for_mutation(
+        &self,
+        path: &Path,
+        expected: &Self,
+    ) -> Result<cap_std::fs::Dir, String> {
+        let relative = self.relative_file(path)?;
+        let file =
+            crate::fs_security::open_directory_child_windows(&self.directory, relative, true)
+                .map_err(|error| {
+                    format!(
+                        "failed to acquire directory mutation capability {}: {error}",
+                        path.display()
+                    )
+                })?;
+        let identity =
+            crate::fs_security::FileIdentity::from_file(file.try_clone().map_err(|error| {
+                format!("failed to clone directory mutation capability: {error}")
+            })?)
+            .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))?;
+        if identity != expected.identity {
+            return Err(format!(
+                "state directory identity changed before mutation: {}",
+                path.display()
+            ));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(file))
     }
 
     pub(crate) fn rename_file_if_matches(
@@ -5358,6 +5424,84 @@ mod tests {
         assert!(!canonical.exists());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_directory_publication_rechecks_expiry_after_mutation_capability() {
+        let root = tempdir().expect("tempdir");
+        let staging = root.path().join("native.staging");
+        let canonical = root.path().join("subagents");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::write(staging.join("receipt.json"), b"exact receipt").expect("staging receipt");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let staged = directory
+            .open_owned_child(&staging)
+            .expect("owned staging capability");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut acquired = false;
+        let error = directory
+            .rename_child_directory_until_with_hooks(
+                &staging,
+                &staged,
+                &canonical,
+                deadline,
+                || Ok(()),
+                || {
+                    acquired = true;
+                    while Instant::now() < deadline {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("expiry after mutation capability acquisition must prevent publication");
+        assert!(acquired, "test acquired the exact mutation capability");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(!canonical.exists(), "expired publication must not redirect");
+        assert_eq!(
+            fs::read(staging.join("receipt.json")).expect("recoverable staging receipt"),
+            b"exact receipt"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_removal_rechecks_authority_after_mutation_capability() {
+        let root = tempdir().expect("tempdir");
+        let child_path = root.path().join("child");
+        fs::create_dir(&child_path).expect("child directory");
+        let parent = StableDirectory::open(root.path()).expect("stable parent");
+        let child = parent
+            .open_owned_child(&child_path)
+            .expect("owned child capability");
+        let acquired = std::cell::Cell::new(false);
+        let error = parent
+            .remove_empty_child_directory_if_matches_with_guard_and_hook(
+                &child_path,
+                child,
+                || {
+                    if acquired.get() {
+                        Err("directory mutation authority expired".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    acquired.set(true);
+                    Ok(())
+                },
+            )
+            .expect_err("expired post-acquisition authority must prevent removal");
+        assert!(
+            acquired.get(),
+            "test acquired the exact mutation capability"
+        );
+        assert!(error.contains("authority expired"), "{error}");
+        assert!(
+            child_path.is_dir(),
+            "expired removal must preserve the child"
+        );
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn daemon_anchor_publication_expiry_preserves_exact_pair_for_fresh_retry() {
@@ -6151,7 +6295,10 @@ mod tests {
         )
         .expect_err("a replaced common lock root must fail closed");
 
-        assert!(replaced, "test did not replace the common lock root");
+        assert!(
+            replaced,
+            "test did not replace the common lock root: {error}"
+        );
         assert!(
             !operation_ran,
             "replacement entered the protected operation"
