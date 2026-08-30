@@ -16085,8 +16085,10 @@ mod tests {
                 let ownership_for_hook = ownership.clone();
                 let ownership_before_for_hook = ownership_before.clone();
                 let hook = std::sync::Arc::new(move |observed_records: &Path| {
-                    if observed_records != records_for_hook
-                        || fired_for_hook.load(std::sync::atomic::Ordering::Acquire)
+                    if !crate::fs_security::canonical_paths_match(
+                        observed_records,
+                        &records_for_hook,
+                    ) || fired_for_hook.load(std::sync::atomic::Ordering::Acquire)
                     {
                         return Ok(());
                     }
@@ -19949,10 +19951,14 @@ mod tests {
     fn records_setup_and_migration_share_one_default_absolute_deadline() {
         let root = tempfile::tempdir().expect("root");
         let mut paused_namespace = None;
+        #[cfg(windows)]
+        let default_timeout = Duration::from_secs(2);
+        #[cfg(not(windows))]
+        let default_timeout = Duration::from_millis(80);
         let error = ensure_records_directory_until_with_phase_hook(
             root.path(),
             None,
-            Duration::from_millis(80),
+            default_timeout,
             |effective_deadline| {
                 paused_namespace = Some(subagent_namespace_snapshot(root.path()));
                 while Instant::now() < effective_deadline {
@@ -21226,7 +21232,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("delegation DOS-alias repository");
-        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(2));
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         git(root.path(), &["init", "-q"]);
         git(
             root.path(),

@@ -3792,6 +3792,24 @@ mod tests {
         snapshot
     }
 
+    fn session_namespace_shape(path: &Path) -> Vec<(std::ffi::OsString, u64)> {
+        let mut snapshot = fs::read_dir(path)
+            .expect("read session namespace shape")
+            .map(|entry| {
+                let entry = entry.expect("session namespace shape entry");
+                (
+                    entry.file_name(),
+                    entry
+                        .metadata()
+                        .expect("session namespace shape metadata")
+                        .len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
     #[test]
     fn failed_preparation_preserves_a_concurrently_adopted_session_namespace() {
         let root = tempfile::tempdir().expect("project root");
@@ -4558,8 +4576,10 @@ mod tests {
         let session = store.create_session_with_id("expired-session-commit");
         let path = store.path(&session.id);
         let original = fs::read(&path).expect("original session bytes");
+        let before_namespace = session_namespace_snapshot(store.sessions_dir());
         let deadline = Instant::now() + Duration::from_millis(40);
         let mut paused_namespace = None;
+        let mut expected_temporary = None;
 
         let error = store
             .with_skill_usage_lock(|| {
@@ -4569,14 +4589,17 @@ mod tests {
                         .ok_or_else(|| SessionError::NotFound(session.id.clone()))?;
                     opened.session.summary = Some("must not publish".to_string());
                     opened.session.revision += 1;
+                    expected_temporary = Some(
+                        serde_json::to_vec_pretty(&opened.session)
+                            .expect("expected temporary session bytes"),
+                    );
                     store.save_unlocked_with_deadline_and_commit_check(
                         directory,
                         &opened.session,
                         Some(&opened.file),
                         Some(deadline),
                         || {
-                            paused_namespace =
-                                Some(session_namespace_snapshot(store.sessions_dir()));
+                            paused_namespace = Some(session_namespace_shape(store.sessions_dir()));
                             while Instant::now() < deadline {
                                 std::thread::yield_now();
                             }
@@ -4595,15 +4618,40 @@ mod tests {
         );
         assert_eq!(fs::read(&path).expect("unchanged session bytes"), original);
         let paused_namespace = paused_namespace.expect("captured session precommit namespace");
+        let post_failure_namespace = session_namespace_snapshot(store.sessions_dir());
         assert_eq!(
-            session_namespace_snapshot(store.sessions_dir()),
+            session_namespace_shape(store.sessions_dir()),
             paused_namespace,
             "expired session cleanup mutated transaction artifacts"
+        );
+        let expected_temporary = expected_temporary.expect("serialized temporary session");
+        let mut saw_temporary = false;
+        for (name, bytes) in &post_failure_namespace {
+            let rendered = name.to_string_lossy();
+            if rendered.starts_with(".nib-session-") && rendered.ends_with(".tmp") {
+                assert!(!saw_temporary, "multiple retained session temporaries");
+                assert_eq!(bytes, &expected_temporary, "retained temporary bytes");
+                saw_temporary = true;
+            } else if let Some((_, expected)) = before_namespace
+                .iter()
+                .find(|(before_name, _)| before_name == name)
+            {
+                assert_eq!(bytes, expected, "pre-existing session namespace bytes");
+            } else {
+                assert!(
+                    bytes.is_empty(),
+                    "unexpected nonempty session transaction artifact: {rendered}"
+                );
+            }
+        }
+        assert!(
+            saw_temporary,
+            "expired publication did not retain its temporary"
         );
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
             session_namespace_snapshot(store.sessions_dir()),
-            paused_namespace,
+            post_failure_namespace,
             "expired session cleanup mutated transaction artifacts later"
         );
 
