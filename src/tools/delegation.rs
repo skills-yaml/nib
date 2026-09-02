@@ -13547,7 +13547,10 @@ fn git_failure(output: &Output, operation: &str) -> String {
 mod tests {
     use super::*;
 
-    struct SpawnPreparationTimeoutGuard(Option<Duration>);
+    struct SpawnPreparationTimeoutGuard {
+        previous: Option<Duration>,
+        _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
 
     impl SpawnPreparationTimeoutGuard {
         fn set(timeout: Duration) -> Self {
@@ -13556,13 +13559,16 @@ mod tests {
                 slot.set(Some(timeout));
                 previous
             });
-            Self(previous)
+            Self {
+                previous,
+                _not_send_or_sync: std::marker::PhantomData,
+            }
         }
     }
 
     impl Drop for SpawnPreparationTimeoutGuard {
         fn drop(&mut self) {
-            TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT.with(|slot| slot.set(self.0));
+            TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT.with(|slot| slot.set(self.previous));
         }
     }
 
@@ -14553,6 +14559,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation() {
+        let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(30));
         for cancellable in [false, true] {
             let root = tempfile::tempdir().expect("git project");
             initialize_spawn_test_repository(root.path());
@@ -14577,7 +14584,10 @@ mod tests {
             } else {
                 spawn_subagent(&args, root.path()).expect_err("sync record publication must fail")
             };
-            assert!(error.contains("injected initial subagent record publication failure"));
+            assert!(
+                error.contains("injected initial subagent record publication failure"),
+                "unexpected record-publication failure (cancellable={cancellable}): {error}"
+            );
             assert_subagent_namespace_unchanged(
                 &before,
                 &subagent_namespace_snapshot(root.path()),

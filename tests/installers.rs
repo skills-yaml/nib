@@ -122,6 +122,32 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
 }
 
 #[test]
+fn delegation_task_pins_windows_rollback_fixture() {
+    const TEST_NAME: &str =
+        "sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation";
+
+    let taskfile = read_repository_text("Taskfile.yml");
+    let source = read_repository_text("src/tools/delegation.rs");
+    let delegation = task_section(&taskfile, "test:delegation");
+
+    assert_eq!(
+        source.matches(&format!("async fn {TEST_NAME}()")).count(),
+        1,
+        "the focused rollback fixture must remain uniquely named"
+    );
+    assert_eq!(
+        delegation.matches(TEST_NAME).count(),
+        1,
+        "test:delegation must select the focused rollback fixture exactly once"
+    );
+    assert_eq!(
+        delegation.matches("-- --exact --test-threads=1").count(),
+        1,
+        "the rollback fixture selector must stay exact and serial"
+    );
+}
+
+#[test]
 fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let script = read_repository_text("scripts/check-interactive-release.sh");
     let windows_script = read_repository_text("scripts/check-interactive-release.ps1");

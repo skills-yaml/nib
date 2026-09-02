@@ -692,6 +692,41 @@ inaccessible to the managed worker is a separate product capability. FT-020 owns
 future design and rollout. FT-015 must not remain indefinitely open waiting for FT-020,
 and FT-020 must not weaken this spec's current fail-closed behavior.
 
+## Windows Rollback-Fixture Positive-Progress Budget (2026-09-02)
+
+### Scope
+
+Keep the synchronous/cancellable initial-record failure regression focused on exact
+fallback-audit rollback rather than the unrelated default preparation deadline. The
+production five-second preparation timeout and dedicated expiry/deadline regressions
+remain unchanged.
+
+### Acceptance Criteria
+
+- [x] The rollback fixture uses an explicit 30-second test-only positive-progress budget
+  and reports the unexpected bounded error if injected record publication is not reached.
+- [x] The test-only timeout guard cannot move across threads, and a repository contract
+  pins the focused Task selector to the fixture's unique Rust test name.
+- [ ] The exact PR revision passes the full hosted Windows job and native matrix after
+  this stabilization.
+
+### Affected Areas
+
+`src/tools/delegation.rs`, `tests/installers.rs`, `Taskfile.yml`, this spec, and
+exact-revision hosted Windows validation.
+
+### Validation Evidence
+
+Hosted run `33632000483` passed the Windows pseudoterminal and all-target gates, then
+reached 973 passing library tests before this rollback fixture failed after approximately
+15 seconds because the expected injected publication error was not reached. The test's
+purpose is rollback equivalence between synchronous and cancellable entrypoints; separate
+regressions retain the production deadline contract. `task test:delegation` now selects
+this exact unit fixture in addition to the state, managed-process, and integration paths.
+The focused task passed both optional-open race tests, this exact rollback fixture, all
+36 managed-process tests, and all 22 delegation integrations. The replacement hosted
+matrix remains open.
+
 ## Crash-Durable Spawn Preparation Follow-up (2026-08-29)
 
 Every delegated spawn is covered by a versioned write-ahead spawn-preparation intent under
