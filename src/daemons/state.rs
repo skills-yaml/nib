@@ -5875,7 +5875,9 @@ mod tests {
 
         let nested_lock = sessions.join(".locks/session.lock");
         let nested_parent = nested_lock.parent().expect("nested lock parent");
-        let deadline = Instant::now() + Duration::from_millis(50);
+        // Leave enough setup headroom for a loaded hosted filesystem; the hook
+        // deterministically expires the same absolute deadline once this phase exists.
+        let deadline = Instant::now() + Duration::from_secs(2);
         let mut paused_after_parent_create = false;
         let mut operation_ran = false;
         let error = with_file_lock_in_with_deadline_and_setup_hook(
@@ -5889,9 +5891,7 @@ mod tests {
             || {
                 if nested_parent.is_dir() && !nested_lock.exists() && !paused_after_parent_create {
                     paused_after_parent_create = true;
-                    while Instant::now() < deadline {
-                        thread::yield_now();
-                    }
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
                 Ok(())
             },
@@ -5912,7 +5912,7 @@ mod tests {
 
         let lock_path = sessions.join("session.lock");
         let anchor_path = daemon_lock_anchor_path(&lock_path).expect("session anchor");
-        let deadline = Instant::now() + Duration::from_millis(50);
+        let deadline = Instant::now() + Duration::from_secs(2);
         let mut paused_after_anchor_link = false;
         let error = with_file_lock_in_with_deadline_and_setup_hook(
             &lock_path,
@@ -5922,9 +5922,7 @@ mod tests {
             || {
                 if lock_path.exists() && anchor_path.exists() && !paused_after_anchor_link {
                     paused_after_anchor_link = true;
-                    while Instant::now() < deadline {
-                        thread::yield_now();
-                    }
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
                 Ok(())
             },

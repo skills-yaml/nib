@@ -5144,7 +5144,9 @@ mod tests {
     fn bounded_process_store_setup_retries_directory_and_lock_finalization() {
         let root = git_project();
         let scope_directory = root.path().join(".nib").join(SCOPE_DIRECTORY);
-        let deadline = Instant::now() + Duration::from_millis(50);
+        // Leave enough setup headroom for a loaded hosted filesystem; the hook
+        // deterministically expires the same absolute deadline once this phase exists.
+        let deadline = Instant::now() + Duration::from_secs(2);
         let mut paused_after_scope_create = false;
         let error = ProcessScopeStore::open_with_lock_deadline_and_setup_hook(
             root.path(),
@@ -5152,9 +5154,7 @@ mod tests {
             || {
                 if scope_directory.is_dir() && !paused_after_scope_create {
                     paused_after_scope_create = true;
-                    while Instant::now() < deadline {
-                        thread::yield_now();
-                    }
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
                 Ok(())
             },
@@ -5183,7 +5183,7 @@ mod tests {
         let lock_path = lock_root.path().join(".nib").join(SCOPE_STORE_LOCK);
         let anchor_path = crate::daemons::state::daemon_lock_anchor_path(&lock_path)
             .expect("process lock anchor");
-        let deadline = Instant::now() + Duration::from_millis(50);
+        let deadline = Instant::now() + Duration::from_secs(2);
         let mut paused_after_anchor_link = false;
         let error = ProcessScopeStore::open_with_lock_deadline_and_setup_hook(
             lock_root.path(),
@@ -5191,9 +5191,7 @@ mod tests {
             || {
                 if lock_path.exists() && anchor_path.exists() && !paused_after_anchor_link {
                     paused_after_anchor_link = true;
-                    while Instant::now() < deadline {
-                        thread::yield_now();
-                    }
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
                 Ok(())
             },
