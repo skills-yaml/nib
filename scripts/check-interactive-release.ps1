@@ -12,6 +12,59 @@ function Quote-NibPowerShellLiteral {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Invoke-NibRedirectedPlain {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        if (-not $process.Start()) {
+            throw "Unable to start the redirected Windows plain-mode smoke"
+        }
+        $started = $true
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Write("/status`r`n/quit`r`n")
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(5000)) {
+                throw "Unable to stop the timed-out redirected Windows plain-mode smoke"
+            }
+            throw "The redirected Windows plain-mode smoke exceeded its timeout"
+        }
+        if (-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)) {
+            throw "Timed out while draining redirected Windows plain-mode output"
+        }
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Output = $stdoutTask.GetAwaiter().GetResult()
+            ErrorOutput = $stderrTask.GetAwaiter().GetResult()
+        }
+    } finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(5000)) {
+                throw "Unable to stop the redirected Windows plain-mode smoke"
+            }
+        }
+        $process.Dispose()
+    }
+}
+
 $binaryPath = (Resolve-Path -LiteralPath $Binary).Path
 $temporaryBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [IO.Path]::GetTempPath()
@@ -143,11 +196,35 @@ curator_enabled = false
         -not $plainResult.Output.Contains("Goodbye. Session saved")) {
         throw "Windows TERM=dumb interactive smoke did not preserve plain-mode operations"
     }
-    if ($plainResult.Output.Contains([string][char]27)) {
-        throw "Windows TERM=dumb/NO_COLOR fallback emitted an ANSI escape"
+    foreach ($fullScreenSequence in @(
+        "$([char]27)[?1049",
+        "$([char]27)[?2004"
+    )) {
+        if ($plainResult.Output.Contains($fullScreenSequence)) {
+            throw "Windows TERM=dumb fallback emitted a full-screen terminal sequence"
+        }
     }
 
-    foreach ($output in @($tuiResult.Output, $plainResult.Output)) {
+    $redirectedResult = Invoke-NibRedirectedPlain `
+        -Executable $binaryPath `
+        -WorkingDirectory $fixture
+    if ($redirectedResult.ExitCode -ne 0 -or
+        -not $redirectedResult.Output.Contains("mode: plain") -or
+        -not $redirectedResult.Output.Contains("Configured approval preset:") -or
+        -not $redirectedResult.Output.Contains("Goodbye. Session saved")) {
+        throw "Windows redirected plain-mode smoke did not preserve plain operations"
+    }
+    if ($redirectedResult.Output.Contains([string][char]27) -or
+        $redirectedResult.ErrorOutput.Contains([string][char]27)) {
+        throw "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape"
+    }
+
+    foreach ($output in @(
+        $tuiResult.Output,
+        $plainResult.Output,
+        $redirectedResult.Output,
+        $redirectedResult.ErrorOutput
+    )) {
         if ($output.Contains($privateSentinel) -or $output.Contains('"arguments"')) {
             throw "Windows interactive smoke exposed private configuration or raw arguments"
         }

@@ -221,6 +221,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
 
     for contract in [
         "Invoke-WindowsPseudoTerminal",
+        "Invoke-NibRedirectedPlain",
         "NIB_NO_UPDATE_CHECK",
         "NIB_ENABLE_INTERACTIVE_SMOKE",
         "OPENAI_API_KEY",
@@ -234,6 +235,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "ChildConsoleModesRestored",
         "[?1049l",
         "[?2004l",
+        "Timed out while draining redirected Windows plain-mode output",
+        "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
     ] {
         assert!(
             windows_script.contains(contract),
@@ -242,6 +245,22 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     }
     assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
     assert!(windows_script.contains("could not remove its isolated fixture"));
+    assert!(windows_script.contains(
+        "$startInfo.RedirectStandardInput = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true"
+    ));
+    assert!(windows_script.contains(
+        "$stdoutTask = $process.StandardOutput.ReadToEndAsync()\n        $stderrTask = $process.StandardError.ReadToEndAsync()"
+    ));
+    assert!(windows_script.contains(
+        "$redirectedResult = Invoke-NibRedirectedPlain `\n        -Executable $binaryPath `\n        -WorkingDirectory $fixture"
+    ));
+    assert!(windows_script.contains("-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)"));
+    assert!(windows_script.contains(
+        "$redirectedResult.Output.Contains([string][char]27) -or\n        $redirectedResult.ErrorOutput.Contains([string][char]27)"
+    ));
+    assert!(windows_script.contains(
+        "foreach ($fullScreenSequence in @(\n        \"$([char]27)[?1049\",\n        \"$([char]27)[?2004\"\n    )) {\n        if ($plainResult.Output.Contains($fullScreenSequence)) {"
+    ));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
 
