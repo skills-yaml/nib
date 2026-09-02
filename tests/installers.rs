@@ -123,32 +123,48 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
 
 #[test]
 fn delegation_task_pins_hosted_stabilization_fixtures() {
-    const TEST_NAMES: [&str; 3] = [
-        "sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
-        "persistent_anchor_prevents_replaced_repository_lock_domains",
-        "spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
+    const TESTS: [(&str, &str); 4] = [
+        (
+            "src/tools/delegation.rs",
+            "tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
+        ),
+        (
+            "src/tools/delegation.rs",
+            "tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains",
+        ),
+        (
+            "src/tools/delegation.rs",
+            "tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
+        ),
+        (
+            "src/integrations/mcp_server.rs",
+            "integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root",
+        ),
     ];
     let taskfile = read_repository_text("Taskfile.yml");
-    let source = read_repository_text("src/tools/delegation.rs");
     let delegation = task_section(&taskfile, "test:delegation");
 
-    for test_name in TEST_NAMES {
+    for (source_path, selector) in TESTS {
+        let source = read_repository_text(source_path);
+        let test_name = selector
+            .rsplit("::")
+            .next()
+            .expect("hosted fixture selector has a test name");
         assert_eq!(
             source.matches(&format!("fn {test_name}()")).count(),
             1,
             "the focused hosted fixture must remain uniquely named: {test_name}"
         );
         assert_eq!(
-            delegation.matches(test_name).count(),
+            delegation
+                .matches(&format!(
+                    "cargo test --lib\n        {selector}\n        -- --exact --test-threads=1"
+                ))
+                .count(),
             1,
-            "test:delegation must select the hosted fixture exactly once: {test_name}"
+            "test:delegation must exact-select the hosted fixture serially: {test_name}"
         );
     }
-    assert_eq!(
-        delegation.matches("-- --exact --test-threads=1").count(),
-        TEST_NAMES.len(),
-        "hosted fixture selectors must stay exact and serial"
-    );
 }
 
 #[test]
@@ -156,6 +172,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let script = read_repository_text("scripts/check-interactive-release.sh");
     let windows_script = read_repository_text("scripts/check-interactive-release.ps1");
     let taskfile = read_repository_text("Taskfile.yml");
+    let agent_loop = read_repository_text("src/agent/loop.rs");
     let workflow = read_repository_text(".github/workflows/ci.yml");
 
     for contract in [
@@ -230,6 +247,22 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
 
     assert!(taskfile.contains("  test:interactive:\n"));
     assert!(taskfile.contains("      - task: test:interactive\n"));
+    assert_eq!(
+        agent_loop
+            .matches(
+                "fn exact_run_steering_drained_in_compression_abandons_the_tool_continuation()",
+            )
+            .count(),
+        1,
+        "the hosted steering fixture must remain uniquely named"
+    );
+    assert_eq!(
+        task_section(&taskfile, "test:interactive")
+            .matches("cargo test --lib exact_run_steering -- --test-threads=1")
+            .count(),
+        1,
+        "the focused interactive task must keep selecting exact-run steering serially"
+    );
     assert!(taskfile.contains("  smoke:interactive:binary:\n"));
     assert!(taskfile.contains("      - task: smoke:interactive:binary\n"));
     assert!(taskfile.contains("    platforms: [linux, darwin]\n"));

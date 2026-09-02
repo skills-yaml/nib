@@ -713,6 +713,15 @@ That fixture uses a 15-second test-only reconciliation and worktree-cleanup budg
 production five-second reconciliation deadline, three-second precommit cleanup timeout,
 and dedicated expiry/fail-closed regressions remain unchanged.
 
+Keep the Windows DOS-short-root MCP regression focused on canonical-equivalent repository
+identity across the complete spawn, status, and cancellation flow. Its first-use spawn
+uses one 15-second test-only positive-progress budget for both preparation publication
+and stale-preparation reconciliation, including exact worktree compensation if initial
+spawn fails. The guard ends when the initial `nib_run` response returns, before status or
+cancellation begins. The production five-second preparation/reconciliation and
+three-second precommit-cleanup budgets plus their dedicated expiry regressions remain
+unchanged.
+
 ### Acceptance Criteria
 
 - [x] The rollback fixture uses an explicit 30-second test-only positive-progress budget
@@ -723,13 +732,17 @@ and dedicated expiry/fail-closed regressions remain unchanged.
   and the focused Task/repository contract pins its exact serial parent regression.
 - [x] The atomic crash matrix uses a 15-second test-only reconciliation/cleanup budget,
   and the focused Task/repository contract pins its exact serial regression.
+- [x] The DOS-short-root MCP fixture uses a non-moving 15-second test-only guard only for
+  initial preparation, reconciliation, and exact compensation, while its status path,
+  existing cancellation allowance, and exact assertions remain intact; the focused
+  Task/repository contract pins the native-only regression.
 - [ ] The exact PR revision passes the full hosted Windows job and native matrix after
   this stabilization.
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, `tests/installers.rs`, `Taskfile.yml`, this spec, and
-exact-revision hosted native validation.
+`src/tools/delegation.rs`, `src/integrations/mcp_server.rs`, `tests/installers.rs`,
+`Taskfile.yml`, this spec, and exact-revision hosted native validation.
 
 ### Validation Evidence
 
@@ -766,6 +779,28 @@ tests, every integration suite, and doctests; the two intentional live/exact-rel
 tests remained ignored. Final-state `task coverage` passed at 85.88% line coverage
 (102,020/118,787), including all 1,061 instrumented library tests and the same three
 hosted-sensitive fixtures.
+
+Hosted run `33649455308` proved all three preceding remedies: Linux passed ordinary tests
+and instrumented coverage, macOS passed its complete test and release/smoke job, and
+Windows passed the rollback, persistent-anchor, and 25-process atomic crash regressions.
+After 972 other passing Windows library tests, the first-use
+`mcp_subagent_flow_accepts_a_dos_short_project_root` spawn instead exhausted the default
+five-second preparation/reconciliation budget before returning a subagent ID. Its
+existing ten-second cancellation guard could not affect that earlier phase. The fixture
+now applies one non-`Send`/non-`Sync`, thread-local 15-second allowance to both possible
+initial-spawn deadlines and their exact compensation cleanup, then restores the normal
+test budgets before record/status/cancellation checks. It remains exact-selected by
+`task test:delegation`; production five-second reconciliation and three-second cleanup
+deadlines and failure behavior are unchanged. The replacement hosted matrix remains open.
+
+On the final two-fixture stabilization patch, `task test:delegation` passed both
+optional-open races, the three portable exact fixtures, the Linux zero-selection contract
+for the native-only DOS fixture, all 36 managed-process tests, and all 22 delegation
+integrations. `task test:interactive` passed the 16 exact-steering tests and every focused
+interaction, TUI, console, chat, CLI, and repository-contract group. Final `task verify`
+passed 1,061 library tests, 86 CLI tests, all integration suites, and doctests with only
+the two intentional paid-live/exact-release tests ignored. Final `task coverage` passed
+at 85.86% line coverage (101,992/118,788), including all 1,061 instrumented library tests.
 
 ## Crash-Durable Spawn Preparation Follow-up (2026-08-29)
 

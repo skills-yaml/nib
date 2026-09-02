@@ -6971,6 +6971,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn exact_run_steering_drained_in_compression_abandons_the_tool_continuation() {
+        #[cfg(windows)]
+        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        #[cfg(not(windows))]
+        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
         save_config(directory.path(), &mock_config()).expect("mock config");
@@ -7005,19 +7009,22 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(HOSTED_PROGRESS_TIMEOUT, async {
             loop {
-                if matches!(
-                    stream_rx.recv().await,
-                    Some(StreamEvent::ToolCompleted { tool_name, .. }) if tool_name == "run_terminal"
-                ) {
-                    break;
+                match stream_rx.recv().await {
+                    Some(StreamEvent::ToolCompleted { tool_name, .. })
+                        if tool_name == "run_terminal" =>
+                    {
+                        break
+                    }
+                    None => panic!("stream closed before the first terminal tool completed"),
+                    _ => {}
                 }
             }
         })
         .await
         .expect("first tool completed");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(HOSTED_PROGRESS_TIMEOUT, async {
             loop {
                 if store
                     .load(&session.id)

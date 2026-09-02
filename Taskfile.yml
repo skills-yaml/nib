@@ -101,6 +101,10 @@ tasks:
         cargo test --lib
         tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
         -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root
+        -- --exact --test-threads=1
       - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
       - cargo test --test delegation -- --test-threads=1
 

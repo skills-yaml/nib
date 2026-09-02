@@ -896,3 +896,23 @@ documentation-integrity tests, `task check`, `task check:all-targets`, `task cov
 at 85.98% (85,650 / 99,615), `task build`, and `task smoke:interactive`. This remains
 local dirty-worktree Linux evidence; FT019 stays at 21/22 until the exact clean revision
 passes the native macOS and Windows qualification owned by T034.
+
+Hosted run `33649455308` passed the complete macOS job and advanced Linux through the
+ordinary suite, coverage, and exact release qualification. Windows reached 972 other
+passing library tests but the exact-run compression steering regression exhausted its
+five-second first-tool observation window under late-suite load. The test still requires
+the exact `run_terminal` completion, Compression transition, durable steering intake,
+continuation abandonment, and terminal answer; only its test-local positive-progress
+windows are now 15 seconds on Windows for the two observations while other platforms
+retain five seconds and terminal completion retains ten seconds. The first observation
+also fails explicitly if the stream closes before the scripted tool's terminal event.
+`task test:interactive` continues to select the full exact-run steering family serially.
+The exact hosted native criterion remains open pending the replacement revision.
+
+After the Windows-only observation allowance and closed-stream diagnostic, the complete
+`task test:interactive` gate passed the 16 exact-steering tests and every focused
+interaction, TUI, console, chat, CLI, and selector-contract group. Final `task verify`
+passed 1,061 library tests, 86 CLI tests, all integration suites, and doctests; final
+`task coverage` passed at 85.86% (101,992/118,788). Independent spec-compliance and
+code-quality/security reviews found no remaining blocker. Native hosted acceptance
+remains open until the replacement exact revision passes Windows as well as macOS.

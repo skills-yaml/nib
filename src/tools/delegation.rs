@@ -50,6 +50,42 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+#[cfg(all(test, windows))]
+pub(crate) struct SpawnPositiveProgressTimeoutGuard {
+    previous_preparation: Option<Duration>,
+    previous_reconciliation: Option<Duration>,
+    _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(all(test, windows))]
+impl SpawnPositiveProgressTimeoutGuard {
+    pub(crate) fn set(timeout: Duration) -> Self {
+        let previous_preparation = TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(timeout));
+            previous
+        });
+        let previous_reconciliation = TEST_SPAWN_RECONCILIATION_TIMEOUT.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(timeout));
+            previous
+        });
+        Self {
+            previous_preparation,
+            previous_reconciliation,
+            _not_send_or_sync: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+impl Drop for SpawnPositiveProgressTimeoutGuard {
+    fn drop(&mut self) {
+        TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT.with(|slot| slot.set(self.previous_preparation));
+        TEST_SPAWN_RECONCILIATION_TIMEOUT.with(|slot| slot.set(self.previous_reconciliation));
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT: std::cell::Cell<Option<Duration>> =

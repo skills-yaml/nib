@@ -4588,21 +4588,26 @@ mod tests {
             return;
         }
 
-        let started = handle_request(
-            &short_root,
-            &config,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "dos-alias-run",
-                "method": "tools/call",
-                "params": {
-                    "name": "nib_run",
-                    "arguments": {"goal": "Return a bounded fixture response.", "max_steps": 1}
-                }
-            }),
-        )
-        .await
-        .expect("MCP subagent start response");
+        let started = {
+            let _spawn_timeout = crate::tools::delegation::SpawnPositiveProgressTimeoutGuard::set(
+                std::time::Duration::from_secs(15),
+            );
+            handle_request(
+                &short_root,
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "dos-alias-run",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_run",
+                        "arguments": {"goal": "Return a bounded fixture response.", "max_steps": 1}
+                    }
+                }),
+            )
+            .await
+            .expect("MCP subagent start response")
+        };
         assert_eq!(started["result"]["isError"], false, "{started}");
         let id = started["result"]["structuredContent"]["subagent_id"]
             .as_str()
