@@ -1166,6 +1166,29 @@ The external catalog, credential, cost-account, supported-region Meta, retained 
 artifact, and exact-revision live matrix criteria remain open. No live acceptance item
 is claimed by this reconciliation.
 
+Windows report-publication remediation on 2026-09-02:
+
+- Exact revision `f7b1212050bf7bc4878d60fbf69fcb6759344b9e` passed the complete
+  Linux and macOS jobs in hosted run `33660307444`, but the Windows offline live-report
+  fixture exposed two Windows-specific assumptions. The retained `cap_std` directory
+  handle lacked the write access required by `NtFlushBuffersFile`, and the raced-file
+  fixture used ordinary Windows deferred deletion while an ownership handle remained
+  open. Five report tests failed before the Windows release qualification step, so the
+  run is not closure evidence for any native-matrix criterion.
+- Windows directory durability now opens a second no-follow, share-safe, write-capable
+  handle to the already anchored visible directory, verifies its file identity against
+  the retained anchor, and flushes that exact handle. It does not accept a path-only
+  replacement or weaken a failed durability barrier into success.
+- The raced-replacement fixture now removes the exact opened regular file with
+  `FileDispositionInfoEx` POSIX semantics before creating the replacement. This makes
+  the intended immediate namespace transition explicit instead of depending on
+  deferred `DeleteFile` behavior; the production no-replace publication and
+  identity-bound rollback paths are unchanged.
+- The credential-free offline gate passed 66 tests with one paid live entrypoint
+  intentionally ignored. `task check`, Windows MSVC all-target compilation, and
+  `git diff --check` passed. Replacement native hosted evidence remains required, and
+  no provider credential was read or paid request made.
+
 ## Open Questions
 
 - Which exact current OpenRouter models should replace any advertised entries that fail

@@ -2258,14 +2258,45 @@ impl AnchoredResultsDirectory {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::fs::OpenOptionsExt;
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFile;
-            use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+            use windows_sys::Win32::Foundation::{
+                RtlNtStatusToDosError, GENERIC_READ, GENERIC_WRITE,
+            };
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+                FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
             use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
+            // cap-std deliberately retains a traversal handle with read-oriented
+            // access. NT directory flushing additionally requires write access, so
+            // retain a second no-follow handle to the already identity-bound visible
+            // directory solely for the durability barrier.
+            let mut options = fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .access_mode(GENERIC_READ | GENERIC_WRITE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+            let directory = options.open(&self.visible_path).map_err(|error| {
+                format!("failed to open live results directory for sync: {error}")
+            })?;
+            let identity = FileIdentity::from_file(
+                directory
+                    .try_clone()
+                    .map_err(|_| "failed to retain live results directory for sync".to_string())?,
+            )
+            .map_err(|_| "failed to identify live results directory for sync".to_string())?;
+            if identity != self.identity {
+                return Err(
+                    "live results directory identity changed before durability sync".to_string(),
+                );
+            }
             let mut io_status = IO_STATUS_BLOCK::default();
-            let status =
-                unsafe { NtFlushBuffersFile(self.directory.as_raw_handle(), &mut io_status) };
+            let status = unsafe { NtFlushBuffersFile(directory.as_raw_handle(), &mut io_status) };
             if status >= 0 {
                 Ok(())
             } else {
@@ -2280,6 +2311,65 @@ impl AnchoredResultsDirectory {
             Err("this platform cannot durably sync the live results directory".to_string())
         }
     }
+}
+
+#[cfg(windows)]
+fn remove_visible_file_for_replacement(path: &Path) -> std::io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfoEx, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(DELETE | GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "report replacement fixture requires a regular file",
+        ));
+    }
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let removed = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if removed == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop(file);
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "report replacement fixture could not detach the visible alias",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+fn remove_visible_file_for_replacement(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
 }
 
 fn walk_results_directory(
@@ -3487,7 +3577,7 @@ mod tests {
             report("run-1", true, true),
             |point, _, json, markdown| {
                 if point == PublicationPoint::BetweenPublications {
-                    fs::remove_file(json).map_err(|error| error.to_string())?;
+                    remove_visible_file_for_replacement(json).map_err(|error| error.to_string())?;
                     fs::write(json, b"unowned json").map_err(|error| error.to_string())?;
                     fs::write(markdown, b"unowned markdown").map_err(|error| error.to_string())?;
                 }
