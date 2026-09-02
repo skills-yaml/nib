@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@1.2.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-07-29
+- Last reviewed: 2026-09-02
 
 ## Adopted Files
 
@@ -30,35 +30,19 @@ Metadata:
 
 ## Active Gaps and Future Scope
 
-- T003, T004, and T007 remain in `development/`: namespace quarantine and identity
-  verification do not prove exact physical unlink on Unix, and their platform gates
-  remain open.
-- T006 remains in `development/` pending its own hosted Windows evidence reconciliation.
-  T010 remains there pending an exact-current committed development-channel run and
-  inspection of its published artifacts; rolling Releases now use the documented
-  exclusive-writer operating contract.
-- FT-015 remains in `development/` for Windows/macOS worktree runtime validation and
-  the inherited FT-017 authority boundary.
-- T020 and FT-016 have complete local stdio MCP lifecycle, cancellation, redaction, and
-  metadata coverage. T020 remains open for Windows containment and macOS runtime
-  validation; FT-016 remains open for Windows containment; both inherit FT-015's
-  managed-worktree ownership limits.
-- FT-017 is in `development/` and owns durable abrupt-owner descendant-process
-  containment. Linux production proof, supervisor-crash recovery, launch fencing, and
-  bounded scope retirement are integrated; Windows/macOS production delegation remains
-  rejected until cleanup authority is inaccessible to managed workers.
-- T021 is in `development/` and specifies explicit OpenAI-compatible API-mode and
-  reasoning configuration plus Responses function-tool support.
-- T022 is in `development/` and specifies the typed provider-neutral LLM contract,
-  distinct provider adapters, native correlated tool continuation, safe terminal/error
-  normalization, and shared provider conformance gates.
+- T023 is in `development/`. Its credential-free harness is locally green, but live
+  catalog/canary/selected/full evidence requires owner-approved credentials, budgets,
+  OpenRouter exact IDs, and protected-workflow authority.
+- FT-020 is in `backlog/` for a future protected cleanup-authority design that could
+  enable production delegation on Windows or macOS. Current v1 production delegation
+  remains Linux+bwrap only.
 - `docs/specs/feature/` and `docs/specs/task/` are retained only as empty legacy
   directories; active lifecycle state uses the canonical state directories.
 - MCP v1 is stdio-only; HTTP/SSE and OAuth require a separate future spec.
-- Live paid-provider smoke remains optional operator validation. Windows and macOS
-  runtime, containment, and file-identity gates are required by their owning development
-  specs. Their current process backends are native mechanism evidence rather than an
-  enabled production delegation contract.
+- Live paid-provider qualification is the only active implementation-spec gate and
+  remains explicitly authorization-bound. Completed Windows/macOS mechanism evidence
+  does not enable production delegation there; those platforms require FT-020 or another
+  approved protected-authority design.
 
 ## Legacy Spec Paths (Aligned)
 
@@ -73,27 +57,28 @@ See `docs/specs/README.md` for details. Canonical states (`backlog/`, `developme
 - `task --list`
 - `task check`
 - `task test`
+- `task verify`
 - `task docs:check`
+- `task check:all-targets`
 - `task coverage`
 - `task build`
+- `task qualify:llm-release`
+- `task smoke:interactive`
+- `task smoke:managed-process`
 
 ## Current Validation Run
 
-On 2026-07-16, the reconciled Linux tree passed `task check` and an independent
-`task test` with 795 top-level tests (601 library, 61 CLI, and 133 integration tests).
-`task coverage` reported 83.90 percent runtime line coverage (55,083/65,656),
-`task docs:check` passed all five invariants, and the locked optimized `task build`
-completed. Strict all-target check/Clippy, format, and diff-whitespace gates also passed.
-
-The locally built optimized release binary passed isolated help/version, healthy/failing doctor, skill
-install/list/remove, outbound and inbound MCP initialize/list/call/error and size-bound
-checks, durable cancellation/reconciliation and scheduled wake, and bounded project-doc
-context loading. Linux raw-PTY runs passed plan denial, question selection,
-destructive-tool denial, cancellation reconciliation, and session-detail open/close.
-Windows runtime, Job Object, and reparse behavior and macOS runtime behavior were not
-executed on this host and remain explicit development gates.
-Local cross-target compilation is also blocked before nib code by the missing MSVC
-`lib.exe` tool and the absence of an Apple-compatible C compiler and SDK.
+On 2026-09-02, local `task verify` passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests. Exact hosted run
+[`33683995100`](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+then passed Validate, macOS Tests, and Windows Tests for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. It included native all-target
+checks, complete serial suites, 85.87 percent Linux runtime line coverage
+(102,061/118,862), exact release-binary qualification, Linux/macOS PTY and redirected
+smokes, Windows ConPTY/`TERM=dumb`/redirected smoke, and Linux abrupt-owner containment.
+The explicit paid live-provider entrypoint remained ignored; no provider credential was
+read and no paid request was made.
 
 ## Reconciled Runtime Inventory
 
@@ -113,9 +98,9 @@ Local cross-target compilation is also blocked before nib code by the missing MS
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 19 audited specs are in `done/`; T003, T004, T006, T007, T010, T020,
-  FT-015, FT-016, FT-017, T021, and T022 are in `development/`; no spec is in
-  `backlog/`.
+- Lifecycle: 44 specs are in `done/`, T023 is the sole `development/` spec, and FT-020
+  is the sole `backlog/` spec. `docs/specs/README.md` is the authoritative per-spec
+  index.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate
   model-context accounting.

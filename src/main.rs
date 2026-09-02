@@ -20,7 +20,11 @@ mod version;
 #[command(name = "nib")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "AI agent for coding and workload management", long_about = None)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(flatten)]
+    interactive: chat::ChatArgs,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -94,12 +98,66 @@ mod cli_tests {
     }
 
     #[test]
+    fn no_subcommand_and_chat_share_the_interactive_argument_contract() {
+        let root = Cli::try_parse_from([
+            "nib",
+            "--plain",
+            "--run",
+            "inspect",
+            "--session",
+            "session-1",
+            "--auth",
+        ])
+        .expect("root interactive options");
+        assert!(root.command.is_none());
+        assert!(root.interactive.plain);
+        assert_eq!(root.interactive.run.as_deref(), Some("inspect"));
+        assert_eq!(root.interactive.session.as_deref(), Some("session-1"));
+        assert!(root.interactive.auth);
+
+        let chat = Cli::try_parse_from([
+            "nib",
+            "chat",
+            "--plain",
+            "--run",
+            "inspect",
+            "--session",
+            "session-1",
+            "--auth",
+        ])
+        .expect("chat interactive options");
+        let Some(Commands::Chat(chat)) = chat.command else {
+            panic!("expected chat command");
+        };
+        assert_eq!(root.interactive, chat);
+    }
+
+    #[test]
+    fn interactive_modes_conflict_and_do_not_mix_with_subcommands() {
+        assert!(Cli::try_parse_from(["nib", "--plain", "--tui"]).is_err());
+        assert!(Cli::try_parse_from(["nib", "chat", "--plain", "--tui"]).is_err());
+        assert!(Cli::try_parse_from(["nib", "--plain", "version"]).is_err());
+        assert!(Cli::try_parse_from(["nib", "--session", "session-1", "doctor"]).is_err());
+    }
+
+    #[test]
     fn doctor_accepts_explicit_fix_mode() {
         let parsed = Cli::try_parse_from(["nib", "doctor", "--fix"]).expect("doctor repair option");
         let Some(Commands::Doctor(args)) = parsed.command else {
             panic!("expected doctor command");
         };
         assert!(args.fix);
+        assert!(!args.confirm_no_legacy_processes);
+
+        let parsed =
+            Cli::try_parse_from(["nib", "doctor", "--fix", "--confirm-no-legacy-processes"])
+                .expect("offline legacy migration confirmation");
+        let Some(Commands::Doctor(args)) = parsed.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.fix);
+        assert!(args.confirm_no_legacy_processes);
+        assert!(Cli::try_parse_from(["nib", "doctor", "--confirm-no-legacy-processes"]).is_err());
     }
 }
 
@@ -111,7 +169,7 @@ enum Commands {
     /// Update this installed release, optionally switching release channels
     Update(updater::UpdateArgs),
 
-    /// Start an interactive chat session
+    /// Start the interactive session (TUI when supported, plain mode otherwise)
     Chat(chat::ChatArgs),
 
     /// Run the agent loop for a specific goal
@@ -139,7 +197,7 @@ enum Commands {
         yes: bool,
     },
 
-    /// Launch session browser TUI (ratatui)
+    /// Launch the full-screen TUI (compatibility alias for `nib --tui`)
     Tui(TuiArgs),
 
     /// Start nib as an MCP Server (JSON-RPC over stdio)
@@ -181,6 +239,10 @@ enum Commands {
         execution_generation: u64,
         #[arg(long, hide = true)]
         owner_lease: String,
+        #[arg(long, hide = true)]
+        cleanup_lease_id: String,
+        #[arg(long, hide = true)]
+        supervisor_registration_nonce: String,
         #[arg(long)]
         worktree: PathBuf,
     },
@@ -238,8 +300,8 @@ fn main() {
             }
         },
         Some(Commands::Chat(args)) => {
-            if let Err(error) = chat::run_chat(args) {
-                eprintln!("Chat error: {error}");
+            if let Err(error) = chat::run_interactive(args) {
+                eprintln!("Interactive error: {error}");
                 process::exit(1);
             }
         }
@@ -316,7 +378,7 @@ fn main() {
             .with_approvals_config(&cfg.approvals)
             .with_session_store(session_store)
             .with_environment(profile.custom_env())
-            .with_sensitive_values(cfg.sensitive_values());
+            .with_sensitive_values(cfg.public_session_sensitive_values());
             let args_json = if tool == "run_terminal" {
                 serde_json::json!({"command": arg})
             } else if tool == "grep" {
@@ -341,21 +403,16 @@ fn main() {
             process::exit(if result.success { 0 } else { 1 });
         }
         Some(Commands::Tui(args)) => {
-            let needs_auth = match nib::config::load_nib_config_full(&project) {
-                Ok(config) => args.auth || config.llm.providers.is_empty(),
-                Err(error) => {
-                    eprintln!("TUI error: {error}");
-                    process::exit(1);
-                }
+            eprintln!("nib tui is a compatibility alias; prefer nib --tui");
+            let interactive = chat::ChatArgs {
+                run: args.run.clone(),
+                session: args.session.clone(),
+                auth: args.auth,
+                tui: true,
+                ..Default::default()
             };
-            if needs_auth {
-                if let Err(error) = auth::run_auth_wizard() {
-                    eprintln!("Auth error: {error}");
-                    process::exit(1);
-                }
-            }
-            if let Err(e) = nib::tui::run_tui(&project, args.run.clone(), args.session.clone()) {
-                eprintln!("TUI error: {e}");
+            if let Err(error) = chat::run_interactive(&interactive) {
+                eprintln!("Interactive error: {error}");
                 process::exit(1);
             }
         }
@@ -399,15 +456,32 @@ fn main() {
             task_id,
             lease_token,
         }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio");
-            if let Err(error) = rt.block_on(nib::daemons::workload::run_worker(
-                daemon_dir,
-                task_id,
-                lease_token,
-            )) {
+            let rt = match nib::agent::build_agent_runtime(
+                "failed to initialize the task worker runtime",
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("Task worker error: {error}");
+                    process::exit(1);
+                }
+            };
+            let worker_daemon_dir = daemon_dir.clone();
+            let worker_task_id = task_id.clone();
+            let worker_lease_token = lease_token.clone();
+            let result = nib::agent::block_on_agent_runtime_worker(
+                &rt,
+                async move {
+                    nib::daemons::workload::run_worker(
+                        &worker_daemon_dir,
+                        &worker_task_id,
+                        &worker_lease_token,
+                    )
+                    .await
+                },
+                "task runtime worker",
+            )
+            .and_then(|result| result);
+            if let Err(error) = result {
                 eprintln!("Task worker error: {error}");
                 process::exit(1);
             }
@@ -417,6 +491,8 @@ fn main() {
             subagent_id,
             execution_generation,
             owner_lease,
+            cleanup_lease_id,
+            supervisor_registration_nonce,
             worktree,
         }) => {
             if let Err(error) = nib::tools::delegation::run_subagent_supervisor(
@@ -424,6 +500,8 @@ fn main() {
                 subagent_id,
                 *execution_generation,
                 owner_lease,
+                cleanup_lease_id,
+                supervisor_registration_nonce,
                 worktree,
             ) {
                 eprintln!("Subagent supervisor error: {error}");
@@ -440,10 +518,10 @@ fn main() {
             }
         }
         None => {
-            println!("nib — AI agent for coding and workload management");
-            println!(
-                "Use `nib chat`, `nib run \"goal\"`, `nib auth`, `nib doctor`, or `nib --help`"
-            );
+            if let Err(error) = chat::run_interactive(&cli.interactive) {
+                eprintln!("Interactive error: {error}");
+                process::exit(1);
+            }
         }
     }
 }

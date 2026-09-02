@@ -2,7 +2,7 @@
 use nib::config::load_nib_config_full;
 use nib::config::{save_nib_config_full, ExecutionConfig, McpServerEntry, NibConfig};
 use nib::integrations::mcp::McpManager;
-use nib::session::SessionStore;
+use nib::session::{SessionError, SessionStore};
 use nib::tools::ToolExecutor;
 use serde_json::json;
 use std::collections::HashMap;
@@ -395,6 +395,18 @@ fn observed_session_store(root: &Path) -> SessionStore {
         .with_lock_timeout_for_testing(MCP_SESSION_OBSERVATION_LOCK_TIMEOUT)
 }
 
+fn observed_session_ids(store: &SessionStore, context: &str) -> Option<Vec<String>> {
+    let expected_timeout = format!(
+        "timed out acquiring daemon state lock: {}",
+        store.sessions_dir().join(".skill-usage.lock").display()
+    );
+    match store.list_result() {
+        Ok(ids) => Some(ids),
+        Err(SessionError::InvalidMutation(message)) if message == expected_timeout => None,
+        Err(error) => panic!("{context}: {error}"),
+    }
+}
+
 #[cfg(debug_assertions)]
 fn initialize_terminal_tree_server_fixture(root: &Path) {
     initialize_server_fixture(root);
@@ -589,6 +601,73 @@ async fn read_response(stdout: &mut BufReader<tokio::process::ChildStdout>) -> s
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn nib_run_start_response_exposes_only_public_job_and_session_identity() {
+    let project = tempfile::tempdir().expect("MCP public-start project");
+    initialize_server_fixture(project.path());
+    let (mut server, mut stdin, mut stdout) = spawn_server(project.path());
+
+    write_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "public-start",
+            "method": "tools/call",
+            "params": {
+                "name": "nib_run",
+                "arguments": {"goal": "return a bounded fixture", "max_steps": 1}
+            }
+        }),
+    )
+    .await;
+    let response = read_response(&mut stdout).await;
+    assert_eq!(response["id"], "public-start", "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let public = response["result"]["structuredContent"]
+        .as_object()
+        .expect("structured public start response");
+    assert_eq!(public.len(), 4, "unexpected public fields: {response}");
+    assert_eq!(public["status"], "started");
+    let subagent_id = public["subagent_id"].as_str().expect("subagent id");
+    assert!(public["child_session_id"].as_str().is_some());
+    assert!(public.contains_key("parent_session_id"));
+    let encoded = response.to_string();
+    for private in [
+        "process_scope",
+        "execution_generation",
+        "cleanup_lease_id",
+        "owner_lease",
+        "directory_identity",
+        "worktree_path",
+        "branch_oid",
+        "_ownership_audit_target",
+    ] {
+        assert!(!encoded.contains(private), "leaked {private}: {response}");
+    }
+
+    let persisted: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .path()
+                .join(".nib/subagents")
+                .join(format!("{subagent_id}.json")),
+        )
+        .expect("persisted subagent record"),
+    )
+    .expect("persisted subagent JSON");
+    assert!(persisted["execution_generation"].as_u64().is_some());
+    assert!(persisted["owner_lease"].as_str().is_some());
+    assert!(persisted.to_string().contains("_ownership_audit_target"));
+
+    drop(stdin);
+    let status = tokio::time::timeout(Duration::from_secs(10), server.wait())
+        .await
+        .expect("MCP server shutdown")
+        .expect("MCP server status");
+    assert!(status.success(), "MCP server failed: {status}");
+}
+
+#[cfg(target_os = "linux")]
 fn process_details(pid: i32) -> Option<(char, i32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, fields) = stat.rsplit_once(") ")?;
@@ -770,21 +849,22 @@ async fn wait_for_audit_attempt(root: &Path, token: &str) -> String {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let store = observed_session_store(root);
-            let audited = store
-                .list_result()
-                .unwrap_or_else(|error| panic!("failed to list MCP audit attempts: {error}"))
-                .into_iter()
-                .find(|id| {
-                    store.load(id).is_some_and(|session| {
-                        session.events.iter().any(|event| {
-                            event.kind == "tool_attempted"
-                                && event.details["tool_name"] == "run_terminal"
-                                && event.details["arguments"]["command"]
-                                    .as_str()
-                                    .is_some_and(|command| command.contains(token))
-                        })
+            let Some(ids) = observed_session_ids(&store, "failed to list MCP audit attempts")
+            else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            };
+            let audited = ids.into_iter().find(|id| {
+                store.load(id).is_some_and(|session| {
+                    session.events.iter().any(|event| {
+                        event.kind == "tool_attempted"
+                            && event.details["tool_name"] == "run_terminal"
+                            && event.details["arguments"]["command"]
+                                .as_str()
+                                .is_some_and(|command| command.contains(token))
                     })
-                });
+                })
+            });
             if let Some(id) = audited {
                 return id;
             }
@@ -799,26 +879,27 @@ async fn wait_for_cancellation_audit(root: &Path, token: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let store = observed_session_store(root);
-            let reconciled = store
-                .list_result()
-                .unwrap_or_else(|error| panic!("failed to list MCP cancellation audits: {error}"))
-                .into_iter()
-                .any(|id| {
-                    store.load(&id).is_some_and(|session| {
-                        let attempted = session.events.iter().any(|event| {
-                            event.kind == "tool_attempted"
-                                && event.details["arguments"]["command"]
-                                    .as_str()
-                                    .is_some_and(|command| command.contains(token))
-                        });
-                        let cancelled = session.events.iter().any(|event| {
-                            event.kind == "mcp_request_cancelled"
-                                && event.details["tool_name"] == "run_terminal"
-                                && event.details["reconciled"] == true
-                        });
-                        attempted && cancelled
-                    })
-                });
+            let Some(ids) = observed_session_ids(&store, "failed to list MCP cancellation audits")
+            else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            };
+            let reconciled = ids.into_iter().any(|id| {
+                store.load(&id).is_some_and(|session| {
+                    let attempted = session.events.iter().any(|event| {
+                        event.kind == "tool_attempted"
+                            && event.details["arguments"]["command"]
+                                .as_str()
+                                .is_some_and(|command| command.contains(token))
+                    });
+                    let cancelled = session.events.iter().any(|event| {
+                        event.kind == "mcp_request_cancelled"
+                            && event.details["tool_name"] == "run_terminal"
+                            && event.details["reconciled"] == true
+                    });
+                    attempted && cancelled
+                })
+            });
             if reconciled {
                 return;
             }
@@ -833,21 +914,21 @@ async fn wait_for_tool_completion(root: &Path, tool_name: &str) {
     let completed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let store = observed_session_store(root);
-            let completed = store
-                .list_result()
-                .unwrap_or_else(|error| panic!("failed to list MCP tool audits: {error}"))
-                .into_iter()
-                .any(|id| {
-                    store.load(&id).is_some_and(|session| {
-                        session.tool_calls.iter().any(|call| {
-                            call.tool_name.as_deref() == Some(tool_name)
-                                && call
-                                    .result
-                                    .as_ref()
-                                    .is_some_and(|result| result["success"] == true)
-                        })
+            let Some(ids) = observed_session_ids(&store, "failed to list MCP tool audits") else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            };
+            let completed = ids.into_iter().any(|id| {
+                store.load(&id).is_some_and(|session| {
+                    session.tool_calls.iter().any(|call| {
+                        call.tool_name.as_deref() == Some(tool_name)
+                            && call
+                                .result
+                                .as_ref()
+                                .is_some_and(|result| result["success"] == true)
                     })
-                });
+                })
+            });
             if completed {
                 return;
             }
@@ -874,25 +955,25 @@ async fn wait_for_nib_run_cancellation_audit(root: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let store = observed_session_store(root);
-            let reconciled = store
-                .list_result()
-                .unwrap_or_else(|error| panic!("failed to list nib_run audits: {error}"))
-                .into_iter()
-                .any(|id| {
-                    store.load(&id).is_some_and(|session| {
-                        let tool_audited = session
-                            .tool_calls
-                            .iter()
-                            .any(|call| call.tool_name.as_deref() == Some("spawn_subagent"));
-                        let cancellation_audited = session.events.iter().any(|event| {
-                            event.kind == "mcp_request_cancelled"
-                                && event.details["tool_name"] == "nib_run"
-                                && event.details["outcome"] == "cancelled"
-                                && event.details["reconciled"] == true
-                        });
-                        tool_audited && cancellation_audited
-                    })
-                });
+            let Some(ids) = observed_session_ids(&store, "failed to list nib_run audits") else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            };
+            let reconciled = ids.into_iter().any(|id| {
+                store.load(&id).is_some_and(|session| {
+                    let tool_audited = session
+                        .tool_calls
+                        .iter()
+                        .any(|call| call.tool_name.as_deref() == Some("spawn_subagent"));
+                    let cancellation_audited = session.events.iter().any(|event| {
+                        event.kind == "mcp_request_cancelled"
+                            && event.details["tool_name"] == "nib_run"
+                            && event.details["outcome"] == "cancelled"
+                            && event.details["reconciled"] == true
+                    });
+                    tool_audited && cancellation_audited
+                })
+            });
             if reconciled {
                 return;
             }
@@ -2353,9 +2434,21 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
             .is_some_and(|text| text.contains("registrations were preserved")),
         "{response}"
     );
-    let records = nib::tools::delegation::list_subagents(project.path())
-        .expect("subagent records after compensation");
-    assert!(records.is_empty(), "failed spawn persisted {records:?}");
+    let reconciliation = nib::tools::delegation::list_subagents(project.path())
+        .expect_err("unattributed Git registration must keep preparation fail closed");
+    assert!(
+        reconciliation
+            .contains("post-snapshot Git worktree registration lacks exact creation attribution"),
+        "{reconciliation}"
+    );
+    let preparations = project.path().join(".nib/subagents/.preparations");
+    assert!(
+        std::fs::read_dir(&preparations)
+            .expect("retained spawn preparation namespace")
+            .next()
+            .is_some(),
+        "indeterminate worktree constructor error retired its recovery intent"
+    );
     let worktree_root = project.path().join(".nib/worktrees/subagents");
     assert!(
         !worktree_root.exists()

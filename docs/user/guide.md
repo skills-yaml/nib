@@ -60,6 +60,12 @@ task build
 ./target/release/nib --help
 ```
 
+Release maintainers can exercise the optimized binary's complete credential-free LLM
+smoke with `task qualify:llm-release`. It binds only a localhost fixture, verifies the
+binary's embedded commit against the checkout HEAD, and records the executable SHA-256
+under `target/release-qualification/`. A dirty-worktree run is useful harness evidence
+but is explicitly ineligible as proof of a published exact-revision artifact.
+
 ## Project Setup
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
@@ -90,7 +96,10 @@ nib auth
 The wizard writes the selected provider, model, and API key to `.nib/config.toml`.
 Config writes use owner-only permissions on Unix, but credentials remain plaintext.
 The configured adapters are OpenAI, Anthropic, Google Gemini, xAI Grok, OpenRouter,
-Meta, and the deterministic Mock provider used for tests. Credentials can instead
+Meta, and the deterministic Mock provider used for tests. Meta has no verified public
+default inference endpoint in this adapter and therefore requires an explicit
+OpenAI-compatible `base_url`; readiness fails before network I/O when it is absent.
+Credentials can instead
 come from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`,
 `OPENROUTER_API_KEY`, or `META_API_KEY`.
 
@@ -227,10 +236,13 @@ skill installation, or MCP child-process startup.
 
 New official OpenAI entries created by `nib auth` select `api = "responses"`.
 Existing entries without `api` continue to use `chat_completions`; nib does not rewrite
-them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways also
-retain Chat Completions unless their entry explicitly selects Responses. The selected
-mode is never inferred from a model name, and a rejected request is not retried through
-a different API or with a different reasoning effort.
+them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways retain
+the T021 Chat Completions compatibility default unless their entry explicitly selects
+Responses. xAI now documents Chat Completions as a legacy endpoint and recommends
+Responses for new features; nib reports its selected transport explicitly and does not
+rewrite existing operator configuration. The selected mode is never inferred from a
+model name, and a rejected request is not retried through a different API or with a
+different reasoning effort.
 
 `base_url` may be a provider root or the full endpoint matching `api`. nib appends
 exactly one `/responses` or `/chat/completions` suffix and rejects conflicting or
@@ -243,6 +255,13 @@ nib config show
 nib config validate
 nib doctor
 ```
+
+Provider diagnostics also report the registered implementation, selected wire
+transport, and the adapter's structural support for completion, streaming, function
+tools, typed tool continuation, parallel-tool transport, and configurable reasoning
+effort. These are local implementation facts, not a claim that the configured model
+or gateway accepts every combination. `nib doctor` does not make a provider request
+or probe live model compatibility.
 
 For an active provider named exactly `openai`, doctor treats canonical OpenAI
 Chat Completions with provider-default or enabled reasoning as not ready for nib's
@@ -292,8 +311,31 @@ The main sections are:
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
 
 Run `nib doctor` after manual configuration changes. It validates local readiness and
-credential presence, not live provider connectivity. `--fix` only applies the bounded
-local OpenAI transport repair described above; it is not a live capability probe.
+credential presence, not live provider connectivity. `--fix` by itself only applies
+the bounded local OpenAI transport repair described above; it is not a live capability
+probe.
+
+#### Offline migration from legacy subagent locks
+
+Older nib builds used a per-subagent record-lock namespace. Live coexistence between
+that protocol and the current fixed stripe set is not supported. Before migrating,
+stop and disable every prior nib binary that can access the repository. Then make the
+required external quiescence attestation explicitly:
+
+```bash
+nib doctor --fix --confirm-no-legacy-processes
+```
+
+The confirmation flag requires `--fix`. It writes a versioned receipt bound to the
+exact delegation-record directory, reconciles only the exact legacy artifact manifest,
+and marks the epoch complete after bounded cleanup. A crash can resume the pending
+epoch, but pending state never authorizes ordinary delegation. Existing clean but
+unmarked state, live or ambiguous legacy locks, and legacy artifacts introduced after a
+completed epoch all fail closed and remain available for inspection. Stop the prior
+binary and repeat the explicit command; there is no environment-variable bypass.
+Native namespace staging resumes only when its exact identity-bound receipt is its sole
+content. Doctor preserves unmarked, mismatched, or extra-content staging byte-for-byte
+and reports its path; inspect it and remove only that exact directory before retrying.
 
 ## Use
 
@@ -312,58 +354,190 @@ only in an already trusted environment. Explicit deny policies still take preced
 When the agent calls `ask_question`, the CLI prints the available options and accepts
 either an option number or free-form text on the same input stream. Closed or empty
 question input stops the run and reconciles the session without continuing execution.
+Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. Startup
+and final one-shot status lines are bounded and control-safe and do not echo the full
+goal.
 
 In a normal Git checkout, edits remain in a `nib/session/*` branch under
 `.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
 running inside a linked worktree, edits remain in that worktree.
 
-### Interactive Chat
+### Interactive Session
 
 ```bash
-nib chat
-nib chat --session <id>
-nib chat --auth
+nib                              # automatic TUI/plain selection
+nib --session <id>
+nib --auth
+nib --run "Inspect the failing tests"
+nib --plain                      # force line-oriented presentation
+nib --tui                        # force the full-screen presentation
 ```
 
-Chat commands:
+`nib` is the canonical interactive launcher. It selects the full-screen TUI when input
+and output are terminals with supported capabilities and otherwise uses plain mode.
+`--plain` and `--tui` are mutually exclusive explicit overrides. `nib chat` accepts
+the same options and launches the same product; `nib tui` remains a compatibility
+alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
+Both presentation modes expose these commands:
+
+- `/status` shows session, resolved provider/model/transport, approximate persisted
+  context usage and limit, configured approval preset, effective execution/sandbox
+  posture, plan, and queued follow-up count.
 - `/model` or `/model <name>` lists or selects a model.
+- `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
+  preset, then recomputes the effective provider/profile/network and platform sandbox
+  posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
+  plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
+  states are labeled in text rather than by color alone.
+- `/plan [prompt]` shows the current plan or starts a planning turn.
+- `/review` and `/diff` show the git workspace diff.
+- `/new` and `/clear` start a fresh session; `/resume` and `/session` open
+  preview-and-confirm resume.
+- `/fork` copies the current transcript into a new session; `/rename <name>` sets a
+  display name.
+- `/copy` prints the latest completed assistant output.
+- `/compact` requests bounded compression for the active session through the configured
+  provider. It may bypass the automatic usage threshold, but still respects the
+  compression enabled switch, preserves every raw message, and reports the resulting
+  budget or a truthful no-op/failure outcome.
+- `/ps` lists a bounded projection of durable background work owned by the active
+  session. `/stop` lists stoppable work and exact-ID guidance; `/stop <task-id>` requests
+  cancellation of exactly one task only when that durable record belongs to the active
+  session. Command text, prompts, results, errors, and work from other sessions are not
+  exposed.
 - `/providers` lists configured providers.
-- `/session` prints the active session; `/clear` switches to a new session.
 - `/skills list|install|remove` manages skills.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
+- `queue: <text>` stores a follow-up for the next turn. While a turn is running,
+  `steer: <text>` in plain mode and `Ctrl+S` in TUI mode submit the current draft to
+  the exact active run at its next safe model boundary. Steering is persisted before
+  acknowledgement; the TUI clears the draft only after that persistence succeeds.
+  Enter queues and never steers. Approval and question prompts retain input precedence.
 
-Agent questions share chat's input stream: answer with the displayed option number or
-typed text, then continue entering chat commands after the agent turn completes.
-Model text, tool lifecycle events, and reconciliation status stream while each turn is
-running.
+Parity matrix (same command/session effect in both renderers):
 
-### TUI
+| Action | TUI | Plain |
+| --- | --- | --- |
+| Idle submit | `Enter` | `Enter` |
+| Newline | `Ctrl+J` | continuation / editor |
+| Queue next | `Enter` while running, or `queue: text` | `queue: text` |
+| Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
+| Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
+| Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
+| Command discovery | `/` completion | `/` plus numbered choices |
+| Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
+| Approvals | dock on the current tool | Y/N prompt |
+| Draft history | `Up`/`Down`; `Ctrl+R` or `/history [query]` search | `/history [query]` numbered search |
+| Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
+| Path attachment | `@` completion, structured context | same `@path` mentions |
+| Compact context | `/compact`, streamed compression/reconciliation | same command and outcomes |
+| Background work | `/ps`; `/stop [task-id]` | same bounded list and exact-ID cancellation |
+
+Interaction state is shared by both renderers and is derived from the authoritative
+session and exact active run rather than from terminal chrome:
+
+| State | Meaning and next action |
+| --- | --- |
+| `idle` | A submitted goal starts one foreground turn; slash commands use the shared registry. |
+| `planning` / `running` | Progress remains bound to the exact run. Steering uses the explicit steer path; Enter or ordinary plain text durably queues the next turn. Commands marked idle-only report an error instead of becoming goals. |
+| `waiting_approval` | Approval owns input before every lower layer. Accepting grants only the displayed bounded action; denial resumes reconciliation. |
+| `waiting_question` | The displayed numbered option or free-form answer owns input before commands and the composer. Empty or out-of-range answers remain local errors. |
+| `reconciling` | Cancellation, completion, or failure is not terminal until workload/session evidence is persisted and the worker is joined. |
+| `completed` | A successfully joined run may claim the FIFO queue head only after the next worker is prepared; each retained item starts at most once. |
+| `cancelled` | Queued work remains retained and its disposition is printed; cancellation never silently launches it. |
+| `failed` | The bounded redaction-safe failure report and session reference are shown; queued work remains retained when startup or execution cannot continue safely. |
+
+At any state, approval, question, destructive confirmation, selector/detail, command
+completion, and composer input are consumed in that order. Reconciliation events are
+accepted only for the active session and exact run. The header reports the profile
+captured at startup and the currently validated session worktree; historical tool-call
+paths cannot relabel either value.
+
+#### Plain mode
+
+Plain mode presents the interactive session as a line-oriented prompt. Agent questions
+share its input stream: answer with the displayed option number or typed text, then
+press Enter once on a separate empty line when the modal asks to return input
+ownership. Any non-empty type-ahead before that delimiter is rejected instead of
+becoming a command or queued goal. Continue entering commands after the agent turn
+completes. Tool lifecycle, approval, question, compression, and reconciliation events
+remain live while a turn is running. Provider data is still consumed incrementally,
+but model text and tool proposals are shown only after the completed provider response
+passes terminal validation.
+
+During an active plain-mode run, use `steer: <text>` to affect that exact run or
+`queue: <text>` to retain a later turn. A plain line without either prefix is also a
+queued follow-up while the run is active. A persisted steer that loses a terminal or
+channel race remains visible as an explicit delivery failure and is never converted to
+queued work.
+
+An incomplete slash-command prefix opens a bounded numbered completion prompt sourced
+from the shared command registry. Select a command or fixed subcommand by number; plain
+mode asks separately for any required free-form argument. `/session` accepts a
+displayed number or exact session ID, shows the shared bounded preview, and requires
+`y` confirmation before the active session changes. Cancelling either prompt leaves
+the active session unchanged, and incomplete slash commands never become agent goals.
+
+#### Full-screen TUI
 
 ```bash
-nib tui
-nib tui --run "Inspect the failing tests and fix them"
-nib tui --session <id>
-nib tui --auth
+nib --tui
+nib --tui --run "Inspect the failing tests and fix them"
+nib --tui --session <id>
+nib tui                            # compatibility alias
 ```
 
-The TUI opens with a composer for repeated agent turns in the active session. It
-supports the same `/model`, `/providers`, `/session`, `/clear`, `/skills`, `/mcp`,
-`/help`, and exit commands as chat. `--run` submits an initial goal; `--session`
-resumes an existing session, and `--auth` runs authentication before raw mode starts.
+The TUI opens as a ledger: two fixed header/status rows, a typed activity transcript
+(user, assistant, plan, tool, approval, question, compression, reconcile, failure),
+and a wrapped multi-line composer. Historical sessions are not a permanent pane.
+`--run` submits an initial goal; `--session` hydrates an existing session before input
+is accepted, and `--auth` runs authentication before raw mode starts.
 
-Streamed model output and tool lifecycle events appear live. Calls that still require
-interactive approval open a modal showing the tool and arguments; press `Y` to
-approve, `N` or `Esc` to deny. `ask_question` opens a selectable or typed-response
-modal and resumes the same loop.
+Streamed model output and tool lifecycle events update typed activity entries. Calls
+that still require interactive approval or a question appear as a dock on the current
+entry so the transcript and plan summary stay visible. Press `Y` to approve, `N` or
+`Esc` to deny. `Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a
+turn is running.
 
-The composer has focus initially. Press `Enter` to submit, `Tab` to focus the session
-browser, and `Esc` to clear the draft. In the session browser, use arrow keys to
-select, `Enter` to inspect, `R` to resume the selected session, and `Tab` to return to
-the composer. `Ctrl+C` cancels an active run; with no active run it exits. `Ctrl+Q` or
-`/quit` also exits. Presentation differs between line mode and the TUI, but their
-interactive agent and management capabilities are shared.
+The composer has focus initially. A slash-command prefix opens bounded completion from
+the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
+insert, and `Esc` to close completion without clearing the draft. When completion is
+closed, `Up`/`Down` restore bounded in-process draft history. Typing `@` offers
+project-scoped path completion; submitted `@path` mentions become structured
+attachments (bounded file context) rather than expanding the file into the prompt
+string. Unknown and incomplete slash commands remain in the composer and show an error
+instead of becoming agent goals.
+
+Draft history is process-local, retains at most 50 submitted entries, and is never
+persisted or added to model context before a restored draft is submitted again. Press
+`Ctrl+R` or run `/history [query]` to open a bounded keyboard-only search overlay;
+type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitting, or
+`Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
+numbers and requires explicit confirmation before submitting the selection.
+
+The transcript follows new activity by default. `PageUp` and `PageDown` move by the
+current visible rendered rows without relying on raw terminal scrollback. Manual
+upward movement pauses follow-tail so streaming output does not move the viewport;
+the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
+follow-tail. Resizes and narrow terminals clamp the row viewport safely.
+
+Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
+and typing an exact session ID can preview an older session omitted from the bounded
+list. `Enter` first loads that exact preview when present, then opens a separate
+confirmation naming the current and target sessions; `Esc` cancels without changing
+the session. A confirmed resume re-reads persisted state
+and replaces the complete visible timeline; it cannot mix the previous session's live
+events into the resumed one. A missing or corrupt target leaves the current session
+active. Switching is rejected while an agent worker is running. `/clear` uses the same
+full-view replacement boundary for its new session.
+
+Approval, question, model, and session overlays take input before command completion.
+Switcher and selector errors render on the overlay that caused them. `Ctrl+C` cancels
+an active run; with no active run it exits. `Ctrl+Q` or `/quit` also exits.
+Presentation differs between plain mode and the TUI, but their agent, session,
+completion, and management capabilities are shared.
 
 ### Skills
 
@@ -588,8 +762,12 @@ and arbitrary metadata are intentionally omitted. The stable outcome and safe ty
 fields are available in the session's reconciliation event under
 `.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
 persisted. `nib doctor` shows the resolved local provider and transport without making
-a paid provider request. Chat remains available for another command after a safely
-reconciled failure; `nib run` exits nonzero.
+a paid provider request. The interactive session remains available for another command
+after a safely reconciled failure; `nib run` exits nonzero.
+
+Provider deltas remain private until the terminal response is validated. If a streamed
+request later fails, is refused, or is structurally incomplete, nib discards all of its
+partial model text and tool proposals instead of rendering or persisting them.
 
 Official release builds update within their embedded rolling channel:
 

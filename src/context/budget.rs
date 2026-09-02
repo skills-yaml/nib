@@ -711,6 +711,7 @@ mod tests {
                     content: "authoritative pending task ".repeat(100),
                 })
                 .collect(),
+            attachments: Vec::new(),
         }
     }
 

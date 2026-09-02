@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::future::Future;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -14,6 +14,1297 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod memory;
+
+#[cfg(debug_assertions)]
+fn pause_session_namespace_preparation_phase(phase: &str) -> Result<(), String> {
+    if std::env::var("NIB_TEST_SESSION_PREPARATION_PHASE").as_deref() != Ok(phase) {
+        return Ok(());
+    }
+    let ready = std::env::var_os("NIB_TEST_SESSION_PREPARATION_READY")
+        .map(PathBuf::from)
+        .ok_or_else(|| "missing session preparation readiness path".to_string())?;
+    std::fs::write(&ready, phase.as_bytes())
+        .map_err(|error| format!("publish session preparation phase: {error}"))?;
+    let resume = std::env::var_os("NIB_TEST_SESSION_PREPARATION_RESUME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "missing session preparation resume path".to_string())?;
+    let started = Instant::now();
+    while !resume.exists() {
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err(format!("timed out at session preparation phase {phase}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn pause_session_namespace_preparation_phase(_phase: &str) -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) struct SessionDirectoryPreflight {
+    sessions_dir: PathBuf,
+    parent_path: PathBuf,
+    retained_ancestor: crate::daemons::state::StableDirectory,
+    retained_directory: Option<crate::daemons::state::StableDirectory>,
+    retained_identity_file: Option<File>,
+    sensitive_values: Vec<String>,
+    runtime_config: crate::config::NibConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SessionNamespacePreparationPlan {
+    version: u32,
+    pub(crate) sessions_dir: PathBuf,
+    retained_ancestor: PathBuf,
+    retained_ancestor_identity: crate::fs_security::DirectoryIdentity,
+    proven_missing_directories: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_identity: Option<crate::fs_security::FileIdentitySnapshot>,
+    retained_anchor_present: bool,
+    identity_marker_bytes: Vec<u8>,
+}
+
+struct CreatedSessionDirectoryTree {
+    parent: crate::daemons::state::StableDirectory,
+    path: PathBuf,
+    directory: crate::daemons::state::StableDirectory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CreatedSessionDirectoryReceipt {
+    parent: PathBuf,
+    path: PathBuf,
+    identity: crate::fs_security::DirectoryIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct SessionPreparationReceipt {
+    version: u32,
+    pub(crate) sessions_dir: PathBuf,
+    pub(crate) session_id: String,
+    sessions_directory_identity: crate::fs_security::DirectoryIdentity,
+    directory_identity: crate::fs_security::FileIdentitySnapshot,
+    planned_session: Session,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_identity: Option<crate::fs_security::FileIdentitySnapshot>,
+    created_identity: bool,
+    created_directories: Vec<CreatedSessionDirectoryReceipt>,
+}
+
+impl SessionPreparationReceipt {
+    pub(crate) fn audit_directory_identity(&self) -> crate::fs_security::FileIdentitySnapshot {
+        self.directory_identity
+    }
+
+    pub(crate) fn is_exact_publication_successor(&self, previous: &Self) -> bool {
+        self.version == previous.version
+            && self.sessions_dir == previous.sessions_dir
+            && self.session_id == previous.session_id
+            && self.sessions_directory_identity == previous.sessions_directory_identity
+            && self.directory_identity == previous.directory_identity
+            && self.planned_session == previous.planned_session
+            && previous.session_identity.is_none()
+            && self.session_identity.is_some()
+            && self.created_identity == previous.created_identity
+            && self.created_directories == previous.created_directories
+    }
+}
+
+pub(crate) struct SessionStorePreparation {
+    store: Option<SessionStore>,
+    created_tree: Vec<CreatedSessionDirectoryTree>,
+    created_identity_file: Option<File>,
+    created_session_file: Option<(PathBuf, File)>,
+    planned_session: Option<Session>,
+    parent_directory: Option<crate::daemons::state::StableDirectory>,
+    directory: Option<crate::daemons::state::StableDirectory>,
+    sessions_dir: PathBuf,
+    namespace_lock: Arc<SessionMutex>,
+    armed: bool,
+}
+
+impl SessionStorePreparation {
+    pub(crate) fn store(&self) -> &SessionStore {
+        self.store
+            .as_ref()
+            .expect("prepared session store is present")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_unpublished_session(&mut self, id: &str) -> Result<(), String> {
+        self.create_unpublished_session_with_guard(id, || Ok(()))
+    }
+
+    pub(crate) fn create_unpublished_session_with_guard(
+        &mut self,
+        id: &str,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = self.store().lock_deadline().ok_or_else(|| {
+            "unpublished session preparation requires an absolute deadline".to_string()
+        })?;
+        external_guard()?;
+        let namespace_lock = self.namespace_lock.clone();
+        let _namespace_guard =
+            lock_session_mutex(&namespace_lock, &self.sessions_dir, Some(deadline))
+                .map_err(|error| error.to_string())?;
+        if self.planned_session.is_none() {
+            self.plan_unpublished_session(id)?;
+        }
+        let session = self
+            .planned_session
+            .as_ref()
+            .ok_or_else(|| "planned session is missing".to_string())?;
+        if session.id != id {
+            return Err("planned session id changed before publication".to_string());
+        }
+        let receipt = self
+            .store()
+            .create_unpublished_session_with_receipt_and_guard(session, &mut external_guard)
+            .map_err(|error| error.to_string())?;
+        external_guard()?;
+        self.created_session_file = Some((self.sessions_dir.join(format!("{id}.json")), receipt));
+        Ok(())
+    }
+
+    pub(crate) fn plan_unpublished_session(&mut self, id: &str) -> Result<(), String> {
+        self.store()
+            .validate_session_id(id)
+            .map_err(|error| error.to_string())?;
+        if let Some(planned) = &self.planned_session {
+            return (planned.id == id)
+                .then_some(())
+                .ok_or_else(|| "session preparation already planned another id".to_string());
+        }
+        self.planned_session = Some(Session::new(id.to_string()));
+        Ok(())
+    }
+
+    pub(crate) fn durable_receipt(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionPreparationReceipt, String> {
+        let directory_identity = self
+            .store()
+            .persistent_directory_identity()
+            .map_err(|error| error.to_string())?;
+        let sessions_directory_identity = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| "prepared session directory capability is missing".to_string())?
+            .directory_removal_receipt()?
+            .identity();
+        let planned_session = self
+            .planned_session
+            .clone()
+            .ok_or_else(|| "planned session receipt is missing".to_string())?;
+        let session_identity = self
+            .created_session_file
+            .as_ref()
+            .map(|(_, session_file)| crate::fs_security::file_identity_snapshot(session_file))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let created_directories = self
+            .created_tree
+            .iter()
+            .map(|created| {
+                Ok(CreatedSessionDirectoryReceipt {
+                    parent: created.parent.path().to_path_buf(),
+                    path: created.path.clone(),
+                    identity: created.directory.directory_removal_receipt()?.identity(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(SessionPreparationReceipt {
+            version: 1,
+            sessions_dir: self.sessions_dir.clone(),
+            session_id: session_id.to_string(),
+            sessions_directory_identity,
+            directory_identity,
+            planned_session,
+            session_identity,
+            created_identity: self.created_identity_file.is_some(),
+            created_directories,
+        })
+    }
+
+    pub(crate) fn disarm(mut self) -> SessionStore {
+        self.armed = false;
+        self.store
+            .take()
+            .expect("prepared session store is present")
+    }
+
+    pub(crate) fn cleanup(mut self, deadline: Instant) -> Result<(), String> {
+        self.cleanup_inner(deadline, &mut || Ok(()))
+    }
+
+    /// Attempt the exact cleanup once under a caller-owned durable recovery
+    /// authority.  If that bounded attempt fails, ownership has already been
+    /// handed to the durable receipt, so `Drop` must not renew the deadline and
+    /// race restart reconciliation with an unrecorded second attempt.
+    pub(crate) fn cleanup_with_guard_preserving_failure(
+        mut self,
+        deadline: Instant,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let result = self.cleanup_inner(deadline, &mut external_guard);
+        if result.is_err() {
+            self.armed = false;
+        }
+        result
+    }
+
+    /// Leave every remaining exact artifact to a previously persisted durable
+    /// preparation receipt instead of performing best-effort cleanup in Drop.
+    #[cfg(test)]
+    pub(crate) fn preserve_for_durable_reconciliation(mut self) {
+        self.armed = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_durable(
+        receipt: &SessionPreparationReceipt,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        Self::cleanup_durable_with_guard(receipt, deadline, || Ok(()))
+    }
+
+    pub(crate) fn cleanup_durable_with_guard(
+        receipt: &SessionPreparationReceipt,
+        deadline: Instant,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if receipt.version != 1 {
+            return Err("unsupported session preparation receipt version".to_string());
+        }
+        ensure_session_store_open_deadline(deadline)?;
+        external_guard()?;
+        let namespace_lock = session_preparation_mutex(&receipt.sessions_dir, Some(deadline))?;
+        let _namespace_guard =
+            lock_session_mutex(&namespace_lock, &receipt.sessions_dir, Some(deadline))
+                .map_err(|error| error.to_string())?;
+        let metadata = match std::fs::symlink_metadata(&receipt.sessions_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if crate::fs_security::metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+            return Err(format!(
+                "prepared session directory changed and was preserved: {}",
+                receipt.sessions_dir.display()
+            ));
+        }
+        validate_session_id(&receipt.session_id).map_err(|error| error.to_string())?;
+        if receipt.planned_session.id != receipt.session_id {
+            return Err("prepared session plan does not match its durable session id".to_string());
+        }
+        let parent_path = receipt.sessions_dir.parent().ok_or_else(|| {
+            "prepared session directory has no persistent identity parent".to_string()
+        })?;
+        let parent = crate::daemons::state::StableDirectory::open(parent_path)
+            .map_err(|error| format!("open prepared session parent: {error}"))?;
+        let directory = parent
+            .open_owned_child(&receipt.sessions_dir)
+            .map_err(|error| format!("open prepared sessions directory: {error}"))?;
+        if directory
+            .directory_removal_receipt()
+            .map_err(|error| format!("identify prepared sessions directory: {error}"))?
+            .identity()
+            != receipt.sessions_directory_identity
+        {
+            return Err(format!(
+                "prepared session directory changed identity and was preserved: {}",
+                receipt.sessions_dir.display()
+            ));
+        }
+        let session_path = receipt
+            .sessions_dir
+            .join(format!("{}.json", receipt.session_id));
+        let mut guard = || {
+            external_guard()?;
+            ensure_session_store_open_deadline(deadline)
+        };
+        let expected_session_bytes = serde_json::to_vec_pretty(&receipt.planned_session)
+            .map_err(|error| error.to_string())?;
+        // Resolve the exact missing-only atomic transaction before deciding
+        // whether the canonical leaf exists. This prevents a killed writer's
+        // temporary artifact from being ignored while marker/ancestor cleanup
+        // proceeds.
+        directory.recover_exact_missing_publication_with_guard(
+            &session_path,
+            ".nib-session-",
+            &expected_session_bytes,
+            &mut guard,
+        )?;
+        let deletion_quarantine = directory.deterministic_artifact_path(
+            &session_path,
+            ".nib-session-preparation-delete-",
+            ".quarantine",
+        )?;
+        let canonical_exists = directory.path_exists(&session_path)?;
+        let quarantine_exists = directory.path_exists(&deletion_quarantine)?;
+        if canonical_exists && quarantine_exists {
+            return Err(format!(
+                "prepared session leaf and deletion quarantine are ambiguous and were preserved: {}",
+                session_path.display()
+            ));
+        }
+        if quarantine_exists {
+            let quarantined = directory.open_read_write(&deletion_quarantine)?;
+            if let Some(expected) = &receipt.session_identity {
+                let observed = crate::fs_security::file_identity_snapshot(&quarantined)
+                    .map_err(|error| error.to_string())?;
+                if &observed != expected {
+                    return Err(format!(
+                        "prepared session deletion quarantine changed identity and was preserved: {}",
+                        deletion_quarantine.display()
+                    ));
+                }
+            }
+            let observed = {
+                let mut reader = (&quarantined).take(MAX_SESSION_JSON_BYTES + 1);
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                bytes
+            };
+            if observed != expected_session_bytes {
+                return Err(format!(
+                    "prepared session deletion quarantine bytes changed and were preserved: {}",
+                    deletion_quarantine.display()
+                ));
+            }
+            directory.remove_visible_file_if_matches_direct_with_guard(
+                &deletion_quarantine,
+                &quarantined,
+                &mut guard,
+            )?;
+        }
+        if directory
+            .path_exists(&session_path)
+            .map_err(|error| format!("inspect prepared session leaf: {error}"))?
+        {
+            let session_file = directory
+                .open_read_write(&session_path)
+                .map_err(|error| format!("open prepared session leaf: {error}"))?;
+            let observed = crate::fs_security::file_identity_snapshot(&session_file)
+                .map_err(|error| error.to_string())?;
+            match &receipt.session_identity {
+                Some(expected) if &observed != expected => {
+                    return Err(format!(
+                        "prepared session changed identity and was preserved: {}",
+                        session_path.display()
+                    ));
+                }
+                None => {
+                    if receipt.planned_session.id != receipt.session_id {
+                        return Err(
+                            "prepared session plan does not match its durable session id"
+                                .to_string(),
+                        );
+                    }
+                    let metadata = session_file.metadata().map_err(|error| error.to_string())?;
+                    if metadata.len() > MAX_SESSION_JSON_BYTES {
+                        return Err(format!(
+                            "prepared session exceeds the bounded read limit and was preserved: {}",
+                            session_path.display()
+                        ));
+                    }
+                    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                    let mut reader = (&session_file).take(MAX_SESSION_JSON_BYTES + 1);
+                    reader
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| error.to_string())?;
+                    guard()?;
+                    directory
+                        .verify_file_identity(&session_path, &session_file)
+                        .map_err(|error| {
+                            format!("verify prepared session leaf after read: {error}")
+                        })?;
+                    if bytes != expected_session_bytes {
+                        return Err(format!(
+                            "prepared session content changed and was preserved: {}",
+                            session_path.display()
+                        ));
+                    }
+                }
+                Some(_) => {}
+            }
+            directory.remove_file_if_matches_with_guard(
+                &session_path,
+                &session_file,
+                ".nib-session-preparation-delete-",
+                &mut guard,
+            )?;
+        }
+        if !receipt.created_identity {
+            return guard();
+        }
+        let mut has_shared_entries = false;
+        directory
+            .for_each_entry_bounded(1_024, 255, |name| {
+                if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
+                    has_shared_entries = true;
+                }
+                Ok(())
+            })
+            .map_err(|error| format!("scan prepared session namespace: {error}"))?;
+        if has_shared_entries {
+            return guard();
+        }
+        let visible = receipt.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+        let anchor = session_directory_identity_anchor(&visible)?;
+        let visible_file = directory
+            .path_exists(&visible)
+            .map_err(|error| format!("inspect prepared session marker: {error}"))?
+            .then(|| directory.open_read_write(&visible))
+            .transpose()
+            .map_err(|error| format!("open prepared session marker: {error}"))?;
+        let anchor_file = parent
+            .path_exists(&anchor)
+            .map_err(|error| format!("inspect prepared session anchor: {error}"))?
+            .then(|| parent.open_read_write(&anchor))
+            .transpose()
+            .map_err(|error| format!("open prepared session anchor: {error}"))?;
+        let identity_file = visible_file.as_ref().or(anchor_file.as_ref());
+        for candidate in [visible_file.as_ref(), anchor_file.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let observed = crate::fs_security::file_identity_snapshot(candidate)
+                .map_err(|error| error.to_string())?;
+            if observed != receipt.directory_identity {
+                return Err(format!(
+                    "prepared session marker changed identity and was preserved: {}",
+                    visible.display()
+                ));
+            }
+        }
+        if parent.path_exists(&anchor)? {
+            let identity_file = identity_file.ok_or_else(|| {
+                "prepared session anchor has no retained identity authority".to_string()
+            })?;
+            parent.remove_file_if_matches_with_guard(
+                &anchor,
+                identity_file,
+                ".nib-session-preparation-anchor-delete-",
+                &mut guard,
+            )?;
+        }
+        if directory.path_exists(&visible)? {
+            let identity_file = identity_file.ok_or_else(|| {
+                "prepared session marker has no retained identity authority".to_string()
+            })?;
+            directory.remove_file_if_matches_with_guard(
+                &visible,
+                identity_file,
+                ".nib-session-preparation-marker-delete-",
+                &mut guard,
+            )?;
+        }
+        drop(directory);
+        drop(parent);
+        for created in receipt.created_directories.iter().rev() {
+            guard()?;
+            if created.path.parent() != Some(created.parent.as_path()) {
+                return Err("prepared session directory receipt is not a direct child".to_string());
+            }
+            let parent = match crate::daemons::state::StableDirectory::open(&created.parent) {
+                Ok(parent) => parent,
+                Err(_error) if !created.parent.exists() => continue,
+                Err(error) => return Err(error),
+            };
+            match parent.entry_kind(&created.path)? {
+                None => continue,
+                Some(crate::daemons::state::StableEntryKind::Directory) => {}
+                Some(crate::daemons::state::StableEntryKind::File) => {
+                    return Err(format!(
+                        "prepared session directory was replaced by a file and was preserved: {}",
+                        created.path.display()
+                    ));
+                }
+            }
+            let child = parent.open_owned_child(&created.path)?;
+            if child.directory_removal_receipt()?.identity() != created.identity {
+                return Err(format!(
+                    "prepared session directory changed identity and was preserved: {}",
+                    created.path.display()
+                ));
+            }
+            let mut nonempty = false;
+            child.for_each_entry_bounded(1_024, 255, |_| {
+                nonempty = true;
+                Ok(())
+            })?;
+            if nonempty {
+                break;
+            }
+            parent.remove_empty_child_directory_if_matches_with_guard(
+                &created.path,
+                child,
+                &mut guard,
+            )?;
+        }
+        guard()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_planned_namespace(
+        plan: &SessionNamespacePreparationPlan,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        Self::cleanup_planned_namespace_with_guard(plan, deadline, || Ok(()))
+    }
+
+    pub(crate) fn cleanup_planned_namespace_with_guard(
+        plan: &SessionNamespacePreparationPlan,
+        deadline: Instant,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if plan.version != 1 {
+            return Err("unsupported session namespace preparation plan version".to_string());
+        }
+        ensure_session_store_open_deadline(deadline)?;
+        external_guard()?;
+        let namespace_lock = session_preparation_mutex(&plan.sessions_dir, Some(deadline))?;
+        let _namespace_guard =
+            lock_session_mutex(&namespace_lock, &plan.sessions_dir, Some(deadline))
+                .map_err(|error| error.to_string())?;
+        let mut guard = || {
+            external_guard()?;
+            ensure_session_store_open_deadline(deadline)
+        };
+        let retained = crate::daemons::state::StableDirectory::open(&plan.retained_ancestor)?;
+        if retained.directory_removal_receipt()?.identity() != plan.retained_ancestor_identity {
+            return Err(format!(
+                "prepared session ancestor changed identity and was preserved: {}",
+                plan.retained_ancestor.display()
+            ));
+        }
+        guard()?;
+        let relative = plan
+            .sessions_dir
+            .strip_prefix(&plan.retained_ancestor)
+            .map_err(|_| "planned session directory escaped its retained ancestor".to_string())?;
+        let mut current = retained;
+        let mut traversed = Vec::new();
+        let mut sessions = None;
+        let mut sessions_parent = None;
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err("planned session directory contains an unsafe component".to_string());
+            };
+            let child_path = current.path().join(name);
+            guard()?;
+            match current.entry_kind(&child_path)? {
+                None => break,
+                Some(crate::daemons::state::StableEntryKind::File) => {
+                    return Err(format!(
+                        "planned session directory was replaced by a file and was preserved: {}",
+                        child_path.display()
+                    ));
+                }
+                Some(crate::daemons::state::StableEntryKind::Directory) => {}
+            }
+            let child = current.open_owned_child(&child_path)?;
+            let created = plan.proven_missing_directories.contains(&child_path);
+            if created {
+                traversed.push((
+                    current.try_clone()?,
+                    child_path.clone(),
+                    child.directory_removal_receipt()?.identity(),
+                ));
+            }
+            if child_path == plan.sessions_dir {
+                sessions_parent = Some(current.try_clone()?);
+                sessions = Some(child);
+                break;
+            }
+            current = child;
+        }
+
+        let visible_path = plan.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+        let anchor_path = session_directory_identity_anchor(&visible_path)?;
+        let mut visible_file = None;
+        let mut anchor_file = None;
+        if let (Some(directory), Some(parent)) = (sessions.as_ref(), sessions_parent.as_ref()) {
+            guard()?;
+            if directory.path_exists(&visible_path)? {
+                visible_file = Some(directory.open_read_write(&visible_path)?);
+            }
+            guard()?;
+            if parent.path_exists(&anchor_path)? {
+                anchor_file = Some(parent.open_read_write(&anchor_path)?);
+            }
+            for file in [visible_file.as_ref(), anchor_file.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let observed = crate::fs_security::file_identity_snapshot(file)
+                    .map_err(|error| error.to_string())?;
+                if let Some(retained) = &plan.retained_identity {
+                    if &observed != retained {
+                        return Err(format!(
+                            "retained session identity changed and was preserved: {}",
+                            visible_path.display()
+                        ));
+                    }
+                } else {
+                    let metadata = file.metadata().map_err(|error| error.to_string())?;
+                    if metadata.len() != plan.identity_marker_bytes.len() as u64 {
+                        return Err(format!(
+                            "prepared session identity marker is ambiguous and was preserved: {}",
+                            visible_path.display()
+                        ));
+                    }
+                    let mut bytes = Vec::with_capacity(plan.identity_marker_bytes.len());
+                    file.take(plan.identity_marker_bytes.len() as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| error.to_string())?;
+                    if bytes != plan.identity_marker_bytes {
+                        return Err(format!(
+                            "prepared session identity marker changed and was preserved: {}",
+                            visible_path.display()
+                        ));
+                    }
+                }
+            }
+            if let (Some(visible), Some(anchor)) = (&visible_file, &anchor_file) {
+                let visible_identity = crate::fs_security::file_identity_snapshot(visible)
+                    .map_err(|error| error.to_string())?;
+                let anchor_identity = crate::fs_security::file_identity_snapshot(anchor)
+                    .map_err(|error| error.to_string())?;
+                if visible_identity != anchor_identity {
+                    return Err(format!(
+                        "prepared session identity pair is ambiguous and was preserved: {}",
+                        visible_path.display()
+                    ));
+                }
+            }
+        }
+
+        // A directory this transaction proved missing is owned only while its
+        // complete namespace contains the planned next component and marker.
+        // Inspect the entire planned chain before the first removal so an
+        // unrelated/adopted entry makes compensation fail closed.
+        for (index, (_, path, _)) in traversed.iter().enumerate() {
+            let directory = crate::daemons::state::StableDirectory::open(path)?;
+            let next = traversed.get(index + 1).map(|(_, path, _)| path);
+            let mut unexpected = None;
+            directory.for_each_entry_bounded(1_024, 255, |name| {
+                let entry_path = path.join(&name);
+                let allowed_next = next.is_some_and(|next| next == &entry_path);
+                let allowed_visible = entry_path == visible_path;
+                let allowed_anchor = entry_path == anchor_path;
+                if !allowed_next && !allowed_visible && !allowed_anchor {
+                    unexpected = Some(entry_path);
+                }
+                Ok(())
+            })?;
+            if let Some(unexpected) = unexpected {
+                return Err(format!(
+                    "prepared session namespace contains an unrelated entry and was preserved: {}",
+                    unexpected.display()
+                ));
+            }
+        }
+        // The anchor is a sibling of the sessions directory and therefore is
+        // intentionally outside the sessions-directory scan above.
+        if !plan.retained_anchor_present {
+            if let (Some(parent), Some(file)) = (sessions_parent.as_ref(), anchor_file.as_ref()) {
+                guard()?;
+                parent.remove_file_if_matches_with_guard(
+                    &anchor_path,
+                    file,
+                    ".nib-session-preparation-anchor-delete-",
+                    &mut guard,
+                )?;
+            }
+        }
+        if plan.retained_identity.is_none() {
+            if let (Some(directory), Some(file)) = (sessions.as_ref(), visible_file.as_ref()) {
+                guard()?;
+                directory.remove_file_if_matches_with_guard(
+                    &visible_path,
+                    file,
+                    ".nib-session-preparation-marker-delete-",
+                    &mut guard,
+                )?;
+            }
+        }
+        drop(sessions);
+        drop(sessions_parent);
+        for (parent, path, identity) in traversed.into_iter().rev() {
+            guard()?;
+            let child = match parent.entry_kind(&path)? {
+                None => continue,
+                Some(crate::daemons::state::StableEntryKind::Directory) => {
+                    parent.open_owned_child(&path)?
+                }
+                Some(crate::daemons::state::StableEntryKind::File) => {
+                    return Err(format!(
+                        "prepared session directory changed type and was preserved: {}",
+                        path.display()
+                    ));
+                }
+            };
+            if child.directory_removal_receipt()?.identity() != identity {
+                return Err(format!(
+                    "prepared session directory changed identity and was preserved: {}",
+                    path.display()
+                ));
+            }
+            let mut nonempty = false;
+            child.for_each_entry_bounded(1_024, 255, |_| {
+                nonempty = true;
+                Ok(())
+            })?;
+            if nonempty {
+                return Err(format!(
+                    "prepared session directory was adopted and was preserved: {}",
+                    path.display()
+                ));
+            }
+            parent.remove_empty_child_directory_if_matches_with_guard(&path, child, &mut guard)?;
+        }
+        guard()
+    }
+
+    fn cleanup_inner(
+        &mut self,
+        deadline: Instant,
+        external_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !self.armed {
+            return Ok(());
+        }
+        external_guard()?;
+        let namespace_lock = self.namespace_lock.clone();
+        let _namespace_guard =
+            lock_session_mutex(&namespace_lock, &self.sessions_dir, Some(deadline))
+                .map_err(|error| error.to_string())?;
+        drop(self.store.take());
+        if self.created_tree.is_empty()
+            && self.created_identity_file.is_none()
+            && self.created_session_file.is_none()
+        {
+            self.armed = false;
+            return Ok(());
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| "prepared session directory capability is missing".to_string())?;
+        let parent = self
+            .parent_directory
+            .as_ref()
+            .ok_or_else(|| "prepared session parent capability is missing".to_string())?;
+        let mut guard = || {
+            external_guard()?;
+            ensure_session_store_open_deadline(deadline)
+        };
+        if let Some((session_path, session_file)) = self.created_session_file.as_ref() {
+            directory.remove_file_if_matches_with_guard(
+                session_path,
+                session_file,
+                ".nib-session-preparation-delete-",
+                &mut guard,
+            )?;
+            self.created_session_file.take();
+        }
+        if let Some(identity_file) = self.created_identity_file.as_ref() {
+            let mut has_shared_entries = false;
+            directory.for_each_entry_bounded(1_024, 255, |name| {
+                if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
+                    has_shared_entries = true;
+                }
+                Ok(())
+            })?;
+            if has_shared_entries {
+                // Another spawn adopted this prepared namespace. The marker
+                // and its ancestor directories are now shared infrastructure,
+                // so this transaction owns only its exact session leaf.
+                self.created_identity_file.take();
+                self.created_tree.clear();
+                guard()?;
+                self.armed = false;
+                return Ok(());
+            }
+            let visible = self.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+            let anchor = session_directory_identity_anchor(&visible)?;
+            if parent.path_exists(&anchor)? {
+                parent.remove_file_if_matches_with_guard(
+                    &anchor,
+                    identity_file,
+                    ".nib-session-preparation-anchor-delete-",
+                    &mut guard,
+                )?;
+            }
+            if directory.path_exists(&visible)? {
+                directory.remove_file_if_matches_with_guard(
+                    &visible,
+                    identity_file,
+                    ".nib-session-preparation-marker-delete-",
+                    &mut guard,
+                )?;
+            }
+            self.created_identity_file.take();
+        }
+        self.directory.take();
+        self.parent_directory.take();
+        while let Some(tree) = self.created_tree.pop() {
+            guard()?;
+            let mut nonempty = false;
+            tree.directory.for_each_entry_bounded(1_024, 255, |_| {
+                nonempty = true;
+                Ok(())
+            })?;
+            if nonempty {
+                // A concurrently committed session/profile adopted this
+                // ancestor. Preserve it and every higher ancestor.
+                self.created_tree.clear();
+                break;
+            }
+            tree.parent
+                .remove_empty_child_directory_if_matches_with_guard(
+                    &tree.path,
+                    tree.directory,
+                    &mut guard,
+                )?;
+        }
+        guard()?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for SessionStorePreparation {
+    fn drop(&mut self) {
+        if self.armed {
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .unwrap_or_else(Instant::now);
+            let _ = self.cleanup_inner(deadline, &mut || Ok(()));
+        }
+    }
+}
+
+impl SessionDirectoryPreflight {
+    #[cfg(test)]
+    pub(crate) fn durable_preparation_plan_after_owned_worktree(
+        &self,
+        transaction_id: &str,
+        deadline: Instant,
+        worktree: Option<&crate::sandbox::worktree::Worktree>,
+    ) -> Result<SessionNamespacePreparationPlan, String> {
+        self.durable_preparation_plan_with_authority(transaction_id, deadline, worktree, None)
+    }
+
+    pub(crate) fn durable_preparation_plan_after_authorized_records(
+        &self,
+        transaction_id: &str,
+        deadline: Instant,
+        records: &crate::daemons::state::StableDirectory,
+    ) -> Result<SessionNamespacePreparationPlan, String> {
+        records.verify_visible()?;
+        self.durable_preparation_plan_with_authority(transaction_id, deadline, None, Some(records))
+    }
+
+    fn durable_preparation_plan_with_authority(
+        &self,
+        transaction_id: &str,
+        deadline: Instant,
+        worktree: Option<&crate::sandbox::worktree::Worktree>,
+        records: Option<&crate::daemons::state::StableDirectory>,
+    ) -> Result<SessionNamespacePreparationPlan, String> {
+        ensure_session_store_open_deadline(deadline)?;
+        self.retained_ancestor.verify_visible()?;
+        if let Some(worktree) = worktree {
+            worktree.verify_owned_namespace()?;
+        }
+        let retained_ancestor_identity = self
+            .retained_ancestor
+            .directory_removal_receipt()?
+            .identity();
+        let mut proven_missing_directories = Vec::new();
+        let relative = self
+            .sessions_dir
+            .strip_prefix(self.retained_ancestor.path())
+            .map_err(|_| {
+                "preflighted session directory escaped its retained ancestor".to_string()
+            })?;
+        let mut current = self.retained_ancestor.try_clone()?;
+        let mut planned_path = self.retained_ancestor.path().to_path_buf();
+        let mut missing = false;
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(
+                    "preflighted session directory contains an unsafe component".to_string()
+                );
+            };
+            planned_path.push(name);
+            let path = planned_path.clone();
+            if missing {
+                proven_missing_directories.push(path);
+                continue;
+            }
+            match current.entry_kind(&path)? {
+                None => {
+                    missing = true;
+                    proven_missing_directories.push(path);
+                }
+                Some(crate::daemons::state::StableEntryKind::Directory) => {
+                    let appeared_with_worktree =
+                        worktree.is_some_and(|worktree| worktree.path.starts_with(&path));
+                    let appeared_with_records =
+                        records.is_some_and(|records| records.path().starts_with(&path));
+                    let originally_retained = self
+                        .retained_directory
+                        .as_ref()
+                        .is_some_and(|directory| directory.path() == path);
+                    if !appeared_with_worktree && !appeared_with_records && !originally_retained {
+                        return Err(format!(
+                            "state directory appeared after its absence was proven: {}",
+                            path.display()
+                        ));
+                    }
+                    current = current.open_owned_child(&path)?;
+                }
+                Some(crate::daemons::state::StableEntryKind::File) => {
+                    return Err(format!(
+                        "future session directory component is not a directory: {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        let retained_identity = self
+            .retained_identity_file
+            .as_ref()
+            .map(crate::fs_security::file_identity_snapshot)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let retained_anchor_present = if retained_identity.is_some() {
+            let visible = self.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+            self.retained_ancestor
+                .path_exists(&session_directory_identity_anchor(&visible)?)?
+        } else {
+            false
+        };
+        ensure_session_store_open_deadline(deadline)?;
+        Ok(SessionNamespacePreparationPlan {
+            version: 1,
+            sessions_dir: self.sessions_dir.clone(),
+            retained_ancestor: self.retained_ancestor.path().to_path_buf(),
+            retained_ancestor_identity,
+            proven_missing_directories,
+            retained_identity,
+            retained_anchor_present,
+            identity_marker_bytes: format!("nib-session-preparation-v1:{transaction_id}\n")
+                .into_bytes(),
+        })
+    }
+
+    pub(crate) fn sessions_dir(&self) -> &Path {
+        &self.sessions_dir
+    }
+
+    pub(crate) fn runtime_config(&self) -> &crate::config::NibConfig {
+        &self.runtime_config
+    }
+
+    pub(crate) fn verify_continuity(&self, deadline: Instant) -> Result<(), String> {
+        ensure_session_store_open_deadline(deadline)?;
+        self.retained_ancestor.verify_visible()?;
+        ensure_session_store_open_deadline(deadline)?;
+        if self.retained_ancestor.path() != self.parent_path {
+            let relative = self
+                .parent_path
+                .strip_prefix(self.retained_ancestor.path())
+                .map_err(|_| {
+                    "preflighted session parent escaped its retained ancestor".to_string()
+                })?;
+            let first = relative.components().next().ok_or_else(|| {
+                "preflighted session parent has no retained descendant".to_string()
+            })?;
+            let std::path::Component::Normal(first) = first else {
+                return Err("preflighted session parent has an unsafe component".to_string());
+            };
+            let path = self.retained_ancestor.path().join(first);
+            if self.retained_ancestor.entry_kind(&path)?.is_some() {
+                return Err(format!(
+                    "state directory appeared after its absence was proven: {}",
+                    path.display()
+                ));
+            }
+        } else {
+            match &self.retained_directory {
+                Some(directory) => {
+                    directory.verify_visible()?;
+                    if let Some(identity) = &self.retained_identity_file {
+                        directory.verify_file_identity(
+                            &self.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE),
+                            identity,
+                        )?;
+                    }
+                }
+                None => {
+                    if self
+                        .retained_ancestor
+                        .entry_kind(&self.sessions_dir)?
+                        .is_some()
+                    {
+                        return Err(format!(
+                            "session directory appeared after read-only preflight: {}",
+                            self.sessions_dir.display()
+                        ));
+                    }
+                }
+            }
+        }
+        ensure_session_store_open_deadline(deadline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_until(self, deadline: Instant) -> Result<SessionStorePreparation, String> {
+        self.open_until_with_owned_worktree(deadline, None, None, &mut || Ok(()))
+    }
+
+    pub(crate) fn open_until_with_guard(
+        self,
+        deadline: Instant,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<SessionStorePreparation, String> {
+        self.open_until_with_owned_worktree(deadline, None, None, &mut external_guard)
+    }
+
+    pub(crate) fn open_until_after_owned_worktree_with_guard(
+        self,
+        deadline: Instant,
+        worktree: &crate::sandbox::worktree::Worktree,
+        durable_plan: Option<&SessionNamespacePreparationPlan>,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<SessionStorePreparation, String> {
+        self.open_until_with_owned_worktree(
+            deadline,
+            Some(worktree),
+            durable_plan,
+            &mut external_guard,
+        )
+    }
+
+    fn open_until_with_owned_worktree(
+        self,
+        deadline: Instant,
+        worktree: Option<&crate::sandbox::worktree::Worktree>,
+        durable_plan: Option<&SessionNamespacePreparationPlan>,
+        external_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<SessionStorePreparation, String> {
+        external_guard()?;
+        ensure_session_store_open_deadline(deadline)?;
+        let SessionDirectoryPreflight {
+            sessions_dir,
+            parent_path,
+            retained_ancestor,
+            retained_directory,
+            retained_identity_file,
+            sensitive_values,
+            runtime_config: _,
+        } = self;
+        let namespace_lock = session_preparation_mutex(&sessions_dir, Some(deadline))?;
+        let namespace_guard = lock_session_mutex(&namespace_lock, &sessions_dir, Some(deadline))
+            .map_err(|error| error.to_string())?;
+        if let Some(plan) = durable_plan {
+            if plan.version != 1
+                || plan.sessions_dir != sessions_dir
+                || plan.retained_ancestor != retained_ancestor.path()
+                || plan.retained_ancestor_identity
+                    != retained_ancestor.directory_removal_receipt()?.identity()
+            {
+                return Err(
+                    "durable session namespace plan changed before initialization".to_string(),
+                );
+            }
+        }
+        let mut preparation = SessionStorePreparation {
+            store: None,
+            created_tree: Vec::new(),
+            created_identity_file: None,
+            created_session_file: None,
+            planned_session: None,
+            parent_directory: None,
+            directory: None,
+            sessions_dir: sessions_dir.clone(),
+            namespace_lock: namespace_lock.clone(),
+            armed: true,
+        };
+        let outcome = (|| {
+            external_guard()?;
+            retained_ancestor.verify_visible()?;
+            ensure_session_store_open_deadline(deadline)?;
+
+            let mut parent = retained_ancestor;
+            if parent.path() != parent_path {
+                let relative = parent_path.strip_prefix(parent.path()).map_err(|_| {
+                    format!(
+                        "preflighted session parent is not below its retained ancestor {}: {}",
+                        parent.path().display(),
+                        parent_path.display()
+                    )
+                })?;
+                for component in relative.components() {
+                    let std::path::Component::Normal(name) = component else {
+                        return Err(format!(
+                            "preflighted session parent contains an unsafe component: {}",
+                            parent_path.display()
+                        ));
+                    };
+                    ensure_session_store_open_deadline(deadline)?;
+                    let child_path = parent.path().join(name);
+                    let child = match parent.entry_kind(&child_path)? {
+                        None => {
+                            let child = parent.create_owned_child_directory_no_replace_with_guard(
+                                &child_path,
+                                || {
+                                    external_guard()?;
+                                    ensure_session_store_open_deadline(deadline)
+                                },
+                            )?;
+                            pause_session_namespace_preparation_phase("directory")?;
+                            preparation.created_tree.push(CreatedSessionDirectoryTree {
+                                parent: parent.try_clone()?,
+                                path: child_path,
+                                directory: child.try_clone()?,
+                            });
+                            child
+                        }
+                        Some(crate::daemons::state::StableEntryKind::Directory)
+                            if worktree
+                                .is_some_and(|worktree| worktree.path.starts_with(&child_path)) =>
+                        {
+                            let worktree = worktree.expect("owned worktree guard is present");
+                            worktree.verify_owned_namespace()?;
+                            let child = parent.open_owned_child(&child_path)?;
+                            worktree.verify_owned_namespace()?;
+                            child
+                        }
+                        Some(_) => {
+                            return Err(format!(
+                                "state directory appeared after its absence was proven: {}",
+                                child_path.display()
+                            ));
+                        }
+                    };
+                    parent = child;
+                }
+            }
+            ensure_session_store_open_deadline(deadline)?;
+            parent.verify_visible()?;
+
+            let directory = match retained_directory {
+                Some(directory) => {
+                    directory.verify_visible()?;
+                    ensure_session_store_open_deadline(deadline)?;
+                    if !crate::fs_security::canonical_paths_match(directory.path(), &sessions_dir) {
+                        return Err(format!(
+                            "preflighted session directory changed before initialization: {}",
+                            sessions_dir.display()
+                        ));
+                    }
+                    directory
+                }
+                None => {
+                    if parent.entry_kind(&sessions_dir)?.is_some() {
+                        return Err(format!(
+                            "session directory appeared after read-only preflight: {}",
+                            sessions_dir.display()
+                        ));
+                    }
+                    let child = parent.create_owned_child_directory_no_replace_with_guard(
+                        &sessions_dir,
+                        || {
+                            external_guard()?;
+                            ensure_session_store_open_deadline(deadline)
+                        },
+                    )?;
+                    pause_session_namespace_preparation_phase("directory")?;
+                    preparation.created_tree.push(CreatedSessionDirectoryTree {
+                        parent: parent.try_clone()?,
+                        path: sessions_dir.clone(),
+                        directory: child.try_clone()?,
+                    });
+                    child
+                }
+            };
+            ensure_session_store_open_deadline(deadline)?;
+            preparation.parent_directory = Some(parent.try_clone()?);
+            preparation.directory = Some(directory.try_clone()?);
+            let created_identity = retained_identity_file.is_none();
+            let identity_file = initialize_preflighted_session_directory_identity_with_guard(
+                &directory,
+                &parent,
+                &sessions_dir,
+                retained_identity_file.as_ref(),
+                durable_plan.map(|plan| plan.identity_marker_bytes.as_slice()),
+                &mut || {
+                    external_guard()?;
+                    ensure_session_store_open_deadline(deadline)
+                },
+            )?;
+            if created_identity {
+                preparation.created_identity_file =
+                    Some(identity_file.try_clone().map_err(|error| {
+                        format!("failed to retain prepared session identity: {error}")
+                    })?);
+            }
+            ensure_session_store_open_deadline(deadline)?;
+            directory.verify_visible()?;
+            parent.verify_visible()?;
+            ensure_session_store_open_deadline(deadline)?;
+            if let Some(worktree) = worktree {
+                worktree.verify_owned_namespace()?;
+            }
+            external_guard()?;
+            Ok(SessionStore {
+                sessions_dir,
+                directory: Some(Arc::new(directory)),
+                parent_directory: Some(Arc::new(parent)),
+                directory_identity_file: Some(Arc::new(identity_file)),
+                initialization_error: None,
+                lock_timeout: None,
+                lock_deadline: Some(deadline),
+                sensitive_values: Arc::new(sensitive_values),
+            })
+        })();
+        drop(namespace_guard);
+        match outcome {
+            Ok(store) => {
+                preparation.store = Some(store);
+                Ok(preparation)
+            }
+            Err(error) => {
+                let cleanup_result = preparation.cleanup_inner(deadline, external_guard);
+                if cleanup_result.is_err() && durable_plan.is_some() {
+                    // The durable namespace plan is now the sole recovery
+                    // authority.  Do not let Drop renew this operation's
+                    // absolute deadline after a bounded cleanup failure.
+                    preparation.armed = false;
+                }
+                let cleanup = cleanup_result.err();
+                Err(match cleanup {
+                    Some(cleanup) => {
+                        format!("{error}; session preparation cleanup failed: {cleanup}")
+                    }
+                    None => error,
+                })
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMessage {
@@ -23,6 +1314,13 @@ pub struct SessionMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<PathAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathAttachment {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -236,6 +1534,20 @@ pub struct Session {
     pub active_skills: Vec<String>,
     #[serde(default)]
     pub skill_usage: Vec<SkillUsageRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_follow_ups: Vec<QueuedFollowUp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedFollowUp {
+    pub id: String,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+    pub source: String,
 }
 
 fn revision_is_zero(revision: &u64) -> bool {
@@ -323,6 +1635,15 @@ fn session_mismatch_field(expected: &Session, published: &Session) -> &'static s
     if expected.skill_usage != published.skill_usage {
         return "skill_usage";
     }
+    if expected.queued_follow_ups != published.queued_follow_ups {
+        return "queued_follow_ups";
+    }
+    if expected.display_name != published.display_name {
+        return "display_name";
+    }
+    if expected.forked_from != published.forked_from {
+        return "forked_from";
+    }
     "unknown field"
 }
 
@@ -340,6 +1661,9 @@ impl Session {
             events: vec![],
             active_skills: vec![],
             skill_usage: vec![],
+            queued_follow_ups: vec![],
+            display_name: None,
+            forked_from: None,
         }
     }
 
@@ -415,6 +1739,8 @@ pub enum SessionError {
     InvalidMutation(String),
     #[error("invalid session id: {0}")]
     InvalidSessionId(String),
+    #[error("session identifier conflicts with configured sensitive data")]
+    SensitiveSessionId,
     #[error("session file {path} is {size} bytes; maximum is {max} bytes")]
     FileTooLarge { path: String, size: u64, max: u64 },
 }
@@ -458,11 +1784,11 @@ pub(crate) fn validate_session_id(id: &str) -> Result<(), SessionError> {
 type SessionMutex = Mutex<()>;
 type SessionLockRegistry = Mutex<HashMap<PathBuf, Weak<SessionMutex>>>;
 
-fn lock_session_mutex<'a>(
-    mutex: &'a SessionMutex,
+fn lock_session_mutex<'a, T>(
+    mutex: &'a Mutex<T>,
     path: &Path,
     deadline: Option<Instant>,
-) -> Result<std::sync::MutexGuard<'a, ()>, SessionError> {
+) -> Result<std::sync::MutexGuard<'a, T>, SessionError> {
     let Some(deadline) = deadline else {
         return mutex
             .lock()
@@ -470,8 +1796,12 @@ fn lock_session_mutex<'a>(
     };
 
     loop {
+        ensure_session_lock_deadline(Some(deadline), path)?;
         match mutex.try_lock() {
-            Ok(guard) => return Ok(guard),
+            Ok(guard) => {
+                ensure_session_lock_deadline(Some(deadline), path)?;
+                return Ok(guard);
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => {
                 return Err(SessionError::LockPoisoned(path.display().to_string()));
             }
@@ -489,7 +1819,37 @@ fn lock_session_mutex<'a>(
     }
 }
 
+fn ensure_session_lock_deadline(
+    deadline: Option<Instant>,
+    path: &Path,
+) -> Result<(), SessionError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(SessionError::InvalidMutation(format!(
+            "timed out acquiring session lock: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 static SESSION_LOCKS: OnceLock<SessionLockRegistry> = OnceLock::new();
+static SESSION_PREPARATION_LOCKS: OnceLock<SessionLockRegistry> = OnceLock::new();
+
+fn session_preparation_mutex(
+    path: &Path,
+    deadline: Option<Instant>,
+) -> Result<Arc<SessionMutex>, String> {
+    let registry = SESSION_PREPARATION_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry =
+        lock_session_mutex(registry, path, deadline).map_err(|error| error.to_string())?;
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    registry.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
 const MAX_SESSION_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LISTED_SESSIONS: usize = 10_000;
 const MAX_SESSION_DIRECTORY_ENTRIES: usize = MAX_LISTED_SESSIONS + SESSION_LOCK_STRIPES + 16;
@@ -537,6 +1897,8 @@ pub struct SessionStore {
     directory_identity_file: Option<Arc<File>>,
     initialization_error: Option<String>,
     lock_timeout: Option<Duration>,
+    lock_deadline: Option<Instant>,
+    sensitive_values: Arc<Vec<String>>,
 }
 
 pub(crate) struct SessionRunLease {
@@ -631,8 +1993,197 @@ impl SessionStore {
     }
 
     pub fn for_project(project_root: &Path) -> Result<Self, String> {
-        let config =
-            crate::config::load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+        Self::for_project_until(project_root, None)
+    }
+
+    pub(crate) fn preflight_project_sessions_dir_until(
+        project_root: &Path,
+        deadline: Instant,
+    ) -> Result<SessionDirectoryPreflight, String> {
+        ensure_session_store_open_deadline(deadline)?;
+        let mut config =
+            crate::config::load_nib_config_full_preflight_read_only_until(project_root, deadline)
+                .map_err(|error| error.to_string())?;
+        ensure_session_store_open_deadline(deadline)?;
+        let (selected_profile_id, sessions_dir) =
+            crate::profile::ProfileRegistry::resolve_profile_sessions_without_migration_until(
+                project_root,
+                &config.profiles,
+                deadline,
+            )
+            .map_err(|error| error.to_string())?;
+        // Freeze the workspace-selected profile into the runtime snapshot. The
+        // child bootstrap intentionally reduces the profile set to this id;
+        // retaining the configured global default here would let a nested
+        // workspace inherit another profile's environment and skills.
+        config.profiles.default = selected_profile_id;
+        ensure_session_store_open_deadline(deadline)?;
+        let sessions_dir =
+            crate::fs_security::absolute_path(&sessions_dir).map_err(|error| error.to_string())?;
+        let parent_path = sessions_dir
+            .parent()
+            .ok_or_else(|| {
+                format!(
+                    "session directory has no persistent identity parent: {}",
+                    sessions_dir.display()
+                )
+            })?
+            .to_path_buf();
+
+        let mut ancestor_path = parent_path.clone();
+        loop {
+            ensure_session_store_open_deadline(deadline)?;
+            match std::fs::symlink_metadata(&ancestor_path) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor_path = ancestor_path
+                        .parent()
+                        .ok_or_else(|| {
+                            format!(
+                                "future session directory has no existing retained ancestor: {}",
+                                sessions_dir.display()
+                            )
+                        })?
+                        .to_path_buf();
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to inspect future session ancestor {}: {error}",
+                        ancestor_path.display()
+                    ));
+                }
+            }
+        }
+        let canonical_ancestor =
+            crate::fs_security::canonicalize_existing_directory_without_symlinks(&ancestor_path)
+                .map_err(|error| {
+                    format!(
+                        "existing session ancestor is unsafe {}: {error}",
+                        ancestor_path.display()
+                    )
+                })?;
+        if !crate::fs_security::canonical_paths_match(&canonical_ancestor, &ancestor_path) {
+            return Err(format!(
+                "preflighted session ancestor changed while it was retained: {}",
+                ancestor_path.display()
+            ));
+        }
+        ensure_session_store_open_deadline(deadline)?;
+        let retained_ancestor = crate::daemons::state::StableDirectory::open(&canonical_ancestor)?;
+        ensure_session_store_open_deadline(deadline)?;
+
+        let retained_directory = if retained_ancestor.path() == parent_path {
+            match retained_ancestor.entry_kind(&sessions_dir)? {
+                Some(crate::daemons::state::StableEntryKind::Directory) => {
+                    Some(retained_ancestor.open_owned_child(&sessions_dir)?)
+                }
+                Some(crate::daemons::state::StableEntryKind::File) => {
+                    return Err(format!(
+                        "future session directory is not a local directory: {}",
+                        sessions_dir.display()
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        ensure_session_store_open_deadline(deadline)?;
+        let retained_identity_file = match retained_directory.as_ref() {
+            Some(directory) => {
+                let identity_path = sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+                match directory.entry_kind(&identity_path)? {
+                    Some(crate::daemons::state::StableEntryKind::File) => {
+                        Some(directory.open_read(&identity_path)?)
+                    }
+                    Some(crate::daemons::state::StableEntryKind::Directory) => {
+                        return Err(format!(
+                            "session directory identity is not a regular file: {}",
+                            identity_path.display()
+                        ));
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        ensure_session_store_open_deadline(deadline)?;
+        Ok(SessionDirectoryPreflight {
+            sessions_dir,
+            parent_path,
+            retained_ancestor,
+            retained_directory,
+            retained_identity_file,
+            sensitive_values: config.public_session_sensitive_values(),
+            runtime_config: config,
+        })
+    }
+
+    pub(crate) fn for_existing_project_with_lock_deadline(
+        project_root: &Path,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        ensure_session_store_open_deadline(deadline)?;
+        let config = crate::config::load_nib_config_full_read_only_until(project_root, deadline)
+            .map_err(|error| error.to_string())?;
+        ensure_session_store_open_deadline(deadline)?;
+        let sessions_dir =
+            crate::profile::ProfileRegistry::resolve_sessions_dir_without_migration_until(
+                project_root,
+                &config.profiles,
+                deadline,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_session_store_open_deadline(deadline)?;
+        let (sessions_dir, directory, parent_directory, identity_file) =
+            open_existing_session_directory_until(&sessions_dir, deadline)?;
+        ensure_session_store_open_deadline(deadline)?;
+        Ok(Self {
+            sessions_dir,
+            directory: Some(Arc::new(directory)),
+            parent_directory: Some(Arc::new(parent_directory)),
+            directory_identity_file: Some(Arc::new(identity_file)),
+            initialization_error: None,
+            lock_timeout: None,
+            lock_deadline: Some(deadline),
+            sensitive_values: Arc::new(config.public_session_sensitive_values()),
+        })
+    }
+
+    pub(crate) fn at_existing_dir_with_identity_until(
+        sessions_dir: &Path,
+        expected_identity: crate::fs_security::FileIdentitySnapshot,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        let (sessions_dir, directory, parent_directory, identity_file) =
+            open_existing_session_directory_until(sessions_dir, deadline)?;
+        let observed_identity = crate::fs_security::file_identity_snapshot(&identity_file)
+            .map_err(|error| error.to_string())?;
+        if observed_identity != expected_identity {
+            return Err(format!(
+                "existing session directory identity changed: {}",
+                sessions_dir.display()
+            ));
+        }
+        ensure_session_store_open_deadline(deadline)?;
+        Ok(Self {
+            sessions_dir,
+            directory: Some(Arc::new(directory)),
+            parent_directory: Some(Arc::new(parent_directory)),
+            directory_identity_file: Some(Arc::new(identity_file)),
+            initialization_error: None,
+            lock_timeout: None,
+            lock_deadline: Some(deadline),
+            sensitive_values: Arc::new(Vec::new()),
+        })
+    }
+
+    fn for_project_until(project_root: &Path, deadline: Option<Instant>) -> Result<Self, String> {
+        let config = match deadline {
+            Some(deadline) => crate::config::load_nib_config_full_until(project_root, deadline),
+            None => crate::config::load_nib_config_full(project_root),
+        }
+        .map_err(|error| error.to_string())?;
         let profiles = crate::profile::ProfileRegistry::load(project_root, &config.profiles)
             .map_err(|error| error.to_string())?;
         let profile = profiles
@@ -641,7 +2192,17 @@ impl SessionStore {
         profile
             .ensure_state_dirs()
             .map_err(|error| error.to_string())?;
-        Ok(Self::at_dir(profile.sessions_dir().to_path_buf()))
+        let store = Self::at_dir(profile.sessions_dir().to_path_buf())
+            .with_sensitive_values(config.public_session_sensitive_values());
+        match deadline {
+            Some(deadline) => {
+                if Instant::now() >= deadline {
+                    return Err("session store lock deadline elapsed".to_string());
+                }
+                Ok(store.with_lock_deadline(deadline))
+            }
+            None => Ok(store),
+        }
     }
 
     pub fn at_dir(sessions_dir: PathBuf) -> Self {
@@ -655,6 +2216,8 @@ impl SessionStore {
                 directory_identity_file: Some(Arc::new(identity_file)),
                 initialization_error: None,
                 lock_timeout: None,
+                lock_deadline: None,
+                sensitive_values: Arc::new(Vec::new()),
             },
             Err(error) => Self {
                 sessions_dir: requested,
@@ -665,12 +2228,30 @@ impl SessionStore {
                     "session directory is unsafe or unavailable: {error}"
                 )),
                 lock_timeout: None,
+                lock_deadline: None,
+                sensitive_values: Arc::new(Vec::new()),
             },
         }
     }
 
+    pub(crate) fn with_sensitive_values(mut self, values: Vec<String>) -> Self {
+        self.sensitive_values = Arc::new(values);
+        self
+    }
+
+    pub(crate) fn public_sensitive_values(&self) -> &[String] {
+        self.sensitive_values.as_slice()
+    }
+
     pub(crate) fn with_lock_timeout(mut self, timeout: Duration) -> Self {
         self.lock_timeout = Some(timeout);
+        self.lock_deadline = None;
+        self
+    }
+
+    fn with_lock_deadline(mut self, deadline: Instant) -> Self {
+        self.lock_deadline = Some(deadline);
+        self.lock_timeout = None;
         self
     }
 
@@ -683,8 +2264,24 @@ impl SessionStore {
         &self.sessions_dir
     }
 
+    pub(crate) fn persistent_directory_identity(
+        &self,
+    ) -> Result<crate::fs_security::FileIdentitySnapshot, SessionError> {
+        self.verify_directory_binding()?;
+        let identity = self.directory_identity_file.as_deref().ok_or_else(|| {
+            SessionError::InvalidMutation(
+                "session directory identity is not initialized".to_string(),
+            )
+        })?;
+        crate::fs_security::file_identity_snapshot(identity).map_err(|error| {
+            SessionError::InvalidMutation(format!(
+                "failed to snapshot session directory identity: {error}"
+            ))
+        })
+    }
+
     pub(crate) fn try_acquire_run_lease(&self, id: &str) -> Result<SessionRunLease, SessionError> {
-        validate_session_id(id)?;
+        self.validate_session_id(id)?;
         self.verify_directory_binding()?;
         let lock_path = self.sessions_dir.join(format!(".session-run-{id}.lock"));
         let lock = crate::daemons::state::try_acquire_file_lock_in(&lock_path, &self.sessions_dir)
@@ -710,18 +2307,41 @@ impl SessionStore {
     }
 
     fn lock_path(&self, id: &str) -> Result<PathBuf, SessionError> {
-        validate_session_id(id)?;
+        self.validate_session_id(id)?;
         let stripe = session_lock_stripe(id);
         Ok(self
             .sessions_dir
             .join(format!(".session-lock-{stripe:02}.lock")))
     }
 
-    fn process_lock(&self, path: &Path) -> Result<Arc<SessionMutex>, SessionError> {
+    fn validate_session_id(&self, id: &str) -> Result<(), SessionError> {
+        let redacted = crate::tools::executor::redact_text_with_encoded_sensitive_values(
+            id,
+            self.sensitive_values.iter().cloned(),
+        );
+        if redacted != id {
+            return Err(SessionError::SensitiveSessionId);
+        }
+        validate_session_id(id)
+    }
+
+    fn process_lock(
+        &self,
+        path: &Path,
+        deadline: Option<Instant>,
+    ) -> Result<Arc<SessionMutex>, SessionError> {
         let registry = SESSION_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut registry = registry
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned(path.display().to_string()))?;
+        self.process_lock_in(registry, path, deadline)
+    }
+
+    fn process_lock_in(
+        &self,
+        registry: &SessionLockRegistry,
+        path: &Path,
+        deadline: Option<Instant>,
+    ) -> Result<Arc<SessionMutex>, SessionError> {
+        let mut registry = lock_session_mutex(registry, path, deadline)?;
+        ensure_session_lock_deadline(deadline, path)?;
         registry.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = registry.get(path).and_then(Weak::upgrade) {
             return Ok(lock);
@@ -771,6 +2391,9 @@ impl SessionStore {
     }
 
     fn lock_deadline(&self) -> Option<Instant> {
+        if let Some(deadline) = self.lock_deadline {
+            return Some(deadline);
+        }
         let now = Instant::now();
         self.lock_timeout
             .or_else(|| SESSION_LOCK_POLICY.try_with(|policy| policy.timeout).ok())
@@ -818,14 +2441,17 @@ impl SessionStore {
         operation: impl FnOnce(&crate::daemons::state::StableDirectory) -> Result<T, SessionError>,
     ) -> Result<T, SessionError> {
         self.verify_directory_binding()?;
-        let process_lock = self.process_lock(&lock_path)?;
+        let process_lock = self.process_lock(&lock_path, deadline)?;
         let _guard = lock_session_mutex(&process_lock, &lock_path, deadline)?;
         self.verify_directory_binding()?;
+        ensure_session_lock_deadline(deadline, &lock_path)?;
 
         let directory = self.directory()?;
         let mut outcome = None;
         let lock_operation = |_current_directory: &crate::daemons::state::StableDirectory| {
             self.verify_directory_binding()
+                .map_err(|error| error.to_string())?;
+            ensure_session_lock_deadline(deadline, &lock_path)
                 .map_err(|error| error.to_string())?;
             match operation(directory) {
                 Ok(value) => {
@@ -1052,6 +2678,107 @@ impl SessionStore {
         })
     }
 
+    fn create_unpublished_session_with_receipt_and_guard(
+        &self,
+        session: &Session,
+        external_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<File, SessionError> {
+        let id = session.id.as_str();
+        self.validate_session_id(id)?;
+        self.verify_directory_binding()?;
+        let deadline = self.lock_deadline().ok_or_else(|| {
+            SessionError::InvalidMutation(
+                "unpublished session preparation requires an absolute deadline".to_string(),
+            )
+        })?;
+        ensure_session_lock_deadline(Some(deadline), &self.path(id))?;
+        external_guard().map_err(SessionError::InvalidMutation)?;
+        let directory = self.directory()?;
+        let path = self.path(id);
+        if directory
+            .path_exists(&path)
+            .map_err(SessionError::InvalidMutation)?
+        {
+            return Err(SessionError::InvalidMutation(format!(
+                "unpublished session already exists: {id}"
+            )));
+        }
+        session.validate()?;
+        let encoded = serde_json::to_vec_pretty(session)?;
+        ensure_session_lock_deadline(Some(deadline), &path)?;
+        let receipt = match directory.save_bytes_atomically_expected_with_receipt_and_guard(
+            &path,
+            &encoded,
+            ".nib-session-",
+            crate::daemons::state::FileExpectation::Missing,
+            || {
+                external_guard()?;
+                ensure_session_lock_deadline(Some(deadline), &path)
+                    .map_err(|error| error.to_string())?;
+                self.verify_directory_binding()
+                    .map_err(|error| error.to_string())
+            },
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let message = error.message;
+                let receipt = error
+                    .receipt
+                    .ok_or_else(|| SessionError::InvalidMutation(message.clone()))?;
+                if !receipt.exact_identity {
+                    return Err(SessionError::InvalidMutation(format!(
+                        "{message}; unpublished session receipt was not exact"
+                    )));
+                }
+                let mut guard = || {
+                    external_guard()?;
+                    ensure_session_lock_deadline(Some(deadline), &path)
+                        .map_err(|error| error.to_string())?;
+                    self.verify_directory_binding()
+                        .map_err(|error| error.to_string())
+                };
+                directory
+                    .finalize_failed_exact_publication_with_guard(
+                        &path,
+                        None,
+                        &receipt,
+                        ".nib-session-",
+                        &encoded,
+                        &mut guard,
+                    )
+                    .map_err(|recovery| {
+                        SessionError::InvalidMutation(format!(
+                            "{message}; failed to finalize exact unpublished session: {recovery}"
+                        ))
+                    })?;
+                receipt
+            }
+        };
+        if !receipt.exact_identity {
+            return Err(SessionError::InvalidMutation(format!(
+                "unpublished session preparation did not retain exact publication identity: {}",
+                path.display()
+            )));
+        }
+        ensure_session_lock_deadline(Some(deadline), &path)?;
+        external_guard().map_err(SessionError::InvalidMutation)?;
+        let opened = self
+            .load_opened_unlocked(directory, id)?
+            .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
+        directory
+            .verify_file_identity(&path, &receipt.file)
+            .map_err(SessionError::InvalidMutation)?;
+        if opened.session != *session {
+            return Err(SessionError::InvalidMutation(format!(
+                "unpublished session publication changed during preparation: {}",
+                path.display()
+            )));
+        }
+        ensure_session_lock_deadline(Some(deadline), &path)?;
+        external_guard().map_err(SessionError::InvalidMutation)?;
+        Ok(receipt.file)
+    }
+
     pub fn create_session_with_id(&self, id: impl Into<String>) -> Session {
         let id = id.into();
         self.try_create_session_with_id(id.clone())
@@ -1074,6 +2801,23 @@ impl SessionStore {
         expected: Option<&File>,
         before_commit: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<(), SessionError> {
+        self.save_unlocked_with_namespace_guard(
+            directory,
+            session,
+            expected,
+            &mut || Ok(()),
+            before_commit,
+        )
+    }
+
+    fn save_unlocked_with_namespace_guard(
+        &self,
+        directory: &crate::daemons::state::StableDirectory,
+        session: &Session,
+        expected: Option<&File>,
+        namespace_guard: &mut impl FnMut() -> Result<(), SessionError>,
+        before_commit: impl FnOnce() -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
         session.validate()?;
         let path = self.path(&session.id);
         let data = serde_json::to_vec_pretty(session)?;
@@ -1089,12 +2833,13 @@ impl SessionStore {
             crate::daemons::state::FileExpectation::Present,
         );
         directory
-            .save_bytes_atomically_expected_with_hook(
+            .save_bytes_atomically_expected_with_guard_and_hook(
                 &path,
                 &data,
                 ".nib-session-",
                 true,
                 expected,
+                || namespace_guard().map_err(|error| error.to_string()),
                 || {
                     self.verify_directory_binding()
                         .map_err(|error| error.to_string())?;
@@ -1104,10 +2849,13 @@ impl SessionStore {
                 },
             )
             .map_err(SessionError::InvalidMutation)?;
+        namespace_guard()?;
         self.verify_directory_binding()?;
+        namespace_guard()?;
         let published = self
             .load_opened_unlocked(directory, &session.id)?
             .ok_or_else(|| SessionError::NotFound(session.id.clone()))?;
+        namespace_guard()?;
         if published.session != *session {
             return Err(SessionError::InvalidMutation(format!(
                 "published session did not retain the requested {}: {}",
@@ -1115,7 +2863,50 @@ impl SessionStore {
                 path.display()
             )));
         }
+        namespace_guard()?;
         Ok(())
+    }
+
+    fn save_unlocked_with_deadline(
+        &self,
+        directory: &crate::daemons::state::StableDirectory,
+        session: &Session,
+        expected: Option<&File>,
+        deadline: Option<Instant>,
+    ) -> Result<(), SessionError> {
+        self.save_unlocked_with_deadline_and_commit_check(
+            directory,
+            session,
+            expected,
+            deadline,
+            || Ok(()),
+        )
+    }
+
+    fn save_unlocked_with_deadline_and_commit_check(
+        &self,
+        directory: &crate::daemons::state::StableDirectory,
+        session: &Session,
+        expected: Option<&File>,
+        deadline: Option<Instant>,
+        before_commit: impl FnOnce() -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
+        match deadline {
+            Some(deadline) => {
+                let path = self.path(&session.id);
+                self.save_unlocked_with_namespace_guard(
+                    directory,
+                    session,
+                    expected,
+                    &mut || ensure_session_lock_deadline(Some(deadline), &path),
+                    before_commit,
+                )
+            }
+            None => {
+                before_commit()?;
+                self.save_unlocked(directory, session, expected)
+            }
+        }
     }
 
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
@@ -1158,7 +2949,12 @@ impl SessionStore {
                 )));
             }
             next.revision = committed_revision;
-            self.save_unlocked(directory, &next, opened.as_ref().map(|opened| &opened.file))
+            self.save_unlocked_with_deadline(
+                directory,
+                &next,
+                opened.as_ref().map(|opened| &opened.file),
+                deadline,
+            )
         };
         match deadline {
             Some(deadline) => self.with_session_lock_until(&session.id, deadline, operation),
@@ -1214,7 +3010,12 @@ impl SessionStore {
             opened.session.revision = revision.checked_add(1).ok_or_else(|| {
                 SessionError::InvalidMutation("session revision overflowed".to_string())
             })?;
-            self.save_unlocked(directory, &opened.session, Some(&opened.file))?;
+            self.save_unlocked_with_deadline(
+                directory,
+                &opened.session,
+                Some(&opened.file),
+                deadline,
+            )?;
             Ok(result)
         };
         match deadline {
@@ -1282,10 +3083,11 @@ impl SessionStore {
             session.revision = revision.checked_add(1).ok_or_else(|| {
                 SessionError::InvalidMutation("session revision overflowed".to_string())
             })?;
-            self.save_unlocked(
+            self.save_unlocked_with_deadline(
                 directory,
                 &session,
                 opened.as_ref().map(|opened| &opened.file),
+                deadline,
             )?;
             Ok(result)
         };
@@ -1392,6 +3194,7 @@ impl SessionStore {
                 role: role.to_string(),
                 content: content.to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             Ok(session.clone())
         })
@@ -1413,6 +3216,87 @@ impl SessionStore {
             };
             session.events.push(event.clone());
             Ok(event)
+        })
+    }
+
+    pub(crate) fn record_event_once_with_deadline(
+        &self,
+        id: &str,
+        kind: &str,
+        reconciliation_id: &str,
+        details: serde_json::Value,
+        legacy_details: serde_json::Value,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        self.with_skill_usage_lock_until(deadline, || {
+            self.with_session_lock_until(id, deadline, |directory| {
+                let opened = self.load_opened_unlocked(directory, id)?;
+                let mut session = opened
+                    .as_ref()
+                    .map(|opened| opened.session.clone())
+                    .unwrap_or_else(|| Session::new(id.to_string()));
+                let mut exact_index = None;
+                let mut legacy_index = None;
+                for (index, event) in session.events.iter().enumerate() {
+                    if event.kind != kind {
+                        continue;
+                    }
+                    if event
+                        .details
+                        .get("reconciliation_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(reconciliation_id)
+                    {
+                        if event.details != details || exact_index.replace(index).is_some() {
+                            return Err(SessionError::InvalidMutation(format!(
+                                "session {id} has conflicting duplicate reconciliation audit evidence"
+                            )));
+                        }
+                    } else if event.details == legacy_details
+                        && legacy_index.replace(index).is_some()
+                    {
+                        return Err(SessionError::InvalidMutation(format!(
+                            "session {id} has duplicate legacy reconciliation audit evidence"
+                        )));
+                    }
+                }
+                let session_path = self.path(id);
+                ensure_session_lock_deadline(Some(deadline), &session_path)?;
+                if exact_index.is_some() {
+                    if legacy_index.is_some() {
+                        return Err(SessionError::InvalidMutation(format!(
+                            "session {id} has both legacy and identified reconciliation audit evidence"
+                        )));
+                    }
+                    return Ok(());
+                }
+
+                let revision = session.revision;
+                if let Some(index) = legacy_index {
+                    session.events[index].details = details;
+                } else {
+                    let index = session.events.len();
+                    session.events.push(SessionEvent {
+                        index,
+                        kind: kind.to_string(),
+                        details,
+                        timestamp: Some(Utc::now()),
+                    });
+                }
+                session.revision = revision.checked_add(1).ok_or_else(|| {
+                    SessionError::InvalidMutation("session revision overflowed".to_string())
+                })?;
+                self.save_unlocked_with_deadline_and_commit_check(
+                    directory,
+                    &session,
+                    opened.as_ref().map(|opened| &opened.file),
+                    Some(deadline),
+                    || {
+                        pause_record_event_once_commit(deadline);
+                        ensure_session_lock_deadline(Some(deadline), &session_path)
+                    },
+                )
+            })
         })
     }
 
@@ -1498,7 +3382,8 @@ impl SessionStore {
                             )
                         })?
                         .to_string();
-                    validate_session_id(&id).map_err(|error| error.to_string())?;
+                    self.validate_session_id(&id)
+                        .map_err(|error| error.to_string())?;
                     if ids.len() >= max_sessions {
                         return Err(format!(
                             "session directory {} exceeds the {max_sessions}-session limit",
@@ -1534,7 +3419,13 @@ impl SessionStore {
                     Ok(())
                 },
             )
-            .map_err(SessionError::InvalidMutation)?;
+            .map_err(|error| {
+                if error == SessionError::SensitiveSessionId.to_string() {
+                    SessionError::SensitiveSessionId
+                } else {
+                    SessionError::InvalidMutation(error)
+                }
+            })?;
         ids.sort();
         if validate_contents {
             for id in &ids {
@@ -1628,26 +3519,104 @@ fn open_session_directory(
     Ok((sessions_dir, directory, parent, identity_file))
 }
 
+fn open_existing_session_directory_until(
+    requested: &Path,
+    deadline: Instant,
+) -> Result<
+    (
+        PathBuf,
+        crate::daemons::state::StableDirectory,
+        crate::daemons::state::StableDirectory,
+        File,
+    ),
+    String,
+> {
+    ensure_session_store_open_deadline(deadline)?;
+    crate::fs_security::verify_directory_without_symlinks(requested)
+        .map_err(|error| error.to_string())?;
+    ensure_session_store_open_deadline(deadline)?;
+    let sessions_dir = requested
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let parent_path = sessions_dir.parent().ok_or_else(|| {
+        format!(
+            "session directory has no persistent identity parent: {}",
+            sessions_dir.display()
+        )
+    })?;
+    ensure_session_store_open_deadline(deadline)?;
+    let parent = crate::daemons::state::StableDirectory::open(parent_path)?;
+    ensure_session_store_open_deadline(deadline)?;
+    let directory = parent.open_child(&sessions_dir)?;
+    ensure_session_store_open_deadline(deadline)?;
+    let visible = sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+    let anchor = session_directory_identity_anchor(&visible)?;
+    if !directory.path_exists(&visible)? || !parent.path_exists(&anchor)? {
+        return Err(format!(
+            "existing session directory has incomplete persistent identity: {}",
+            sessions_dir.display()
+        ));
+    }
+    ensure_session_store_open_deadline(deadline)?;
+    let identity_file = directory.open_read(&visible)?;
+    parent.verify_file_identity(&anchor, &identity_file)?;
+    directory.verify_visible()?;
+    parent.verify_visible()?;
+    ensure_session_store_open_deadline(deadline)?;
+    Ok((sessions_dir, directory, parent, identity_file))
+}
+
+fn ensure_session_store_open_deadline(deadline: Instant) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        return Err("session store lock deadline elapsed".to_string());
+    }
+    Ok(())
+}
+
 fn initialize_session_directory_identity(
     directory: &crate::daemons::state::StableDirectory,
     parent: &crate::daemons::state::StableDirectory,
     sessions_dir: &Path,
 ) -> Result<File, String> {
+    initialize_session_directory_identity_with_guard(
+        directory,
+        parent,
+        sessions_dir,
+        &mut || Ok(()),
+    )
+}
+
+fn initialize_session_directory_identity_with_guard(
+    directory: &crate::daemons::state::StableDirectory,
+    parent: &crate::daemons::state::StableDirectory,
+    sessions_dir: &Path,
+    namespace_guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<File, String> {
+    namespace_guard()?;
     let visible = sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
     let anchor = session_directory_identity_anchor(&visible)?;
+    namespace_guard()?;
     let visible_exists = directory.path_exists(&visible)?;
+    namespace_guard()?;
     let anchor_exists = parent.path_exists(&anchor)?;
+    namespace_guard()?;
 
     match (visible_exists, anchor_exists) {
         (false, false) => {
-            drop(directory.open_read_write_create(&visible)?);
-            directory.hard_link_to(&visible, parent, &anchor)?;
+            drop(directory.open_read_write_create_with_guard(&visible, &mut *namespace_guard)?);
+            namespace_guard()?;
+            directory.hard_link_to_with_guard(&visible, parent, &anchor, &mut *namespace_guard)?;
+            namespace_guard()?;
             directory.sync_directory()?;
+            namespace_guard()?;
             parent.sync_directory()?;
+            namespace_guard()?;
         }
         (true, false) => {
-            directory.hard_link_to(&visible, parent, &anchor)?;
+            directory.hard_link_to_with_guard(&visible, parent, &anchor, &mut *namespace_guard)?;
+            namespace_guard()?;
             parent.sync_directory()?;
+            namespace_guard()?;
         }
         (false, true) => {
             return Err(format!(
@@ -1658,10 +3627,116 @@ fn initialize_session_directory_identity(
         (true, true) => {}
     }
 
+    namespace_guard()?;
     let identity_file = directory.open_read(&visible)?;
+    namespace_guard()?;
     parent.verify_file_identity(&anchor, &identity_file)?;
+    namespace_guard()?;
     directory.verify_visible()?;
+    namespace_guard()?;
     parent.verify_visible()?;
+    namespace_guard()?;
+    Ok(identity_file)
+}
+
+fn initialize_preflighted_session_directory_identity_with_guard(
+    directory: &crate::daemons::state::StableDirectory,
+    parent: &crate::daemons::state::StableDirectory,
+    sessions_dir: &Path,
+    retained_identity_file: Option<&File>,
+    planned_identity_bytes: Option<&[u8]>,
+    namespace_guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<File, String> {
+    namespace_guard()?;
+    let visible = sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+    let anchor = session_directory_identity_anchor(&visible)?;
+    namespace_guard()?;
+    let visible_exists = directory.path_exists(&visible)?;
+    namespace_guard()?;
+    let anchor_exists = parent.path_exists(&anchor)?;
+    namespace_guard()?;
+
+    match retained_identity_file {
+        Some(retained) => {
+            if !visible_exists {
+                return Err(format!(
+                    "preflighted session directory identity disappeared: {}",
+                    visible.display()
+                ));
+            }
+            directory.verify_file_identity(&visible, retained)?;
+            namespace_guard()?;
+            if anchor_exists {
+                parent.verify_file_identity(&anchor, retained)?;
+                namespace_guard()?;
+            } else {
+                directory.hard_link_to_with_guard(
+                    &visible,
+                    parent,
+                    &anchor,
+                    &mut *namespace_guard,
+                )?;
+                namespace_guard()?;
+                parent.verify_file_identity(&anchor, retained)?;
+                namespace_guard()?;
+                parent.sync_directory()?;
+                namespace_guard()?;
+            }
+        }
+        None => {
+            if visible_exists || anchor_exists {
+                return Err(format!(
+                    "session directory identity appeared after read-only preflight: {}",
+                    sessions_dir.display()
+                ));
+            }
+            let created =
+                directory.open_read_write_create_new_with_guard(&visible, &mut *namespace_guard)?;
+            namespace_guard()?;
+            if let Some(bytes) = planned_identity_bytes {
+                let mut writer = &created;
+                writer.write_all(bytes).map_err(|error| error.to_string())?;
+                namespace_guard()?;
+                created.sync_all().map_err(|error| error.to_string())?;
+                namespace_guard()?;
+            }
+            pause_session_namespace_preparation_phase("marker")?;
+            directory.hard_link_to_with_guard(&visible, parent, &anchor, &mut *namespace_guard)?;
+            pause_session_namespace_preparation_phase("anchor")?;
+            namespace_guard()?;
+            parent.verify_file_identity(&anchor, &created)?;
+            namespace_guard()?;
+            directory.sync_directory()?;
+            pause_session_namespace_preparation_phase("sync")?;
+            namespace_guard()?;
+            parent.sync_directory()?;
+            namespace_guard()?;
+        }
+    }
+
+    namespace_guard()?;
+    let identity_file = directory.open_read(&visible)?;
+    namespace_guard()?;
+    if let Some(retained) = retained_identity_file {
+        directory.verify_file_identity(&visible, retained)?;
+        let expected = crate::fs_security::file_identity_snapshot(retained)
+            .map_err(|error| error.to_string())?;
+        let observed = crate::fs_security::file_identity_snapshot(&identity_file)
+            .map_err(|error| error.to_string())?;
+        if observed != expected {
+            return Err(format!(
+                "preflighted session directory identity changed before initialization: {}",
+                sessions_dir.display()
+            ));
+        }
+    }
+    parent.verify_file_identity(&anchor, &identity_file)?;
+    namespace_guard()?;
+    directory.verify_visible()?;
+    namespace_guard()?;
+    parent.verify_visible()?;
+    namespace_guard()?;
+    pause_session_namespace_preparation_phase("final")?;
     Ok(identity_file)
 }
 
@@ -1680,9 +3755,179 @@ fn session_lock_stripe(id: &str) -> usize {
 }
 
 #[cfg(test)]
+thread_local! {
+    static PAUSE_RECORD_EVENT_ONCE_COMMIT: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn pause_record_event_once_commit(deadline: Instant) {
+    if PAUSE_RECORD_EVENT_ONCE_COMMIT.get() {
+        while Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn pause_record_event_once_commit(_deadline: Instant) {}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn session_namespace_snapshot(path: &Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+        let mut snapshot = fs::read_dir(path)
+            .expect("read session namespace")
+            .map(|entry| {
+                let entry = entry.expect("session namespace entry");
+                (
+                    entry.file_name(),
+                    crate::fs_security::read_namespace_snapshot_file(&entry.path())
+                        .expect("session namespace bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    fn session_namespace_shape(path: &Path) -> Vec<(std::ffi::OsString, u64)> {
+        let mut snapshot = fs::read_dir(path)
+            .expect("read session namespace shape")
+            .map(|entry| {
+                let entry = entry.expect("session namespace shape entry");
+                (
+                    entry.file_name(),
+                    entry
+                        .metadata()
+                        .expect("session namespace shape metadata")
+                        .len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    #[test]
+    fn failed_preparation_preserves_a_concurrently_adopted_session_namespace() {
+        let root = tempfile::tempdir().expect("project root");
+        let mut config = crate::config::NibConfig::default();
+        crate::config::save_nib_config_full(root.path(), &mut config).expect("config");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let preflight_a = SessionStore::preflight_project_sessions_dir_until(root.path(), deadline)
+            .expect("A preflight");
+        let mut preparation_a = preflight_a.open_until(deadline).expect("A preparation");
+        preparation_a
+            .create_unpublished_session("session-a")
+            .expect("A session");
+
+        let preflight_b = SessionStore::preflight_project_sessions_dir_until(root.path(), deadline)
+            .expect("B preflight after A publication");
+        let mut preparation_b = preflight_b
+            .open_until(deadline)
+            .expect("B adopts namespace");
+        preparation_b
+            .create_unpublished_session("session-b")
+            .expect("B session");
+        let sessions_dir = preparation_b.store().sessions_dir().to_path_buf();
+        let store_b = preparation_b.disarm();
+        let committed_b = session_namespace_snapshot(&sessions_dir)
+            .into_iter()
+            .filter(|(name, _)| name != "session-a.json")
+            .collect::<Vec<_>>();
+
+        preparation_a
+            .cleanup(deadline)
+            .expect("A leaf-only compensation");
+
+        assert_eq!(session_namespace_snapshot(&sessions_dir), committed_b);
+        assert!(store_b.load_result("session-b").expect("load B").is_some());
+        assert!(!sessions_dir.join("session-a.json").exists());
+        assert!(sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE).is_file());
+    }
+
+    #[test]
+    fn durable_planned_session_receipt_cleans_publication_before_identity_update() {
+        let root = tempfile::tempdir().expect("project root");
+        let mut config = crate::config::NibConfig::default();
+        crate::config::save_nib_config_full(root.path(), &mut config).expect("config");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let preflight = SessionStore::preflight_project_sessions_dir_until(root.path(), deadline)
+            .expect("session preflight");
+        let mut preparation = preflight.open_until(deadline).expect("session preparation");
+        preparation
+            .plan_unpublished_session("planned-before-publication")
+            .expect("durable session plan");
+        let receipt = preparation
+            .durable_receipt("planned-before-publication")
+            .expect("receipt before publication");
+        assert!(receipt.session_identity.is_none());
+
+        preparation
+            .create_unpublished_session("planned-before-publication")
+            .expect("publish planned session");
+        let sessions_dir = preparation.store().sessions_dir().to_path_buf();
+        assert!(sessions_dir
+            .join("planned-before-publication.json")
+            .is_file());
+        drop(preparation.disarm());
+
+        SessionStorePreparation::cleanup_durable(&receipt, deadline)
+            .expect("restart cleans the exact planned publication");
+        assert!(!sessions_dir
+            .join("planned-before-publication.json")
+            .exists());
+        assert!(!sessions_dir.exists());
+    }
+
+    #[test]
+    fn planned_namespace_cleanup_preserves_unrelated_or_ambiguous_state_byte_exactly() {
+        let root = tempfile::tempdir().expect("project root");
+        let mut config = crate::config::NibConfig::default();
+        crate::config::save_nib_config_full(root.path(), &mut config).expect("config");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let preflight = SessionStore::preflight_project_sessions_dir_until(root.path(), deadline)
+            .expect("session preflight");
+        let plan = preflight
+            .durable_preparation_plan_after_owned_worktree("hostile-preservation", deadline, None)
+            .expect("durable namespace plan");
+        let preparation = preflight
+            .open_until_with_owned_worktree(deadline, None, Some(&plan), &mut || Ok(()))
+            .expect("publish planned namespace");
+        let sessions_dir = preparation.store().sessions_dir().to_path_buf();
+        drop(preparation.disarm());
+        std::fs::write(sessions_dir.join("hostile-sentinel"), b"preserve-me")
+            .expect("hostile sentinel");
+        let before = session_namespace_snapshot(&sessions_dir);
+
+        let error = SessionStorePreparation::cleanup_planned_namespace(&plan, deadline)
+            .expect_err("unrelated state must fail closed");
+        assert!(
+            error.contains("unrelated entry"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(session_namespace_snapshot(&sessions_dir), before);
+
+        std::fs::remove_file(sessions_dir.join("hostile-sentinel")).expect("remove sentinel");
+        let marker = sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
+        std::fs::write(&marker, b"ambiguous-marker").expect("replace marker content");
+        let anchor = session_directory_identity_anchor(&marker).expect("identity anchor");
+        let before_marker = session_namespace_snapshot(&sessions_dir);
+        let before_anchor = std::fs::read(&anchor).expect("anchor bytes");
+        let error = SessionStorePreparation::cleanup_planned_namespace(&plan, deadline)
+            .expect_err("ambiguous marker must fail closed");
+        assert!(
+            error.contains("marker changed") || error.contains("marker is ambiguous"),
+            "unexpected marker error: {error}"
+        );
+        assert_eq!(session_namespace_snapshot(&sessions_dir), before_marker);
+        assert_eq!(
+            std::fs::read(anchor).expect("preserved anchor"),
+            before_anchor
+        );
+    }
 
     #[cfg(unix)]
     const SESSION_COMMIT_CHILD_ROOT: &str = "NIB_SESSION_COMMIT_CHILD_ROOT";
@@ -2244,6 +4489,280 @@ mod tests {
     }
 
     #[test]
+    fn expired_deadline_rejects_free_session_locks_without_mutating() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("expired-free-session-lock");
+        let mut update_ran = false;
+
+        let error = store
+            .update_session_with_deadline(
+                &session.id,
+                Instant::now() - Duration::from_millis(1),
+                |current| {
+                    update_ran = true;
+                    current.summary = Some("must not persist".to_string());
+                    Ok(())
+                },
+            )
+            .expect_err("an expired deadline must reject uncontended session locks");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring session lock"),
+            "{error}"
+        );
+        assert!(!update_ran, "expired session update entered its mutation");
+        assert_eq!(
+            store.load(&session.id).expect("session remains").summary,
+            None
+        );
+    }
+
+    #[test]
+    fn session_read_crossing_its_deadline_is_rejected_without_late_anchor_cleanup() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("expired-post-read-session");
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let mut read_namespace = None;
+
+        let error = store
+            .with_session_lock_until(&session.id, deadline, |directory| {
+                store.load_opened_unlocked_with_hook(directory, &session.id, || {
+                    read_namespace = Some(session_namespace_snapshot(store.sessions_dir()));
+                    while Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .expect_err("a session read crossing its deadline must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring daemon state lock"),
+            "{error}"
+        );
+        let read_namespace = read_namespace.expect("captured post-read lock namespace");
+        assert_eq!(
+            session_namespace_snapshot(store.sessions_dir()),
+            read_namespace,
+            "post-expiry lock cleanup mutated its persistent anchor"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            session_namespace_snapshot(store.sessions_dir()),
+            read_namespace,
+            "post-expiry lock cleanup mutated its persistent anchor later"
+        );
+        assert_eq!(
+            store
+                .load_result(&session.id)
+                .expect("later unbounded read")
+                .expect("session")
+                .id,
+            session.id
+        );
+    }
+
+    #[test]
+    fn session_publication_rechecks_deadline_at_the_commit_boundary() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("expired-session-commit");
+        let path = store.path(&session.id);
+        let original = fs::read(&path).expect("original session bytes");
+        let before_namespace = session_namespace_snapshot(store.sessions_dir());
+        let mut paused_namespace = None;
+        let mut expected_temporary = None;
+
+        let error = store
+            .with_skill_usage_lock(|| {
+                store.with_session_lock(&session.id, |directory| {
+                    let mut opened = store
+                        .load_opened_unlocked(directory, &session.id)?
+                        .ok_or_else(|| SessionError::NotFound(session.id.clone()))?;
+                    opened.session.summary = Some("must not publish".to_string());
+                    opened.session.revision += 1;
+                    expected_temporary = Some(
+                        serde_json::to_vec_pretty(&opened.session)
+                            .expect("expected temporary session bytes"),
+                    );
+                    let commit_timeout = if cfg!(windows) {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::from_millis(40)
+                    };
+                    let deadline = Instant::now() + commit_timeout;
+                    store.save_unlocked_with_deadline_and_commit_check(
+                        directory,
+                        &opened.session,
+                        Some(&opened.file),
+                        Some(deadline),
+                        || {
+                            paused_namespace = Some(session_namespace_shape(store.sessions_dir()));
+                            while Instant::now() < deadline {
+                                std::thread::yield_now();
+                            }
+                            Ok(())
+                        },
+                    )
+                })
+            })
+            .expect_err("expired session precommit must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring session lock"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged session bytes"), original);
+        let paused_namespace = paused_namespace.expect("captured session precommit namespace");
+        let post_failure_namespace = session_namespace_snapshot(store.sessions_dir());
+        assert_eq!(
+            session_namespace_shape(store.sessions_dir()),
+            paused_namespace,
+            "expired session cleanup mutated transaction artifacts"
+        );
+        let expected_temporary = expected_temporary.expect("serialized temporary session");
+        let mut saw_temporary = false;
+        for (name, bytes) in &post_failure_namespace {
+            let rendered = name.to_string_lossy();
+            if rendered.starts_with(".nib-session-") && rendered.ends_with(".tmp") {
+                assert!(!saw_temporary, "multiple retained session temporaries");
+                assert_eq!(bytes, &expected_temporary, "retained temporary bytes");
+                saw_temporary = true;
+            } else if let Some((_, expected)) = before_namespace
+                .iter()
+                .find(|(before_name, _)| before_name == name)
+            {
+                assert_eq!(bytes, expected, "pre-existing session namespace bytes");
+            } else {
+                assert!(
+                    bytes.is_empty(),
+                    "unexpected nonempty session transaction artifact: {rendered}"
+                );
+            }
+        }
+        assert!(
+            saw_temporary,
+            "expired publication did not retain its temporary"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            session_namespace_snapshot(store.sessions_dir()),
+            post_failure_namespace,
+            "expired session cleanup mutated transaction artifacts later"
+        );
+
+        let mut update_ran = false;
+        let missing = "preexpired-session-create";
+        store
+            .update_or_create_session_with_deadline(
+                missing,
+                Instant::now() - Duration::from_millis(1),
+                |_session| {
+                    update_ran = true;
+                    Ok(())
+                },
+            )
+            .expect_err("preexpired update-or-create must fail on free locks");
+        assert!(!update_ran, "preexpired session mutation ran");
+        assert!(
+            !store.path(missing).exists(),
+            "preexpired session was created"
+        );
+    }
+
+    #[test]
+    fn append_once_audit_expiry_preserves_the_complete_session_namespace() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("expired-append-once-audit");
+        let path = store.path(&session.id);
+        let original = fs::read(&path).expect("original audit session bytes");
+        let before_namespace = session_namespace_snapshot(store.sessions_dir());
+        let deadline = Instant::now() + Duration::from_millis(40);
+
+        PAUSE_RECORD_EVENT_ONCE_COMMIT.set(true);
+        let result = store.record_event_once_with_deadline(
+            &session.id,
+            "subagent_execution_reconciled",
+            "reconciliation-v1",
+            serde_json::json!({
+                "reconciliation_id": "reconciliation-v1",
+                "outcome": "cancelled_after_verified_cleanup",
+            }),
+            serde_json::json!({
+                "outcome": "cancelled_after_verified_cleanup",
+            }),
+            deadline,
+        );
+        PAUSE_RECORD_EVENT_ONCE_COMMIT.set(false);
+        let error = result.expect_err("expired append-once publication must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring daemon state lock"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged audit session"), original);
+        let expired_namespace = session_namespace_snapshot(store.sessions_dir());
+        assert_ne!(
+            expired_namespace, before_namespace,
+            "the prepublication pause must retain its recoverable transaction"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            session_namespace_snapshot(store.sessions_dir()),
+            expired_namespace,
+            "expired append-once cleanup mutated the session namespace later"
+        );
+        assert!(store
+            .load_result(&session.id)
+            .expect("load unchanged audit session")
+            .expect("audit session")
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn session_lock_registry_contention_obeys_the_absolute_deadline() {
+        let root = tempdir().expect("project");
+        let store = SessionStore::new(root.path());
+        let registry: SessionLockRegistry = Mutex::new(HashMap::new());
+        let held_registry = registry.lock().expect("hold session lock registry");
+        let path = store.sessions_dir().join("registry-contention.lock");
+        let started = Instant::now();
+
+        let error = store
+            .process_lock_in(
+                &registry,
+                &path,
+                Some(Instant::now() + Duration::from_millis(75)),
+            )
+            .expect_err("the session lock registry wait must be bounded");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out acquiring session lock"),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            held_registry.is_empty(),
+            "contended registry was not mutated"
+        );
+    }
+
+    #[test]
     fn deadline_update_times_out_behind_process_lock_without_mutating() {
         let root = tempdir().expect("project");
         let store = SessionStore::new(root.path());
@@ -2360,7 +4879,7 @@ mod tests {
                 .with_session_lock(&session_holder_id, |_| {
                     session_held_tx.send(()).expect("signal session lock held");
                     release_session_rx
-                        .recv_timeout(Duration::from_secs(5))
+                        .recv_timeout(Duration::from_secs(10))
                         .expect("release session lock");
                     Ok(())
                 })
@@ -2378,7 +4897,7 @@ mod tests {
                 .with_skill_usage_lock(|| {
                     skill_held_tx.send(()).expect("signal skill lock held");
                     release_skill_rx
-                        .recv_timeout(Duration::from_secs(5))
+                        .recv_timeout(Duration::from_secs(10))
                         .expect("release skill lock");
                     Ok(())
                 })
@@ -2389,10 +4908,10 @@ mod tests {
             .expect("skill usage lock is held");
 
         let delayed_release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_secs(1));
             release_skill_tx.send(()).expect("release skill usage lock");
         });
-        let bounded_store = store.clone().with_lock_timeout(Duration::from_millis(300));
+        let bounded_store = store.clone().with_lock_timeout(Duration::from_secs(3));
         let started = Instant::now();
         let error = bounded_store
             .update_session(&session.id, |_current| Ok(()))
@@ -2401,11 +4920,11 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("timed out acquiring session lock"),
+                .contains("timed out acquiring daemon state lock"),
             "{error}"
         );
         assert!(
-            elapsed < Duration::from_millis(420),
+            elapsed < Duration::from_secs(4),
             "nested locks received separate timeout budgets: {elapsed:?}"
         );
 

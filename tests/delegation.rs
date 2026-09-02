@@ -207,7 +207,27 @@ fn subagent_listing_rejects_symlinked_records() {
     let root = tempdir().expect("root");
     let outside = tempdir().expect("outside");
     let record_dir = root.path().join(".nib/subagents");
-    std::fs::create_dir_all(&record_dir).expect("records");
+    write_subagent_record(
+        root.path(),
+        &SubagentRecord {
+            id: "initializer".to_string(),
+            parent_session_id: None,
+            child_session_id: "initializer-child".to_string(),
+            prompt: "initialize native records namespace".to_string(),
+            status: "completed".to_string(),
+            execution_generation: None,
+            owner_lease: None,
+            worktree_path: root.path().to_path_buf(),
+            branch: "initializer".to_string(),
+            branch_oid: None,
+            result: None,
+            error: None,
+            verification: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        },
+    )
+    .expect("initialize current records namespace");
     std::fs::write(outside.path().join("record.json"), b"{}\n").expect("outside record");
     symlink(
         outside.path().join("record.json"),
@@ -338,9 +358,11 @@ async fn execute_merge(
 async fn wait_for_terminal_record(root: &Path, id: &str) -> SubagentRecord {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let record = get_subagent_record(root, id).expect("subagent record");
-            if record.status != "running" {
-                return record;
+            match get_subagent_record(root, id) {
+                Ok(record) if record.status != "running" => return record,
+                Ok(_) => {}
+                Err(error) if terminal_owner_handoff_is_still_live(&error) => {}
+                Err(error) => panic!("subagent record: {error}"),
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -353,9 +375,11 @@ async fn wait_for_terminal_record(root: &Path, id: &str) -> SubagentRecord {
 fn wait_for_terminal_record_sync(root: &Path, id: &str) -> SubagentRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let record = get_subagent_record(root, id).expect("subagent record");
-        if record.status != "running" {
-            return record;
+        match get_subagent_record(root, id) {
+            Ok(record) if record.status != "running" => return record,
+            Ok(_) => {}
+            Err(error) if terminal_owner_handoff_is_still_live(&error) => {}
+            Err(error) => panic!("subagent record: {error}"),
         }
         assert!(
             Instant::now() < deadline,
@@ -363,6 +387,60 @@ fn wait_for_terminal_record_sync(root: &Path, id: &str) -> SubagentRecord {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_owner_handoff_is_still_live(error: &str) -> bool {
+    let Some(detail) = error.strip_prefix("subagent owner lease cleanup did not complete: ") else {
+        return false;
+    };
+    detail.starts_with("terminal subagent owner lease is still live; artifacts were preserved: ")
+        || detail
+            .starts_with("terminal subagent owner anchor is still live; artifact was preserved: ")
+        || detail.starts_with(
+            "terminal visible subagent owner lease is still live; artifact was preserved: ",
+        )
+}
+
+#[cfg(target_os = "linux")]
+fn assert_public_subagent_start(response: &serde_json::Value) {
+    let object = response.as_object().expect("subagent start object");
+    assert_eq!(object.len(), 4, "unexpected start fields: {response}");
+    assert_eq!(response["status"], "started");
+    assert!(response["subagent_id"].as_str().is_some());
+    assert!(response["child_session_id"].as_str().is_some());
+    assert!(object.contains_key("parent_session_id"));
+    for private in [
+        "process_scope",
+        "execution_generation",
+        "cleanup_lease_id",
+        "owner_lease",
+        "directory_identity",
+        "worktree_path",
+        "branch",
+        "branch_oid",
+    ] {
+        assert!(
+            !object.contains_key(private),
+            "leaked {private}: {response}"
+        );
+    }
+    assert!(object.keys().all(|key| !key.starts_with('_')));
+}
+
+#[cfg(target_os = "linux")]
+fn assert_internal_start_authority(root: &Path, subagent_id: &str) {
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.join(".nib/subagents")
+                .join(format!("{subagent_id}.json")),
+        )
+        .expect("persisted subagent record"),
+    )
+    .expect("persisted subagent JSON");
+    assert!(record["execution_generation"].as_u64().is_some());
+    assert!(record["owner_lease"].as_str().is_some());
+    assert!(record.to_string().contains("_ownership_audit_target"));
 }
 
 #[cfg(target_os = "linux")]
@@ -375,7 +453,9 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
         root.path(),
     )
     .expect("spawn completed fixture");
+    assert_public_subagent_start(&completed);
     let completed_id = completed["subagent_id"].as_str().expect("completed id");
+    assert_internal_start_authority(root.path(), completed_id);
     let completed_record = wait_for_terminal_record(root.path(), completed_id).await;
     assert_eq!(
         completed_record.status, "completed",
@@ -397,12 +477,23 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
         Some("completed")
     );
 
-    let bounded = spawn_subagent(
+    let environment = std::collections::HashMap::new();
+    let bounded = nib::tools::core::dispatch(
+        "invoke_subagent",
         &json!({"prompt": "explore the project", "max_steps": 1}),
         root.path(),
+        &ExecutionConfig::default(),
+        "direct",
+        30,
+        &environment,
+        None,
+        None,
     )
-    .expect("spawn bounded fixture");
+    .await
+    .expect("core invoke bounded fixture");
+    assert_public_subagent_start(&bounded);
     let bounded_id = bounded["subagent_id"].as_str().expect("bounded id");
+    assert_internal_start_authority(root.path(), bounded_id);
     let bounded_record = wait_for_terminal_record(root.path(), bounded_id).await;
     assert_eq!(bounded_record.status, "failed");
     assert_eq!(
@@ -530,8 +621,30 @@ fn dropping_the_runtime_cannot_leave_a_spawned_record_running() {
     let record = wait_for_terminal_record_sync(root.path(), &id);
     assert_eq!(record.status, "cancelled");
     assert!(record.error.as_deref().unwrap().contains("cancelled"));
-    assert_eq!(record.result.as_ref().unwrap()["cleanup_verified"], true);
-    assert!(record.result.as_ref().unwrap()["cleanup_proof"].is_object());
+    assert_eq!(record.result.as_ref().unwrap()["outcome"], "cancelled");
+    assert!(record
+        .result
+        .as_ref()
+        .unwrap()
+        .get("cleanup_verified")
+        .is_none());
+    assert!(record
+        .result
+        .as_ref()
+        .unwrap()
+        .get("cleanup_proof")
+        .is_none());
+    let persisted: nib::tools::delegation::SubagentRecord = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join(".nib/subagents")
+                .join(format!("{id}.json")),
+        )
+        .expect("persisted internal record"),
+    )
+    .expect("persisted internal record JSON");
+    assert_eq!(persisted.result.as_ref().unwrap()["cleanup_verified"], true);
+    assert!(persisted.result.as_ref().unwrap()["cleanup_proof"].is_object());
     assert_eq!(
         nib::daemons::task::TASK_MANAGER.get_status(&id).as_deref(),
         Some("cancelled")

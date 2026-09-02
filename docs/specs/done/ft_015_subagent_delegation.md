@@ -1,6 +1,6 @@
 # FT-015: Deep Sub-Agent Delegation
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
@@ -66,7 +66,7 @@ and results, support message/cancel, and require separately approved verificatio
 - [x] Merge and cleanup failures preserve terminal evidence; successful merge cleans
   the worktree before the record becomes `merged`.
 - [x] Fresh local aggregate gates are green on the reconciled tree.
-- [ ] Windows and macOS runtime gates are green on the reconciled tree.
+- [x] Windows and macOS runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -166,7 +166,7 @@ existing merge/recovery ownership proofs.
 - [x] Focused persistent-lock identity tests pass.
 - [x] Fresh canonical local repository gates pass after the final ownership/worktree
   remediation.
-- [ ] Windows and macOS runtime gates pass after the final ownership/worktree
+- [x] Windows and macOS runtime gates pass after the final ownership/worktree
   remediation.
 
 ### Affected Areas
@@ -323,7 +323,7 @@ user-configured helpers while creating, verifying, merging, or compensating work
   locks prevent recovery from racing a live publisher. Receipt-bound ref-lock and
   reserved-ref scratch are recovered under bounded directory scans before phase
   reconciliation, and `Removed`/`Complete` advances only after both Git locks release.
-- [ ] Windows cleanup is executed and proven through exact opened-handle deletion and
+- [x] Windows cleanup is executed and proven through exact opened-handle deletion and
   reparse-point regressions. Local Unix cleanup already proves exact namespace
   detachment and reports rather than overclaims residual physical cleanup.
 - [x] Modern abrupt-owner reconciliation remains nonterminal while cleanup ownership is
@@ -358,11 +358,39 @@ recovery-required tests; Windows reparse and Job Object tests; `task test`, `tas
   physical unlink is not claimed.
 - Record stripes and the owner namespace use persistent-anchor `try_lock` loops with an
   absolute five-second deadline. The owner namespace lives in stable `.nib`, and its
-  bounded sweep reconciles the union of visible leases and persistent anchors.
+  bounded sweep reconciles the union of visible leases and persistent anchors. That
+  deadline begins before setup and guards capability-relative `.nib`, lock-parent, and
+  anchor-parent creation plus visible-file creation, anchor linking, durable sync,
+  identity reopen, and final visibility; late expiry cannot report success, and an
+  exact partial pair remains retryable. Creation and parent sync are one durability
+  operation: a fresh retry that adopts an exact existing child re-syncs its parent before
+  success. Records initialization derives one effective deadline and never renews it
+  between namespace setup, authorization, and legacy migration.
+- Compatibility with the retired per-record lock namespace is an offline migration,
+  not a live dual-lock protocol. Before running
+  `nib doctor --fix --confirm-no-legacy-processes`, the operator MUST stop and disable
+  every prior nib binary; the explicit flag is the external quiescence attestation.
+  Doctor persists a versioned pending epoch bound to the exact records-directory
+  capability and exact legacy artifacts, resumes only that bounded cleanup after a
+  crash, and completes the epoch only after the old namespace is clean. Ordinary
+  delegation requires either that exact completed epoch or a native-origin receipt
+  published atomically inside a genuinely new records directory. Existing clean but
+  unmarked state, pending/rejected epochs, live or ambiguous legacy identity, and any
+  legacy artifact introduced after completion all fail closed with doctor guidance and
+  are never deleted by an ordinary operation.
+- Native-origin staging is accepted only when its versioned receipt matches the exact
+  directory identity and is its only content. Creation and no-replace publication carry
+  one absolute deadline through mutation, durable parent sync, identity reopen, and
+  final visibility. Doctor never recursively repairs unmarked, mismatched, or
+  extra-content staging: it preserves the complete namespace for inspection and tells
+  the operator to remove only that exact directory before renewed attestation.
 - Modern owner loss is reconciled only after the independent supervisor persists an
   exact-generation descendant-cleanup proof. Missing or incomplete process scopes stay
   nonterminal with `recovery_required` evidence. Anchor-only live artifacts are
   preserved and reported; stale artifacts are conditionally quarantined by identity.
+  Deadline-aware process-scope and session-audit locks carry that same caller-owned
+  deadline through capability-relative parent creation, lock/anchor publication,
+  durable sync, identity reopen, and final visibility.
 - Managed Git blocks the configured executable-helper surface and initial branch
   creation carries an exact ownership receipt. Real Git still reads mutable local and
   per-worktree configuration after preflight.
@@ -411,6 +439,12 @@ Additional regressions cover
 `reported_add_failure_preserves_unproven_registration`,
 `normal_remove_uses_exact_ownership_to_remove_path_registration_and_branch`, and
 `cleanup_retry_resumes_after_branch_deletion_and_lock_release_failure`.
+The offline-lock migration matrix additionally covers a prior-version child paused
+after opening the exact legacy anchor and before acquiring its lock: ordinary status or
+record work preserves the inode and refuses to enter the fixed-stripe critical section;
+only after the child terminates may an explicit attested doctor run reconcile it. A
+fresh legacy artifact after epoch completion again blocks ordinary work until a fresh
+attestation.
 
 Focused durable-ownership validation on 2026-07-16 passed 53/53 sandbox worktree tests
 and 11/11 integration worktree tests. The restart matrix covers process-local receipt
@@ -437,9 +471,11 @@ entry.
   smoke tests.
 - [x] Delegation integration passes 21/21, including owner loss, cancellation,
   verification, recovery, exact cleanup, and fail-closed ambiguity paths.
-- [ ] Windows runtime reparse, handle-deletion, process-containment, and full-suite gates
-  remain unexecuted because a Windows runtime is unavailable on this host. macOS
-  runtime execution also remains unverified.
+- [x] The exact hosted Windows and macOS jobs passed their complete serial suites,
+  native all-target gates, release qualification, and platform smokes. Local Linux
+  remains non-authoritative for those native behaviors. Production descendant
+  containment remains intentionally Linux plus bwrap; the non-Linux path is a tested
+  fail-closed rejection owned by this shipped scope.
 
 ### Explicit Future Boundary
 
@@ -637,14 +673,299 @@ regression; all nine runtime E2Es; the release build; and the release-binary `--
 `version`, and `doctor` smoke. The exact hosted run therefore closes this bounded-cleanup
 and contention follow-up while FT-015 retains its separate platform-authority work.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute Windows/macOS runtime gates for worktree identity/deletion and the FT-017
-   native mechanisms, then design an authority boundary inaccessible to managed workers
-   before enabling production delegation on either platform.
+   native mechanisms, and prove that production delegation continues to fail closed on
+   both platforms. Enabling production delegation outside Linux requires the separate
+   FT-020 authority design and is not a completion condition for this v1 contract.
 2. Rerun the canonical Task gates and two-stage review before moving FT-015 to `done/`.
 
-## Current Risks
+## Non-Linux Production Scope Decision (2026-09-02)
+
+FT-015 defines production delegation as Linux plus a usable bwrap PID namespace. Native
+Windows Job Object and macOS process-group implementations remain qualification
+mechanisms, and their runtime tests plus explicit production rejection are required
+before this spec can close. They do not authorize production delegation on those
+platforms.
+
+An OS-protected cleanup authority that remains effective after owner loss and is
+inaccessible to the managed worker is a separate product capability. FT-020 owns that
+future design and rollout. FT-015 must not remain indefinitely open waiting for FT-020,
+and FT-020 must not weaken this spec's current fail-closed behavior.
+
+## Hosted Positive-Progress Budgets (2026-09-02)
+
+### Scope
+
+Keep the synchronous/cancellable initial-record failure regression focused on exact
+fallback-audit rollback rather than the unrelated default preparation deadline. The
+production five-second preparation timeout and dedicated expiry/deadline regressions
+remain unchanged.
+
+Keep the persistent repository-lock anchor regression focused on replacement identity
+and offline-attestation verdicts under LLVM coverage instrumentation. Its child process
+uses a two-second test-only acquisition budget so bounded namespace initialization can
+finish before the expected verdict; the production 30-second repository merge-lock
+timeout and dedicated short-deadline regression remain unchanged.
+
+Keep the 25-process atomic publication crash matrix focused on exact, idempotent restart
+reconciliation when a late Windows worktree cleanup exceeds the normal service budget.
+That fixture uses a 15-second test-only reconciliation and worktree-cleanup budget; the
+production five-second reconciliation deadline, three-second precommit cleanup timeout,
+and dedicated expiry/fail-closed regressions remain unchanged.
+
+Keep the Windows DOS-short-root MCP regression focused on canonical-equivalent repository
+identity across the complete spawn, status, and cancellation flow. Its first-use spawn
+uses one 15-second test-only positive-progress budget for both preparation publication
+and stale-preparation reconciliation, including exact worktree compensation if initial
+spawn fails. The guard ends when the initial `nib_run` response returns, before status or
+cancellation begins. The production five-second preparation/reconciliation and
+three-second precommit-cleanup budgets plus their dedicated expiry regressions remain
+unchanged.
+
+### Acceptance Criteria
+
+- [x] The rollback fixture uses an explicit 30-second test-only positive-progress budget
+  and reports the unexpected bounded error if injected record publication is not reached.
+- [x] The test-only timeout guard cannot move across threads, and a repository contract
+  pins the focused Task selector to the fixture's unique Rust test name.
+- [x] The persistent-anchor child fixture uses a two-second test-only acquisition budget,
+  and the focused Task/repository contract pins its exact serial parent regression.
+- [x] The atomic crash matrix uses a 15-second test-only reconciliation/cleanup budget,
+  and the focused Task/repository contract pins its exact serial regression.
+- [x] The DOS-short-root MCP fixture uses a non-moving 15-second test-only guard only for
+  initial preparation, reconciliation, and exact compensation, while its status path,
+  existing cancellation allowance, and exact assertions remain intact; the focused
+  Task/repository contract pins the native-only regression.
+- [x] The exact PR revision passes the full hosted Windows job and native matrix after
+  this stabilization.
+
+### Affected Areas
+
+`src/tools/delegation.rs`, `src/integrations/mcp_server.rs`, `tests/installers.rs`,
+`Taskfile.yml`, this spec, and exact-revision hosted native validation.
+
+### Validation Evidence
+
+Hosted run `33632000483` passed the Windows pseudoterminal and all-target gates, then
+reached 973 passing library tests before this rollback fixture failed after approximately
+15 seconds because the expected injected publication error was not reached. The test's
+purpose is rollback equivalence between synchronous and cancellable entrypoints; separate
+regressions retain the production deadline contract. `task test:delegation` now selects
+this exact unit fixture in addition to the state, managed-process, and integration paths.
+The focused task passed both optional-open race tests, this exact rollback fixture, all
+36 managed-process tests, and all 22 delegation integrations. The replacement hosted
+matrix remains open.
+
+Replacement run `33638458780` then passed Linux's complete ordinary test step, including
+the stabilized rollback fixture, but LLVM coverage instrumentation exhausted the
+persistent-anchor child fixture's 100-millisecond setup-and-verdict budget before its
+expected replacement-identity result. That regression protects persistent lock-domain
+identity rather than a 100-millisecond service level. The child budget is now two seconds,
+and `task test:delegation` selects the exact parent regression. The replacement hosted
+matrix remains open.
+
+The same run passed the stabilized rollback regression on Windows, then exposed
+`spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly` after 973 passing
+library tests: the `intent-audit-published/directory_sync` restart preserved its intent
+when exact worktree cleanup exceeded three seconds. The 25-process matrix protects exact
+crash reconciliation rather than that service budget, which remains covered by dedicated
+deadline regressions. Its thread-pinned test-only budget is now 15 seconds and the focused
+Task gate selects the exact matrix. The replacement hosted matrix remains open.
+
+On the combined patch, `task test:delegation` passed both optional-open race tests,
+all three exact hosted-sensitive fixtures, all 36 managed-process unit tests, and all
+22 delegation integrations. Canonical `task verify` passed 1,061 library tests, 86 CLI
+tests, every integration suite, and doctests; the two intentional live/exact-release
+tests remained ignored. Final-state `task coverage` passed at 85.88% line coverage
+(102,020/118,787), including all 1,061 instrumented library tests and the same three
+hosted-sensitive fixtures.
+
+Hosted run `33649455308` proved all three preceding remedies: Linux passed ordinary tests
+and instrumented coverage, macOS passed its complete test and release/smoke job, and
+Windows passed the rollback, persistent-anchor, and 25-process atomic crash regressions.
+After 972 other passing Windows library tests, the first-use
+`mcp_subagent_flow_accepts_a_dos_short_project_root` spawn instead exhausted the default
+five-second preparation/reconciliation budget before returning a subagent ID. Its
+existing ten-second cancellation guard could not affect that earlier phase. The fixture
+now applies one non-`Send`/non-`Sync`, thread-local 15-second allowance to both possible
+initial-spawn deadlines and their exact compensation cleanup, then restores the normal
+test budgets before record/status/cancellation checks. It remains exact-selected by
+`task test:delegation`; production five-second reconciliation and three-second cleanup
+deadlines and failure behavior are unchanged. The replacement hosted matrix remains open.
+
+On the final two-fixture stabilization patch, `task test:delegation` passed both
+optional-open races, the three portable exact fixtures, the Linux zero-selection contract
+for the native-only DOS fixture, all 36 managed-process tests, and all 22 delegation
+integrations. `task test:interactive` passed the 16 exact-steering tests and every focused
+interaction, TUI, console, chat, CLI, and repository-contract group. Final `task verify`
+passed 1,061 library tests, 86 CLI tests, all integration suites, and doctests with only
+the two intentional paid-live/exact-release tests ignored. Final `task coverage` passed
+at 85.86% line coverage (101,992/118,788), including all 1,061 instrumented library tests.
+
+## Crash-Durable Spawn Preparation Follow-up (2026-08-29)
+
+Every delegated spawn is covered by a versioned write-ahead spawn-preparation intent under
+the authoritative subagent records namespace. The intent is published before worktree,
+child-config, owner, or shared profile/session mutation and binds the subagent id, execution
+generation, owner lease, exact durable worktree authority, and planned audit
+session/destination. Fallback audit initialization adds its exact namespace/session receipt;
+a provided store instead binds the exact preexisting audit target without claiming its
+namespace. Publishing a `running` record does not supersede the intent: until execution
+handoff is durable, that record carries private `pending` handoff evidence and remains a
+compensable preparation artifact. The intent is never projected as a public subagent or
+result, and the private handoff evidence is stripped from every public response.
+
+Spawn, list, and status entry points reconcile unfinished intents with a bounded,
+fail-closed protocol. A live owner preserves the intent. A dead preparation without a
+running record removes only its exact audit leaf and empty transaction-owned ancestors,
+then its exact worktree and owner pair, and deletes the intent last. A running record
+retains all workload resources and permits only the stale intent to be removed. Every
+step is retry-idempotent; missing, half-cleaned, mismatched, nonempty, or replacement
+state is preserved rather than guessed.
+
+Acceptance and validation include a subprocess killed after audit-session publication
+but before running-record publication, restart reconciliation with no per-spawn audit,
+worktree, owner, or intent orphan, a hidden preparing state, and a successful fresh retry.
+
+The initial intent contains durable ownership evidence before every earlier audit
+namespace mutation: an exact retained-ancestor identity, post-worktree proven-missing
+component chain, retained identity/anchor state, and domain-separated transaction marker
+bytes. The session identity marker is written and synced with those bytes before its
+anchor is linked. The intent is upgraded before the session leaf with the exact planned
+session payload and directory authorities, then upgraded again with the published leaf
+identity. A crash between those upgrades is recoverable only when the stable leaf bytes
+exactly match the durable plan; mismatches remain fail closed.
+
+Acceptance includes subprocess termination at directory-create, marker, anchor, sync,
+final-visibility, session-publication, and pre-record boundaries. Restart must reconcile
+each phase idempotently, while concurrent adopted sessions and hostile or ambiguous
+namespace entries remain byte-identical.
+
+The initial revision now precedes every worktree/config/owner mutation and binds exact
+pre-generated authorities that the resource constructors must consume. Both synchronous
+and cancellable spawn use one retained, Policy-B-authorized records-directory capability
+for preparation recovery, intent access, and canonical record supersession checks. A
+running or terminal record may retire the intent only after exact status and authority
+validation, including the worktree durable receipt and pinned audit destination. Atomic
+publication errors retain and finalize exact receipts; indeterminate transaction artifacts
+or cleanup errors remain visible and fail closed for deterministic restart recovery.
+
+The spawn writer acquires the durable global migration fence and its exact fixed record
+stripe before publishing `planned`, in that order, and retains both authorities through
+every resource mutation, intent revision, running-record publication, compensation, and
+intent retirement. Preparation reconciliation acquires the same global fence before
+atomic recovery, intent reads, external cleanup, record supersession, or deletion. It can
+therefore neither roll back an evacuated revision nor retire a quarantined intent while a
+live writer owns the transaction; it remains bounded and creates no per-intent lock file.
+All owner, audit-session, and worktree cleanup additionally receives the retained records
+capability as a pre/post mutation guard, so a detached or replaced records namespace
+preserves the intent and its external resources fail closed.
+
+Restart recovery resolves the exact planned session leaf transaction before classifying
+the canonical leaf. A canonical plus temporary entry is accepted only when both are the
+same unlocked publication identity with the exact planned bytes; prior, mismatched, live,
+or ambiguous artifacts are preserved. The intent remains authoritative until session
+temporary/previous/deletion-quarantine artifacts and transaction-owned marker, anchor,
+and empty ancestor directories have all been finalized.
+
+Ordinary spawn compensation uses the preparation authority's original absolute operation
+deadline; no worktree, owner, audit-session, or intent cleanup receives a renewed budget.
+Intent retirement is cleanup-last: a partial or indeterminate worktree constructor result,
+any exact-resource cleanup error, post-audit cancellation cleanup error, or expiry after a
+durable resource mutation leaves the intent authoritative for bounded restart recovery.
+Only after every exact external cleanup succeeds may the intent be removed. Deterministic
+sync/cancellable regressions cover durable worktree reservation, fully written session
+temporary/canonical publication, and injected session, owner, worktree, and audit cleanup
+failures, then prove a fresh restart removes the resources before retiring the intent.
+
+Execution admission uses a durable handoff protocol. The prepared record is published with
+`pending` evidence, TaskManager registration is paused behind a one-shot start gate, and
+the intent records `record_published` and `manager_registered`. Only after the worker or
+native supervisor has established its abort/control owner does the intent advance to
+`handoff_proven`; an exact record compare-and-swap then changes the matching evidence to
+`committed`. For native execution, the version-4 intent preplans an immutable cleanup-lease
+id and supervisor-registration nonce, and the parent publishes their exact `Prepared`
+scope with `launch_committed=false` before spawning the supervisor. The spawned
+supervisor's first workload-state operation—before reading the parent request, record,
+worktree, or any other external launch resource—is to capture its own OS identity and
+exact-CAS that identity into the matching Prepared scope under the fixed process-scope
+lock. It then spawns the worker behind the real OS launch gate, persists a `Running`
+process scope with `launch_committed=false`, and sends
+a bounded, versioned `READY` frame. The frame and subsequent `COMMIT`/`STARTED` frames bind
+one fresh nonce plus the exact subagent id, execution generation, owner lease, cleanup
+lease, supervisor identity, and direct-child identity. The parent only observes and
+validates the already-persisted exact supervisor identity; it is not a second publisher.
+The version-4 preparation intent
+persists that complete READY process-scope authority before the parent sends `COMMIT`; the
+intent and record commits must both be durable. The supervisor exact-validates it, durably
+advances the same scope to `launch_committed=true`, releases the OS gate, and responds
+`STARTED`; only then may the parent release TaskManager and retire the intent. Partial or
+malformed frames, identity mismatch, timeout, EOF, or parent death before `COMMIT` abort
+the gated child, prove descendant cleanup, and persist launch-abort authority without ever
+running the worker. Final intent retirement is cleanup-last and still uses the original
+absolute spawn deadline.
+
+That startup deadline governs only existing-only process-scope opening,
+self-registration, and the `READY`/`COMMIT`/`STARTED` launch handoff. Once `STARTED` is
+successfully acknowledged, the supervisor converts the retained exact store capability
+and already-held cleanup lease into capability-identical long-lived authorities; it does
+not reopen the scope namespace by path. Later cleanup and terminal mutations each use a
+fresh bounded process-scope lock deadline, allowing normal completion or cancellation
+after an arbitrarily long worker lifetime while retaining exact cleanup proof. No deadline
+renewal occurs on the pre-commit path.
+
+The version-4 process-scope plan is immutable across every intent revision and atomic
+previous/target successor. Structural validation, transaction recovery, committed-evidence
+evaluation, and restart classification all apply the same strict binding: the READY cleanup
+lease must equal the preplanned lease and its supervisor-registration nonce must be present
+and exactly equal to the preplanned nonce. Scope id, subagent kind, generation, owner,
+backend, supervisor, and direct-child identity remain exact between READY and every observed
+successor. A changed lease or nonce, missing nonce, or substituted atomic revision preserves
+the intent and all external resources byte-for-byte and fails closed. Legacy version-2 and
+version-3 intents never acquire an inferred version-4 plan.
+
+Preparation compatibility is an explicit version/field matrix rather than a permissive
+serde default. Version 2 never carries either a process-scope plan or a persisted `READY`
+scope, including at `HandoffProven`, and therefore can never be promoted from otherwise
+matching committed process state. Version 3 carries no version-4 plan and may add its exact
+legacy `READY` representation only on the monotonic `ManagerRegistered` to
+`HandoffProven` transition; later evidence must match every persisted identity exactly.
+Version 4 follows the stricter plan-bound rules above. Structural reads, revision recovery,
+temporary/previous transaction inspection, evidence evaluation, and restart classification
+apply the same matrix. Forbidden legacy fields are preserved byte-for-byte and fail closed;
+they are neither inferred away nor adopted from an atomic artifact.
+
+Restart opens the process-scope namespace only through the retained, Policy-B-authorized
+records capability and one deadline-bound store lock. That locked lookup recovers and scans
+the canonical record, deterministic atomic temporary/previous artifacts, scope-deletion
+quarantine, cleanup lease, and cleanup-lease quarantine; only one coherent empty scan may
+report absence. A committed record is authoritative only when the stored version-4 READY
+scope exactly matches its key, `subagent` kind, generation, cleanup authority, backend,
+owner, supervisor, and child identities and the observed scope is
+`launch_committed=true` in `Running`, `CleanupInProgress`, or `RecoveryRequired`, or is
+`Complete` with the exact terminal cleanup proof carried by the record. `Prepared`, false,
+legacy missing launch flags, mismatched keys/kinds/authority, TaskManager presence, and
+unmatched terminal proof never supersede the intent. A process scope created during any
+pre-handoff intent phase is cleanup authority: restart must abort/reap its exact descendants
+and retire its exact scope and cleanup lease before removing owner, audit session, worktree,
+record, or intent. A pending record, an uncommitted record, or a committed record without
+committed execution evidence is rolled back under a fresh bounded recovery authority.
+An exact version-4 Prepared scope with no supervisor, direct child, or cleanup lease is
+retired under the same scope lock used by self-registration. This is safe against a late
+unobserved supervisor: either its CAS wins first and restart observes and aborts that exact
+identity, or retirement wins and the late CAS fails before the supervisor can access any
+external resource. The lock ordering is identical on Unix and Windows.
+Ambiguous evidence remains fail closed. Deterministic
+sync/cancellable expiry tests cover final retirement and rollback failure; subprocess tests
+cover each durable handoff boundary, SIGKILL at both scope and cleanup-lease quarantine
+boundaries, real-binary parent SIGKILL after Prepared-before-spawn and after OS spawn-before
+self-registration, plus parent SIGKILL after `READY` and before `COMMIT`, with a
+worker-entry sentinel proving zero precommit execution. No restart may expose an unlaunchable
+`running` or `recovery_required` workload.
+
+## Historical Risks at This Stage
 
 - Ambiguous registrations and cleanup races must remain preserved for operator review;
   guessing ownership would be destructive.
@@ -654,3 +975,32 @@ and contention follow-up while FT-015 retains its separate platform-authority wo
   configuration can appear dirty to isolated managed Git. Supporting that case while
   retaining FT-015 configuration isolation requires a separate policy design.
 - Windows and macOS runtime behavior remains unexecuted on the local Linux host.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+Completion does not enable production delegation on Windows or macOS. The shipped v1
+production boundary remains Linux with usable bwrap PID-namespace containment; the
+native non-Linux mechanism and fail-closed rejection gates are complete. Backlog
+FT-020 owns any future protected non-Linux production authority.

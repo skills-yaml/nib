@@ -50,7 +50,7 @@ User / Workload Owner
         │
         ▼
 ┌──────────────────────────────┐
-│         CLI (Rust) / TUI     │  (clap / ratatui)
+│ Unified Interactive Launcher │  (clap; plain / ratatui modes)
 └──────────────┬───────────────┘
                │
                ▼
@@ -120,23 +120,26 @@ User / Workload Owner
 - `src/integrations/mcp_framing.rs` — Shared bounded, newline-delimited JSON framing for MCP client/server stdio.
 - `src/integrations/mcp_server.rs` — Inbound MCP server exposing the gated nib runtime.
 - `src/integrations/worktree.rs` — Session worktree manager built on sandbox ownership receipts.
-- `src/llm/{mod.rs,types.rs,factory.rs,openai.rs,responses.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral structured requests and private completed-turn streams, retry/response bounds, explicit Chat Completions and Responses transports, provider construction, concrete APIs, and deterministic test doubles.
+- `src/llm/{mod.rs,types.rs,registry.rs,factory.rs,openai.rs,responses.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral structured requests and private completed-turn streams, retry/response bounds, a central structural adapter-capability registry, explicit Chat Completions and Responses transports, provider construction and diagnostics, concrete APIs, and deterministic test doubles. Registry capabilities describe implemented transports, not live model compatibility.
 - `src/profile/{mod.rs,migration.rs}` — Workspace profile resolution, isolated state roots, environment loading, and legacy state migration.
 - `src/sandbox/mod.rs` — Command-shell resolution, capability checks, direct execution, and optional Linux `bwrap` isolation.
 - `src/sandbox/process.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
 - `src/sandbox/windows_job.rs` — Windows Job Object containment backend.
 - `src/sandbox/worktree.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
-- `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, events, tool audit, profile-scoped persistence, and bounded profile memory.
+- `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, additive exact-run steering and lifecycle events, tool audit, profile-scoped persistence, and bounded profile memory.
 - `src/tools/{mod.rs,classifier.rs,models.rs,registry.rs,executor.rs,core.rs,delegation.rs}` — Tool contracts and metadata, classification, the central approval/policy/sandbox gate, built-in tools, and linked-subagent lifecycle.
-- `src/tui/mod.rs` — Ratatui session browser and streamed interactive execution UI.
+- `src/tui/mod.rs` — Current-session-first Ratatui renderer, terminal preflight and
+  restoration boundary, overlays, completion, and streamed execution UI.
 
 ### Binary Module Map
 
-- `src/main.rs` — Clap command model, runtime setup, hidden worker/relay entry points, and top-level dispatch.
-- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, interactive chat, and one-shot agent execution.
-- `src/console.rs` — Shared blocking/async console input plus approval and question handlers used by CLI flows.
+- `src/main.rs` — Clap command model, no-subcommand interactive dispatch, compatibility
+  aliases, runtime setup, and hidden worker/relay entry points.
+- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, the unified
+  interactive launcher with its plain renderer, and unchanged one-shot execution.
+- `src/console.rs` — Shared blocking/async console input used by the plain renderer's single-owner active-run broker and other CLI flows.
 - `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.
-- `src/mcp_cmd.rs`, `src/skill_cmd.rs`, and `src/task_cmd.rs` — MCP server configuration, skill inventory/install/remove operations, and durable task management.
+- `src/mcp_cmd.rs`, `src/skill_cmd.rs`, and `src/task_cmd.rs` — MCP server configuration, skill inventory/install/remove operations, and durable task management. Interactive `/ps` and `/stop` use a separate safe projection and atomic active-session ownership check over the same durable store; they never route through its global administrative view.
 - `src/version.rs` and `src/updater.rs` — Embedded build identity, strict rolling-release
   manifest checks, verified self-update, and bounded user-facing update notices.
 - `src/mcp_test_fixture.rs` — Debug-build-only subprocess fixture for MCP framing, lifecycle, and process-tree tests.
@@ -145,14 +148,27 @@ User / Workload Owner
 
 1. **Intake / Activation**
    - User creates or resumes a session in the selected profile store.
-   - Console/TUI input enters directly; external messaging adapters authenticate and receive provider traffic before passing a payload to the normalized gateway.
+   - The interactive launcher resolves plain or TUI presentation before authentication,
+     session creation, or workload execution. Native input then enters through the
+     selected renderer; external messaging adapters authenticate and receive provider
+     traffic before passing a payload to the normalized gateway.
    - Context + prompt builder assembles AGENTS.md, project documentation, skills,
      profile memory, workload state, recent history, and tool schemas within one
      aggregate model-context budget.
 
 2. **LLM Reasoning (new in FT-004)**
-   - AgentLoop sends prompt to LLMClient.
-   - LLM returns content or tool_calls.
+   - AgentLoop checks the exact-run steering receiver at safe boundaries and builds a
+     bounded request containing every durably accepted instruction.
+   - AgentLoop sends the prompt to `LLMClient`; only `crate::llm` can consume the raw
+     provider stream, and application callers can only finish it. Provider deltas
+     remain private until terminal validation succeeds; failed, refused, or incomplete
+     streams publish no partial model content or tool proposal.
+   - After validation, AgentLoop derives bounded, redacted public content/tool events
+     only from the authoritative completed response. Tool lifecycle, approval,
+     question, compression, and reconciliation events can remain live independently.
+   - Steering that arrived during the response discards its uncommitted content/tool
+     proposal and causes a fresh bounded request. Already-started tools finish normally;
+     steering is applied before the following provider request.
 
 3. **Execution (gated)**
    - Tool calls go to ToolExecutor:
@@ -168,14 +184,15 @@ User / Workload Owner
    - Reconciliation advances or blocks the persisted plan and records the final outcome.
 
 5. **Visibility**
-   - CLI/TUI shows live session history, tool calls (with boundaries/approvals), and loop state.
+   - The selected plain or TUI renderer shows live session history, tool calls (with
+     boundaries/approvals), and loop state.
 
 ### Sequence Diagram of Interactions
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant C as CLI / Chat
+    participant C as Interactive CLI
     participant L as Agent Loop
     participant Cx as Context Engine
     participant M as MCP Manager
@@ -261,7 +278,13 @@ sequenceDiagram
 
 ## Current Runtime Extensions
 
-- Provider streaming feeds live model, tool, approval, question, compression, and reconciliation events to the TUI.
+- Provider adapters consume response bodies incrementally, but provider model text and
+  tool proposals cross the public renderer boundary only after terminal validation of
+  the completed response. Failed/refused partial deltas are discarded. Tool lifecycle,
+  approval, question, compression, and reconciliation events remain live in the TUI.
+  Explicit `/compact` is an exact-session leased, non-steerable maintenance run that
+  bypasses only the automatic compression threshold, preserves raw history, and emits
+  the same typed compression evidence without synthesizing chat messages.
 - Structured plans are persisted, approved before execution, and advanced from verified tool outcomes.
 - Compression preserves raw transcripts while bounding model context; profile memory persists environment and user facts.
 - The `manage_memory` tool provides bounded list/get/set/delete operations. Reads are

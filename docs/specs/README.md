@@ -23,39 +23,26 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **23 done, 14 development, and 0 backlog**.
+The current lifecycle is **44 done, 1 development, and 1 backlog**.
 
-T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
-contract proves exact namespace detachment and reports ambiguous residual physical
-cleanup within the documented non-malicious-same-UID boundary. T006 remains pending
-separate hosted Windows evidence reconciliation. T010 completed its exact-current
-development and production release evidence. FT-015 retains Windows worktree
-cleanup/runtime validation and the FT-017
-platform authority boundary;
-managed Git preflight and Unix namespace-detachment criteria are locally complete under
-the same threat boundary. T020 and FT-016 have complete local stdio MCP lifecycle,
-cancellation, redaction, and metadata coverage; T020 retains Windows Job Object and
-macOS runtime evidence, FT-016 retains Windows runtime evidence, and both inherit
-FT-015's remaining platform limits. FT-017 owns the stronger abrupt-owner
-descendant-process containment contract: Linux production proof is implemented, while
-Windows/macOS production delegation fails closed pending protected cleanup authority.
-T021 is in development for explicit OpenAI-compatible API-mode and reasoning
-configuration plus Responses function-tool support.
-T022 is in development for a typed provider-neutral LLM contract, distinct provider
-adapters composed from shared wire codecs, native correlated tool continuation, safe
-terminal/error normalization, and provider conformance gates.
-T023 is in development for credential-gated live qualification across every account-visible
-direct-provider model and a reviewed exact-ID OpenRouter allowlist.
-T024 is in development for source-controlled curated provider model defaults and
-user-configurable per-provider picker lists.
-T025 completed interactive chat/TUI capability parity. T026 is in development for
-actionable, redaction-safe LLM failure propagation and native console/TUI presentation.
-T027 completed a doctor-diagnosed, explicitly invoked repair of canonical OpenAI
-tool/reasoning workloads that still use Chat Completions.
-T029 is in development for explicit, verified switching between production and
-development self-update channels from an already managed installation.
-FT-018 completed the verified self-update command, bounded update notices, Windows
-in-use replacement, and four-platform production rollout.
+Exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+closed the remaining ordinary implementation and native-platform gates for T003, T004,
+T006, T007, T020, T021, T022, T026, T029, T034, T035, FT-015, FT-016, FT-017, and
+FT-019. The clean Linux, macOS, and Windows jobs passed their complete serial suites,
+native all-target checks, exact release-binary qualification, and platform smokes.
+The final Linux coverage result was 85.87 percent (102,061/118,862).
+
+T023 is the only development spec. Its bounded credential-free implementation and
+offline native matrix are green, but no paid or credentialed live run was authorized.
+It still requires owner-approved exact OpenRouter IDs, provider accounts and
+credentials, hard spend and execution ceilings, protected environment approvals, and
+privacy-reviewed catalog/canary/selected/full evidence for all six provider groups.
+FT-020 remains backlog for any future protected Windows/macOS production delegation
+authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
+bwrap containment; native non-Linux mechanism tests are complete and production use
+continues to fail closed. Remote MCP transport remains separate future scope; shipped
+MCP v1 is stdio-only.
 
 Each audited file has an `Implementation Reconciliation (2026-07-15)` section that
 supersedes older proposal text. Later dated remediation sections and their unchecked
@@ -67,26 +54,33 @@ work or narrower guarantees.
 - [D001: Workspace Docs Adoption](done/D001_workspace_docs_adoption_and_foundational_spec_alignment.md)
 - [T001: Core Agent Tools](done/T001_implement_core_agent_tools.md)
 - [T002: Runtime and Orchestration](done/T002_agent_framework_runtime_and_orchestration_engine.md)
-- [T003: Context and Compression](development/T003_context_engine_with_dynamic_compression_and_session_management.md)
-- [T004: Profiles, Memory, and Daemons](development/T004_profiles_discrete_memory_store_and_maintenance_daemons.md)
+- [T003: Context and Compression](done/T003_context_engine_with_dynamic_compression_and_session_management.md)
+- [T004: Profiles, Memory, and Daemons](done/T004_profiles_discrete_memory_store_and_maintenance_daemons.md)
 - [T005: Runtime State Machine](done/T005_full_runtime_state_machine_and_lifecycle.md)
-- [T006: Skills and MCP Gateway](development/T006_enhanced_skills_framework_and_mcp_gateway_alignment.md)
-- [T007: Configuration and Doctor](development/T007_configuration_schema_alignment_and_nib_doctor_validation.md)
+- [T006: Skills and MCP Gateway](done/T006_enhanced_skills_framework_and_mcp_gateway_alignment.md)
+- [T007: Configuration and Doctor](done/T007_configuration_schema_alignment_and_nib_doctor_validation.md)
 - [T008: End-to-End Validation](done/T008_end_to_end_tests_and_sequence_diagram_validation.md)
 - [T009: Rust Module Layout and TOML Config](done/T009_rust_module_layout_and_toml_config.md)
 - [T010: Release Process](done/T010_release_process.md)
 - [T011: End-User Documentation](done/T011_end_user_documentation.md)
 - [T012: Toolset Expansion](done/T012_toolset_expansion.md)
 - [T018: ratatui Approval Flow](done/T018_ratatui_tui_approval.md)
-- [T020: MCP Client Integration](development/T020_mcp_client_integration.md)
-- [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
-- [T022: Provider-Neutral LLM Contract and Adapter Conformance](development/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
+- [T020: MCP Client Integration](done/T020_mcp_client_integration.md)
+- [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
+- [T022: Provider-Neutral LLM Contract and Adapter Conformance](done/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
 - [T023: Live LLM Provider and Model Integration Qualification](development/T023_live_llm_provider_model_integration_qualification.md)
-- [T024: Configurable Provider Model Catalog and Curated Defaults](development/T024_configurable_provider_model_catalog_and_curated_defaults.md)
+- [T024: Configurable Provider Model Catalog and Curated Defaults](done/T024_configurable_provider_model_catalog_and_curated_defaults.md)
 - [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
-- [T026: Actionable, Redaction-Safe LLM Failure Reporting](development/T026_actionable_redaction_safe_llm_failure_reporting.md)
+- [T026: Actionable, Redaction-Safe LLM Failure Reporting](done/T026_actionable_redaction_safe_llm_failure_reporting.md)
 - [T027: Doctor-Guided OpenAI Transport Repair](done/T027_doctor_guided_openai_transport_repair.md)
-- [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
+- [T028: Current-Session-First TUI and Slash-Command Completion](done/T028_current_session_first_tui_and_slash_command_completion.md)
+- [T029: Explicit Self-Update Channel Switching](done/T029_explicit_self_update_channel_switching.md)
+- [T030: Unified Interactive CLI and Plain-Mode Fallback](done/T030_unified_interactive_cli_and_plain_mode_fallback.md)
+- [T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](done/T031_ft019_interaction_model_and_ledger_tui.md)
+- [T032: FT-019 Explicit Compaction and Session Background Commands](done/T032_ft019_explicit_compaction_and_session_background_commands.md)
+- [T033: FT-019 Exact-Run Live Steering](done/T033_ft019_exact_run_live_steering.md)
+- [T034: FT-019 Native Terminal Qualification](done/T034_ft019_native_terminal_qualification.md)
+- [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
 
 ### Feature specs
 
@@ -100,33 +94,32 @@ work or narrower guarantees.
 - [FT-012: Richer Planner](done/ft_012_richer_planner.md)
 - [FT-013: Advanced Session Memory](done/ft_013_advanced_session_memory.md)
 - [FT-014: Smart Approval Classifier](done/ft_014_smart_approval_classifier.md)
-- [FT-015: Subagent Delegation](development/ft_015_subagent_delegation.md)
-- [FT-016: MCP Server Exposure](development/ft_016_mcp_server_exposure.md)
-- [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
+- [FT-015: Subagent Delegation](done/ft_015_subagent_delegation.md)
+- [FT-016: MCP Server Exposure](done/ft_016_mcp_server_exposure.md)
+- [FT-017: Managed Process Supervisor](done/ft_017_managed_process_supervisor.md)
 - [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
+- [FT-019: Codex-Inspired Chat and TUI Interactions](done/ft_019_codex_inspired_chat_and_tui_interactions.md)
+- [FT-020: Protected Non-Linux Production Delegation Authority](backlog/ft_020_protected_non_linux_production_delegation_authority.md)
 
-## Current Local Validation (2026-07-16)
+## Current Validation (2026-09-02)
 
-- `task check`: installer checks, formatting, Clippy with warnings denied, compilation,
-  and all 795 top-level tests passed serially on the reconciled tree.
-- `task test`: all 795 top-level tests passed independently (601 library, 61 CLI, and
-  133 integration tests).
-- `task coverage`: 83.90 percent runtime line coverage (55,083/65,656).
-- `task docs:check`: all five documentation invariants passed.
-- `task build`: the locked optimized release build passed.
-- Strict follow-up gates passed: `cargo fmt --all -- --check`, `cargo check
-  --all-targets`, all-target/all-feature Clippy with warnings denied, and
-  `git diff --check`.
-- The locally built optimized release binary passed isolated help/version, healthy/failing doctor, skill
-  lifecycle, outbound and inbound MCP protocol/error/size bounds, durable cancellation
-  and scheduled wake, and bounded project-document context smoke. Linux raw-PTY smoke
-  passed plan denial, question selection, destructive-tool denial, cancellation
-  reconciliation, and session-detail navigation.
-
-These are Linux local results. Windows runtime and Job Object/reparse behavior and
-macOS runtime behavior were not executed and remain explicit development-spec gates.
-Cross-target checks could not reach nib compilation on this host: the MSVC target lacks
-`lib.exe`, and the macOS target lacks an Apple-compatible C compiler and SDK.
+- Local `task verify` passed 1,062 library tests, 86 CLI tests, every integration suite,
+  and doctests; the paid live-provider and exact release qualification entrypoints
+  remained explicitly gated from the ordinary suite.
+- Exact hosted run `33683995100` passed Validate, macOS Tests, and Windows Tests for
+  head `c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+  `0479b72ad3d11fd7221632f042736b8489b6443b`.
+- The hosted Linux coverage gate passed at 85.87 percent (102,061/118,862). Linux and
+  macOS native PTY/redirected smokes and the Windows ConPTY/`TERM=dumb`/redirected smoke
+  passed with terminal restoration and bounded execution.
+- Exact release qualification passed the credential-free structured planning,
+  Responses tool continuation, failure reconciliation, doctor, identity, and stability
+  matrix. Binary SHA-256 values were
+  `e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+  (Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+  (macOS), and
+  `e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+  (Windows); every report recorded `source_worktree_clean = true`.
 
 ## Authoritative Runtime Decisions
 

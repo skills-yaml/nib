@@ -267,6 +267,34 @@ pub(crate) fn path_without_windows_verbatim_prefix(path: &Path) -> PathBuf {
     PathBuf::from(OsString::from_wide(&normalized))
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn windows_dos_short_path_for_test(path: &Path) -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let path = path_without_windows_verbatim_prefix(path);
+    let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    input.push(0);
+    let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut output = vec![0_u16; required as usize];
+    let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if written as usize >= output.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DOS short-path output exceeded its sized buffer",
+        ));
+    }
+    output.truncate(written as usize);
+    Ok(PathBuf::from(OsString::from_wide(&output)))
+}
+
 #[cfg(windows)]
 pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
     path_without_windows_verbatim_prefix(path)
@@ -278,9 +306,8 @@ pub(crate) fn path_for_external_command(path: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-pub(crate) fn rename_open_entry_no_replace_windows<
-    S: std::os::windows::io::AsRawHandle + ?Sized,
->(
+#[doc(hidden)]
+pub fn rename_open_entry_no_replace_windows<S: std::os::windows::io::AsRawHandle + ?Sized>(
     parent: &cap_std::fs::Dir,
     source: &S,
     destination: &Path,
@@ -409,6 +436,25 @@ pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn read_namespace_snapshot_file(path: &Path) -> io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        #[cfg(windows)]
+        Err(error)
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION as i32)
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) =>
+        {
+            // Windows byte-range locks are mandatory, so a second handle cannot
+            // read even an empty lock file. Its complete byte content is still
+            // known exactly from the zero length without bypassing the lock.
+            Ok(Vec::new())
+        }
         Err(error) => Err(error),
     }
 }
@@ -902,6 +948,94 @@ pub(crate) fn open_directory_observation_windows(path: &Path) -> io::Result<std:
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(invalid_directory_component(path));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_directory_child_windows(
+    parent: &cap_std::fs::Dir,
+    path: &Path,
+    delete_access: bool,
+) -> io::Result<std::fs::File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+    };
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut components = path.components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a direct child",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a direct child",
+        ));
+    }
+    let mut name = name.encode_wide().collect::<Vec<_>>();
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "filename too long"))?;
+    if name_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle-relative directory open requires a non-empty child name",
+        ));
+    }
+    let unicode_name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &unicode_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES;
+    if delete_access {
+        access |= DELETE;
+    }
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut io_status,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status < 0 {
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
     let metadata = file.metadata()?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(invalid_directory_component(path));

@@ -215,6 +215,7 @@ fn concurrent_session_updates_do_not_lose_messages_or_events() {
                         role: "assistant".to_string(),
                         content: format!("assistant-{writer}"),
                         timestamp: None,
+                        attachments: Vec::new(),
                     });
                     let user_index = session.messages.len();
                     session.messages.push(nib::session::SessionMessage {
@@ -222,6 +223,7 @@ fn concurrent_session_updates_do_not_lose_messages_or_events() {
                         role: "user".to_string(),
                         content: format!("user-{writer}"),
                         timestamp: None,
+                        attachments: Vec::new(),
                     });
                     Ok(())
                 })

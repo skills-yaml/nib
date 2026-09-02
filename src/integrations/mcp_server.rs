@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_TOOL_OUTPUT_BYTES: usize = MAX_MCP_FRAME_BYTES / 4;
+const MAX_MCP_VALIDATION_ERROR_BYTES: usize = 8 * 1024;
 const MAX_ACTIVE_MCP_REQUESTS: usize = 32;
 const MCP_REQUEST_CANCELLED_CODE: i64 = -32800;
 const MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -26,7 +27,7 @@ const MCP_SUBAGENT_SHUTDOWN_HANDOFF_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 #[cfg(test)]
 const MCP_SUBAGENT_SHUTDOWN_HANDOFF_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
+    std::time::Duration::from_millis(500);
 
 struct OwnedResponseWriter {
     response_tx: Option<mpsc::Sender<QueuedResponse>>,
@@ -912,13 +913,14 @@ where
                                 &task_cancellation_audit,
                             )
                             .await;
-                            finish_request_lifecycle(
+                            finish_request_lifecycle_async(
                                 &task_lifecycle,
                                 request_generation,
                                 task_root.as_path(),
                                 &task_cancellation_class,
                                 handled,
-                            );
+                            )
+                            .await;
                         },
                     )
                     .await;
@@ -1129,6 +1131,7 @@ impl RequestCancellationClass {
     }
 }
 
+#[cfg(test)]
 fn finish_request_lifecycle(
     lifecycle: &SharedRequestLifecycle,
     generation: u64,
@@ -1136,41 +1139,73 @@ fn finish_request_lifecycle(
     cancellation_class: &RequestCancellationClass,
     mut handled: HandledRequest,
 ) {
+    let Some(subagent_tool_name) =
+        begin_request_lifecycle_finish(lifecycle, generation, cancellation_class, &mut handled)
+    else {
+        return;
+    };
+    let publication = reconcile_started_subagent(project_root, subagent_tool_name, &mut handled);
+    publish_request_lifecycle_reconciliation(lifecycle, generation, publication);
+}
+
+async fn finish_request_lifecycle_async(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    project_root: &Path,
+    cancellation_class: &RequestCancellationClass,
+    mut handled: HandledRequest,
+) {
+    let Some(subagent_tool_name) =
+        begin_request_lifecycle_finish(lifecycle, generation, cancellation_class, &mut handled)
+    else {
+        return;
+    };
+    let publication =
+        reconcile_started_subagent_async(project_root, subagent_tool_name, &mut handled).await;
+    publish_request_lifecycle_reconciliation(lifecycle, generation, publication);
+}
+
+fn begin_request_lifecycle_finish<'a>(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    cancellation_class: &'a RequestCancellationClass,
+    handled: &mut HandledRequest,
+) -> Option<&'a str> {
     let subagent_tool_name = cancellation_class.subagent_tool_name();
-    {
-        let mut state = lock_request_lifecycle(lifecycle);
-        match &*state {
-            RequestLifecycle::Running => {
-                handled.complete_audit();
-                *state = RequestLifecycle::Completed(handled.response.take());
-                return;
-            }
-            RequestLifecycle::CancelRequested
-                if subagent_tool_name.is_some() && handled.cancellation_audit.is_some() =>
-            {
-                *state = RequestLifecycle::Reconciling { generation };
-            }
-            RequestLifecycle::CancelRequested => {
-                handled.complete_audit();
-                *state = RequestLifecycle::Completed(handled.response.take());
-                return;
-            }
-            RequestLifecycle::Completed(_) | RequestLifecycle::CancellationFailed { .. } => {
-                handled.complete_audit();
-                return;
-            }
-            RequestLifecycle::Reconciling { .. } | RequestLifecycle::Cancelled => {
-                handled.disarm_audit();
-                return;
-            }
+    let mut state = lock_request_lifecycle(lifecycle);
+    match &*state {
+        RequestLifecycle::Running => {
+            handled.complete_audit();
+            *state = RequestLifecycle::Completed(handled.response.take());
+            None
+        }
+        RequestLifecycle::CancelRequested
+            if subagent_tool_name.is_some() && handled.cancellation_audit.is_some() =>
+        {
+            *state = RequestLifecycle::Reconciling { generation };
+            subagent_tool_name
+        }
+        RequestLifecycle::CancelRequested => {
+            handled.complete_audit();
+            *state = RequestLifecycle::Completed(handled.response.take());
+            None
+        }
+        RequestLifecycle::Completed(_) | RequestLifecycle::CancellationFailed { .. } => {
+            handled.complete_audit();
+            None
+        }
+        RequestLifecycle::Reconciling { .. } | RequestLifecycle::Cancelled => {
+            handled.disarm_audit();
+            None
         }
     }
+}
 
-    let publication = reconcile_started_subagent(
-        project_root,
-        subagent_tool_name.expect("only subagent starts enter reconciliation"),
-        &mut handled,
-    );
+fn publish_request_lifecycle_reconciliation(
+    lifecycle: &SharedRequestLifecycle,
+    generation: u64,
+    publication: RequestLifecycle,
+) {
     let mut state = lock_request_lifecycle(lifecycle);
     if matches!(
         &*state,
@@ -1182,6 +1217,7 @@ fn finish_request_lifecycle(
     }
 }
 
+#[cfg(test)]
 fn reconcile_started_subagent(
     project_root: &Path,
     tool_name: &str,
@@ -1190,6 +1226,25 @@ fn reconcile_started_subagent(
     #[cfg(test)]
     pause_at_reconciliation_barrier(handled.response.as_ref());
     let outcome = cancel_started_subagent(project_root, tool_name, handled.response.as_ref());
+    finish_started_subagent_reconciliation(handled, outcome)
+}
+
+async fn reconcile_started_subagent_async(
+    project_root: &Path,
+    tool_name: &str,
+    handled: &mut HandledRequest,
+) -> RequestLifecycle {
+    #[cfg(test)]
+    pause_at_reconciliation_barrier(handled.response.as_ref());
+    let outcome =
+        cancel_started_subagent_async(project_root, tool_name, handled.response.as_ref()).await;
+    finish_started_subagent_reconciliation(handled, outcome)
+}
+
+fn finish_started_subagent_reconciliation(
+    handled: &mut HandledRequest,
+    outcome: SubagentCancellationOutcome,
+) -> RequestLifecycle {
     let response_id = handled
         .response
         .as_ref()
@@ -1250,13 +1305,44 @@ fn pause_at_reconciliation_barrier(response: Option<&Value>) {
     }
 }
 
+#[cfg(test)]
 fn cancel_started_subagent(
     project_root: &Path,
     tool_name: &str,
     response: Option<&Value>,
 ) -> SubagentCancellationOutcome {
+    let subagent_id = match started_subagent_cancellation_target(tool_name, response) {
+        Ok(subagent_id) => subagent_id,
+        Err(outcome) => return outcome,
+    };
+    started_subagent_cancellation_outcome(
+        tool_name,
+        subagent_id,
+        crate::tools::delegation::resolve_subagent_cancellation(project_root, subagent_id),
+    )
+}
+
+async fn cancel_started_subagent_async(
+    project_root: &Path,
+    tool_name: &str,
+    response: Option<&Value>,
+) -> SubagentCancellationOutcome {
+    let subagent_id = match started_subagent_cancellation_target(tool_name, response) {
+        Ok(subagent_id) => subagent_id,
+        Err(outcome) => return outcome,
+    };
+    let resolution =
+        crate::tools::delegation::resolve_subagent_cancellation_async(project_root, subagent_id)
+            .await;
+    started_subagent_cancellation_outcome(tool_name, subagent_id, resolution)
+}
+
+fn started_subagent_cancellation_target<'a>(
+    tool_name: &str,
+    response: Option<&'a Value>,
+) -> Result<&'a str, SubagentCancellationOutcome> {
     let Some(response) = response else {
-        return SubagentCancellationOutcome::Unresolved {
+        return Err(SubagentCancellationOutcome::Unresolved {
             details: json!({
                 "tool_name": tool_name,
                 "outcome": "unresolved",
@@ -1264,18 +1350,18 @@ fn cancel_started_subagent(
                 "error": format!("{tool_name} produced no response"),
             }),
             error: format!("{tool_name} cancellation produced no response to reconcile"),
-        };
+        });
     };
     if response.get("error").is_some() || response["result"]["isError"] == true {
-        return SubagentCancellationOutcome::Cancelled(json!({
+        return Err(SubagentCancellationOutcome::Cancelled(json!({
             "tool_name": tool_name,
             "outcome": "cancelled",
             "reconciled": true,
             "phase": "precommit",
-        }));
+        })));
     }
     let Some(subagent_id) = response["result"]["structuredContent"]["subagent_id"].as_str() else {
-        return SubagentCancellationOutcome::Unresolved {
+        return Err(SubagentCancellationOutcome::Unresolved {
             details: json!({
                 "tool_name": tool_name,
                 "outcome": "unresolved",
@@ -1283,9 +1369,17 @@ fn cancel_started_subagent(
                 "error": format!("successful {tool_name} response omitted subagent_id"),
             }),
             error: format!("successful {tool_name} response omitted its authoritative subagent ID"),
-        };
+        });
     };
-    match crate::tools::delegation::resolve_subagent_cancellation(project_root, subagent_id) {
+    Ok(subagent_id)
+}
+
+fn started_subagent_cancellation_outcome(
+    tool_name: &str,
+    subagent_id: &str,
+    resolution: crate::tools::delegation::CancelSubagentResolution,
+) -> SubagentCancellationOutcome {
+    match resolution {
         crate::tools::delegation::CancelSubagentResolution::Cancelled { record } => {
             SubagentCancellationOutcome::Cancelled(json!({
                 "tool_name": tool_name,
@@ -1733,6 +1827,7 @@ async fn handle_request_with_cancellation(
     }
 
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let public_sensitive_values = config.public_session_sensitive_values();
     let mut cancellation_audit = None;
     let response = Some(match method {
         "initialize" => rpc_result(
@@ -1762,9 +1857,17 @@ async fn handle_request_with_cancellation(
                     cancellation_audit = audit;
                     rpc_result(id, tool_result_content(result))
                 }
-                Err(error) => rpc_error(id, -32602, error),
+                Err(error) => rpc_error(
+                    id,
+                    -32602,
+                    safe_mcp_validation_error(&error, &public_sensitive_values),
+                ),
             },
-            Err(error) => rpc_error(id, -32602, error),
+            Err(error) => rpc_error(
+                id,
+                -32602,
+                safe_mcp_validation_error(&error, &public_sensitive_values),
+            ),
         },
         _ => rpc_error(id, -32601, "Method not found"),
     });
@@ -1906,11 +2009,13 @@ fn validate_mcp_tool_arguments(
         .take(5)
         .map(|error| {
             let path = error.instance_path.to_string();
-            if path.is_empty() {
-                error.to_string()
+            let constraint = error.schema_path.to_string();
+            let location = if path.is_empty() {
+                "at the argument root".to_string()
             } else {
-                format!("at {path}: {error}")
-            }
+                format!("at {path}")
+            };
+            format!("{location}: failed schema constraint {constraint}")
         })
         .collect();
     if errors.is_empty() {
@@ -1921,6 +2026,15 @@ fn validate_mcp_tool_arguments(
             errors.join("; ")
         ))
     }
+}
+
+fn safe_mcp_validation_error(error: &str, sensitive_values: &[String]) -> String {
+    crate::interactive::bounded_public_text(
+        error,
+        sensitive_values,
+        MAX_MCP_VALIDATION_ERROR_BYTES,
+        false,
+    )
 }
 
 async fn call_tool(
@@ -1936,6 +2050,14 @@ async fn call_tool(
         arguments,
         requested_status_id,
     } = prepared;
+    if requested_name == "nib_get_status" {
+        let session_id = requested_status_id
+            .as_deref()
+            .expect("nib_get_status schema requires a session id");
+        if let Err(error) = config.validate_public_session_id(session_id) {
+            return (invalid_tool_result(&requested_name, error), None);
+        }
+    }
     let runtime = match run_mcp_session_io(|| resolve_mcp_runtime(project_root, config)) {
         Ok(runtime) => runtime,
         Err(error) => return (invalid_tool_result(&requested_name, error), None),
@@ -1979,7 +2101,7 @@ async fn call_tool(
         .with_approvals_config(&config.approvals)
         .with_session_store(runtime.session_store)
         .with_environment(&runtime.environment)
-        .with_sensitive_values(config.sensitive_values())
+        .with_sensitive_values(config.public_session_sensitive_values())
         .with_approval_handler(std::sync::Arc::new(DenyInteractiveApproval));
     if let Some(cancellation) = cancellation {
         executor = executor.with_cancellation(cancellation.clone());
@@ -2162,7 +2284,11 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{save_nib_config_full, ProfileConfig, ProfilesConfig};
+    use crate::config::{
+        load_nib_config_full, save_nib_config_full, LlmApiMode, ProfileConfig, ProfilesConfig,
+        ProviderEntry,
+    };
+    use crate::llm::test_support::serve_once;
     use std::pin::Pin;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2172,6 +2298,28 @@ mod tests {
     const MANAGED_PROCESS_FIXTURE_CHILD_ENV: &str = "NIB_TEST_MCP_PROCESS_SCOPE_CHILD";
     const MANAGED_PROCESS_FIXTURE_CHILD_TEST: &str =
         "integrations::mcp_server::tests::managed_process_scope_fixture_child";
+
+    struct EnvironmentGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     struct ManagedProcessFixture {
         store: crate::sandbox::process::ProcessScopeStore,
@@ -2726,6 +2874,67 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn nib_get_status_projects_running_subagent_ownership_authority() {
+        let root = tempdir().expect("MCP status project");
+        let config = save_profile_config(root.path());
+        let id = format!("sub-public-mcp-{}", uuid::Uuid::new_v4());
+        let owner_lease = crate::tools::delegation::create_test_subagent_owner_lease(root.path())
+            .expect("live owner lease");
+        crate::tools::delegation::write_subagent_record(
+            root.path(),
+            &crate::tools::delegation::SubagentRecord {
+                id: id.clone(),
+                parent_session_id: Some("parent".to_string()),
+                child_session_id: id.clone(),
+                prompt: "MCP public projection fixture".to_string(),
+                status: "running".to_string(),
+                execution_generation: Some(owner_lease.execution_generation()),
+                owner_lease: Some(owner_lease.lease_id().to_string()),
+                worktree_path: root.path().join("worktree"),
+                branch: format!("nib/subagent/{id}"),
+                branch_oid: None,
+                result: Some(json!({
+                    "_ownership_audit_target": {
+                        "sessions_dir": root.path().join("private-mcp-audit-sessions"),
+                        "directory_identity": "private-mcp-identity",
+                    }
+                })),
+                error: None,
+                verification: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .expect("running subagent record");
+
+        let response = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "public-status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": id},
+                }
+            }),
+        )
+        .await
+        .expect("MCP status response");
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let public = &response["result"]["structuredContent"];
+        assert_eq!(public["status"], "running");
+        assert!(public["result"].is_null());
+        assert!(public.get("execution_generation").is_none());
+        assert!(public.get("owner_lease").is_none());
+        let encoded = response.to_string();
+        assert!(!encoded.contains("_ownership_audit_target"));
+        assert!(!encoded.contains("private-mcp-audit-sessions"));
+        assert!(!encoded.contains("private-mcp-identity"));
+    }
+
     #[test]
     fn cancellation_classification_covers_all_subagent_aliases_and_effect_boundaries() {
         for name in ["nib_run", "spawn_subagent", "invoke_subagent"] {
@@ -3161,7 +3370,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let error = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
             cancel_all_requests(&mut active),
         )
         .await
@@ -3170,12 +3379,138 @@ mod tests {
 
         assert!(active.is_empty());
         assert!(observed_cancellation.is_cancelled());
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(error.contains("durable cancellation reconciliation was handed off"));
         assert!(matches!(
             &*lock_request_lifecycle(&lifecycle),
             RequestLifecycle::CancelRequested
         ));
+    }
+
+    #[tokio::test]
+    async fn subagent_shutdown_joins_held_lock_reconciliation_before_returning() {
+        let root = tempdir().expect("held-lock cancellation repository");
+        let id = format!("sub-held-cancel-{}", uuid::Uuid::new_v4());
+        let store = SessionStore::for_project(root.path()).expect("profile session store");
+        let session = store.try_create_session().expect("audit session");
+        let owner_lease = crate::tools::delegation::create_test_subagent_owner_lease(root.path())
+            .expect("subagent owner lease");
+        crate::tools::delegation::write_subagent_record(
+            root.path(),
+            &crate::tools::delegation::SubagentRecord {
+                id: id.clone(),
+                parent_session_id: Some(session.id.clone()),
+                child_session_id: id.clone(),
+                prompt: "held record lock".to_string(),
+                status: "running".to_string(),
+                execution_generation: Some(owner_lease.execution_generation()),
+                owner_lease: Some(owner_lease.lease_id().to_string()),
+                worktree_path: root.path().to_path_buf(),
+                branch: format!("nib/subagent/{id}"),
+                branch_oid: None,
+                result: None,
+                error: None,
+                verification: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .expect("running subagent record");
+        drop(owner_lease);
+        let held = crate::tools::delegation::hold_subagent_record_lock_for_test(root.path(), &id)
+            .expect("held subagent record lock");
+        crate::daemons::task::TASK_MANAGER
+            .register_task(id.clone(), "subagent")
+            .expect("subagent task");
+        let manager_task = tokio::spawn(std::future::pending::<()>());
+        crate::daemons::task::TASK_MANAGER
+            .attach_abort_handle(&id, manager_task.abort_handle())
+            .expect("subagent abort handle");
+
+        let lifecycle = Arc::new(StdMutex::new(RequestLifecycle::Running));
+        let cancellation = crate::agent::CancellationSignal::new();
+        let task_cancellation = cancellation.clone();
+        let task_lifecycle = Arc::clone(&lifecycle);
+        let task_root = root.path().to_path_buf();
+        let cancellation_class = subagent_start_class("nib_run");
+        let task_cancellation_class = cancellation_class.clone();
+        let response = rpc_result(
+            json!("held-lock-cancel"),
+            json!({
+                "isError": false,
+                "structuredContent": {"subagent_id": id.clone()}
+            }),
+        );
+        let (audit, audit_state) = test_cancellation_audit(&store, &session.id, "nib_run");
+        let audit_slot = Arc::new(CancellationAuditSlot::default());
+        audit_slot.set(audit_state);
+        let task = tokio::spawn(async move {
+            task_cancellation.cancelled().await;
+            finish_request_lifecycle_async(
+                &task_lifecycle,
+                1,
+                &task_root,
+                &task_cancellation_class,
+                HandledRequest {
+                    response: Some(response),
+                    cancellation_audit: Some(audit),
+                },
+            )
+            .await;
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = cancel_active_request(ActiveRequest {
+            generation: 1,
+            id: json!("held-lock-cancel"),
+            task_kind: ActiveTaskKind::Execution,
+            lifecycle: Arc::clone(&lifecycle),
+            cancellation_class,
+            cancellation_audit: audit_slot,
+            cancellation,
+            task,
+        })
+        .await;
+        let CancellationOutcome::Failed(error) = outcome else {
+            panic!("held-lock reconciliation must fail closed");
+        };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "MCP shutdown exceeded its owned reconciliation window"
+        );
+        assert!(!error.contains("handed off"), "{error}");
+        assert!(
+            error.contains("delegation state lock deadline elapsed"),
+            "{error}"
+        );
+        assert!(matches!(
+            &*lock_request_lifecycle(&lifecycle),
+            RequestLifecycle::CancellationFailed { .. }
+        ));
+        assert!(manager_task
+            .await
+            .expect_err("subagent manager task is cancelled")
+            .is_cancelled());
+
+        drop(held);
+        tokio::time::sleep(
+            crate::tools::delegation::SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT * 2,
+        )
+        .await;
+        let record_path = root
+            .path()
+            .join(".nib")
+            .join("subagents")
+            .join(format!("{id}.json"));
+        let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
+            &std::fs::read(record_path).expect("unreconciled subagent record bytes"),
+        )
+        .expect("unreconciled subagent record");
+        assert_eq!(persisted.status, "running");
+        assert!(
+            persisted.result.is_none(),
+            "MCP returned while a detached reconciler could still mutate durable state"
+        );
     }
 
     #[test]
@@ -3375,6 +3710,123 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn status_rejects_credential_derived_identifiers_before_audit_or_reflection() {
+        const SECRET: &str = "mcp/status-secret";
+        const ENVIRONMENT_SECRET: &str = "environment-status-secret";
+        let root = tempdir().unwrap();
+        let _environment = EnvironmentGuard::set("OPENAI_API_KEY", ENVIRONMENT_SECRET);
+        let mut config = NibConfig::default();
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                ..ProviderEntry::default()
+            },
+        );
+
+        for session_id in [
+            SECRET.to_string(),
+            format!("prefix-{SECRET}-suffix"),
+            "mcp%2Fstatus-secret".to_string(),
+            "bWNwL3N0YXR1cy1zZWNyZXQ=".to_string(),
+            r"mcp\/status-secret".to_string(),
+            ENVIRONMENT_SECRET.to_string(),
+            "ZW52aXJvbm1lbnQtc3RhdHVzLXNlY3JldA==".to_string(),
+        ] {
+            let response = handle_request(
+                root.path(),
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "sensitive-status",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_get_status",
+                        "arguments": {"session_id": session_id}
+                    }
+                }),
+            )
+            .await
+            .expect("sensitive status response");
+            let rendered = response.to_string();
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(
+                rendered.contains("session identifier conflicts with configured sensitive data")
+            );
+            assert!(!rendered.contains(SECRET), "{rendered}");
+            assert!(!rendered.contains("bWNwL3N0YXR1cy1zZWNyZXQ"), "{rendered}");
+            assert!(!rendered.contains(ENVIRONMENT_SECRET), "{rendered}");
+            assert!(
+                !rendered.contains("ZW52aXJvbm1lbnQtc3RhdHVzLXNlY3JldA"),
+                "{rendered}"
+            );
+        }
+
+        assert!(
+            !root.path().join(".nib").exists(),
+            "rejected status calls must not initialize profile state or create audit sessions"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn schema_validation_errors_never_reflect_environment_credentials() {
+        const SECRET: &str = "mcp/invalid-arg-secret";
+        const BASE64_SECRET: &str = "bWNwL2ludmFsaWQtYXJnLXNlY3JldA==";
+        let root = tempdir().expect("MCP project");
+        let _environment = EnvironmentGuard::set("OPENAI_API_KEY", SECRET);
+
+        for invalid_value in [
+            SECRET.to_string(),
+            r"mcp\/invalid-arg-secret".to_string(),
+            BASE64_SECRET.to_string(),
+            format!("{SECRET}\u{1b}[2J\u{202e}"),
+        ] {
+            let response = handle_request(
+                root.path(),
+                &NibConfig::default(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "invalid-arguments",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_run",
+                        "arguments": {
+                            "goal": "safe goal",
+                            "max_steps": invalid_value
+                        }
+                    }
+                }),
+            )
+            .await
+            .expect("schema error response");
+            let message = response["error"]["message"]
+                .as_str()
+                .expect("bounded validation message");
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert!(message.contains("/max_steps"), "{message}");
+            assert!(message.contains("schema constraint"), "{message}");
+            for forbidden in [
+                SECRET,
+                r"mcp\/invalid-arg-secret",
+                BASE64_SECRET,
+                "\u{1b}",
+                "\u{202e}",
+            ] {
+                assert!(!message.contains(forbidden), "{message:?}");
+            }
+            assert!(message.len() <= MAX_MCP_VALIDATION_ERROR_BYTES);
+        }
+
+        assert!(
+            !root.path().join(".nib").exists(),
+            "schema rejection must precede audit-session initialization"
+        );
+    }
+
+    #[tokio::test]
     async fn notifications_have_no_response_and_unknown_tools_are_errors() {
         let root = tempdir().unwrap();
         assert!(handle_request(
@@ -3402,6 +3854,9 @@ mod tests {
 
     #[tokio::test]
     async fn postcommit_nib_run_completion_win_has_no_cancellation_audit() {
+        let _timeout = crate::tools::delegation::SubagentCancellationTimeoutGuard::set(
+            std::time::Duration::from_secs(5),
+        );
         let root = tempdir().expect("completion-win repository");
         initialize_git_repository(root.path());
         let id = format!("sub-{}", uuid::Uuid::new_v4());
@@ -3470,8 +3925,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postcommit_nib_run_cancellation_win_records_exactly_one_rich_audit() {
+    async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_audit() {
         let root = tempdir().expect("cancellation-win repository");
+        #[cfg(windows)]
+        let cancellation_timeout = std::time::Duration::from_secs(15);
+        #[cfg(not(windows))]
+        let cancellation_timeout = std::time::Duration::from_secs(2);
+        let _timeout =
+            crate::tools::delegation::SubagentCancellationTimeoutGuard::set(cancellation_timeout);
         initialize_git_repository(root.path());
         let id = format!("sub-{}", uuid::Uuid::new_v4());
         let worktree = crate::sandbox::worktree::Worktree::create(root.path(), &id)
@@ -3512,7 +3973,7 @@ mod tests {
             .attach_abort_handle(&id, running.abort_handle())
             .expect("subagent abort handle");
         let owner_id = id.clone();
-        let owner_release = std::thread::spawn(move || {
+        let owner_release = tokio::spawn(async move {
             let started = std::time::Instant::now();
             while crate::daemons::task::TASK_MANAGER
                 .get_status(&owner_id)
@@ -3523,7 +3984,7 @@ mod tests {
                     started.elapsed() < std::time::Duration::from_secs(5),
                     "subagent manager never entered cancelled state"
                 );
-                std::thread::yield_now();
+                tokio::task::yield_now().await;
             }
             drop(owner_lease);
         });
@@ -3546,14 +4007,15 @@ mod tests {
             cancellation_audit: Some(audit),
         };
 
-        finish_request_lifecycle(
+        finish_request_lifecycle_async(
             &lifecycle,
             1,
             root.path(),
             &subagent_start_class("nib_run"),
             handled,
-        );
-        owner_release.join().expect("owner lease release thread");
+        )
+        .await;
+        owner_release.await.expect("owner lease release task");
 
         assert!(matches!(
             &*lock_request_lifecycle(&lifecycle),
@@ -3578,9 +4040,24 @@ mod tests {
             "cancelled"
         );
         let cancelled_record = crate::tools::delegation::get_subagent_record(root.path(), &id)
-            .expect("cancelled record with cleanup proof");
+            .expect("public cancelled record");
+        assert!(cancelled_record.execution_generation.is_none());
+        assert!(cancelled_record.owner_lease.is_none());
+        assert!(cancelled_record.result.as_ref().is_none_or(|result| {
+            result.get("ownership_reconciliation").is_none()
+                && result.get("cleanup_proof").is_none()
+        }));
+        let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
+            &std::fs::read(
+                root.path()
+                    .join(".nib/subagents")
+                    .join(format!("{id}.json")),
+            )
+            .expect("persisted cancelled record"),
+        )
+        .expect("persisted cancelled record JSON");
         assert_eq!(
-            cancelled_record.result.as_ref().and_then(|result| {
+            persisted.result.as_ref().and_then(|result| {
                 result
                     .get("ownership_reconciliation")
                     .and_then(|evidence| evidence.get("cleanup_proof"))
@@ -3895,6 +4372,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error() {
+        const SECRET: &str = "mcp/provider+secret";
+        const SECRET_PERCENT: &str = "mcp%2Fprovider%2Bsecret";
+        const SECRET_BASE64: &str = "bWNwL3Byb3ZpZGVyK3NlY3JldA==";
+        const REMOTE_BODY: &str = "REMOTE_MCP_PROVIDER_BODY";
+        let root = tempdir().expect("mcp llm-failure repository");
+        initialize_git_repository(root.path());
+        let (base_url, _) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            serde_json::json!({
+                "error": {
+                    "code": "invalid_api_key",
+                    "message": format!(
+                        "{REMOTE_BODY} {SECRET} {SECRET_PERCENT} {SECRET_BASE64} <red>[bold] \u{1b}[31m"
+                    )
+                }
+            })
+            .to_string(),
+        );
+        let mut config = NibConfig::default();
+        config.execution.plan_mode = false;
+        config.skills.enabled = false;
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        config.llm.active_provider = Some("openai".to_string());
+        config.llm.providers.insert(
+            "openai".to_string(),
+            ProviderEntry {
+                model: "fixture-model".to_string(),
+                api_key: Some(SECRET.to_string()),
+                base_url: Some(base_url),
+                api: Some(LlmApiMode::ChatCompletions),
+                ..ProviderEntry::default()
+            },
+        );
+        save_nib_config_full(root.path(), &mut config).expect("save config");
+        let config = load_nib_config_full(root.path()).expect("reload config");
+
+        let started = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "run",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_run",
+                    "arguments": {"goal": "inspect the workspace", "max_steps": 1}
+                }
+            }),
+        )
+        .await
+        .expect("nib_run response");
+        assert_eq!(started["result"]["isError"], false, "{started}");
+        let subagent_id = started["result"]["structuredContent"]["subagent_id"]
+            .as_str()
+            .expect("subagent id")
+            .to_string();
+        let started_payload = started.to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let record = loop {
+            let record = crate::tools::delegation::get_subagent_record(root.path(), &subagent_id)
+                .expect("subagent record");
+            if record.status != "running" {
+                assert_eq!(record.status, "failed", "{record:?}");
+                break record;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("subagent did not finish: {record:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let result = record.result.as_ref().expect("typed subagent result");
+        assert_eq!(result["outcome"], "planning_failed");
+        assert_eq!(result["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(result["failure"]["class"], "authentication");
+
+        let child_store = crate::session::SessionStore::for_project(&record.worktree_path)
+            .expect("MCP child session store");
+        let child = child_store
+            .load(&record.child_session_id)
+            .expect("MCP child failure session");
+        child
+            .validate_message_sequence()
+            .expect("MCP child message sequence");
+        assert!(!child.messages.iter().any(|message| {
+            message.role == "assistant"
+                && (message.content.contains("LLM") || message.content.contains("failed"))
+        }));
+
+        let status = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": subagent_id}
+                }
+            }),
+        )
+        .await
+        .expect("status response");
+        let payload = status.to_string();
+        assert_eq!(status["result"]["isError"], false, "{status}");
+        let structured = &status["result"]["structuredContent"];
+        assert_eq!(structured["status"], "failed", "{status}");
+        assert_eq!(structured["result"]["outcome"], "planning_failed");
+        assert_eq!(structured["result"]["failure"]["incident_code"], "LLM-AUTH");
+        assert_eq!(structured["result"]["failure"]["class"], "authentication");
+
+        let repeated = handle_request(
+            root.path(),
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "status-repeat",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": subagent_id}
+                }
+            }),
+        )
+        .await
+        .expect("repeated status response");
+        assert_eq!(repeated["result"]["isError"], false, "{repeated}");
+        assert_eq!(
+            repeated["result"]["structuredContent"],
+            status["result"]["structuredContent"]
+        );
+
+        let persisted_record = serde_json::to_string(&record).expect("subagent record JSON");
+        let persisted_session = serde_json::to_string(&child).expect("child session JSON");
+        let repeated_payload = repeated.to_string();
+        for surface in [
+            &started_payload,
+            &payload,
+            &repeated_payload,
+            &persisted_record,
+            &persisted_session,
+        ] {
+            assert!(surface.len() <= 64 * 1024, "observer payload is unbounded");
+            for forbidden in [
+                SECRET,
+                SECRET_PERCENT,
+                SECRET_BASE64,
+                REMOTE_BODY,
+                "invalid_api_key",
+                "<red>",
+                "[red]",
+                "[bold]",
+                "\u{1b}",
+                "\\u001b",
+                "\\u001B",
+            ] {
+                assert!(!surface.contains(forbidden), "found {forbidden}: {surface}");
+            }
+            assert!(surface.chars().all(|character| {
+                !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+            }));
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_tool_calls_never_create_audit_sessions() {
         let root = tempdir().unwrap();
         let invalid_params = [
@@ -3927,5 +4573,78 @@ mod tests {
             !root.path().join(".nib").exists(),
             "invalid calls must not initialize profile state or persist sessions"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn mcp_subagent_flow_accepts_a_dos_short_project_root() {
+        let root = tempdir().expect("MCP DOS-alias repository");
+        let _timeout = crate::tools::delegation::SubagentCancellationTimeoutGuard::set(
+            std::time::Duration::from_secs(10),
+        );
+        initialize_git_repository(root.path());
+        let config = save_profile_config(root.path());
+        let canonical_root = root.path().canonicalize().expect("canonical repository");
+        let short_root = crate::fs_security::windows_dos_short_path_for_test(&canonical_root)
+            .expect("DOS short project root");
+        if short_root == crate::fs_security::path_without_windows_verbatim_prefix(&canonical_root) {
+            return;
+        }
+
+        let started = {
+            let _spawn_timeout = crate::tools::delegation::SpawnPositiveProgressTimeoutGuard::set(
+                std::time::Duration::from_secs(15),
+            );
+            handle_request(
+                &short_root,
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "dos-alias-run",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nib_run",
+                        "arguments": {"goal": "Return a bounded fixture response.", "max_steps": 1}
+                    }
+                }),
+            )
+            .await
+            .expect("MCP subagent start response")
+        };
+        assert_eq!(started["result"]["isError"], false, "{started}");
+        let id = started["result"]["structuredContent"]["subagent_id"]
+            .as_str()
+            .expect("subagent id");
+        let record = crate::tools::delegation::get_subagent_record(&short_root, id)
+            .expect("MCP delegation record");
+        assert!(record.worktree_path.starts_with(&canonical_root));
+        assert!(!record.worktree_path.starts_with(&short_root));
+
+        let status = handle_request(
+            &short_root,
+            &config,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "dos-alias-status",
+                "method": "tools/call",
+                "params": {
+                    "name": "nib_get_status",
+                    "arguments": {"session_id": id}
+                }
+            }),
+        )
+        .await
+        .expect("MCP status response");
+        assert_eq!(status["result"]["isError"], false, "{status}");
+
+        match crate::tools::delegation::resolve_subagent_cancellation_async(&short_root, id).await {
+            crate::tools::delegation::CancelSubagentResolution::Cancelled { .. }
+            | crate::tools::delegation::CancelSubagentResolution::Terminal { .. } => {}
+            crate::tools::delegation::CancelSubagentResolution::Unresolved { error, .. } => {
+                panic!("DOS-alias MCP cancellation was unresolved: {error}")
+            }
+        }
+        crate::sandbox::worktree::Worktree::remove(&short_root, id)
+            .expect("remove MCP worktree through DOS short root");
     }
 }

@@ -10,13 +10,11 @@ tasks:
       - task --list
 
   check:
-    desc: Run Rust formatting, lint, compile, and unit tests
+    desc: Run fast installer and Rust static checks
     cmds:
       - task: installers:check
       - cargo fmt -- --check
       - cargo clippy -- -D warnings
-      - cargo check
-      - cargo test -- --test-threads=1
 
   check:all-targets:
     desc: Type-check every Rust target and feature (supports cross TARGET)
@@ -40,6 +38,7 @@ tasks:
       - sh -n scripts/first-time-setup.sh
       - bash -n scripts/publish-release.sh
       - bash -n scripts/qualify-release-update.sh
+      - bash -n scripts/check-interactive-release.sh
       - bash -n scripts/check-managed-process-release.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.sh
       - grep -Fq 'skills-yaml/nib' scripts/install.ps1
@@ -62,10 +61,57 @@ tasks:
     cmds:
       - cargo test -- --test-threads=1
 
+  verify:
+    desc: Run the complete local static and test gates once
+    cmds:
+      - task: check
+      - task: test
+
+  test:llm-conformance:
+    desc: Run credential-free provider-neutral LLM adapter conformance tests
+    cmds:
+      - 'cargo test --lib llm::gemini::tests::idless_parallel_continuation_ -- --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::factory_rejects_every_unused_mock_transport_or_credential_field -- --exact --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::factory_mock_consumes_model_fields_for_complete_and_stream -- --exact --test-threads=1'
+      - 'cargo test --lib llm::factory::tests::reviewed_http_client_override_is_limited_to_openai_compatible_adapters -- --exact --test-threads=1'
+      - 'cargo test --lib config::tests::mock_rejects_unused_transport_and_credential_fields_but_keeps_model_catalog_fields -- --exact --test-threads=1'
+      - 'cargo test --lib llm::conformance::tests:: -- --test-threads=1'
+
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
     cmds:
       - cargo test --test durable_tasks -- --test-threads=1
+
+  test:delegation:
+    desc: Run managed-process and subagent delegation tests
+    cmds:
+      - >-
+        cargo test --lib
+        daemons::state::tests::optional_read_write_
+        -- --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root
+        -- --exact --test-threads=1
+      - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
+      - cargo test --test delegation -- --test-threads=1
+
+  test:runtime-e2e:
+    desc: Run the full agent runtime end-to-end integration tests
+    cmds:
+      - cargo test --test test_runtime_e2e -- --test-threads=1
 
   test:managed-process-capability:
     desc: Verify the exact managed-process backend probe independently
@@ -121,10 +167,37 @@ tasks:
     cmds:
       - cargo test --test installers -- --test-threads=1
 
+  test:task-contract:
+    desc: Validate fast-check and full-verification Task composition
+    cmds:
+      - >-
+        cargo test --test installers
+        task_workflow_keeps_fast_feedback_separate_from_full_verification --
+        --exact --test-threads=1
+
+  test:interactive:
+    desc: Run deterministic plain/TUI interaction semantics without a pseudo-terminal
+    cmds:
+      - 'cargo test --lib exact_run_steering -- --test-threads=1'
+      - 'cargo test --lib interactive::tests:: -- --test-threads=1'
+      - 'cargo test --lib tui::tests:: -- --test-threads=1'
+      - 'cargo test --bin nib console::tests:: -- --test-threads=1'
+      - 'cargo test --bin nib chat::tests:: -- --test-threads=1'
+      - cargo test --test interactive_cli -- --test-threads=1
+      - >-
+        cargo test --test installers
+        interactive_release_smoke_is_offline_bounded_and_restoration_aware --
+        --exact --test-threads=1
+
   test:llm-live:offline:
     desc: Run credential-free live LLM harness, matrix, planner, and report tests
     cmds:
       - cargo test --test llm_live -- --test-threads=1
+
+  test:llm-release:
+    desc: Run deterministic T021 release-binary harness contract tests
+    cmds:
+      - cargo test --test release_binary_qualification -- --test-threads=1
 
   test:llm-live:catalog:
     desc: Discover and reconcile live provider model catalogs (explicit opt-in)
@@ -205,11 +278,46 @@ tasks:
       - task: build
       - scripts/check-managed-process-release.sh
 
-  dev:
-    desc: Quick dev check (Rust-only core)
+  smoke:interactive:
+    desc: Qualify offline interaction semantics and release Unix PTY restoration
+    platforms: [linux, darwin]
     cmds:
-      - task: check
-      - task: test
+      - task: test:interactive
+      - task: build
+      - task: smoke:interactive:binary
+
+  smoke:interactive:binary:
+    desc: Exercise the existing release binary through offline redirected and native Unix PTY flows
+    platforms: [linux, darwin]
+    cmds:
+      - scripts/check-interactive-release.sh
+
+  smoke:interactive:windows:binary:
+    desc: Exercise the existing release binary through offline Windows ConPTY and TERM=dumb flows
+    platforms: [windows]
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/check-interactive-release.ps1
+
+  qualify:llm-release:
+    desc: Exercise the optimized nib binary against exact-revision local LLM fixtures
+    vars:
+      SOURCE_COMMIT:
+        sh: git rev-parse HEAD
+    env:
+      NIB_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
+      NIB_EXPECTED_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
+    cmds:
+      - task: test:llm-release
+      - task: build
+      - >-
+        cargo test --test release_binary_qualification
+        exact_release_binary_qualification --
+        --ignored --exact --nocapture --test-threads=1
+
+  dev:
+    desc: Run complete verification, build, and help smoke
+    cmds:
+      - task: verify
       - task: build
       - ./target/release/nib --help || cargo run -- --help
 

@@ -260,3 +260,90 @@ embedded identity controls subsequent option-free updates and startup notices. A
 different requested channel must replace the binary even when both manifests name the
 same commit. Local/source, unsupported, non-writable, and ambiguous installations
 remain installer-managed, and repository/tag selection remains compile-time controlled.
+
+## 2026-08-19 - Treat plain and TUI as presentations of one interactive product
+
+- Type: decision
+- Source: user + T028 + T030
+- Confidence: high
+- Review: none
+- Supersedes: 2026-06-20 chat-only `/model` capability and the separate chat/TUI product model
+
+Content:
+
+The line-oriented and full-screen interfaces must expose the same interactive agent,
+session, command, model/provider, skill, MCP, approval, question, cancellation, and
+reconciliation capabilities. Presentation and controls may remain native to each mode.
+`nib` is the canonical interactive launcher, automatically selecting the TUI on a
+capable terminal and plain mode otherwise; `--plain` and `--tui` force a presentation.
+`nib chat` uses the same launcher, `nib tui` remains a compatibility alias, and
+`nib run` retains its separate one-shot automation contract.
+
+## 2026-08-20 - FT-019 TUI is a ledgered renderer over a shared interaction model
+
+- Type: decision
+- Source: user + FT-019 backlog revision
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+FT-019 remains the umbrella interaction contract. The TUI is a presentation of that
+contract, not a second product: two fixed header/status rows, typed activity
+transcript, wrapped composer, and approval/question docks that keep the transcript
+visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
+canonical command discovery. Enter never steers; the first user-visible slice is
+queue-only until the agent loop can bind exact-run steering. Implementation still
+requires child development specs before code.
+
+## 2026-09-02 - Keep v1 production delegation Linux-only
+
+- Type: decision
+- Source: FT-015/FT-017 closure review
+- Confidence: high
+- Review: pending exact-revision independent review
+- Supersedes: none
+
+Content:
+
+FT-015 and FT-017 may close after native Windows/macOS mechanism tests and explicit
+fail-closed production rejection pass; they do not wait for production enablement on
+those platforms. The v1 production delegation boundary is Linux plus a usable bwrap PID
+namespace. A protected cleanup authority outside the managed worker trust boundary is a
+separate product capability owned by backlog spec FT-020. Windows and macOS may graduate
+independently only through that future spec and must not weaken the current rejection
+contract.
+
+## 2026-09-02 - Qualify every native CI release binary exactly
+
+- Type: decision
+- Source: development-spec closure review
+- Confidence: high
+- Review: pending exact-revision hosted CI
+- Supersedes: build-only native CI steps
+
+Content:
+
+Linux Validate, Windows Tests, and macOS Tests run `task qualify:llm-release` before
+their platform smoke. The task embeds and verifies the checkout's exact commit, exercises
+credential-free localhost LLM fixtures, hashes the optimized executable, and marks
+evidence acceptance-eligible only when the source worktree is clean. A plain successful
+release build is no longer sufficient T021/T022 closure evidence.
+
+## 2026-09-02 - Close ordinary development specs only on exact native evidence
+
+- Type: decision
+- Source: development-spec closure review and exact hosted CI
+- Confidence: high
+- Review: independent spec-compliance and code-quality/security reviews
+- Supersedes: pending review state for the 2026-09-02 native qualification decisions
+
+Content:
+
+T003, T004, T006, T007, T020, T021, T022, T026, T029, T034, T035, FT-015,
+FT-016, FT-017, and FT-019 may move from `development/` to `done/` on exact run
+`33683995100`. T021 and T022 close from the same final release-binary revision, T034
+closes before FT-019 on the same native smoke evidence, and T029 composes that native
+failure-boundary matrix with the already recorded real managed switches in both
+directions. No live-provider authority is inferred: T023 remains in development.

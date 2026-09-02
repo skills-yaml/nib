@@ -88,24 +88,54 @@ task build
 
 3. **Start an interactive session:**
    ```bash
-   nib chat
-   # or use the full-screen interface
-   nib tui
+   nib
+
+   # Explicit presentation modes
+   nib --plain
+   nib --tui
    ```
 
-   Both interactive interfaces use the same slash commands:
+   nib automatically uses the full-screen interface on a capable terminal and falls
+   back to line-oriented plain mode elsewhere. Both presentation modes use the same
+   slash commands:
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
+   - `/session` - Preview and resume a persisted session
+   - `/clear` - Start a fresh session
    - `/skills` - Manage installed skills
    - `/mcp` - Manage MCP servers
    - `/quit` - Exit the session
 
-   `nib chat --session <id>` and `nib tui --session <id>` resume the same
-   profile-scoped session. Add `--auth` to either command to run authentication first.
+   `nib --session <id>` resumes a profile-scoped session, and `--auth` runs
+   authentication first. `nib chat` remains an explicit spelling of the same launcher;
+   `nib tui` remains a compatibility alias for `nib --tui`.
+
+   The TUI centers the active session's bounded persisted timeline and offers keyboard
+   completion. Plain mode provides the same command and session capabilities through
+   numbered prompts. `/session` previews history and requires confirmation before
+   changing the active session in either mode.
 
 Mutating work remains on a `nib/session/*` worktree branch until you review and merge
 it. `nib run --yes` bypasses interactive plan and tool prompts and should be limited to
 already trusted environments.
+
+### Upgrading legacy delegation state
+
+Repositories previously used by a nib build with per-subagent record locks require a
+one-time offline migration. Stop and disable every prior nib binary that can access the
+repository, then explicitly attest that condition:
+
+```bash
+nib doctor --fix --confirm-no-legacy-processes
+```
+
+The command performs bounded, retry-safe cleanup and records the exact migration epoch.
+Without that confirmation, an existing unmarked records directory or any legacy lock
+state fails closed and remains untouched. If a prior binary can run again or introduces
+legacy state after migration, stop it and repeat the explicit doctor command.
+An interrupted native staging directory is resumed only when its exact identity-bound
+receipt is its sole content. Unmarked, mismatched, or extra-content staging is preserved
+for inspection; verify it and remove only that exact staging directory before retrying.
 
 ## Documentation
 

@@ -45,23 +45,28 @@ impl AgentState {
                 | (Self::Idle, Self::Reconciliation)
                 | (Self::Planning, Self::PlanApproval)
                 | (Self::Planning, Self::Reconciliation)
+                | (Self::PlanApproval, Self::Planning)
                 | (Self::PlanApproval, Self::BuildContext)
                 | (Self::PlanApproval, Self::Reconciliation)
                 | (Self::BuildContext, Self::Compression)
                 | (Self::BuildContext, Self::Reconciliation)
                 | (Self::Compression, Self::InspectLlm)
                 | (Self::Compression, Self::Reconciliation)
+                | (Self::InspectLlm, Self::BuildContext)
                 | (Self::InspectLlm, Self::UpdateMemory)
                 | (Self::InspectLlm, Self::Reconciliation)
                 | (Self::UpdateMemory, Self::UserApproval)
+                | (Self::UpdateMemory, Self::BuildContext)
                 | (Self::UpdateMemory, Self::Reconciliation)
                 | (Self::UserApproval, Self::ToolExecute)
+                | (Self::UserApproval, Self::BuildContext)
                 | (Self::UserApproval, Self::Reconciliation)
                 | (Self::ToolExecute, Self::BuildContext)
                 | (Self::ToolExecute, Self::WaitingForUserInput)
                 | (Self::ToolExecute, Self::Reconciliation)
                 | (Self::WaitingForUserInput, Self::BuildContext)
                 | (Self::WaitingForUserInput, Self::Reconciliation)
+                | (Self::Reconciliation, Self::Planning)
                 | (Self::Reconciliation, Self::BuildContext)
                 | (Self::Reconciliation, Self::Done)
         )
@@ -107,5 +112,16 @@ mod tests {
     fn lifecycle_rejects_execution_before_plan_approval() {
         assert!(!AgentState::Planning.can_transition_to(AgentState::ToolExecute));
         assert!(!AgentState::PlanApproval.can_transition_to(AgentState::ToolExecute));
+    }
+
+    #[test]
+    fn lifecycle_accepts_only_safe_steering_reentry_boundaries() {
+        assert!(AgentState::PlanApproval.can_transition_to(AgentState::Planning));
+        assert!(AgentState::InspectLlm.can_transition_to(AgentState::BuildContext));
+        assert!(AgentState::UpdateMemory.can_transition_to(AgentState::BuildContext));
+        assert!(AgentState::Reconciliation.can_transition_to(AgentState::Planning));
+        assert!(AgentState::Reconciliation.can_transition_to(AgentState::BuildContext));
+        assert!(AgentState::UserApproval.can_transition_to(AgentState::BuildContext));
+        assert!(!AgentState::WaitingForUserInput.can_transition_to(AgentState::Planning));
     }
 }
