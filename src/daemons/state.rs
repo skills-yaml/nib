@@ -5436,7 +5436,10 @@ mod tests {
             let child = root.path().join(relative);
             fs::create_dir_all(child.parent().expect("child parent")).expect("fixture parent");
             let directory = StableDirectory::open(root.path()).expect("stable directory");
-            let deadline = Instant::now() + Duration::from_millis(40);
+            // Leave enough setup time for loaded CI workers to reach the
+            // post-create hook; the hook itself deterministically expires the
+            // same deadline before the parent-sync guard is rechecked.
+            let deadline = Instant::now() + Duration::from_secs(2);
             let mut paused_after_create = false;
             let error = directory
                 .open_or_create_descendant_directory_with_guard_and_hooks(
@@ -5446,9 +5449,7 @@ mod tests {
                     |sync_child| {
                         if sync_child == child && !paused_after_create {
                             paused_after_create = true;
-                            while Instant::now() < deadline {
-                                thread::yield_now();
-                            }
+                            thread::sleep(deadline.saturating_duration_since(Instant::now()));
                         }
                         Ok(())
                     },
@@ -5614,7 +5615,10 @@ mod tests {
             .open_read_write(&visible_path)
             .expect("visible lock handle");
         let identity = daemon_lock_identity(&visible, &visible_path).expect("lock identity");
-        let deadline = Instant::now() + Duration::from_millis(100);
+        // The hard-link publication is the phase under test. Give loaded CI
+        // workers enough time to reach it, then expire the same deadline in
+        // the guard before final synchronization.
+        let deadline = Instant::now() + Duration::from_secs(2);
         let mut paused = false;
         let error = repair_daemon_lock_anchor_with_guard(
             &visible_directory,
@@ -5625,9 +5629,7 @@ mod tests {
             || {
                 if !paused && anchor_path.exists() {
                     paused = true;
-                    while Instant::now() < deadline {
-                        thread::yield_now();
-                    }
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
                 ensure_directory_namespace_deadline(deadline, &anchor_path)
             },
