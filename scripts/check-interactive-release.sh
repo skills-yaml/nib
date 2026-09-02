@@ -351,11 +351,12 @@ grep -Fq 'Draft history matches for inspect:' "$fixture/plain-semantics.txt"
 grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
 
 plain_question_input() {
-  sleep 1.2
+  local question_output="$fixture/plain-question.txt"
+  wait_for_pty_output "$question_output" 'Approval required'
   printf 'y\n\n'
-  sleep 1.2
+  wait_for_pty_output "$question_output" 'Answer (number or text):'
   printf '2\n\n'
-  sleep 1.8
+  wait_for_pty_output "$question_output" 'You> '
   printf '/quit\n'
 }
 
