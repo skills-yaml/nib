@@ -1,6 +1,6 @@
 # T034: FT-019 Native Terminal Qualification
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [FT-019: Codex-Inspired Chat and TUI Interactions](ft_019_codex_inspired_chat_and_tui_interactions.md),
@@ -51,28 +51,28 @@ the corresponding native CI jobs to execute successfully on the completion revis
 
 ## Acceptance Criteria
 
-- [ ] The Unix release-binary smoke runs on native Linux and macOS without GNU-only or
+- [x] The Unix release-binary smoke runs on native Linux and macOS without GNU-only or
       Bash-4-only dependencies and selects the correct native `script` dialect.
-- [ ] Unix capable-terminal and `TERM=dumb`/redirected cases remain bounded,
+- [x] Unix capable-terminal and `TERM=dumb`/redirected cases remain bounded,
       credential-free, Mock-only, isolated, privacy-scanned, and restore terminal mode,
       alternate-screen, and bracketed-paste state.
-- [ ] The Windows ConPTY adapter accepts only bounded timed input chunks, drains output
+- [x] The Windows ConPTY adapter accepts only bounded timed input chunks, drains output
       concurrently, preserves the exact child exit status, and keeps timeout cleanup
       bounded with no surviving console descendant.
-- [ ] Every Windows adapter invocation records before/after console input/output modes
+- [x] Every Windows adapter invocation records before/after console input/output modes
       and proves restoration on success, child failure, and timeout.
-- [ ] The Windows native release-binary smoke drives a capable interactive session and
+- [x] The Windows native release-binary smoke drives a capable interactive session and
       a `TERM=dumb`/plain fallback through the real inbox console adapter using only the
       isolated Mock configuration.
 - [x] Task exposes documented Unix and Windows binary-smoke entry points, and native
       macOS/Windows CI invokes the matching smoke after building the optimized binary.
 - [x] Static contract tests fail on removed platform routing, input bounds, restoration
       evidence, Mock/offline isolation, or CI wiring.
-- [ ] Native Linux, macOS, and Windows jobs pass their exact smoke tasks on the same
+- [x] Native Linux, macOS, and Windows jobs pass their exact smoke tasks on the same
       clean completion revision.
 - [x] Independent spec-compliance and code-quality/security reviews have no unresolved
       blocking findings.
-- [ ] `task test:installers`, `task docs:check`, `task check`, `task test`,
+- [x] `task test:installers`, `task docs:check`, `task check`, `task test`,
       `task check:all-targets`, `task coverage`, `task build`,
       `task smoke:interactive`, the native Windows binary smoke, and
       `git diff --check` pass on the completion revision.
@@ -180,3 +180,27 @@ tests, and every integration/doctest target), `task test:installers` (39/39),
 `task docs:check` (5/5), `task check`, `task check:all-targets`, `task coverage` at
 85.98% (85,650 / 99,615), and `task build`. These dirty-worktree Linux results do not
 replace the still-open same-clean-revision macOS/Windows/native aggregate evidence.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

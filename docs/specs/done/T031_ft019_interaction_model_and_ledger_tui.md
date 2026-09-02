@@ -1,15 +1,15 @@
 # T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input
 
 **Status:** Done
-**Related:** [FT-019](../development/ft_019_codex_inspired_chat_and_tui_interactions.md),
+**Related:** [FT-019](../done/ft_019_codex_inspired_chat_and_tui_interactions.md),
 [T025](T025_interactive_chat_tui_capability_parity.md),
 [T028](T028_current_session_first_tui_and_slash_command_completion.md),
 [T030](T030_unified_interactive_cli_and_plain_mode_fallback.md),
 [T018](T018_ratatui_tui_approval.md),
-[T003](../development/T003_context_engine_with_dynamic_compression_and_session_management.md),
-[T026](../development/T026_actionable_redaction_safe_llm_failure_reporting.md),
+[T003](../done/T003_context_engine_with_dynamic_compression_and_session_management.md),
+[T026](../done/T026_actionable_redaction_safe_llm_failure_reporting.md),
 [FT-012](ft_012_richer_planner.md),
-[FT-017](../development/ft_017_managed_process_supervisor.md)
+[FT-017](../done/ft_017_managed_process_supervisor.md)
 
 ## Summary
 

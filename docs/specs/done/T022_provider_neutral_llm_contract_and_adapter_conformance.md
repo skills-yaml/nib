@@ -1,6 +1,6 @@
 # T022: Provider-Neutral LLM Contract and Adapter Conformance
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
@@ -660,7 +660,7 @@ reconciliation is safer and auditable.
 - [x] Architecture, Rust conventions, user guide, provider inventory, T021 relationship,
   and config/doctor documentation describe the delivered behavior without overstating
   model-specific compatibility.
-- [ ] T021 exact-revision evidence either predates all T022 runtime changes as the
+- [x] T021 exact-revision evidence either predates all T022 runtime changes as the
   recorded baseline or is rerun on the final T022 revision according to the sequencing
   rule above; stale binary evidence cannot close either spec.
 - [x] Independent spec-compliance and technical/security reviews find no unresolved
@@ -983,7 +983,7 @@ Combined local conformance evidence on 2026-08-26:
 No paid live-provider, native macOS/Windows, or clean exact-revision evidence is created
 by these local gates, so the exact-revision criterion remains open.
 
-Remaining before Done:
+Historical items remaining before Done at this stage:
 
 - T021 exact-revision release-binary sequencing on a clean source revision, native
   macOS/Windows exact-revision CI.
@@ -998,3 +998,31 @@ Remaining before Done:
 - [Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling)
 - [OpenRouter streaming error handling](https://openrouter.ai/docs/api/reference/streaming)
 - [OpenRouter errors and retry hints](https://openrouter.ai/docs/api/reference/errors-and-debugging)
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+T021 and T022 use this same final revision and release-binary matrix. The T021
+baseline is therefore not older than any T022 runtime change, and the documented
+sequencing rule is satisfied before either lifecycle transition.

@@ -283,3 +283,33 @@ future to a Tokio multi-thread runtime whose workers have 4 MiB stacks. The proc
 thread blocks only on the spawned future's join handle. Join failures return bounded
 static cancellation/panic diagnostics, and the subagent worker preserves its captured
 optional session-lock policy across the boundary.
+
+## 2026-09-02 - Ordinary implementation specs reconciled to native closure
+
+- Type: fact
+- Source: exact hosted CI, local Task gates, specs, and independent reviews
+- Confidence: high
+- Review: 2026-09-02
+- Supersedes: 2026-09-02 current spec lifecycle and local gate baseline; pending
+  exact-revision hosted Windows review of configured-runtime root-future execution
+
+Content:
+
+The canonical lifecycle is 44 specs in `done/`, T023 alone in `development/`, and
+FT-020 alone in `backlog/`. Exact implementation run `33683995100` passed Validate,
+macOS Tests, and Windows Tests for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed complete serial
+suites, native all-target checks, exact release qualification, Linux/macOS terminal
+smokes, Windows ConPTY and redirected smokes, and Linux managed-process owner-loss
+containment. Hosted Linux runtime line coverage was 85.87 percent
+(102,061/118,862). Exact binary SHA-256 values are
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows).
+
+T023 remains open because ordinary credential-free evidence cannot substitute for
+owner-approved paid live qualification. FT-015/FT-017 completion retains the
+Linux+bwrap-only production boundary; FT-020 owns future protected non-Linux authority.

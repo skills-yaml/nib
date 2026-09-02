@@ -1,6 +1,6 @@
 # FT-015: Deep Sub-Agent Delegation
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
@@ -66,7 +66,7 @@ and results, support message/cancel, and require separately approved verificatio
 - [x] Merge and cleanup failures preserve terminal evidence; successful merge cleans
   the worktree before the record becomes `merged`.
 - [x] Fresh local aggregate gates are green on the reconciled tree.
-- [ ] Windows and macOS runtime gates are green on the reconciled tree.
+- [x] Windows and macOS runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -166,7 +166,7 @@ existing merge/recovery ownership proofs.
 - [x] Focused persistent-lock identity tests pass.
 - [x] Fresh canonical local repository gates pass after the final ownership/worktree
   remediation.
-- [ ] Windows and macOS runtime gates pass after the final ownership/worktree
+- [x] Windows and macOS runtime gates pass after the final ownership/worktree
   remediation.
 
 ### Affected Areas
@@ -323,7 +323,7 @@ user-configured helpers while creating, verifying, merging, or compensating work
   locks prevent recovery from racing a live publisher. Receipt-bound ref-lock and
   reserved-ref scratch are recovered under bounded directory scans before phase
   reconciliation, and `Removed`/`Complete` advances only after both Git locks release.
-- [ ] Windows cleanup is executed and proven through exact opened-handle deletion and
+- [x] Windows cleanup is executed and proven through exact opened-handle deletion and
   reparse-point regressions. Local Unix cleanup already proves exact namespace
   detachment and reports rather than overclaims residual physical cleanup.
 - [x] Modern abrupt-owner reconciliation remains nonterminal while cleanup ownership is
@@ -471,9 +471,11 @@ entry.
   smoke tests.
 - [x] Delegation integration passes 21/21, including owner loss, cancellation,
   verification, recovery, exact cleanup, and fail-closed ambiguity paths.
-- [ ] Windows runtime reparse, handle-deletion, process-containment, and full-suite gates
-  remain unexecuted because a Windows runtime is unavailable on this host. macOS
-  runtime execution also remains unverified.
+- [x] The exact hosted Windows and macOS jobs passed their complete serial suites,
+  native all-target gates, release qualification, and platform smokes. Local Linux
+  remains non-authoritative for those native behaviors. Production descendant
+  containment remains intentionally Linux plus bwrap; the non-Linux path is a tested
+  fail-closed rejection owned by this shipped scope.
 
 ### Explicit Future Boundary
 
@@ -671,7 +673,7 @@ regression; all nine runtime E2Es; the release build; and the release-binary `--
 `version`, and `doctor` smoke. The exact hosted run therefore closes this bounded-cleanup
 and contention follow-up while FT-015 retains its separate platform-authority work.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute Windows/macOS runtime gates for worktree identity/deletion and the FT-017
    native mechanisms, and prove that production delegation continues to fail closed on
@@ -736,7 +738,7 @@ unchanged.
   initial preparation, reconciliation, and exact compensation, while its status path,
   existing cancellation allowance, and exact assertions remain intact; the focused
   Task/repository contract pins the native-only regression.
-- [ ] The exact PR revision passes the full hosted Windows job and native matrix after
+- [x] The exact PR revision passes the full hosted Windows job and native matrix after
   this stabilization.
 
 ### Affected Areas
@@ -963,7 +965,7 @@ self-registration, plus parent SIGKILL after `READY` and before `COMMIT`, with a
 worker-entry sentinel proving zero precommit execution. No restart may expose an unlaunchable
 `running` or `recovery_required` workload.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - Ambiguous registrations and cleanup races must remain preserved for operator review;
   guessing ownership would be destructive.
@@ -973,3 +975,32 @@ worker-entry sentinel proving zero precommit execution. No restart may expose an
   configuration can appear dirty to isolated managed Git. Supporting that case while
   retaining FT-015 configuration isolation requires a separate policy design.
 - Windows and macOS runtime behavior remains unexecuted on the local Linux host.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+Completion does not enable production delegation on Windows or macOS. The shipped v1
+production boundary remains Linux with usable bwrap PID-namespace containment; the
+native non-Linux mechanism and fail-closed rejection gates are complete. Backlog
+FT-020 owns any future protected non-Linux production authority.

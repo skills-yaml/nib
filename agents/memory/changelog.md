@@ -350,3 +350,24 @@ coverage, locked optimized build, Linux interactive PTY smoke, abrupt-owner
 managed-process smoke, dirty-tree release-harness execution, and patch hygiene. T023's
 offline implementation is green but no paid/live authority was inferred; its external
 evidence remains open.
+
+## 2026-09-02 - Native matrix closed 15 development specs
+
+- Type: implementation / validation / lifecycle milestone
+- Source: PR #25, run 33683995100, local Task gates, and two-stage review
+- Confidence: high
+- Review: independent spec-compliance and code-quality/security reviews
+
+Content:
+
+Hosted Linux, macOS, and Windows passed the exact implementation revision, including
+complete serial suites, all-target checks, exact optimized-binary qualification,
+platform interaction smokes, coverage, and Linux managed-process owner-loss proof.
+Late hosted timing races were confined to phase-specific test fixtures and hardened
+without changing production deadlines or weakening fail-closed assertions.
+
+Fifteen evidence-complete specs moved to `done/`: T003, T004, T006, T007, T020,
+T021, T022, T026, T029, T034, T035, FT-015, FT-016, FT-017, and FT-019. The
+resulting lifecycle is 44 done, 1 development, and 1 backlog. T023 remains the sole
+development spec pending explicit live-provider authority and privacy-reviewed evidence;
+FT-020 remains backlog for protected non-Linux production delegation authority.

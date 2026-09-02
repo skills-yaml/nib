@@ -3,10 +3,10 @@
 **Status:** Done
 
 **Related:**
-[T007: Configuration Schema Alignment and Doctor Validation](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
-[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
+[T007: Configuration Schema Alignment and Doctor Validation](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
 [T024: Configurable Provider Model Catalog and Curated Defaults](T024_configurable_provider_model_catalog_and_curated_defaults.md), and
-[T026: Actionable, Redaction-Safe LLM Failure Reporting](../development/T026_actionable_redaction_safe_llm_failure_reporting.md)
+[T026: Actionable, Redaction-Safe LLM Failure Reporting](../done/T026_actionable_redaction_safe_llm_failure_reporting.md)
 
 ## Summary
 

@@ -1,6 +1,6 @@
 # T020: MCP Client Integration
 
-**Status:** Development
+**Status:** Done
 **Related:** [FT-005](../done/ft_005_pure_rust_core_migration.md), [Ecosystem Integration](../../tech/ecosystem_integration.md)
 
 ## Scope
@@ -53,7 +53,7 @@ executor approval and audit.
 - [x] Request timeout, cancellation, dropped callers, child cleanup, and ambient-secret stripping fail safely.
 - [x] A Rust mock MCP process demonstrates discovery and calls without Python fixtures.
 - [x] Fresh local aggregate gates and Linux release-binary smoke are green.
-- [ ] Windows and macOS runtime gates are green.
+- [x] Windows and macOS runtime gates are green.
 
 ### Affected Areas
 
@@ -111,7 +111,7 @@ child stderr.
   terminates group-contained descendants while reaping the unusable direct MCP child.
 - [x] Existing request timeout, cancellation, correlation, and child cleanup behavior
   remains intact.
-- [ ] Windows MCP children are assigned before execution to a kill-on-close Job Object,
+- [x] Windows MCP children are assigned before execution to a kill-on-close Job Object,
   so timeout, cancellation, manager drop, and fatal transport terminate descendants as
   well as the direct child; the configured Windows CI job executes the regression.
 
@@ -148,7 +148,7 @@ MCP-routed gated tools must remain bounded, hook-disabled, contained, and compen
 - [x] Manager startup, ordinary drop, initialization failure, fatal transport, queued
   request drainage, direct-root-exit detection, and descendant cleanup have
   platform-independent code paths and deterministic Linux runtime tests.
-- [ ] Windows Job Object lifecycle and descendant cleanup tests compile and execute in
+- [x] Windows Job Object lifecycle and descendant cleanup tests compile and execute in
   Windows CI where process execution is available.
 - [x] MCP-routed mutating tool worktrees use bounded, hook-disabled managed Git execution.
   Post-add compensation removes only exact-owned path, registration, and branch state;
@@ -158,7 +158,7 @@ MCP-routed gated tools must remain bounded, hook-disabled, contained, and compen
 - [x] Managed-worktree completion inherits FT-015's supported Unix exact-namespace
   detachment, fail-closed residual cleanup reporting, and durable receipt recovery;
   Windows runtime execution remains covered by the platform criteria around it.
-- [ ] Synchronous managed commands terminate their Windows Job Object descendants and
+- [x] Synchronous managed commands terminate their Windows Job Object descendants and
   reap the direct child on timeout and cancellation, matching the Unix process-group
   boundary.
 
@@ -230,7 +230,7 @@ all-target check/Clippy, and isolated release-binary MCP initialize/list/call/er
 size-bound smoke. Windows and macOS runtime evidence and the inherited FT-015 ownership
 gates remain open.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Retain FT-015's documented isolation boundary: mutable same-UID Git interference is
    outside the threat model, while every attributable cleanup continues to require
@@ -240,7 +240,7 @@ gates remain open.
    runners and retain the resulting runtime evidence.
 3. Rerun the canonical Task gates and two-stage review before moving T020 to `done/`.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - Same-UID repository/worktree Git-configuration mutation is the explicit inherited
   FT-015 trust boundary; T020 does not classify it as an unimplemented containment
@@ -248,3 +248,27 @@ gates remain open.
 - A descendant that deliberately escapes the managed Unix process group is outside this
   spec's guarantee and remains owned by FT-017.
 - Windows Job Object and macOS MCP behavior have not been executed on this Linux host.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

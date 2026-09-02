@@ -1,6 +1,6 @@
 # FT-017: Managed Process Supervisor for Abrupt Owner Loss
 
-**Status:** Development
+**Status:** Done
 
 ## Summary
 
@@ -226,9 +226,9 @@ design are both proven.
   is absent.
 - [x] Linux tests launch a real descendant that calls `setsid`, kill the owner, and prove
   the PID-namespace or cgroup scope terminates and reaps it before terminal publication.
-- [ ] Windows tests prove abrupt owner exit closes the Job Object and terminates the full
+- [x] Windows tests prove abrupt owner exit closes the Job Object and terminates the full
   descendant tree before terminal publication.
-- [ ] macOS behavior is tested against the documented group-contained contract and never
+- [x] macOS behavior is tested against the documented group-contained contract and never
   claims arbitrary detached-descendant cleanup.
 - [x] Foreground terminal, MCP, raw Git, managed-worktree Git, skill, and agent-loop
   children execute beneath the same registered scope root. Durable background workers
@@ -246,7 +246,7 @@ design are both proven.
 - [x] Process-scope storage is aggregate-bounded, restart-recovers deterministic scratch,
   and retires Complete records only from exact cleanup or launch-abort authority embedded
   in terminal workload state.
-- [ ] `task test`, `task check`, `task coverage`, Linux/macOS/Windows CI, and abrupt-owner
+- [x] `task test`, `task check`, `task coverage`, Linux/macOS/Windows CI, and abrupt-owner
   release-binary smoke all pass.
 
 ## Risks And Tradeoffs
@@ -398,7 +398,7 @@ it without non-portable multi-digit descriptor redirections.
   before the exact probe and proves the dynamic info handoff works with `/bin/sh`.
 - [x] A focused supervisor regression proves the internal launch frame cannot consume or
   alter payload stdin bytes sent after durable Running publication.
-- [ ] The exact PR revision passes the hosted Validate job with required bwrap tests.
+- [x] The exact PR revision passes the hosted Validate job with required bwrap tests.
 
 ### Affected Areas
 
@@ -442,7 +442,7 @@ validation or exact crash recovery.
 - [x] An active Windows cleanup lease does not prevent bounded directory accounting,
   scope mutation, lease-state inspection, or exact atomic recovery from reading the
   durable lease record.
-- [ ] The exact PR revision passes required bwrap validation and the hosted Linux,
+- [x] The exact PR revision passes required bwrap validation and the hosted Linux,
   macOS, and Windows matrix.
 
 ### Affected Areas
@@ -489,7 +489,7 @@ coverage.
 - [x] MCP integration tests execute production delegation only on Linux; macOS and
   Windows assert the platform rejection contract while native containment tests remain
   enabled.
-- [ ] The exact PR revision passes the hosted Validate and macOS jobs.
+- [x] The exact PR revision passes the hosted Validate and macOS jobs.
 
 ### Affected Areas
 
@@ -532,11 +532,11 @@ namespace proof unchanged, and do not enable production subagent delegation on W
   process generation.
 - [x] Windows cleanup proof does not depend on reopening a terminated PID failing while
   the supervisor retains stronger direct-child and Job Object authorities.
-- [ ] The native Windows owner-loss regression publishes its terminal result only after
+- [x] The native Windows owner-loss regression publishes its terminal result only after
   the Job-contained descendant is gone; the explicit production rejection remains.
 - [x] A native supervisor error is reported directly by the fixture instead of being
   masked as a terminal-publication timeout.
-- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+- [x] The exact PR revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
 
@@ -576,7 +576,7 @@ foreign and missing IDs share one unavailable result. `/stop` without an ID is a
 bounded read-only listing. These commands do not move durable workers into the
 foreground supervisor protocol or change this feature's platform containment contract.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute the native Windows Job Object and macOS group-contained mechanism tests on
    hosted runners while retaining the documented production rejection on both
@@ -624,9 +624,9 @@ existing cleanup proof, lease lock, scope lock, deadline, and fail-closed bounda
   identities remain preserved.
 - [x] The focused managed-process and delegation gate passes, including the previously
   failing `spawned_subagents_approve_their_plan_but_deny_destructive_actions` workflow.
-- [ ] `task verify`, coverage, release smokes, and exact-revision hosted Linux, macOS,
-  and Windows CI are green after this repair. The local portions are complete; only
-  exact-revision hosted CI remains.
+- [x] `task verify`, coverage, release smokes, and exact-revision hosted Linux, macOS,
+  and Windows CI are green after this repair; no validation gate in this item remains
+  open.
 
 ### Affected Areas
 
@@ -646,3 +646,32 @@ MSVC all-target checks passed, runtime line coverage was 85.87 percent
 (101,945/118,726), and both the optimized Linux interactive and abrupt-owner
 managed-process smokes passed. The exact hosted Linux, macOS, and Windows evidence
 remains open.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+Completion does not enable production delegation on Windows or macOS. The shipped v1
+production boundary remains Linux with usable bwrap PID-namespace containment; the
+native non-Linux mechanism and fail-closed rejection gates are complete. Backlog
+FT-020 owns any future protected non-Linux production authority.

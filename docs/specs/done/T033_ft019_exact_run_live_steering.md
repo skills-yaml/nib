@@ -3,10 +3,10 @@
 **Status:** Done
 
 **Related:**
-[FT-019: Codex-Inspired Chat and TUI Interactions](../development/ft_019_codex_inspired_chat_and_tui_interactions.md),
+[FT-019: Codex-Inspired Chat and TUI Interactions](../done/ft_019_codex_inspired_chat_and_tui_interactions.md),
 [T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](../done/T031_ft019_interaction_model_and_ledger_tui.md),
 [T032: FT-019 Explicit Compaction and Session Background Commands](T032_ft019_explicit_compaction_and_session_background_commands.md), and
-[T003: Context Engine with Dynamic Compression](../development/T003_context_engine_with_dynamic_compression_and_session_management.md)
+[T003: Context Engine with Dynamic Compression](../done/T003_context_engine_with_dynamic_compression_and_session_management.md)
 
 ## Summary
 

@@ -1,6 +1,6 @@
 # T007: Configuration Schema Alignment + "nib doctor" Validation
 
-**Status:** Development
+**Status:** Done
 
 **Related Feature:** T002: Agent Framework Runtime and Orchestration Engine for nib
 
@@ -93,7 +93,7 @@ migration/editing, credential redaction, and actionable doctor checks.
 - [x] `nib doctor` distinguishes healthy, invalid-config, credential, skill, daemon, permission, and MCP failures.
 - [x] CLI config display redacts primary and rotating credentials by default.
 - [x] Fresh local repository gates are green on the reconciled tree.
-- [ ] Windows and macOS runtime gates are green on the reconciled tree.
+- [x] Windows and macOS runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -248,13 +248,13 @@ until executed.
   passed. Missing configuration reports `ConfigSource::Default`; malformed TOML and
   simulated detached configuration state are propagated by both compatibility loaders.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute Windows and macOS configuration, migration, doctor, identity, and recovery
    gates on their configured platforms and remediate platform-specific failures.
 2. Rerun the canonical Task gates and two-stage review before moving T007 to `done/`.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - Residual physical cleanup remains explicitly unverified when pathname ownership
   cannot be retained through unlink; hostile same-UID peers require an external
@@ -282,3 +282,27 @@ The confirmation does not authorize recursive repair of ambiguous native-origin
 staging. Only a sole, valid receipt bound to that exact staging identity can resume;
 unmarked, mismatched, or extra-content staging is preserved with actionable inspection
 and exact-removal guidance.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

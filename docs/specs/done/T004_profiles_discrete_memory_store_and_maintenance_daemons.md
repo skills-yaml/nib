@@ -1,6 +1,6 @@
 # T004: Profiles, Discrete Memory Store, and Maintenance Daemons (Cron/Curator)
 
-**Status:** Development
+**Status:** Done
 
 **Related Feature:** T002: Agent Framework Runtime and Orchestration Engine for nib
 
@@ -135,7 +135,7 @@ detached durable workers.
 - [x] Destructive cleanup requires explicit policy and is mirrored into session audit.
 - [x] Durable terminal and schedule workers survive the invoking process and reconcile stale leases.
 - [x] Fresh local repository gates are green on the reconciled tree.
-- [ ] Windows and macOS runtime gates are green on the reconciled tree.
+- [x] Windows and macOS runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -341,7 +341,7 @@ evidence.
 - [x] `cargo clippy --all-targets --all-features -- -D warnings`.
 - [x] Repository-wide `task test`, `task check`, and `task coverage` final local gates.
 - [x] Isolated Linux release-binary smoke.
-- [ ] Windows CI `task test` and Windows/macOS runtime smoke final platform gates.
+- [x] Windows CI `task test` and Windows/macOS runtime smoke final platform gates.
 
 ## Final Memory And Pin Linearization Review (2026-07-15)
 
@@ -365,7 +365,7 @@ memory or managed-skill cleanup decision.
   every pin that returns success before the destructive commit preserves its target.
 - [x] Local file, lock, and parent-directory replacement regressions prove memory
   reads/writes and curator deletion fail closed without losing authoritative state.
-- [ ] Windows runtime reparse regressions prove the same behavior on Windows.
+- [x] Windows runtime reparse regressions prove the same behavior on Windows.
 
 ### Affected Areas
 
@@ -495,7 +495,7 @@ directories through the existing handle rather than opening a conflicting second
   cleanup use equivalent DOS-short and canonical project-root spellings.
 - [x] Bounded nested-tree scans operate through a retained DELETE-capable directory
   handle without triggering a Windows sharing violation.
-- [ ] The full Windows job passes with its default `C:\Users\RUNNER~1` temporary root.
+- [x] The full Windows job passes with its default `C:\Users\RUNNER~1` temporary root.
 
 ### Affected Areas
 
@@ -539,7 +539,7 @@ a conflicting byte range.
   locked transaction handle.
 - [x] Canonical-equivalent Windows session-store paths compare by filesystem identity
   rather than raw DOS-short versus verbatim spelling.
-- [ ] The full hosted Windows job passes under its default `C:\Users\RUNNER~1`
+- [x] The full hosted Windows job passes under its default `C:\Users\RUNNER~1`
   temporary root.
 
 ### Affected Areas
@@ -579,14 +579,14 @@ their ownership protocol is active, without weakening live-owner exclusion.
 - [x] Managed worktree capture matches the reported registration parent to the trusted
   canonical namespace using only equivalent Windows spellings, then rebuilds and opens
   exactly one normal direct-child component beneath the trusted parent.
-- [ ] Equivalent Windows path spellings do not cause worktree creation, integration,
+- [x] Equivalent Windows path spellings do not cause worktree creation, integration,
   compensation, delegation, or MCP flows to reject a valid Git registration.
 - [x] Retained state and capability directory handles permit visible namespace
   replacement when the tree has no active descendant lock; a live Windows lock may
   instead pin the parent and must preserve the original namespace and state.
 - [x] Durable ownership and ref receipts remain bounded and readable while ownership is
   held, and a live writer is still excluded from recovery or destructive cleanup.
-- [ ] The exact PR revision passes the full hosted Windows job under its default
+- [x] The exact PR revision passes the full hosted Windows job under its default
   `C:\Users\RUNNER~1` temporary root.
 
 ### Affected Areas
@@ -678,16 +678,16 @@ relying on a fixed child lifetime.
 - [x] Strict recovery waits within its existing bound for a moved live writer, then
   rechecks path identity and accepts the writer's completed prior cleanup; an unlocked
   identity-distinct target/prior pair remains an ambiguity error.
-- [ ] Skill installation accepts an existing real directory reached through an
+- [x] Skill installation accepts an existing real directory reached through an
   equivalent Windows DOS short alias while symlinks and Windows reparse points remain
   rejected.
-- [ ] Skill-list malformed-manifest diagnostics are asserted with the host path
+- [x] Skill-list malformed-manifest diagnostics are asserted with the host path
   separator.
-- [ ] Windows bounded-command cleanup waits for the captured Job Object process handles
+- [x] Windows bounded-command cleanup waits for the captured Job Object process handles
   to become signaled before returning and still verifies zero active job processes.
 - [x] The Linux owner-loss recovery fixture uses an explicit release barrier and still
   proves that an escaped descendant cannot survive namespace recovery.
-- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+- [x] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
 
 ### Affected Areas
 
@@ -737,11 +737,11 @@ finishes.
 - [x] All four durable CLI integration workflows complete under a 1 MiB main-thread
   stack budget instead of aborting before their first tool result.
 - [x] The canonical Task gates and Windows all-target graph remain green.
-- [ ] Windows durable-worker creation inherits no ambient capture handles while preserving
+- [x] Windows durable-worker creation inherits no ambient capture handles while preserving
   its environment, working directory, detached execution, and durable PID publication.
-- [ ] A captured `nib run` invocation returns before its long-running durable terminal job,
+- [x] A captured `nib run` invocation returns before its long-running durable terminal job,
   allowing a later `nib task cancel` process to cancel and reconcile that job.
-- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+- [x] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
 
 ### Affected Areas
 
@@ -795,7 +795,7 @@ Production gateway timeouts and locking behavior remain unchanged.
   distinct-conversation progress, stream-backpressure, and final prompt-order assertions.
 - [x] Every positive-progress phase uses one explicit 30-second test budget while the
   250 ms same-conversation no-entry probe remains unchanged.
-- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+- [x] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
 
 ### Affected Areas
 
@@ -840,7 +840,7 @@ contracts remain unchanged.
   behavior remains unchanged and is not part of this repair.
 - [x] A deterministic unit regression proves the submitted root future is polled off the
   caller thread, and the four constrained-stack durable CLI workflows remain green.
-- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+- [x] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
 
 ### Affected Areas
 
@@ -885,7 +885,7 @@ MSVC `task check:all-targets`, 85.87 percent runtime line coverage
 abrupt-owner managed-process smoke also passed. The exact hosted Windows, macOS, and
 Linux revision remains the only open criterion in this follow-up.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS
    daemon, curator, memory, and task runtime gates on their configured platforms.
@@ -1038,10 +1038,34 @@ resources. Production-linked SIGKILL coverage exercises both Prepared-before-spa
 spawn-before-self-registration boundaries and requires scope retirement before any external
 compensation, with no worker sentinel or resource reappearance after the late child exits.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - Residual physical cleanup remains explicitly unverified when pathname ownership
   cannot be retained through unlink; hostile same-UID peers require an external
   account, VM/container, or privileged broker boundary.
 - Non-Linux persistence, reparse, and cleanup paths remain unexecuted and may require
   platform-specific identity handling without weakening fail-closed preservation.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

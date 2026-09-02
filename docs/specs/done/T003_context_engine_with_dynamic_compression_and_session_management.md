@@ -1,6 +1,6 @@
 # T003: Implement Context Engine with Dynamic Compression and Session Management
 
-**Status:** Development
+**Status:** Done
 
 **Related Feature:** T002: Agent Framework Runtime and Orchestration Engine for nib
 
@@ -138,7 +138,7 @@ history at configured thresholds, and inject profile memory plus workload state.
 - [x] Environment and user memory persist separately and are included in bounded context.
 - [x] Long AGENTS content is complete when budget permits and head/tail marked only under aggregate pressure.
 - [x] Fresh local repository gates are green on the reconciled tree.
-- [ ] Windows and macOS runtime gates are green on the reconciled tree.
+- [x] Windows and macOS runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -257,9 +257,10 @@ isolated release-binary smoke.
 - [x] Fresh `task check`, independent `task test`, `task docs:check`, `task coverage`,
   locked release build, and Linux release/PTY smoke on 2026-07-16. The suite executes
   772 tests and coverage is 83.94 percent (53,734/64,015).
-- [ ] Windows runtime execution remains a final platform gate. A Windows runtime and
-  MSVC toolchain are unavailable on this host, and local Linux does not prove Windows
-  reparse behavior.
+- [x] The exact hosted Windows job passed the complete serial suite, native MSVC
+  all-target gate, release qualification, and platform smoke. Local Linux remains
+  non-authoritative for Windows reparse behavior; the native hosted result supplies
+  that evidence.
 
 ## Final Conditional-Commit And Deletion Remediation (2026-07-15)
 
@@ -360,7 +361,7 @@ already owns that lock.
   mutation lock; no recursive lock acquisition is introduced.
 - [x] A deterministic regression proves strict enumeration times out while the mutation
   lock is held and succeeds after release; existing corruption regressions remain strict.
-- [ ] The exact PR revision passes the Windows MCP stdout-backpressure regression and the
+- [x] The exact PR revision passes the Windows MCP stdout-backpressure regression and the
   full hosted matrix.
 
 ### Affected Areas
@@ -400,7 +401,7 @@ weaken retained directory identity, lock, publication, or detachment validation.
   always releases and joins the child, and verifies the original child update succeeds.
 - [x] File replacement and lock replacement regressions remain unchanged.
 - [x] Canonical local, documentation, and Windows-target validation gates pass.
-- [ ] The exact hosted Windows revision passes `session_roundtrip` and the full CI matrix.
+- [x] The exact hosted Windows revision passes `session_roundtrip` and the full CI matrix.
 
 ### Affected Areas
 
@@ -433,16 +434,40 @@ a concurrent append rejects the stale summary. The command creates no synthetic 
 message and records exact run plus compression evidence. This does not close T003's
 native platform evidence requirements.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute the Windows and macOS session/context runtime gates on their configured
    platforms and remediate any identity or persistence differences.
 2. Rerun the canonical Task gates and two-stage review before moving T003 to `done/`.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - Residual physical cleanup is deliberately reported as unverified when exact
   pathname ownership cannot be retained through unlink; hostile same-UID peers remain
   outside nib's isolation boundary.
 - Windows and macOS session persistence and deletion behavior have not been executed on
   this Linux host.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

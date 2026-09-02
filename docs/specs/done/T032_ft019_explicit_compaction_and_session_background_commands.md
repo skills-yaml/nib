@@ -1,8 +1,8 @@
 # T032: FT-019 Explicit Compaction and Session Background Commands
 
 **Status:** Done
-**Parent:** [FT-019](../development/ft_019_codex_inspired_chat_and_tui_interactions.md)
-**Related:** [T003](../development/T003_context_engine_with_dynamic_compression_and_session_management.md), [T012](T012_toolset_expansion.md), [FT-017](../development/ft_017_managed_process_supervisor.md), [T031](T031_ft019_interaction_model_and_ledger_tui.md)
+**Parent:** [FT-019](../done/ft_019_codex_inspired_chat_and_tui_interactions.md)
+**Related:** [T003](../done/T003_context_engine_with_dynamic_compression_and_session_management.md), [T012](T012_toolset_expansion.md), [FT-017](../done/ft_017_managed_process_supervisor.md), [T031](T031_ft019_interaction_model_and_ledger_tui.md)
 
 ## Summary
 

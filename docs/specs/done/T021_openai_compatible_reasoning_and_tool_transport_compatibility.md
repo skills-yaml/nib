@@ -1,11 +1,11 @@
 # T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
-[T007: Configuration and Doctor](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T007: Configuration and Doctor](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
 [T010: Release Process](../done/T010_release_process.md)
 
 ## Summary
@@ -361,7 +361,7 @@ rule with a deterministic operator-requested repair.
 - [x] A kill/restart fixture between persisted tool completion and model continuation
   reconciles the interrupted run terminally and proves the completed tool is not
   executed twice.
-- [ ] An exact release binary exercises help, version, doctor, structured planning,
+- [x] An exact release binary exercises help, version, doctor, structured planning,
   one Responses tool round trip through a credential-free local fixture, and failure
   reconciliation; its reported SHA matches the validated artifact.
 - [x] User and technical documentation explain API-mode selection, migration, privacy,
@@ -524,3 +524,31 @@ done.
 - [T027: Doctor-Guided OpenAI Transport Repair](../done/T027_doctor_guided_openai_transport_repair.md)
   owns the explicit configuration repair while preserving this spec's runtime
   no-fallback contract.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+T021 and T022 use this same final revision and release-binary matrix. T021 therefore
+provides a non-stale baseline before the T022 lifecycle transition, satisfying the
+documented sequencing rule without relying on an older artifact.

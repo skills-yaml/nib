@@ -1,6 +1,6 @@
 # FT-016: MCP Server Exposing the Agent Loop
 
-**Status:** Development
+**Status:** Done
 **Related:** [architecture.md](../../tech/architecture.md)
 
 ## Summary
@@ -66,7 +66,7 @@ core tools, and route calls through profile-aware runtime/executor ownership.
 - [x] Risky noninteractive calls fail closed without creating bypass audit state.
 - [x] Unknown tools, invalid arguments, notifications, and oversized output return bounded protocol responses.
 - [x] Fresh local aggregate gates and Linux release-binary smoke are green.
-- [ ] Windows runtime gates are green.
+- [x] Windows runtime gates are green.
 
 ### Affected Areas
 
@@ -122,7 +122,7 @@ execution promptly while retaining normal audit/reconciliation behavior.
   commit may instead win and return its normal authoritative result.
 - [x] Deterministic stdio/process regressions prove cancellation and disconnect terminate
   a long-running command and preserve gated audit evidence.
-- [ ] Windows terminal and agent children are contained in a kill-on-close Job Object
+- [x] Windows terminal and agent children are contained in a kill-on-close Job Object
   before execution, and the configured Windows CI job proves descendant cleanup.
 
 ### Affected Areas
@@ -181,7 +181,7 @@ containment on Windows as asynchronous execution.
 - [x] Managed-worktree completion inherits FT-015's supported Unix exact-namespace
   detachment, fail-closed residual cleanup reporting, and durable receipt recovery;
   Windows runtime execution remains covered by the platform criterion below.
-- [ ] Windows synchronous process execution assigns the child to a kill-on-close Job
+- [x] Windows synchronous process execution assigns the child to a kill-on-close Job
   Object before it can run, and descendant timeout/drop regressions cover that path.
 - [x] Deterministic local tests cover cancelled-record write failure after task abort,
   terminal, still-running, contradictory, and unknown reconciliation, stale publication,
@@ -264,7 +264,7 @@ detachment failures.
   poll their fixture-root heartbeat, and do not create a nested session worktree.
 - [x] Public session enumeration is serialized with audit mutation while retaining
   strict persistence errors and the curator's non-recursive locked enumeration path.
-- [ ] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
+- [x] Targeted cancellation, stdin disconnect, fatal input, and stdout-backpressure
   regressions start the shell descendant, stop its heartbeat, and retain cancellation
   audit evidence on Windows.
 - [x] Fixture startup failures identify the exact requested heartbeat path alongside the
@@ -272,7 +272,7 @@ detachment failures.
 - [x] The Unix fixture-image-relative native lifecycle trace records fixture entry, child
   entry, first flush, `current_exe()`, `current_dir()`, and raw and resolved heartbeat
   paths; success verifies those records without making trace I/O lifecycle-fatal.
-- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+- [x] The exact PR revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
 
@@ -502,7 +502,7 @@ cancellation behavior, sandbox policy, Windows Job containment, and the public t
   diagnostic evidence is recorded.
 - [x] Canonical local, documentation, and Windows-target validation gates pass.
 - [x] The exact hosted Windows revision passes all four portable MCP lifecycle tests.
-- [ ] The exact hosted Linux, macOS, and Windows matrix is green.
+- [x] The exact hosted Linux, macOS, and Windows matrix is green.
 
 ### Affected Areas
 
@@ -569,17 +569,41 @@ test-only budget because it verifies terminal/cancellation ordering and absence 
 false cancellation audit, not deadline behavior. Production timeouts, lifecycle state
 transitions, and audit semantics are unchanged.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured
    runner.
 2. Close the inherited FT-015 Git-configuration, unlink, and platform gates.
 3. Rerun the canonical Task gates and two-stage review before moving FT-016 to `done/`.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - A descendant that deliberately escapes the managed Unix process group remains outside
   this spec's guarantee and is owned by FT-017.
 - Cancellation protocol publication depends on durable audit persistence; persistence
   failure must continue to fail closed rather than emit an unaudited cancellation.
 - Windows Job Object runtime behavior has not been executed on this Linux host.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

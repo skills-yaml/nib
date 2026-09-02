@@ -5,9 +5,9 @@
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
-[T007: Configuration Schema Alignment](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
-[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
-[T022: Provider-Neutral LLM Contract and Adapter Conformance](../development/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
+[T007: Configuration Schema Alignment](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
+[T022: Provider-Neutral LLM Contract and Adapter Conformance](../done/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
 [Task Runner](../../tech/task.md), and
 [CI](../../tech/ci.md)
 
@@ -1215,3 +1215,23 @@ The Meta reference establishes the direct public-preview service and OpenAI-comp
 developer surface, but not yet a stable catalog endpoint in the accessible public
 reference. The explicit-base-URL blocker above is intentional until implementation can
 record authoritative catalog documentation and a bounded fixture.
+
+## Final Offline Native Matrix Reconciliation (2026-09-02)
+
+PR [#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100) passed
+Validate, macOS Tests, and Windows Tests for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. This includes the complete
+credential-free offline live-harness suite on every native job; the paid live entrypoint
+remained explicitly ignored by ordinary CI. No provider credential was read and no paid
+request was made.
+
+This evidence closes the offline implementation and portability risk, but it does not
+close T023. Completion still requires owner-approved exact OpenRouter IDs with rationale
+and review/expiry dates; dedicated provider credentials and accounts; explicit per-request,
+provider, and run budgets plus hard spend caps; protected environment approvals; catalog
+and dry-run review; then canary, selected, and full exact-revision runs with retained
+privacy-reviewed reports for all six provider groups. The live acceptance items remain
+unchecked and T023 remains in `development/` until that external authority and evidence
+exist.

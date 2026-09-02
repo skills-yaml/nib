@@ -1,6 +1,6 @@
 # T035: Fast Incremental Check and Single Full Verification
 
-Status: Development
+**Status:** Done
 
 ## Summary
 
@@ -51,7 +51,7 @@ full test run.
 - [x] Focused Task contract tests, `task docs:check`, `task check`, and
       `git diff --check` pass; full-suite status is reported truthfully against the
       current working tree.
-- [ ] The exact committed revision passes hosted CI before T035 moves to `done/`.
+- [x] The exact committed revision passes hosted CI before T035 moves to `done/`.
 
 ## Affected Areas
 
@@ -121,3 +121,27 @@ static gate once and then passed the unchanged serial suite: 1,061 library tests
 CLI tests, and 254 integration tests, with the two explicit live/release qualification
 tests ignored by the normal suite. T035 remains in development only until the exact
 committed revision passes hosted CI and its lifecycle move is reconciled.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

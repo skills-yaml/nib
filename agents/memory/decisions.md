@@ -330,3 +330,20 @@ their platform smoke. The task embeds and verifies the checkout's exact commit, 
 credential-free localhost LLM fixtures, hashes the optimized executable, and marks
 evidence acceptance-eligible only when the source worktree is clean. A plain successful
 release build is no longer sufficient T021/T022 closure evidence.
+
+## 2026-09-02 - Close ordinary development specs only on exact native evidence
+
+- Type: decision
+- Source: development-spec closure review and exact hosted CI
+- Confidence: high
+- Review: independent spec-compliance and code-quality/security reviews
+- Supersedes: pending review state for the 2026-09-02 native qualification decisions
+
+Content:
+
+T003, T004, T006, T007, T020, T021, T022, T026, T029, T034, T035, FT-015,
+FT-016, FT-017, and FT-019 may move from `development/` to `done/` on exact run
+`33683995100`. T021 and T022 close from the same final release-binary revision, T034
+closes before FT-019 on the same native smoke evidence, and T029 composes that native
+failure-boundary matrix with the already recorded real managed switches in both
+directions. No live-provider authority is inferred: T023 remains in development.
