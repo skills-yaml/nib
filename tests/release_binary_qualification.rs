@@ -368,7 +368,8 @@ fn expected_source_revision() -> String {
 #[test]
 fn release_qualification_task_contract_is_stable() {
     let taskfile = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Taskfile.yml"))
-        .expect("Taskfile");
+        .expect("Taskfile")
+        .replace("\r\n", "\n");
     let target = taskfile
         .split("  qualify:llm-release:\n")
         .nth(1)

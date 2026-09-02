@@ -316,12 +316,14 @@ design are both proven.
   namespace is reaped and the cleanup lease is absent.
 - `cargo test --test managed_process_supervisor_recovery -- --test-threads=1` passes
   4/4 supervisor-loss cases. Running recovery reacquires the exact cleanup lease and
-  forces the recorded namespace PID 1 to remain live until the recovery path
-  exact-signals it. Prepared recovery kills the supervisor before bwrap spawn, after
-  bwrap spawn but before PID-1 discovery, and after the PID-1 gate is ready but before
-  Running. Every Prepared case proves user code never started and publishes only
-  launch-abort authority; the recorded-root case additionally proves exact pidfd
-  termination before completion.
+  proves the recorded namespace PID 1 is absent before completion under either valid
+  parent-death ordering. A separate deterministic process-store regression keeps a
+  direct child live after its recorded supervisor exits and proves recovery exact-signals
+  it with `SIGKILL`, waits for reap, and publishes cleanup proof only afterward. Prepared
+  recovery kills the supervisor before bwrap spawn, after bwrap spawn but before PID-1
+  discovery, and after the PID-1 gate is ready but before Running. Every Prepared case
+  proves user code never started and publishes only launch-abort authority; the
+  recorded-root case additionally proves exact pidfd termination before completion.
 - `cargo test --test managed_process_launch_fencing -- --test-threads=1` passes 2/2.
   The launch-fencing matrix covers partial request delivery, a complete flushed request,
   proof-free recovery evidence, and eventual proof-backed terminal publication. The
@@ -585,12 +587,19 @@ foreground supervisor protocol or change this feature's platform containment con
 
 ## Linux Recovery-Fixture Stabilization (2026-08-23)
 
-The abrupt-supervisor recovery fixture now waits until procfs reports the namespace root
-in the stopped state before killing the supervisor. `kill(SIGSTOP)` only confirms signal
-delivery, so the previous immediate owner kill could let parent-death cleanup win the
-test's intended recovery race under full-suite load. The production recovery path is
-unchanged. The exact focused test passed after the change, and multiple concurrent-tree
-`task check` runs subsequently passed the complete recovery suite.
+The abrupt-supervisor recovery fixture previously tried to keep the namespace root alive
+by stopping it before killing the supervisor. That assumption was invalid: bubblewrap's
+parent-death `SIGKILL` can terminate a stopped namespace root before recovery observes it.
+The fixture now proves the exact namespace identity is live before the supervisor crash,
+then accepts either valid ordering after the crash: kernel parent-death cleanup may win,
+or recovery may exact-signal the still-live identity. In both cases recovery must hold the
+recoverable cleanup lease, publish the same cleanup proof, verify namespace exit, and prove
+that the escaped-session descendant never survives. The production recovery path is
+unchanged. A distinct deterministic regression records separate supervisor and direct-child
+process generations, reaps the supervisor while the child remains live, and verifies that
+recovery delivers `SIGKILL` to that exact child generation and waits for its reap before
+completion. Together the tests cover both the real bubblewrap ordering and the
+security-critical recovery-signalling branch without relying on scheduler timing.
 
 ## Cleanup-Lease Finalization Read Reconciliation (2026-09-02)
 

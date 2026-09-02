@@ -4952,6 +4952,29 @@ fn platform_process_start_marker(_pid: u32) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    struct LinuxIdentityKillGuard(Option<ProcessIdentity>);
+
+    #[cfg(target_os = "linux")]
+    impl LinuxIdentityKillGuard {
+        fn new(identity: ProcessIdentity) -> Self {
+            Self(Some(identity))
+        }
+
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for LinuxIdentityKillGuard {
+        fn drop(&mut self) {
+            if let Some(identity) = &self.0 {
+                let _ = signal_linux_process_identity(identity);
+            }
+        }
+    }
+
     fn process_namespace_snapshot(path: &Path) -> Vec<(OsString, Vec<u8>)> {
         let mut snapshot = std::fs::read_dir(path)
             .expect("read process namespace")
@@ -6112,7 +6135,7 @@ mod tests {
             )
             .expect("prepare scope");
         let mut supervisor = Command::new("sh")
-            .args(["-c", "sleep 60"])
+            .args(["-c", "exec sleep 60"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -6163,6 +6186,93 @@ mod tests {
             store
                 .cleanup_lease_state(&completed)
                 .expect("released recovery lease"),
+            CleanupLeaseState::Missing
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_recovery_exact_signals_a_live_direct_child_after_supervisor_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let root = git_project();
+        let store = ProcessScopeStore::open(root.path()).expect("scope store");
+        let prepared = store
+            .prepare(
+                "sub-live-direct-child-recovery",
+                "subagent",
+                45,
+                ProcessIdentity::current().expect("owner identity"),
+                ProcessScopeBackend::LinuxPidNamespace,
+            )
+            .expect("prepare scope");
+        let cleanup_lease = store
+            .acquire_cleanup_lease(&prepared)
+            .expect("cleanup lease");
+
+        let mut supervisor = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn supervisor fixture");
+        let supervisor_identity =
+            ProcessIdentity::capture(supervisor.id()).expect("supervisor identity");
+        let mut supervisor_guard = LinuxIdentityKillGuard::new(supervisor_identity.clone());
+
+        let mut direct_child = Command::new("sh")
+            .args(["-c", "exec sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn direct-child fixture");
+        let direct_child_identity =
+            ProcessIdentity::capture(direct_child.id()).expect("direct-child identity");
+        let mut direct_child_guard = LinuxIdentityKillGuard::new(direct_child_identity.clone());
+        let running = store
+            .mark_running(
+                &prepared.scope_id,
+                prepared.execution_generation,
+                &prepared.cleanup_lease_id,
+                supervisor_identity.clone(),
+                direct_child_identity.clone(),
+            )
+            .expect("persist running scope");
+        drop(cleanup_lease);
+
+        supervisor.kill().expect("kill supervisor fixture");
+        supervisor.wait().expect("reap supervisor fixture");
+        supervisor_guard.disarm();
+        assert!(!supervisor_identity.still_matches());
+        assert!(direct_child_identity.still_matches());
+        assert_eq!(
+            store
+                .cleanup_lease_state(&running)
+                .expect("recoverable cleanup lease"),
+            CleanupLeaseState::Recoverable
+        );
+
+        let direct_child_reaper =
+            std::thread::spawn(move || direct_child.wait().expect("reap direct-child fixture"));
+        let completed = store
+            .recover_linux_supervisor_loss(&running)
+            .expect("recover live direct child");
+        let direct_child_status = direct_child_reaper.join().expect("direct-child reaper");
+        direct_child_guard.disarm();
+
+        assert_eq!(direct_child_status.signal(), Some(libc::SIGKILL));
+        assert!(!direct_child_identity.still_matches());
+        assert_eq!(completed.status, ProcessScopeStatus::Complete);
+        let proof = completed.cleanup_proof.as_ref().expect("cleanup proof");
+        assert_eq!(proof.direct_child, direct_child_identity);
+        assert_eq!(proof.outcome, "supervisor_lost_linux_pid_namespace");
+        assert!(proof.descendants_reaped);
+        assert_eq!(
+            store
+                .cleanup_lease_state(&completed)
+                .expect("released cleanup lease"),
             CleanupLeaseState::Missing
         );
     }

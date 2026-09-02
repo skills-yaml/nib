@@ -443,6 +443,15 @@ This evidence deliberately reports `source_worktree_clean = false` and
 not the required clean committed cross-platform release artifact; the acceptance
 checkbox and Development state therefore remain unchanged.
 
+## Windows Task-Contract Portability (2026-09-02)
+
+Hosted Windows run `33665599019` passed the complete test suite through the native Job
+Object, MCP lifecycle, and credential-free LLM report-publication coverage, then exposed
+that the deterministic release Task contract test parsed only LF-delimited YAML. Windows
+checks out the Taskfile with CRLF delimiters, so the test now normalizes CRLF to LF before
+inspecting the same exact target and required commands. The Task target and production
+release qualification behavior are unchanged.
+
 ## Affected Areas
 
 - `src/config/mod.rs`, `src/auth.rs`, `src/config_cmd.rs`, and `src/doctor.rs`
