@@ -352,7 +352,7 @@ grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
 
 plain_question_input() {
   local question_output="$fixture/plain-question.txt"
-  wait_for_pty_output "$question_output" 'Approval required'
+  wait_for_pty_output "$question_output" 'Approve? [y/N]: '
   printf 'y\n\n'
   wait_for_pty_output "$question_output" 'Answer (number or text):'
   printf '2\n\n'
