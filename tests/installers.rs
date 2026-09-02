@@ -122,28 +122,32 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
 }
 
 #[test]
-fn delegation_task_pins_windows_rollback_fixture() {
-    const TEST_NAME: &str =
-        "sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation";
-
+fn delegation_task_pins_hosted_stabilization_fixtures() {
+    const TEST_NAMES: [&str; 3] = [
+        "sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
+        "persistent_anchor_prevents_replaced_repository_lock_domains",
+        "spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
+    ];
     let taskfile = read_repository_text("Taskfile.yml");
     let source = read_repository_text("src/tools/delegation.rs");
     let delegation = task_section(&taskfile, "test:delegation");
 
-    assert_eq!(
-        source.matches(&format!("async fn {TEST_NAME}()")).count(),
-        1,
-        "the focused rollback fixture must remain uniquely named"
-    );
-    assert_eq!(
-        delegation.matches(TEST_NAME).count(),
-        1,
-        "test:delegation must select the focused rollback fixture exactly once"
-    );
+    for test_name in TEST_NAMES {
+        assert_eq!(
+            source.matches(&format!("fn {test_name}()")).count(),
+            1,
+            "the focused hosted fixture must remain uniquely named: {test_name}"
+        );
+        assert_eq!(
+            delegation.matches(test_name).count(),
+            1,
+            "test:delegation must select the hosted fixture exactly once: {test_name}"
+        );
+    }
     assert_eq!(
         delegation.matches("-- --exact --test-threads=1").count(),
-        1,
-        "the rollback fixture selector must stay exact and serial"
+        TEST_NAMES.len(),
+        "hosted fixture selectors must stay exact and serial"
     );
 }
 

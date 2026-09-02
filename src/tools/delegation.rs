@@ -46,6 +46,8 @@ const SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 thread_local! {
     static TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
+    static TEST_SPAWN_RECONCILIATION_TIMEOUT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -104,6 +106,32 @@ fn spawn_preparation_operation_timeout() -> Duration {
     #[cfg(not(test))]
     {
         SUBAGENT_RECORD_LOCK_TIMEOUT
+    }
+}
+
+fn spawn_reconciliation_deadline_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        return TEST_SPAWN_RECONCILIATION_TIMEOUT
+            .with(|timeout| timeout.get())
+            .unwrap_or(SUBAGENT_RECORD_LOCK_TIMEOUT);
+    }
+    #[cfg(not(test))]
+    {
+        SUBAGENT_RECORD_LOCK_TIMEOUT
+    }
+}
+
+fn spawn_reconciliation_worktree_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        return TEST_SPAWN_RECONCILIATION_TIMEOUT
+            .with(|timeout| timeout.get())
+            .unwrap_or(SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT);
+    }
+    #[cfg(not(test))]
+    {
+        SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT
     }
 }
 
@@ -3528,7 +3556,7 @@ fn reconcile_spawn_preparations(
         None => return Ok(()),
     };
     let deadline = Instant::now()
-        .checked_add(SUBAGENT_RECORD_LOCK_TIMEOUT)
+        .checked_add(spawn_reconciliation_deadline_timeout())
         .ok_or_else(|| "subagent preparation reconciliation deadline overflow".to_string())?;
     let _preparation_fence = acquire_spawn_preparation_fence_until(records, deadline)?;
     let verify_records = || {
@@ -3778,7 +3806,7 @@ fn reconcile_spawn_preparations(
         crate::sandbox::worktree::Worktree::cleanup_preparation_authority_with_guard(
             project_root,
             &intent.worktree,
-            SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT,
+            spawn_reconciliation_worktree_timeout(),
             &verify_records,
         )
         .map_err(|error| format!("failed to reconcile prepared worktree: {error}"))?;
@@ -13572,6 +13600,31 @@ mod tests {
         }
     }
 
+    struct SpawnReconciliationTimeoutGuard {
+        previous: Option<Duration>,
+        _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+
+    impl SpawnReconciliationTimeoutGuard {
+        fn set(timeout: Duration) -> Self {
+            let previous = TEST_SPAWN_RECONCILIATION_TIMEOUT.with(|slot| {
+                let previous = slot.get();
+                slot.set(Some(timeout));
+                previous
+            });
+            Self {
+                previous,
+                _not_send_or_sync: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl Drop for SpawnReconciliationTimeoutGuard {
+        fn drop(&mut self) {
+            TEST_SPAWN_RECONCILIATION_TIMEOUT.with(|slot| slot.set(self.previous));
+        }
+    }
+
     struct SpawnAuthorityVerifyHookGuard;
 
     impl SpawnAuthorityVerifyHookGuard {
@@ -14124,6 +14177,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
+        let _reconciliation_timeout = SpawnReconciliationTimeoutGuard::set(Duration::from_secs(15));
         let categories = [
             ("intent-initial", ".preparations", "\"revision\": 0"),
             ("intent-resources", ".preparations", "\"revision\": 1"),
@@ -20903,7 +20957,7 @@ mod tests {
         let error = runtime
             .block_on(RepositoryMergeLock::acquire_with_timeout(
                 Path::new(&project_root),
-                Duration::from_millis(100),
+                Duration::from_secs(2),
             ))
             .expect_err("replacement must not create a second repository lock domain");
         match expectation.as_str() {

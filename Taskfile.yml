@@ -93,6 +93,14 @@ tasks:
         cargo test --lib
         tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
         -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
+        -- --exact --test-threads=1
       - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
       - cargo test --test delegation -- --test-threads=1
 

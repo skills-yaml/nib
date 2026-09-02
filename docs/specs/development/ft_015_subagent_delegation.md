@@ -692,7 +692,7 @@ inaccessible to the managed worker is a separate product capability. FT-020 owns
 future design and rollout. FT-015 must not remain indefinitely open waiting for FT-020,
 and FT-020 must not weaken this spec's current fail-closed behavior.
 
-## Windows Rollback-Fixture Positive-Progress Budget (2026-09-02)
+## Hosted Positive-Progress Budgets (2026-09-02)
 
 ### Scope
 
@@ -701,19 +701,35 @@ fallback-audit rollback rather than the unrelated default preparation deadline. 
 production five-second preparation timeout and dedicated expiry/deadline regressions
 remain unchanged.
 
+Keep the persistent repository-lock anchor regression focused on replacement identity
+and offline-attestation verdicts under LLVM coverage instrumentation. Its child process
+uses a two-second test-only acquisition budget so bounded namespace initialization can
+finish before the expected verdict; the production 30-second repository merge-lock
+timeout and dedicated short-deadline regression remain unchanged.
+
+Keep the 25-process atomic publication crash matrix focused on exact, idempotent restart
+reconciliation when a late Windows worktree cleanup exceeds the normal service budget.
+That fixture uses a 15-second test-only reconciliation and worktree-cleanup budget; the
+production five-second reconciliation deadline, three-second precommit cleanup timeout,
+and dedicated expiry/fail-closed regressions remain unchanged.
+
 ### Acceptance Criteria
 
 - [x] The rollback fixture uses an explicit 30-second test-only positive-progress budget
   and reports the unexpected bounded error if injected record publication is not reached.
 - [x] The test-only timeout guard cannot move across threads, and a repository contract
   pins the focused Task selector to the fixture's unique Rust test name.
+- [x] The persistent-anchor child fixture uses a two-second test-only acquisition budget,
+  and the focused Task/repository contract pins its exact serial parent regression.
+- [x] The atomic crash matrix uses a 15-second test-only reconciliation/cleanup budget,
+  and the focused Task/repository contract pins its exact serial regression.
 - [ ] The exact PR revision passes the full hosted Windows job and native matrix after
   this stabilization.
 
 ### Affected Areas
 
 `src/tools/delegation.rs`, `tests/installers.rs`, `Taskfile.yml`, this spec, and
-exact-revision hosted Windows validation.
+exact-revision hosted native validation.
 
 ### Validation Evidence
 
@@ -726,6 +742,30 @@ this exact unit fixture in addition to the state, managed-process, and integrati
 The focused task passed both optional-open race tests, this exact rollback fixture, all
 36 managed-process tests, and all 22 delegation integrations. The replacement hosted
 matrix remains open.
+
+Replacement run `33638458780` then passed Linux's complete ordinary test step, including
+the stabilized rollback fixture, but LLVM coverage instrumentation exhausted the
+persistent-anchor child fixture's 100-millisecond setup-and-verdict budget before its
+expected replacement-identity result. That regression protects persistent lock-domain
+identity rather than a 100-millisecond service level. The child budget is now two seconds,
+and `task test:delegation` selects the exact parent regression. The replacement hosted
+matrix remains open.
+
+The same run passed the stabilized rollback regression on Windows, then exposed
+`spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly` after 973 passing
+library tests: the `intent-audit-published/directory_sync` restart preserved its intent
+when exact worktree cleanup exceeded three seconds. The 25-process matrix protects exact
+crash reconciliation rather than that service budget, which remains covered by dedicated
+deadline regressions. Its thread-pinned test-only budget is now 15 seconds and the focused
+Task gate selects the exact matrix. The replacement hosted matrix remains open.
+
+On the combined patch, `task test:delegation` passed both optional-open race tests,
+all three exact hosted-sensitive fixtures, all 36 managed-process unit tests, and all
+22 delegation integrations. Canonical `task verify` passed 1,061 library tests, 86 CLI
+tests, every integration suite, and doctests; the two intentional live/exact-release
+tests remained ignored. Final-state `task coverage` passed at 85.88% line coverage
+(102,020/118,787), including all 1,061 instrumented library tests and the same three
+hosted-sensitive fixtures.
 
 ## Crash-Durable Spawn Preparation Follow-up (2026-08-29)
 
