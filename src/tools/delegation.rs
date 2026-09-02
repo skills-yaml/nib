@@ -14690,6 +14690,10 @@ mod tests {
 
     #[tokio::test]
     async fn preparation_supersession_requires_every_persisted_authority_field() {
+        // This fixture stages every durable spawn resource before exercising
+        // authority mismatch validation. Keep loaded Windows runners from
+        // expiring the unrelated positive-progress setup deadline.
+        let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(30));
         let root = tempfile::tempdir().expect("git project");
         initialize_spawn_test_repository(root.path());
         let project_root = canonical_project_root(root.path()).expect("canonical root");
