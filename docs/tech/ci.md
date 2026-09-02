@@ -3,11 +3,15 @@
 Follows skm project structure.
 
 ## Pipeline
-- Use `task check`, `task test`, `task coverage`, `task build`, the offline Mock-only
+- Use `task check`, `task test`, `task coverage`, `task qualify:llm-release`, the offline Mock-only
   `task smoke:interactive` redirected/native-Unix-PTY semantics and restoration gate,
   the Windows ConPTY binary smoke, and the `task smoke:managed-process` release-binary
-  owner-loss gate. T021 release candidates also run `task qualify:llm-release` against
-  credential-free localhost fixtures.
+  owner-loss gate. Every native CI job builds and qualifies its exact release binary
+  through credential-free localhost fixtures so T021 evidence cannot become stale after
+  later transport changes.
+- `task check` is the fast static gate and `task test` is the full serial suite; CI
+  runs each once rather than nesting the suite inside the check step. Local completion
+  can use their `task verify` aggregate.
 - Rust toolchain via dtolnay/rust-toolchain.
 - Task via arduino/setup-task.
 - Install bwrap on Linux and require the PID-namespace supervisor regressions.
@@ -125,7 +129,9 @@ See:
 
 ```bash
 task build          # Release binary
-task dev            # check + test + build + --help
+task check          # Fast installer, format, and Clippy feedback
+task verify         # Complete static + serial-test gate, once each
+task dev            # verify + build + --help
 ./target/release/nib
 ```
 
@@ -174,8 +180,9 @@ staging/backup transaction before mutation. The local transaction fails closed o
 external retag it can observe; the exclusive-writer contract removes the API's
 unfenceable proof-to-mutation interval from the supported operating model.
 
-T010 remains in development until the exact committed workflow revision completes a
-development-channel run and its published artifacts are inspected.
+T010 completed after exact committed development and production publications, public
+artifact inspection, and four-platform update qualification. Later release changes
+must retain that recorded transaction and exclusive-writer contract.
 
 Official release builds expose `nib update`. It compares the embedded build commit with
 the selected rolling channel manifest, reports a successful no-op when current, and

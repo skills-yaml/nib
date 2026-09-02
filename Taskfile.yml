@@ -10,13 +10,11 @@ tasks:
       - task --list
 
   check:
-    desc: Run Rust formatting, lint, compile, and unit tests
+    desc: Run fast installer and Rust static checks
     cmds:
       - task: installers:check
       - cargo fmt -- --check
       - cargo clippy -- -D warnings
-      - cargo check
-      - cargo test -- --test-threads=1
 
   check:all-targets:
     desc: Type-check every Rust target and feature (supports cross TARGET)
@@ -63,6 +61,12 @@ tasks:
     cmds:
       - cargo test -- --test-threads=1
 
+  verify:
+    desc: Run the complete local static and test gates once
+    cmds:
+      - task: check
+      - task: test
+
   test:llm-conformance:
     desc: Run credential-free provider-neutral LLM adapter conformance tests
     cmds:
@@ -77,6 +81,16 @@ tasks:
     desc: Run durable background task and scheduled worker integration tests
     cmds:
       - cargo test --test durable_tasks -- --test-threads=1
+
+  test:delegation:
+    desc: Run managed-process and subagent delegation tests
+    cmds:
+      - >-
+        cargo test --lib
+        daemons::state::tests::optional_read_write_
+        -- --test-threads=1
+      - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
+      - cargo test --test delegation -- --test-threads=1
 
   test:runtime-e2e:
     desc: Run the full agent runtime end-to-end integration tests
@@ -136,6 +150,14 @@ tasks:
     desc: Run installer and release-transaction integration tests
     cmds:
       - cargo test --test installers -- --test-threads=1
+
+  test:task-contract:
+    desc: Validate fast-check and full-verification Task composition
+    cmds:
+      - >-
+        cargo test --test installers
+        task_workflow_keeps_fast_feedback_separate_from_full_verification --
+        --exact --test-threads=1
 
   test:interactive:
     desc: Run deterministic plain/TUI interaction semantics without a pseudo-terminal
@@ -277,10 +299,9 @@ tasks:
         --ignored --exact --nocapture --test-threads=1
 
   dev:
-    desc: Quick dev check (Rust-only core)
+    desc: Run complete verification, build, and help smoke
     cmds:
-      - task: check
-      - task: test
+      - task: verify
       - task: build
       - ./target/release/nib --help || cargo run -- --help
 

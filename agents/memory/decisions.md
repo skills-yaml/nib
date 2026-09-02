@@ -296,3 +296,37 @@ visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
 canonical command discovery. Enter never steers; the first user-visible slice is
 queue-only until the agent loop can bind exact-run steering. Implementation still
 requires child development specs before code.
+
+## 2026-09-02 - Keep v1 production delegation Linux-only
+
+- Type: decision
+- Source: FT-015/FT-017 closure review
+- Confidence: high
+- Review: pending exact-revision independent review
+- Supersedes: none
+
+Content:
+
+FT-015 and FT-017 may close after native Windows/macOS mechanism tests and explicit
+fail-closed production rejection pass; they do not wait for production enablement on
+those platforms. The v1 production delegation boundary is Linux plus a usable bwrap PID
+namespace. A protected cleanup authority outside the managed worker trust boundary is a
+separate product capability owned by backlog spec FT-020. Windows and macOS may graduate
+independently only through that future spec and must not weaken the current rejection
+contract.
+
+## 2026-09-02 - Qualify every native CI release binary exactly
+
+- Type: decision
+- Source: development-spec closure review
+- Confidence: high
+- Review: pending exact-revision hosted CI
+- Supersedes: build-only native CI steps
+
+Content:
+
+Linux Validate, Windows Tests, and macOS Tests run `task qualify:llm-release` before
+their platform smoke. The task embeds and verifies the checkout's exact commit, exercises
+credential-free localhost LLM fixtures, hashes the optimized executable, and marks
+evidence acceptance-eligible only when the source worktree is clean. A plain successful
+release build is no longer sufficient T021/T022 closure evidence.

@@ -676,6 +676,53 @@ impl StableDirectory {
         Ok(file)
     }
 
+    pub(crate) fn open_read_write_if_exists(&self, path: &Path) -> Result<Option<File>, String> {
+        self.open_read_write_if_exists_with_hook(path, || Ok(()))
+    }
+
+    fn open_read_write_if_exists_with_hook(
+        &self,
+        path: &Path,
+        after_open: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Option<File>, String> {
+        let relative = self.relative_file(path)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        configure_capability_no_follow(&mut options);
+        configure_capability_delete_access(&mut options, true, true);
+        let file = match self.directory.open_with(relative, &options) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!("failed to open {}: {error}", path.display()));
+            }
+        };
+        validate_stable_file_metadata(path, &file.metadata().map_err(|error| error.to_string())?)?;
+        after_open()?;
+
+        let mut visible_options = cap_std::fs::OpenOptions::new();
+        visible_options.read(true);
+        configure_capability_no_follow(&mut visible_options);
+        let visible = match self.directory.open_with(relative, &visible_options) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!("failed to re-open {}: {error}", path.display()));
+            }
+        };
+        validate_stable_file_metadata(
+            path,
+            &visible.metadata().map_err(|error| error.to_string())?,
+        )?;
+        if !same_open_file_identity(&file, &visible)? {
+            return Err(format!(
+                "state file identity changed while it was in use: {}",
+                path.display()
+            ));
+        }
+        Ok(Some(file))
+    }
+
     pub(crate) fn open_read_write_create(&self, path: &Path) -> Result<File, String> {
         self.open_read_write_create_with_guard(path, || Ok(()))
     }
@@ -5297,6 +5344,54 @@ mod tests {
             ),
             prefix,
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_read_write_treats_exact_disappearance_during_identity_check_as_absent() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("cleanup-quarantine.json");
+        fs::write(&target, b"owned cleanup state").expect("fixture state");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+
+        let opened = directory
+            .open_read_write_if_exists_with_hook(&target, || {
+                fs::remove_file(&target)
+                    .map_err(|error| format!("remove fixture after open: {error}"))
+            })
+            .expect("disappearance is an observed absence");
+
+        assert!(opened.is_none());
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_read_write_rejects_replacement_during_identity_check() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("cleanup-quarantine.json");
+        let retired = root.path().join("retired-cleanup-quarantine.json");
+        fs::write(&target, b"owned cleanup state").expect("fixture state");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+
+        let error = directory
+            .open_read_write_if_exists_with_hook(&target, || {
+                fs::rename(&target, &retired)
+                    .map_err(|error| format!("retire fixture after open: {error}"))?;
+                fs::write(&target, b"replacement cleanup state")
+                    .map_err(|error| format!("publish replacement fixture: {error}"))
+            })
+            .expect_err("replacement must fail the identity check");
+
+        assert!(error.contains("state file identity changed while it was in use"));
+        assert_eq!(
+            fs::read(&target).expect("replacement remains visible"),
+            b"replacement cleanup state"
+        );
+        assert_eq!(
+            fs::read(&retired).expect("opened identity remains preserved"),
+            b"owned cleanup state"
+        );
     }
 
     #[test]

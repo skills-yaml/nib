@@ -808,6 +808,27 @@ can classify a transport as unsupported.
 - [ ] Independent spec-compliance and technical/security reviews have no unresolved
   blocker.
 
+## Closure Classification (2026-09-02)
+
+The implementation and external evidence boundaries are now explicit:
+
+- Offline implementation evidence is green. The normal suite passed 66 credential-free
+  live-harness tests (with the paid test ignored), covering catalog parsing and bounds,
+  scenario planning, matrix/report provenance, typed outcomes, cost accounting, privacy,
+  and workflow contracts. `task verify`, `task docs:check`, host and Windows-target
+  all-target checks, 85.87 percent runtime coverage, and the locked release build also
+  passed locally.
+- No catalog, canary, selected, or full live run was authorized in this work session.
+  No provider credentials, spending acknowledgement, approved OpenRouter-model decision,
+  or protected environment authority was inferred. Consequently none of the acceptance
+  checkboxes above is promoted solely from offline evidence.
+- Closure requires an owner-approved current OpenRouter exact-ID allowlist, dedicated
+  provider credentials and budgets, protected-workflow approval, then catalog/canary/
+  selected/full execution. The resulting complete reports must be inspected for all six
+  provider groups, privacy scans, exact revision and matrix/catalog fingerprints,
+  denominators, blockers, and bounded usage/cost evidence before this spec can move to
+  `done/`.
+
 ## Affected Areas
 
 - `tests/llm_live.rs` and live-only support modules/fixtures

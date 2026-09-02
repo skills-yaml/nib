@@ -818,6 +818,73 @@ Independent reviews found no lost wake or lock-ownership defect. The regression 
 30-second budget for bounded successful progress while preserving the 250 ms exclusion
 probe and all state assertions.
 
+## FT-019 Windows Root-Future Stack Follow-up (2026-08-30)
+
+### Scope
+
+Restore caller-stack independence after the FT-019 agent state machine enlarged the
+public runtime wrappers. The CLI, durable task worker, and subagent worker must submit
+their owned root futures to a Tokio worker with an explicit stack budget instead of
+polling those futures on the platform-limited process main thread. The existing inner
+future boxing, cancellation ordering, workload leases, reconciliation, and public output
+contracts remain unchanged.
+
+### Acceptance Criteria
+
+- [x] `nib run` polls the owned agent root future on a configured runtime worker with a
+  4 MiB stack while its main thread blocks only on the worker join handle.
+- [x] Durable `task-worker` and `subagent-worker` entrypoints use the same root-future
+  boundary, including scheduled agent execution and optional session-lock policy scope.
+- [x] Returned worker join failures use bounded static errors without including panic
+  payloads or changing successful agent and workload results. Process-global panic-hook
+  behavior remains unchanged and is not part of this repair.
+- [x] A deterministic unit regression proves the submitted root future is polled off the
+  caller thread, and the four constrained-stack durable CLI workflows remain green.
+- [ ] The exact PR revision passes the full hosted Linux, macOS, and Windows jobs.
+
+### Affected Areas
+
+`src/agent/mod.rs`, `src/run.rs`, `src/main.rs`, `src/tools/delegation.rs`, this
+development spec, the durable task regression, and the hosted native CI matrix.
+
+### Validation Gates
+
+The focused agent runtime-boundary unit regression; `task test:durable`; `task check`;
+`task test`; `task docs:check`; Windows-target `task check:all-targets`; `task build`;
+runtime coverage; and the exact-revision hosted Linux, macOS, and Windows jobs.
+
+### Reproduction Evidence
+
+Hosted Windows job `99333326200` at head
+`8803408240d4c00ebc4027041c073c7f540360cc` passed all 1,057 library tests and all
+91 binary tests, including the bounded legacy-lock migration regression, before every
+`tests/durable_tasks.rs` workflow failed identically. Each spawned `nib run` process
+printed its session header and then aborted with `thread 'main' has overflowed its
+stack` before the first tool result. Linux's synthetic 1 MiB regression and the hosted
+macOS job passed, so native Windows remains the authoritative platform gate. The root
+CLI still calls `Runtime::block_on(run_agent_loop(...))`; the durable and subagent worker
+entrypoints have analogous direct root-future polling boundaries. The repair therefore
+belongs to production runtime dispatch rather than a relaxed fixture or a larger PE
+main-stack reserve.
+
+### Local Repair Evidence (2026-09-02)
+
+`build_agent_runtime` now configures every Tokio worker with a 4 MiB stack, and
+`block_on_agent_runtime_worker` submits the owned root future before the caller blocks
+on its join handle. `nib run`, `task-worker`, and `subagent-worker` share that boundary;
+the subagent path retains its captured optional session-lock policy. Deterministic unit
+coverage proves the root future is polled on a different thread and that its returned
+join error is bounded and excludes the panic payload. This does not suppress or replace
+Rust's process-global panic hook.
+
+`task test:durable` passed all four constrained-stack durable CLI workflows. The final
+local `task verify` passed 1,061 library tests, 86 CLI tests, and 254 integration tests
+with two explicitly ignored qualification tests. `task docs:check`, host and Windows
+MSVC `task check:all-targets`, 85.87 percent runtime line coverage
+(101,945/118,726), the locked release build, Linux interactive PTY smoke, and Linux
+abrupt-owner managed-process smoke also passed. The exact hosted Windows, macOS, and
+Linux revision remains the only open criterion in this follow-up.
+
 ## Remaining Implementation Plan
 
 1. Execute Windows short-alias, rooted rename, reparse/identity, and Windows/macOS

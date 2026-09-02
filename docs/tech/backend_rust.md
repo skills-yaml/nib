@@ -41,9 +41,10 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### Build and Testing
 
 - **Taskfile**: All development tasks are orchestrated via `task`.
-- **Quality Gates**: `task check` validates installers, formatting, Clippy warnings,
-  compilation, and tests. `task docs:check` validates links/spec state, and
-  `task coverage` enforces runtime line coverage.
+- **Quality Gates**: `task check` provides fast installer, formatting, and
+  warning-denying Clippy feedback. `task test` owns the full serial suite, and
+  `task verify` runs both exactly once for completion. `task docs:check` validates
+  links/spec state, and `task coverage` enforces runtime line coverage.
 - **Unit and Fixture Tests**: CI runs against `MockLlmClient` to prevent flakiness and network dependencies.
 
 ### OpenAI-Compatible Transport Contract

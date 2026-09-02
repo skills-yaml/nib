@@ -456,15 +456,32 @@ fn main() {
             task_id,
             lease_token,
         }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio");
-            if let Err(error) = rt.block_on(nib::daemons::workload::run_worker(
-                daemon_dir,
-                task_id,
-                lease_token,
-            )) {
+            let rt = match nib::agent::build_agent_runtime(
+                "failed to initialize the task worker runtime",
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("Task worker error: {error}");
+                    process::exit(1);
+                }
+            };
+            let worker_daemon_dir = daemon_dir.clone();
+            let worker_task_id = task_id.clone();
+            let worker_lease_token = lease_token.clone();
+            let result = nib::agent::block_on_agent_runtime_worker(
+                &rt,
+                async move {
+                    nib::daemons::workload::run_worker(
+                        &worker_daemon_dir,
+                        &worker_task_id,
+                        &worker_lease_token,
+                    )
+                    .await
+                },
+                "task runtime worker",
+            )
+            .and_then(|result| result);
+            if let Err(error) = result {
                 eprintln!("Task worker error: {error}");
                 process::exit(1);
             }

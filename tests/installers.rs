@@ -54,12 +54,71 @@ fn read_repository_text(relative_path: &str) -> String {
     normalize_repository_text(text)
 }
 
+fn task_section(taskfile: &str, name: &str) -> String {
+    let marker = format!("  {name}:\n");
+    let body = taskfile
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("Taskfile is missing the {name} task"))
+        .1;
+    body.lines()
+        .take_while(|line| {
+            let Some(task_candidate) = line.strip_prefix("  ") else {
+                return true;
+            };
+            task_candidate.starts_with(' ') || !task_candidate.ends_with(':')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn repository_text_normalization_accepts_windows_line_endings() {
     assert_eq!(
         normalize_repository_text("first\r\nsecond\r\n".to_string()),
         "first\nsecond\n"
     );
+}
+
+#[test]
+fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
+    let taskfile = read_repository_text("Taskfile.yml");
+    let check = task_section(&taskfile, "check");
+    let test = task_section(&taskfile, "test");
+    let verify = task_section(&taskfile, "verify");
+    let dev = task_section(&taskfile, "dev");
+
+    for required in [
+        "task: installers:check",
+        "cargo fmt -- --check",
+        "cargo clippy -- -D warnings",
+    ] {
+        assert!(check.contains(required), "check task lacks {required}");
+    }
+    for duplicate in ["cargo check", "cargo test", "task: test"] {
+        assert!(
+            !check.contains(duplicate),
+            "fast check contains duplicate full-gate command {duplicate}"
+        );
+    }
+    let nested_check_tasks = check
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- task: "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nested_check_tasks,
+        vec!["installers:check"],
+        "fast check must not acquire tests through another nested task"
+    );
+
+    assert!(test.contains("cargo test -- --test-threads=1"));
+    assert_eq!(verify.matches("task: check").count(), 1);
+    assert_eq!(verify.matches("task: test").count(), 1);
+    assert!(!verify.contains("cargo "));
+
+    assert_eq!(dev.matches("task: verify").count(), 1);
+    assert_eq!(dev.matches("task: build").count(), 1);
+    assert!(!dev.contains("task: check"));
+    assert!(!dev.contains("task: test"));
 }
 
 #[test]
@@ -153,8 +212,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         .map(|(job, _)| job)
         .expect("Windows CI job");
     let windows_build = windows_job
-        .find("run: task build")
-        .expect("Windows release build");
+        .find("run: task qualify:llm-release")
+        .expect("Windows qualified release build");
     let windows_native_smoke = windows_job
         .find("run: task smoke:interactive:windows:binary")
         .expect("Windows native interactive smoke");
@@ -165,12 +224,24 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         .map(|(_, job)| job)
         .expect("macOS CI job");
     let macos_build = macos_job
-        .find("run: task build")
-        .expect("macOS release build");
+        .find("run: task qualify:llm-release")
+        .expect("macOS qualified release build");
     let macos_native_smoke = macos_job
         .find("run: task smoke:interactive:binary")
         .expect("macOS native interactive smoke");
     assert!(macos_build < macos_native_smoke);
+
+    let validate_job = workflow
+        .split_once("  validate:\n")
+        .and_then(|(_, remainder)| remainder.split_once("  windows-tests:\n"))
+        .map(|(job, _)| job)
+        .expect("Linux validation job");
+    assert!(validate_job.contains("run: task qualify:llm-release"));
+    assert_eq!(
+        workflow.matches("run: task qualify:llm-release").count(),
+        3,
+        "every native CI job must qualify its exact release binary"
+    );
 }
 
 #[test]

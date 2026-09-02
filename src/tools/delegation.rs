@@ -3713,8 +3713,8 @@ fn reconcile_spawn_preparations(
                 )?;
                 continue;
             }
-            if !record_spawn_handoff_matches(&intent, &opened.record, "pending")
-                && !(intent.phase == SpawnPreparationPhase::HandoffProven
+            if !(record_spawn_handoff_matches(&intent, &opened.record, "pending")
+                || intent.phase == SpawnPreparationPhase::HandoffProven
                     && !execution_evidence
                     && record_spawn_handoff_matches(&intent, &opened.record, "committed"))
             {
@@ -7508,10 +7508,7 @@ pub fn run_subagent_worker(worktree: &Path, subagent_id: &str) -> Result<(), Str
     if request.prompt.trim().is_empty() || request.max_steps > 100 {
         return Err("subagent worker request is invalid".to_string());
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("failed to start subagent worker runtime: {error}"))?;
+    let runtime = crate::agent::build_agent_runtime("failed to start subagent worker runtime")?;
     let config = crate::agent::AgentLoopConfig {
         max_steps: request.max_steps,
         auto_approve: false,
@@ -7519,10 +7516,19 @@ pub fn run_subagent_worker(worktree: &Path, subagent_id: &str) -> Result<(), Str
         ..Default::default()
     };
     let session_lock_policy = crate::session::SessionStore::current_lock_policy();
-    let outcome = runtime.block_on(crate::session::SessionStore::with_optional_lock_policy(
-        session_lock_policy,
-        crate::agent::run_agent_loop(worktree, subagent_id, &request.prompt, config),
-    ));
+    let worker_subagent_id = subagent_id.to_string();
+    let worker_prompt = request.prompt;
+    let outcome = crate::agent::block_on_agent_runtime_worker(
+        &runtime,
+        async move {
+            crate::session::SessionStore::with_optional_lock_policy(
+                session_lock_policy,
+                crate::agent::run_agent_loop(worktree, &worker_subagent_id, &worker_prompt, config),
+            )
+            .await
+        },
+        "subagent runtime worker",
+    )?;
     serde_json::to_writer(
         std::io::stdout().lock(),
         &SubagentWorkerResponse { outcome },

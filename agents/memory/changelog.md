@@ -326,3 +326,27 @@ plain/TUI selection, approval, question, completion, session switching, cancella
 workload routing, and terminal restoration. One independent-suite attempt hit an
 unrelated namespace-recovery timing assertion; that exact test passed in the preceding
 canonical suite, the clean rerun, and the instrumented coverage suite.
+
+## 2026-09-02 - Development-spec closure remediation prepared
+
+- Type: implementation / documentation / validation milestone
+- Source: user-requested development-spec review and closure actions
+- Confidence: high
+- Review: pending exact-revision independent and hosted review
+
+Content:
+
+Implemented T004's caller-stack-independent root runtime boundary for `nib run`, durable
+task workers, and subagent workers. Reconciled an exact cleanup-lease finalization race
+that surfaced in the first complete suite, added deterministic disappearance coverage
+and `task test:delegation`, separated fast `task check` from the full `task verify`
+aggregate under T035, and changed all native CI jobs to exact release-binary LLM
+qualification. FT-015 now explicitly closes as a Linux-production-only v1 contract;
+FT-020 records protected non-Linux production delegation authority as future backlog.
+
+The final local gates passed: `task verify` (1,061 library, 86 CLI, 254 integration),
+documentation 5/5, host and Windows MSVC all-target checks, 85.87 percent runtime line
+coverage, locked optimized build, Linux interactive PTY smoke, abrupt-owner
+managed-process smoke, dirty-tree release-harness execution, and patch hygiene. T023's
+offline implementation is green but no paid/live authority was inferred; its external
+evidence remains open.

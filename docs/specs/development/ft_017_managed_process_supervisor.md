@@ -591,3 +591,49 @@ delivery, so the previous immediate owner kill could let parent-death cleanup wi
 test's intended recovery race under full-suite load. The production recovery path is
 unchanged. The exact focused test passed after the change, and multiple concurrent-tree
 `task check` runs subsequently passed the complete recovery suite.
+
+## Cleanup-Lease Finalization Read Reconciliation (2026-09-02)
+
+### Scope
+
+Make cleanup-lease deletion recovery tolerate the exact successful-finalization race in
+which a reader opens the deterministic quarantine immediately before its owner removes
+that quarantine. Preserve strict identity rejection for replacement state and retain the
+existing cleanup proof, lease lock, scope lock, deadline, and fail-closed boundaries.
+
+### Acceptance Criteria
+
+- [x] A capability-relative optional read/write open distinguishes exact disappearance
+  during the visible-identity check from replacement, link, metadata, and other I/O
+  failures.
+- [x] Cleanup-lease recovery treats a quarantine that is absent after that exact race as
+  successfully finalized, while a still-visible but unopenable quarantine remains an
+  explicit preserved-state error.
+- [x] A deterministic regression removes the exact file between the retained open and
+  visibility check and proves the operation reports absence; a companion regression
+  publishes a replacement at that boundary and proves identity rejection while both
+  identities remain preserved.
+- [x] The focused managed-process and delegation gate passes, including the previously
+  failing `spawned_subagents_approve_their_plan_but_deny_destructive_actions` workflow.
+- [ ] `task verify`, coverage, release smokes, and exact-revision hosted Linux, macOS,
+  and Windows CI are green after this repair. The local portions are complete; only
+  exact-revision hosted CI remains.
+
+### Affected Areas
+
+`src/daemons/state.rs`, `src/sandbox/process.rs`, the managed-process and delegation
+tests, `Taskfile.yml`, and this spec.
+
+### Validation Evidence
+
+The first 2026-09-02 `task verify` attempt passed 1,059 library and 86 CLI tests, then
+failed in the delegation integration suite when a cleanup reader tried to re-open a
+quarantine that its exact live owner had just removed. After the repair,
+`task test:delegation` passed the deterministic disappearance and replacement
+regressions, all 36
+managed-process unit tests, and all 22 delegation integration tests. The complete
+aggregate then passed 1,061 library, 86 CLI, and 254 integration tests. Host and Windows
+MSVC all-target checks passed, runtime line coverage was 85.87 percent
+(101,945/118,726), and both the optimized Linux interactive and abrupt-owner
+managed-process smokes passed. The exact hosted Linux, macOS, and Windows evidence
+remains open.

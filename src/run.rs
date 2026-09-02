@@ -63,10 +63,7 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
 
     // We use the Rust agent loop directly
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("failed to initialize the async runtime: {error}"))?;
+    let rt = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
 
     let loop_cfg = nib::agent::AgentLoopConfig {
         max_steps: args.max_steps,
@@ -79,12 +76,17 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         ..Default::default()
     };
 
-    let result = rt.block_on(nib::agent::run_agent_loop(
-        project.clone(),
-        &sid,
-        &args.goal,
-        loop_cfg,
-    ));
+    let worker_project = project.clone();
+    let worker_session_id = sid.clone();
+    let worker_goal = args.goal.clone();
+    let result = nib::agent::block_on_agent_runtime_worker(
+        &rt,
+        async move {
+            nib::agent::run_agent_loop(worker_project, &worker_session_id, &worker_goal, loop_cfg)
+                .await
+        },
+        "agent runtime worker",
+    )?;
 
     match result {
         Ok(summary) => {

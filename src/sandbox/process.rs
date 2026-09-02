@@ -4648,7 +4648,16 @@ fn recover_cleanup_lease_deletion_until(
             "managed-process cleanup lease has an unproven deletion quarantine".to_string(),
         );
     }
-    let file = directory.open_read_write(&quarantine)?;
+    let Some(file) = directory.open_read_write_if_exists(&quarantine)? else {
+        ensure_process_scope_deadline(deadline)?;
+        if directory.path_exists(&quarantine)? {
+            return Err(
+                "managed-process cleanup lease deletion quarantine changed while it was being opened; it was preserved"
+                    .to_string(),
+            );
+        }
+        return Ok(false);
+    };
     let observed: CleanupLeaseRecord = read_bounded_json(&file, &quarantine)?;
     validate_cleanup_lease_record(&observed)?;
     let expected = CleanupLeaseRecord {

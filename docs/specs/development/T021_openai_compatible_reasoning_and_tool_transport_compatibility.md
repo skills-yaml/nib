@@ -415,6 +415,18 @@ target without claiming that this uncommitted worktree is the required artifact:
 The acceptance checkbox remains unchecked until this target passes for the clean,
 committed implementation revision on the required native release artifacts/CI hosts.
 
+## Native CI Qualification Wiring (2026-09-02)
+
+The Validate, Windows Tests, and macOS Tests jobs now run
+`task qualify:llm-release` in place of a build-only step, before their native smoke.
+Static installer coverage asserts that all three jobs retain that exact qualification
+boundary. A local dirty-tree run passed help, embedded version, doctor, structured
+planning, Responses tool continuation, typed failure reconciliation, and executable
+stability for source revision `8803408240d4c00ebc4027041c073c7f540360cc`; its
+evidence correctly reports `source_worktree_clean = false` and is not acceptance
+eligible. The checkbox remains open until the pushed clean revision produces native
+hosted evidence.
+
 ## Local Release-Artifact Qualification (2026-08-26)
 
 `task qualify:llm-release` passed against the locked optimized Linux binary. The

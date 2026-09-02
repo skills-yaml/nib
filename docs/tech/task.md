@@ -12,11 +12,13 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 ## Current minimal tasks (see root Taskfile.yml)
 
 - `task` or `task default` — list tasks
-- `task check` — installer checks, Rust formatting, Clippy, compilation, and the full serial test suite
+- `task check` — fast installer, Rust formatting, and warning-denying Clippy checks
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
+- `task verify` — run `task check` and `task test` exactly once as the complete local gate
 - `task test:durable` — run detached background-task and scheduled-worker process tests
+- `task test:delegation` — run managed-process and subagent delegation tests
 - `task test:runtime-e2e` — run the full agent runtime end-to-end integration tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
 - `task test:updater` — run self-update and update-notification unit tests
@@ -29,6 +31,7 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   adapter creates an interactive child terminal, accepts bounded delayed input,
   preserves output and exit status, restores console modes, and reaps timed-out trees
 - `task test:installers` — run installer and release-transaction integration tests
+- `task test:task-contract` — validate fast-check and full-verification Task composition
 - `task test:interactive` — run deterministic plain/TUI reducer, composer, history,
   transcript, dock, and redirected-CLI tests without a pseudo-terminal or network
 - `task test:llm-conformance` — run the shared credential-free complete/stream adapter
@@ -62,6 +65,11 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   and verify a detached supervised descendant is reaped before terminal publication
 - `task fix` — apply Rust formatting and Clippy fixes
 - `task installers:check` — validate installer syntax, repository defaults, and checksum logic
+
+Use `task check` and the narrowest relevant `task test:*` target during implementation.
+Before completion, use `task verify` so static checks and the authoritative serial suite
+both run once. `task check` intentionally excludes `cargo test`; callers must not treat
+it as completion evidence by itself.
 
 ## Live LLM qualification
 

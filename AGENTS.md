@@ -77,7 +77,9 @@ Your goal is to build nib as a focused, trustworthy coding + workload agent whil
 2. **Plan explicitly.** Identify impacted areas (workload model, execution engine, integrations, UI/TUI, tests, docs). Note effects on persistence, delegation, verification loops, and external systems.
 3. **Implement incrementally.** Keep changes focused and reviewable. Follow existing patterns from sibling projects (revized, autonomus, agents, etc.).
 4. **Self-review + verification.** Use systematic approaches (spec compliance review then quality review where appropriate). Run all quality gates.
-5. **Quality gates.** Run relevant `task check`, `task test`, and any agent-specific verification. All gates must pass.
+5. **Quality gates.** Use `task check` for fast static feedback and focused test tasks
+   while iterating. Run `task verify` plus any agent-specific verification before
+   completion. All gates must pass.
 6. **Update artifacts.** Keep specs, plans, and docs in sync when behavior or interfaces change.
 7. **Mark complete only when everything is green** (tests, checks, spec alignment, documentation).
 
@@ -127,7 +129,7 @@ Your goal is to build nib as a focused, trustworthy coding + workload agent whil
 ## Completion Criteria
 
 You may only consider work complete when:
-- All relevant quality gates (`task check`, `task test`, etc.) pass.
+- The complete local gate (`task verify`) and any additional relevant gates pass.
 - Specs and plans have been updated where behavior changed.
 - The workload model (if modified) remains consistent.
 - A human (or final review agent) can understand the change, its rationale, and its effect on the backlog and execution system.

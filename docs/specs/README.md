@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **27 done, 14 development, and 0 backlog**.
+The current lifecycle is **29 done, 16 development, and 1 backlog**.
 
 T003, T004, and T007 retain their Windows/macOS runtime gates; their implemented Unix
 contract proves exact namespace detachment and reports ambiguous residual physical
@@ -64,6 +64,10 @@ composer, transcript, live steering and queueing, status and permission visibili
 inspectable activity, and full semantic parity between TUI and plain/chat modes. T031
 completed the first child slice (shared model, ledger TUI, queue-only live input,
 capability-gated compact/ps/stop/steer).
+T032 completed explicit compaction and session background commands. T033 completed
+exact-run live steering. T034 remains in development for native terminal qualification.
+T035 is in development to separate fast static feedback from one complete local
+verification aggregate without weakening the serial test gate.
 FT-018 completed the verified self-update command, bounded update notices, Windows
 in-use replacement, and four-platform production rollout.
 
@@ -100,6 +104,10 @@ work or narrower guarantees.
 - [T029: Explicit Self-Update Channel Switching](development/T029_explicit_self_update_channel_switching.md)
 - [T030: Unified Interactive CLI and Plain-Mode Fallback](done/T030_unified_interactive_cli_and_plain_mode_fallback.md)
 - [T031: FT-019 Interaction Model, Ledger TUI, and Queue-Only Live Input](done/T031_ft019_interaction_model_and_ledger_tui.md)
+- [T032: FT-019 Explicit Compaction and Session Background Commands](done/T032_ft019_explicit_compaction_and_session_background_commands.md)
+- [T033: FT-019 Exact-Run Live Steering](done/T033_ft019_exact_run_live_steering.md)
+- [T034: FT-019 Native Terminal Qualification](development/T034_ft019_native_terminal_qualification.md)
+- [T035: Fast Incremental Check and Single Full Verification](development/T035_fast_incremental_check_and_single_full_verification.md)
 
 ### Feature specs
 
@@ -118,29 +126,30 @@ work or narrower guarantees.
 - [FT-017: Managed Process Supervisor](development/ft_017_managed_process_supervisor.md)
 - [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
 - [FT-019: Codex-Inspired Chat and TUI Interactions](development/ft_019_codex_inspired_chat_and_tui_interactions.md)
+- [FT-020: Protected Non-Linux Production Delegation Authority](backlog/ft_020_protected_non_linux_production_delegation_authority.md)
 
-## Current Local Validation (2026-07-16)
+## Current Local Validation (2026-09-02)
 
-- `task check`: installer checks, formatting, Clippy with warnings denied, compilation,
-  and all 795 top-level tests passed serially on the reconciled tree.
-- `task test`: all 795 top-level tests passed independently (601 library, 61 CLI, and
-  133 integration tests).
-- `task coverage`: 83.90 percent runtime line coverage (55,083/65,656).
-- `task docs:check`: all five documentation invariants passed.
-- `task build`: the locked optimized release build passed.
-- Strict follow-up gates passed: `cargo fmt --all -- --check`, `cargo check
-  --all-targets`, all-target/all-feature Clippy with warnings denied, and
-  `git diff --check`.
-- The locally built optimized release binary passed isolated help/version, healthy/failing doctor, skill
-  lifecycle, outbound and inbound MCP protocol/error/size bounds, durable cancellation
-  and scheduled wake, and bounded project-document context smoke. Linux raw-PTY smoke
-  passed plan denial, question selection, destructive-tool denial, cancellation
-  reconciliation, and session-detail navigation.
+- `task verify` passed its fast static phase once and the complete unchanged serial
+  suite: 1,061 library tests, 86 CLI tests, and 254 integration tests; only the explicit
+  live-provider and release-qualification tests were ignored by the normal suite.
+- `task docs:check` passed all five documentation invariants. Host and Windows MSVC
+  `task check:all-targets` both reached and checked nib; the Windows test graph emitted
+  only existing target-specific dead-code warnings.
+- `task coverage` passed at 85.87 percent runtime line coverage
+  (101,945/118,726). The locked optimized release build and `git diff --check` passed.
+- `task smoke:interactive` passed offline Linux PTY and redirected modes with terminal
+  restoration. `task smoke:managed-process` killed the optimized-binary owner and
+  proved supervised descendant cleanup.
+- `task qualify:llm-release` passed help, embedded version, doctor, structured planning,
+  Responses tool continuation, typed failure reconciliation, and executable stability.
+  Because the source tree was not yet committed, the evidence correctly records
+  `source_worktree_clean = false` and is not acceptance eligible.
 
-These are Linux local results. Windows runtime and Job Object/reparse behavior and
-macOS runtime behavior were not executed and remain explicit development-spec gates.
-Cross-target checks could not reach nib compilation on this host: the MSVC target lacks
-`lib.exe`, and the macOS target lacks an Apple-compatible C compiler and SDK.
+These are Linux runtime results plus a Windows cross-target type-check. Native Windows
+Job Object/reparse/ConPTY behavior and native macOS runtime/PTY behavior remain explicit
+hosted development-spec gates. The CI workflow now qualifies the exact optimized LLM
+release binary on all three native jobs before their platform smoke.
 
 ## Authoritative Runtime Decisions
 

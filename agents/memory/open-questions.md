@@ -30,3 +30,20 @@ Content:
   proof state outside an untrusted Windows/macOS worker, and what independent macOS
   owner will recover a crashed supervisor? Production delegation remains disabled on
   those platforms until both questions have verified answers.
+
+## 2026-09-02 - Live LLM qualification authority
+
+- Type: open-question
+- Source: T023 closure review
+- Confidence: high
+- Review: required before any paid or credentialed live run
+- Supersedes: none
+
+Content:
+
+- Which owner-approved, current exact OpenRouter model IDs should form the initial
+  allowlist, with rationale, owner, review/expiry dates, and cost ceilings?
+- Which dedicated provider credentials, per-provider budgets, and protected GitHub
+  environment approvals may be used for catalog, canary, selected, and full runs?
+- T023 remains in development until those authorities exist and one exact revision has
+  complete, privacy-reviewed evidence across all six provider groups.

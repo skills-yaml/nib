@@ -58,8 +58,8 @@ jobs:
       - name: Enforce runtime coverage
         run: task coverage
 
-      - name: Build release binary
-        run: task build
+      - name: Build and qualify release binary
+        run: task qualify:llm-release
 
       - name: Smoke unified interactive launcher
         run: task smoke:interactive
@@ -92,8 +92,8 @@ jobs:
       - name: Run tests
         run: task test
 
-      - name: Build release binary
-        run: task build
+      - name: Build and qualify release binary
+        run: task qualify:llm-release
 
       - name: Smoke native Windows interaction
         run: task smoke:interactive:windows:binary
@@ -156,8 +156,8 @@ jobs:
       - name: Run tests
         run: task test
 
-      - name: Build release binary
-        run: task build
+      - name: Build and qualify release binary
+        run: task qualify:llm-release
 
       - name: Smoke native macOS interaction
         run: task smoke:interactive:binary

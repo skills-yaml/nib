@@ -674,9 +674,23 @@ and contention follow-up while FT-015 retains its separate platform-authority wo
 ## Remaining Implementation Plan
 
 1. Execute Windows/macOS runtime gates for worktree identity/deletion and the FT-017
-   native mechanisms, then design an authority boundary inaccessible to managed workers
-   before enabling production delegation on either platform.
+   native mechanisms, and prove that production delegation continues to fail closed on
+   both platforms. Enabling production delegation outside Linux requires the separate
+   FT-020 authority design and is not a completion condition for this v1 contract.
 2. Rerun the canonical Task gates and two-stage review before moving FT-015 to `done/`.
+
+## Non-Linux Production Scope Decision (2026-09-02)
+
+FT-015 defines production delegation as Linux plus a usable bwrap PID namespace. Native
+Windows Job Object and macOS process-group implementations remain qualification
+mechanisms, and their runtime tests plus explicit production rejection are required
+before this spec can close. They do not authorize production delegation on those
+platforms.
+
+An OS-protected cleanup authority that remains effective after owner loss and is
+inaccessible to the managed worker is a separate product capability. FT-020 owns that
+future design and rollout. FT-015 must not remain indefinitely open waiting for FT-020,
+and FT-020 must not weaken this spec's current fail-closed behavior.
 
 ## Crash-Durable Spawn Preparation Follow-up (2026-08-29)
 

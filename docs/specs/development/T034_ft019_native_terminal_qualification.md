@@ -103,6 +103,17 @@ the corresponding native CI jobs to execute successfully on the completion revis
 5. Update technical docs, run focused and canonical gates, complete two-stage review,
    then reconcile hosted native evidence before moving T034 or FT-019 to Done.
 
+## Local Linux Qualification (2026-09-02)
+
+`task smoke:interactive` passed the deterministic steering, interaction, TUI, console,
+chat, redirected-CLI, and installer contract suites, then built the locked optimized
+binary and passed the offline Linux PTY and redirected-mode smoke with terminal-state
+restoration. `task test:installers` passed 40/40, `task verify` passed the complete
+serial suite, host and Windows MSVC all-target checks passed, runtime line coverage was
+85.87 percent (101,945/118,726), and `git diff --check` passed. These results prove the
+Linux/local portions only; native macOS and Windows terminal behavior and the same clean
+revision hosted matrix remain open.
+
 ## Validation Gates
 
 1. `task test:windows-pseudoterminal` proves exact status propagation, bounded input,

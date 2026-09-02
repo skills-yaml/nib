@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@1.2.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-07-29
+- Last reviewed: 2026-09-02
 
 ## Adopted Files
 
@@ -32,11 +32,11 @@ Metadata:
 
 - T003, T004, and T007 remain in `development/`: namespace quarantine and identity
   verification do not prove exact physical unlink on Unix, and their platform gates
-  remain open.
+  remain open. T004's FT-019 root-future repair is locally green and awaits exact native
+  hosted CI.
 - T006 remains in `development/` pending its own hosted Windows evidence reconciliation.
-  T010 remains there pending an exact-current committed development-channel run and
-  inspection of its published artifacts; rolling Releases now use the documented
-  exclusive-writer operating contract.
+  T010 is complete; rolling Releases use the documented exclusive-writer operating
+  contract.
 - FT-015 remains in `development/` for Windows/macOS worktree runtime validation and
   the inherited FT-017 authority boundary.
 - T020 and FT-016 have complete local stdio MCP lifecycle, cancellation, redaction, and
@@ -52,6 +52,16 @@ Metadata:
 - T022 is in `development/` and specifies the typed provider-neutral LLM contract,
   distinct provider adapters, native correlated tool continuation, safe terminal/error
   normalization, and shared provider conformance gates.
+- T023 is in `development/`. Its credential-free harness is locally green, but live
+  catalog/canary/selected/full evidence requires owner-approved credentials, budgets,
+  OpenRouter exact IDs, and protected-workflow authority.
+- T026 awaits exact native hosted validation and final independent review. T029 awaits
+  production publication plus the reverse production-to-development switch. T034 and
+  FT-019 await same-revision native terminal evidence. T035 awaits exact hosted CI for
+  the new fast-check/single-verify Task boundary.
+- FT-020 is in `backlog/` for a future protected cleanup-authority design that could
+  enable production delegation on Windows or macOS. Current v1 production delegation
+  remains Linux+bwrap only.
 - `docs/specs/feature/` and `docs/specs/task/` are retained only as empty legacy
   directories; active lifecycle state uses the canonical state directories.
 - MCP v1 is stdio-only; HTTP/SSE and OAuth require a separate future spec.
@@ -73,27 +83,30 @@ See `docs/specs/README.md` for details. Canonical states (`backlog/`, `developme
 - `task --list`
 - `task check`
 - `task test`
+- `task verify`
 - `task docs:check`
+- `task check:all-targets`
 - `task coverage`
 - `task build`
+- `task qualify:llm-release`
+- `task smoke:interactive`
+- `task smoke:managed-process`
 
 ## Current Validation Run
 
-On 2026-07-16, the reconciled Linux tree passed `task check` and an independent
-`task test` with 795 top-level tests (601 library, 61 CLI, and 133 integration tests).
-`task coverage` reported 83.90 percent runtime line coverage (55,083/65,656),
-`task docs:check` passed all five invariants, and the locked optimized `task build`
-completed. Strict all-target check/Clippy, format, and diff-whitespace gates also passed.
+On 2026-09-02, `task verify` passed the fast static phase once and the complete serial
+suite: 1,061 library, 86 CLI, and 254 integration tests, with the two explicit
+live/release qualification tests ignored by the ordinary suite. `task docs:check`
+passed all five invariants. Host and Windows MSVC `task check:all-targets` both reached
+nib successfully. Runtime line coverage passed at 85.87 percent
+(101,945/118,726), the locked optimized build passed, and `git diff --check` was clean.
 
-The locally built optimized release binary passed isolated help/version, healthy/failing doctor, skill
-install/list/remove, outbound and inbound MCP initialize/list/call/error and size-bound
-checks, durable cancellation/reconciliation and scheduled wake, and bounded project-doc
-context loading. Linux raw-PTY runs passed plan denial, question selection,
-destructive-tool denial, cancellation reconciliation, and session-detail open/close.
-Windows runtime, Job Object, and reparse behavior and macOS runtime behavior were not
-executed on this host and remain explicit development gates.
-Local cross-target compilation is also blocked before nib code by the missing MSVC
-`lib.exe` tool and the absence of an Apple-compatible C compiler and SDK.
+The optimized Linux binary passed the offline PTY/redirected interactive smoke and the
+abrupt-owner managed-process descendant-cleanup smoke. The local exact-revision LLM
+release harness passed its complete fixture path but correctly marked its dirty-source
+evidence ineligible. Native Windows Job Object, reparse, and ConPTY behavior and native
+macOS runtime/PTY behavior were not executed on this host and remain explicit hosted
+development gates.
 
 ## Reconciled Runtime Inventory
 
@@ -113,9 +126,8 @@ Local cross-target compilation is also blocked before nib code by the missing MS
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 19 audited specs are in `done/`; T003, T004, T006, T007, T010, T020,
-  FT-015, FT-016, FT-017, T021, and T022 are in `development/`; no spec is in
-  `backlog/`.
+- Lifecycle: 29 specs are in `done/`, 16 are in `development/`, and FT-020 is in
+  `backlog/`. `docs/specs/README.md` is the authoritative per-spec index.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate
   model-context accounting.

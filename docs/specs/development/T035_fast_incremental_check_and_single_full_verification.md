@@ -1,6 +1,6 @@
 # T035: Fast Incremental Check and Single Full Verification
 
-Status: Backlog
+Status: Development
 
 ## Summary
 
@@ -117,7 +117,7 @@ The initially reported shared-tree Clippy finding in `src/tools/delegation.rs` w
 reconciled as part of the owning runtime repair. On 2026-09-02,
 `task test:task-contract`, `task test:installers` (40/40), `task docs:check` (5/5),
 `task check`, and `git diff --check` passed. The canonical `task verify` completed the
-static gate once and then passed the unchanged serial suite: 1,060 library tests, 86
+static gate once and then passed the unchanged serial suite: 1,061 library tests, 86
 CLI tests, and 254 integration tests, with the two explicit live/release qualification
 tests ignored by the normal suite. T035 remains in development only until the exact
 committed revision passes hosted CI and its lifecycle move is reconciled.
