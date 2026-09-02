@@ -558,6 +558,17 @@ cancellation, server-exit, heartbeat, and descendant-cleanup predicates remain r
 `task check` and `git diff --check` pass, and independent code-quality review found no
 acceptance weakening. A replacement exact hosted matrix remains required.
 
+## Post-Commit Completion-Fixture Budget (2026-09-02)
+
+Hosted run `33671463213` passed Linux containment and static checks, then exposed that
+the post-commit completion-wins-over-cancellation unit fixture inherited the deliberately
+tight 250 ms generic test-only reconciliation budget. Under hosted load, authoritative
+terminal-record reconciliation could exceed that fixture budget even though the
+production boundary is four seconds. The fixture now selects an explicit five-second
+test-only budget because it verifies terminal/cancellation ordering and absence of a
+false cancellation audit, not deadline behavior. Production timeouts, lifecycle state
+transitions, and audit semantics are unchanged.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured

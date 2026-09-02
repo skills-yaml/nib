@@ -3854,6 +3854,9 @@ mod tests {
 
     #[tokio::test]
     async fn postcommit_nib_run_completion_win_has_no_cancellation_audit() {
+        let _timeout = crate::tools::delegation::SubagentCancellationTimeoutGuard::set(
+            std::time::Duration::from_secs(5),
+        );
         let root = tempdir().expect("completion-win repository");
         initialize_git_repository(root.path());
         let id = format!("sub-{}", uuid::Uuid::new_v4());
