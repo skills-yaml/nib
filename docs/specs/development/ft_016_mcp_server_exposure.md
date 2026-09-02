@@ -538,6 +538,26 @@ sessions directory to be renameable, contrary to the existing Windows directory-
 contract. The full hosted matrix remains open while that platform-specific test contract
 is corrected.
 
+## Hosted Observation-Contention Remediation (2026-09-02)
+
+Hosted run `33665599019` reached the Linux MCP integration suite after the complete
+unit, CLI, installer, and credential-free live-report suites passed. The
+`blocked_stdout_disconnect_reaps_terminal_descendants_on_every_platform` fixture then
+failed while observing the successful `read_file` audit because its deliberately
+500-millisecond observation lock acquisition overlapped the server's authoritative
+`.skill-usage.lock` mutation. The process, backpressure, disconnect, and cleanup
+assertions had not failed; the observer incorrectly treated one bounded lock timeout as
+permanent instead of continuing within its existing ten-second progress deadline.
+
+All MCP audit polling helpers now retry only `SessionError::InvalidMutation` carrying
+the exact expected timeout text and exact observed `.skill-usage.lock` path. JSON
+corruption, session-ID mismatch, other lock paths, and every other error still fail
+immediately. Each synchronous attempt remains bounded to 500 milliseconds, the existing
+five- or ten-second outer deadlines remain unchanged, and all original tool-completion,
+cancellation, server-exit, heartbeat, and descendant-cleanup predicates remain required.
+`task check` and `git diff --check` pass, and independent code-quality review found no
+acceptance weakening. A replacement exact hosted matrix remains required.
+
 ## Remaining Implementation Plan
 
 1. Execute the Windows Job Object cancellation and disconnect suite on the configured
