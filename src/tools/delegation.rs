@@ -16195,6 +16195,12 @@ mod tests {
     async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() {
         const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
         const EXPIRY_DELAY: Duration = Duration::from_millis(5_100);
+        // The assertion is that a fresh, bounded restart authority completes
+        // exact cleanup after the deliberately expired spawn authority. The
+        // production five-second outer/three-second worktree budgets are not
+        // under test and are too tight for repeated Git cleanup on a loaded
+        // Windows runner.
+        let _reconciliation_timeout = SpawnReconciliationTimeoutGuard::set(Duration::from_secs(15));
 
         for cancellable in [false, true] {
             for phase in ["worktree_reservation", "session_temp", "session_canonical"] {
