@@ -2,7 +2,7 @@
 name = "nib"
 version = "0.1.0"
 edition = "2021"
-description = "Local-first AI coding agent with persistent plans, gated tools, and auditable execution."
+description = "Local-first AI agent with persistent plans, gated tools, and auditable execution."
 license = "MIT"
 authors = ["nib Contributors"]
 repository = "https://github.com/skills-yaml/nib"

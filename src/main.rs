@@ -19,7 +19,7 @@ mod version;
 #[derive(Parser)]
 #[command(name = "nib")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "AI agent for coding and workload management", long_about = None)]
+#[command(about = "AI agent", long_about = None)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(flatten)]

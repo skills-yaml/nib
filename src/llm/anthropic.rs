@@ -139,7 +139,7 @@ impl AnthropicClient {
             .iter()
             .find(|message| message.role == crate::llm::LlmMessageRole::System)
             .map(|message| message.content.as_str())
-            .unwrap_or("You are nib, a coding agent.");
+            .unwrap_or("You are nib, an AI agent.");
         let mut messages = request_messages
             .iter()
             .filter(|message| message.role != crate::llm::types::LlmMessageRole::System)

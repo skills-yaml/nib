@@ -1,6 +1,6 @@
 # Base Architecture of nib
 
-nib is a **local-first AI coding agent**. Session data (conversations + tool calls) is stored as JSON files inside the selected profile's `.nib/profiles/<id>/sessions/` directory by default. It breaks down goals, executes work through approval, worktree, and optional `bwrap` layers, and keeps an auditable history per profile.
+nib is a **local-first AI agent**. Session data (conversations + tool calls) is stored as JSON files inside the selected profile's `.nib/profiles/<id>/sessions/` directory by default. It breaks down goals, executes work through approval, worktree, and optional `bwrap` layers, and keeps an auditable history per profile.
 
 This document describes the **base architecture** — the core components, data flows, principles, and integration points that every part of nib must respect.
 

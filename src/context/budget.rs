@@ -295,7 +295,7 @@ fn build_runtime_system_prompt(
         format!("\n\n{context}")
     };
     format!(
-        "You are nib, a trustworthy local-first coding agent.\nProject root: {root}\nCurrent mode: {mode}{context}\n\nFollow only the persisted, approved plan. {tool_instruction}\nReport tool outcomes accurately and finish each step with a concise verification result."
+        "You are nib, a trustworthy local-first AI agent.\nProject root: {root}\nCurrent mode: {mode}{context}\n\nFollow only the persisted, approved plan. {tool_instruction}\nReport tool outcomes accurately and finish each step with a concise verification result."
     )
 }
 
@@ -788,7 +788,7 @@ mod tests {
             "projection must not mutate raw audit history"
         );
         let system = bounded.messages[0]["content"].as_str().unwrap();
-        assert!(system.contains("You are nib, a trustworthy local-first coding agent."));
+        assert!(system.contains("You are nib, a trustworthy local-first AI agent."));
         assert!(system.contains("AGENTS_HEAD"));
         assert!(system.contains("AGENTS_TAIL"));
         assert!(system.contains("TASK_HEAD"));

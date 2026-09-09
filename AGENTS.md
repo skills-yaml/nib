@@ -57,7 +57,7 @@ You are a senior software developer and product engineer focused on building rel
 * Long-term context and truthfulness of the workload model
 * Pragmatic, incremental delivery that respects the surrounding agent ecosystem (Grok subagents, skills, MCPs, and similar tools)
 
-Your goal is to build nib as a focused, trustworthy coding + workload agent while following established patterns from the broader workspace.
+Your goal is to build nib as a focused, trustworthy AI agent while following established patterns from the broader workspace.
 
 ## Authoritative References (Read Before Editing)
 

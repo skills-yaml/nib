@@ -347,3 +347,19 @@ FT-016, FT-017, and FT-019 may move from `development/` to `done/` on exact run
 closes before FT-019 on the same native smoke evidence, and T029 composes that native
 failure-boundary matrix with the already recorded real managed switches in both
 directions. No live-provider authority is inferred: T023 remains in development.
+
+## 2026-09-09 - Position nib simply as an AI agent
+
+- Type: decision
+- Source: owner product-positioning direction
+- Confidence: high
+- Review: canonical local verification and documentation integrity
+- Supersedes: nib-specific "coding agent" and "coding/workload agent" product labels
+
+Content:
+
+The canonical product category for nib is **AI agent**. Public metadata, CLI help,
+runtime identity prompts, architecture guidance, and product documentation use that
+term without qualifying nib as a coding agent or workload agent. Coding, planning,
+execution, and workload reconciliation remain concrete capabilities, not the product
+category.

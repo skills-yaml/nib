@@ -1,6 +1,6 @@
 # nib
 
-nib is a command-line AI coding assistant that plans, executes, and reconciles work in local Git worktrees with explicit approval and audit records.
+nib is a command-line AI agent that plans, executes, and reconciles work in local Git worktrees with explicit approval and audit records.
 
 ## Features
 
