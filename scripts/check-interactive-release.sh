@@ -435,7 +435,9 @@ grep -Fq 'question  Which verification mode?' "$fixture/tui-approval-question-do
 tui_composer_input() {
   sleep 0.8
   printf '/hel\t\r'
-  sleep 1
+  # Exercise the contextual follow hint after the case's three-second resize;
+  # the initial 50-column terminal intentionally clips the long idle footer.
+  sleep 2.5
   printf '\033[5~'
   sleep 0.5
   printf '\033[6~'
@@ -461,11 +463,18 @@ tui_composer_input() {
 }
 
 run_tui_case tui-composer-scroll-history tui_composer_input '--tui' yes
-grep -Fq 'Command' "$fixture/tui-composer-scroll-history.txt"
-grep -Fq 'Completion' "$fixture/tui-composer-scroll-history.txt"
-grep -Fq 'paused row' "$fixture/tui-composer-scroll-history.txt"
-grep -Fq 'tail:following' "$fixture/tui-composer-scroll-history.txt"
-grep -Fq 'History | type' "$fixture/tui-composer-scroll-history.txt"
+# Ratatui can position the cursor over blank cells instead of writing spaces.
+# Normalize CSI boundaries for word assertions; key-driven state checks and exact
+# terminal restoration below continue to use their original evidence.
+terminal_escape="$(printf '\033')"
+composer_words="$fixture/tui-composer-scroll-history.words"
+sed "s/${terminal_escape}\\[[0-9;?]*[ -/]*[@-~]/ /g" \
+  "$fixture/tui-composer-scroll-history.txt" | tr -s '[:space:]' ' ' >"$composer_words"
+grep -Fq 'Commands' "$composer_words"
+grep -Fq 'Tab insert' "$composer_words"
+grep -Fq 'Ctrl+End follow' "$composer_words"
+grep -Fq 'Enter send' "$composer_words"
+grep -Fq 'History | type' "$composer_words"
 grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
 grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
 grep -R -Fq '"path": "README.md"' "$session_directory"
@@ -476,12 +485,37 @@ fi
 
 tui_queue_input() {
   sleep 0.8
-  printf 'interactive queue smoke\r'
-  sleep 0.1
-  printf 'steering release verification'
+  # Paste each draft atomically so per-keystroke drawing cannot consume the
+  # Mock planner's bounded steering window before Ctrl+S and Enter arrive.
+  printf '\033[200~interactive queue smoke\033[201~\r'
+  # Wait for the actual planning phase: earlier steering is valid but cannot
+  # prove that an in-flight plan is superseded, which this case requires.
+  local planning_ready=no
+  local planning_attempts=0
+  local queue_candidate
+  while [ "$planning_attempts" -lt 100 ]; do
+    for queue_candidate in "$session_directory"/*.json; do
+      if [ -f "$queue_candidate" ] &&
+        grep -Fq '"content": "interactive queue smoke"' "$queue_candidate" &&
+        grep -Fq '"to": "planning"' "$queue_candidate"; then
+        planning_ready=yes
+        break
+      fi
+    done
+    if [ "$planning_ready" = yes ]; then
+      break
+    fi
+    planning_attempts=$((planning_attempts + 1))
+    sleep 0.1
+  done
+  if [ "$planning_ready" != yes ]; then
+    printf '%s\n' 'queue smoke did not reach its persisted planning phase' >&2
+    return 1
+  fi
+  printf '\033[200~steering release verification\033[201~'
   printf '\023'
   sleep 0.2
-  printf 'queued release follow-up\r'
+  printf '\033[200~queued release follow-up\033[201~\r'
   sleep 2.5
   printf '\003'
   sleep 1.4

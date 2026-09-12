@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **44 done, 1 development, and 1 backlog**.
+The current lifecycle is **45 done, 1 development, and 1 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -33,11 +33,12 @@ FT-019. The clean Linux, macOS, and Windows jobs passed their complete serial su
 native all-target checks, exact release-binary qualification, and platform smokes.
 The final Linux coverage result was 85.87 percent (102,061/118,862).
 
-T023 is the only development spec. Its bounded credential-free implementation and
-offline native matrix are green, but no paid or credentialed live run was authorized.
-It still requires owner-approved exact OpenRouter IDs, provider accounts and
-credentials, hard spend and execution ceilings, protected environment approvals, and
-privacy-reviewed catalog/canary/selected/full evidence for all six provider groups.
+T023 remains in development. Its bounded credential-free implementation and offline
+native matrix are green, but no paid or credentialed live run was authorized. It still
+requires owner-approved exact OpenRouter IDs, provider accounts and credentials, hard
+spend and execution ceilings, protected environment approvals, and privacy-reviewed
+catalog/canary/selected/full evidence for all six provider groups. T036 completed the
+conversation-first TUI hierarchy refinement with local verification and native PTY smoke.
 FT-020 remains backlog for any future protected Windows/macOS production delegation
 authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
 bwrap containment; native non-Linux mechanism tests are complete and production use
@@ -81,6 +82,7 @@ work or narrower guarantees.
 - [T033: FT-019 Exact-Run Live Steering](done/T033_ft019_exact_run_live_steering.md)
 - [T034: FT-019 Native Terminal Qualification](done/T034_ft019_native_terminal_qualification.md)
 - [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
+- [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
 
 ### Feature specs
 

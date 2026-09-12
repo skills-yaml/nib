@@ -1,17 +1,18 @@
 //! Current-session-first Ratatui interface with live agent lifecycle rendering.
 
+#[cfg(test)]
+use crate::interactive::safe_event_fields;
 use crate::interactive::{
     apply_stream_event, claim_next_queued_follow_up_after_startup,
     display_stream_event_with_sensitive_values, execute_interactive_command_in_state,
-    format_interaction_chrome, interactive_completions, interactive_session_candidate,
+    format_tui_interaction_chrome, interactive_completions, interactive_session_candidate,
     interactive_session_selection, path_completions, persist_queued_follow_up,
     project_session_activities, queue_disposition_message, reduce_interaction, resolve_session,
-    restore_queued_follow_up_after_start_failure, safe_event_fields, set_active_model,
-    unicode_display_width, validate_interactive_session_target, wrapped_display_rows,
-    wrapped_line_count, ActivityEntry, ActivityKind, DraftHistory, DraftHistorySearch,
-    InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
-    InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
-    InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
+    restore_queued_follow_up_after_start_failure, set_active_model, unicode_display_width,
+    validate_interactive_session_target, wrapped_display_rows, ActivityEntry, ActivityKind,
+    DraftHistory, DraftHistorySearch, InteractionConsumer, InteractionDecision, InteractionInput,
+    InteractionReduction, InteractionRunState, InteractionState, InteractionTerminalOutcome,
+    InteractiveAgentMode, InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
     InteractiveSessionSelection, ModelSelection, SelectorDetailKind, StreamDisplay,
     TranscriptViewport, TranscriptViewportAction, MAX_DRAFT_HISTORY_QUERY_BYTES,
 };
@@ -22,8 +23,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-use ratatui::layout::{Constraint, Direction, Layout, Position};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::DefaultTerminal;
@@ -32,6 +33,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use tokio::sync::oneshot;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::agent::CancellationSignal;
 use crate::tools::executor::{ApprovalContext, ApprovalHandler};
@@ -45,12 +47,16 @@ struct LiveOutput {
 
 const MAX_LIVE_OUTPUT_BYTES: usize = 1_048_576;
 const OMITTED_OUTPUT_MARKER: &str = "[older live output omitted]\n";
+#[cfg(test)]
 const MAX_SESSION_DETAIL_BYTES: usize = 131_072;
+#[cfg(test)]
 const MAX_SESSION_DETAIL_ITEMS: usize = 100;
 const MAX_SESSION_DETAIL_ITEM_CHARS: usize = 500;
+#[cfg(test)]
 const MAX_SESSION_DETAIL_ROWS: usize = 400;
+#[cfg(test)]
 const SESSION_DETAIL_TRUNCATED_MARKER: &str = "\n[session detail truncated]\n";
-const MAX_VISIBLE_COMPLETIONS: usize = 10;
+const MAX_VISIBLE_COMPLETIONS: usize = 7;
 const MAX_SWITCHER_CANDIDATES: usize = 100;
 const MAX_SWITCHER_EXACT_ID_BYTES: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -98,11 +104,13 @@ impl LiveOutput {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionDetail {
     text: String,
 }
 
+#[cfg(test)]
 impl SessionDetail {
     fn new(
         id: &str,
@@ -186,6 +194,7 @@ impl SessionDetail {
     }
 }
 
+#[cfg(test)]
 fn bounded_preview(content: &str, sensitive_values: &[String]) -> String {
     let safe = bounded_public_text(
         content,
@@ -204,6 +213,7 @@ fn bounded_preview(content: &str, sensitive_values: &[String]) -> String {
     preview
 }
 
+#[cfg(test)]
 fn truncate_session_detail(text: &mut String) {
     if text.len() <= MAX_SESSION_DETAIL_BYTES {
         return;
@@ -216,6 +226,7 @@ fn truncate_session_detail(text: &mut String) {
     text.push_str(SESSION_DETAIL_TRUNCATED_MARKER);
 }
 
+#[cfg(test)]
 fn truncate_session_detail_rows(text: &mut String) {
     let line_count = text.lines().count();
     if line_count <= MAX_SESSION_DETAIL_ROWS {
@@ -232,10 +243,9 @@ struct ActiveTimeline {
     session_id: String,
     active_run_id: Option<String>,
     reconciled_terminal: Option<InteractionTerminalOutcome>,
-    persisted: String,
+    reconciled_outcome: Option<String>,
     activities: Vec<ActivityEntry>,
     live: LiveOutput,
-    notice: Option<String>,
     sensitive_values: Vec<String>,
 }
 
@@ -264,10 +274,9 @@ impl ActiveTimeline {
             session_id: session.id.clone(),
             active_run_id: None,
             reconciled_terminal: None,
-            persisted: SessionDetail::new(&session.id, Some(session), &sensitive_values).text,
+            reconciled_outcome: None,
             activities,
             live: LiveOutput::default(),
-            notice: None,
             sensitive_values,
         }
     }
@@ -275,9 +284,6 @@ impl ActiveTimeline {
     fn push_status(&mut self, status: String) {
         let status =
             bounded_public_text(&status, &self.sensitive_values, MAX_LIVE_OUTPUT_BYTES, true);
-        if status.starts_with("Resumed session ") {
-            self.notice = Some(status.clone());
-        }
         self.live.push_status(status.clone());
         self.activities.push(ActivityEntry {
             kind: ActivityKind::System,
@@ -298,42 +304,62 @@ impl ActiveTimeline {
 
     fn apply_event(&mut self, event: StreamEvent) {
         if let StreamEvent::Reconciled { outcome } = &event {
-            if let InteractionReduction::Reconciled { terminal, .. } = reduce_interaction(
-                &InteractionState::default(),
-                InteractionInput::ReconciledOutcome {
-                    outcome,
-                    failure: false,
-                },
-            ) {
-                self.reconciled_terminal = Some(terminal);
+            if outcome != "step_completed" {
+                if let InteractionReduction::Reconciled { terminal, outcome } = reduce_interaction(
+                    &InteractionState::default(),
+                    InteractionInput::ReconciledOutcome {
+                        outcome,
+                        failure: false,
+                    },
+                ) {
+                    self.reconciled_terminal = Some(terminal);
+                    self.reconciled_outcome = Some(outcome);
+                }
             }
         }
-        apply_stream_event(
-            &mut self.activities,
-            event.clone(),
-            &mut self.live.state,
-            &self.sensitive_values,
-        );
-        self.live.apply(event, &self.sensitive_values);
+        let duplicate_end = matches!(&event, StreamEvent::End(outcome)
+            if self.reconciled_outcome.as_deref() == Some(outcome.as_str()));
+        if !duplicate_end {
+            if let StreamEvent::End(outcome) = &event {
+                if let InteractionReduction::Reconciled { terminal, .. } = reduce_interaction(
+                    &InteractionState::default(),
+                    InteractionInput::ReconciledOutcome {
+                        outcome,
+                        failure: false,
+                    },
+                ) {
+                    // Final persistence can fail after a successful reconciliation.
+                    // Preserve that failure and prevent queued work from advancing.
+                    if terminal != InteractionTerminalOutcome::Completed {
+                        self.reconciled_terminal = Some(terminal);
+                    }
+                }
+            }
+            apply_stream_event(
+                &mut self.activities,
+                event.clone(),
+                &mut self.live.state,
+                &self.sensitive_values,
+            );
+            self.live.apply(event, &self.sensitive_values);
+        }
     }
 
     fn bind_run(&mut self, run_id: Option<String>) {
         if run_id.is_some() {
             self.reconciled_terminal = None;
+            self.reconciled_outcome = None;
         }
         self.active_run_id = run_id;
     }
 
     fn rendered_text(&self) -> String {
-        let mut text = self
+        let text = self
             .activities
             .iter()
             .map(ActivityEntry::render_line)
             .collect::<Vec<_>>()
             .join("\n\n");
-        if text.is_empty() {
-            text = self.persisted.clone();
-        }
         if self.live.text.is_empty() {
             return text;
         }
@@ -1416,9 +1442,8 @@ fn activate_selected_session(
     let session = validate_interactive_session_target(store, candidate).map_err(|error| {
         format!("Could not resume {target}: {error}. The active session is unchanged.")
     })?;
-    let mut replacement =
+    let replacement =
         ActiveTimeline::from_session(&session, store.public_sensitive_values().to_vec());
-    replacement.push_status(format!("Resumed session {target} from persisted state."));
     *timeline = replacement;
     *active_session_id = target.clone();
     Ok(target)
@@ -1552,41 +1577,142 @@ fn render_session_switcher(
     }
 }
 
-fn render_completion(frame: &mut ratatui::Frame<'_>, completion: &CompletionMenu) {
+fn completion_rect(area: Rect, row_count: usize, composer_height: u16) -> Rect {
+    let horizontal_margin: u16 = if area.width >= 12 { 2 } else { 0 };
+    let width = area
+        .width
+        .saturating_sub(horizontal_margin.saturating_mul(2))
+        .clamp(1, 92);
+    let composer_top = area
+        .y
+        .saturating_add(area.height)
+        .saturating_sub(1)
+        .saturating_sub(composer_height);
+    let transcript_top = area.y.saturating_add(2);
+    let transcript_height = composer_top.saturating_sub(transcript_top);
+    let max_height = (transcript_height / 2).clamp(1, 10);
+    let desired_height = u16::try_from(row_count.saturating_add(3)).unwrap_or(u16::MAX);
+    let height = desired_height.min(max_height).max(1);
+    Rect {
+        x: area.x.saturating_add(horizontal_margin),
+        y: composer_top.saturating_sub(height),
+        width,
+        height,
+    }
+}
+
+fn completion_signature(suggestion: &InteractiveCompletion) -> &str {
+    let insertion = suggestion.insertion.trim_end();
+    if suggestion.insertion.starts_with('/') && !insertion.contains(char::is_whitespace) {
+        suggestion.usage
+    } else {
+        insertion
+    }
+}
+
+fn truncate_completion_text(value: &str, max_cells: usize) -> String {
+    if unicode_display_width(value) <= max_cells {
+        return value.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let mut output = String::new();
+    for grapheme in value.graphemes(true) {
+        let mut candidate = output.clone();
+        candidate.push_str(grapheme);
+        if unicode_display_width(&candidate) > max_cells.saturating_sub(1) {
+            break;
+        }
+        output.push_str(grapheme);
+    }
+    output.push('…');
+    output
+}
+
+fn completion_line(suggestion: &InteractiveCompletion, selected: bool, width: u16) -> String {
+    let marker = if selected { "> " } else { "  " };
+    let width = usize::from(width);
+    if width <= 2 {
+        return truncate_completion_text(marker, width);
+    }
+    let content_width = width.saturating_sub(2);
+    let signature_column = content_width
+        .saturating_mul(2)
+        .checked_div(5)
+        .unwrap_or(0)
+        .max(1);
+    let signature = truncate_completion_text(completion_signature(suggestion), signature_column);
+    let signature_width = unicode_display_width(&signature);
+    let gap = if content_width > signature_column {
+        2
+    } else {
+        0
+    };
+    let description_width = content_width.saturating_sub(signature_column.saturating_add(gap));
+    let description = truncate_completion_text(suggestion.summary, description_width);
+    format!(
+        "{marker}{signature}{}{description}",
+        " ".repeat(
+            signature_column
+                .saturating_sub(signature_width)
+                .saturating_add(gap)
+        )
+    )
+}
+
+fn render_completion(
+    frame: &mut ratatui::Frame<'_>,
+    completion: &CompletionMenu,
+    composer: &Composer,
+) {
     if !completion.is_open() {
         return;
     }
+    let composer_height = composer_height(composer, frame.area().width);
+    let modal_area = completion_rect(
+        frame.area(),
+        completion.suggestions.len().min(MAX_VISIBLE_COMPLETIONS),
+        composer_height,
+    );
+    let visible_capacity = usize::from(modal_area.height.saturating_sub(3)).max(1);
     let start = completion
         .selected
-        .saturating_sub(MAX_VISIBLE_COMPLETIONS.saturating_sub(1));
-    let end = (start + MAX_VISIBLE_COMPLETIONS).min(completion.suggestions.len());
-    let lines = completion.suggestions[start..end]
+        .saturating_sub(visible_capacity.saturating_sub(1));
+    let end = (start + visible_capacity).min(completion.suggestions.len());
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let inner_width = modal_area.width.saturating_sub(2);
+    let mut lines = completion.suggestions[start..end]
         .iter()
         .enumerate()
         .map(|(offset, suggestion)| {
-            let marker = if start + offset == completion.selected {
-                ">"
+            let selected = start + offset == completion.selected;
+            let style = if selected {
+                let style = Style::default().add_modifier(Modifier::BOLD);
+                if no_color {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style.fg(Color::Cyan)
+                }
             } else {
-                " "
+                Style::default()
             };
-            Line::from(format!(
-                "{marker} {:<22} | {} | {}",
-                suggestion.insertion.trim_end(),
-                suggestion.usage,
-                suggestion.summary
+            Line::from(Span::styled(
+                completion_line(suggestion, selected, inner_width),
+                style,
             ))
         })
         .collect::<Vec<_>>();
-    let modal_area = centered_rect(92, 42, frame.area());
+    lines.push(Line::from(Span::styled(
+        truncate_completion_text(
+            "  Up/Down select · Tab insert · Esc close",
+            usize::from(inner_width),
+        ),
+        muted_style(no_color),
+    )));
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Command Completion | Up/Down select | Tab insert | Esc close "),
-            )
-            .wrap(ratatui::widgets::Wrap { trim: true }),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Commands ")),
         modal_area,
     );
 }
@@ -1662,6 +1788,7 @@ fn render_modal_state_error(frame: &mut ratatui::Frame<'_>, message: &'static st
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_interaction_overlay(
     frame: &mut ratatui::Frame<'_>,
     layer: InteractionLayer,
@@ -1670,6 +1797,7 @@ fn render_interaction_overlay(
     pending_history_search: Option<&PendingHistorySearch>,
     active_session_id: &str,
     completion: &CompletionMenu,
+    composer: &Composer,
 ) {
     match layer {
         InteractionLayer::Model => {
@@ -1702,7 +1830,7 @@ fn render_interaction_overlay(
                 );
             }
         }
-        InteractionLayer::Completion => render_completion(frame, completion),
+        InteractionLayer::Completion => render_completion(frame, completion, composer),
         InteractionLayer::RecoverableError => render_modal_state_error(
             frame,
             "Interaction state is unavailable; press Esc to continue.",
@@ -2190,7 +2318,8 @@ pub fn run_tui(
         let resolution =
             resolve_session(&store, requested_session.as_deref()).map_err(io::Error::other)?;
         let active_session_id = resolution.session_id().to_string();
-        let session_notice = resolution.notice();
+        let session_origin = resolution.tui_origin().to_string();
+        let session_notice = resolution.tui_notice();
         draw_loop(
             terminal,
             project_root,
@@ -2198,6 +2327,7 @@ pub fn run_tui(
             store,
             run_goal,
             active_session_id,
+            session_origin,
             session_notice,
         )
     })();
@@ -2328,34 +2458,148 @@ impl Drop for TerminalRestoreGuard {
 }
 
 fn composer_height(composer: &Composer, width: u16) -> u16 {
-    let visual = wrapped_line_count(&composer.input, width.max(1)).clamp(2, 6);
+    let visual = composer_visual_rows(composer, width).len().clamp(2, 6);
     u16::try_from(visual).unwrap_or(6)
 }
 
 fn composer_cursor_cell(input: &str, cursor: usize, width: u16) -> (u16, u16) {
     let width = usize::from(width.max(1));
     let cursor = cursor.min(input.len());
-    let prefix = &input[..cursor];
-    let mut row = 0u16;
-    let mut col = 0usize;
-    for character in prefix.chars() {
-        if character == '\n' {
-            row = row.saturating_add(1);
-            col = 0;
-            continue;
-        }
-        let glyph = unicode_display_width(&character.to_string()).max(1);
-        if col.saturating_add(glyph) > width {
-            row = row.saturating_add(1);
-            col = glyph;
-        } else {
-            col += glyph;
-        }
+    let prefix = format!("> {}", &input[..cursor]);
+    let rows = wrapped_display_rows(&prefix, width as u16);
+    let last_width = rows.last().map_or(0, |row| unicode_display_width(row));
+    if last_width >= width {
+        return (0, u16::try_from(rows.len()).unwrap_or(u16::MAX));
     }
     (
-        u16::try_from(col.min(width.saturating_sub(1))).unwrap_or(0),
-        row,
+        u16::try_from(last_width).unwrap_or(width as u16 - 1),
+        u16::try_from(rows.len().saturating_sub(1)).unwrap_or(u16::MAX),
     )
+}
+
+fn composer_visual_rows(composer: &Composer, width: u16) -> Vec<String> {
+    let mut rows = wrapped_display_rows(&format!("> {}", composer.input), width.max(1));
+    let (_, cursor_row) = composer_cursor_cell(&composer.input, composer.cursor, width);
+    let required = usize::from(cursor_row).saturating_add(1);
+    if rows.len() < required {
+        rows.resize(required, String::new());
+    }
+    rows
+}
+
+fn muted_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn role_style(kind: ActivityKind, no_color: bool) -> Style {
+    let style = Style::default().add_modifier(Modifier::BOLD);
+    if no_color {
+        return style;
+    }
+    style.fg(match kind {
+        ActivityKind::User => Color::Cyan,
+        ActivityKind::Assistant => Color::Green,
+        ActivityKind::Plan
+        | ActivityKind::Tool
+        | ActivityKind::Approval
+        | ActivityKind::Question => Color::Yellow,
+        ActivityKind::Failure | ActivityKind::Cancellation => Color::Red,
+        ActivityKind::Compression | ActivityKind::Reconcile | ActivityKind::System => {
+            Color::DarkGray
+        }
+    })
+}
+
+fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
+    for kind in [
+        ActivityKind::User,
+        ActivityKind::Assistant,
+        ActivityKind::Plan,
+        ActivityKind::Tool,
+        ActivityKind::Approval,
+        ActivityKind::Question,
+        ActivityKind::Compression,
+        ActivityKind::Reconcile,
+        ActivityKind::Cancellation,
+        ActivityKind::Failure,
+        ActivityKind::System,
+    ] {
+        let label = kind.role_label();
+        let prefix = format!("{label}  ");
+        if let Some(rest) = row.strip_prefix(&prefix) {
+            return Line::from(vec![
+                Span::styled(label.to_string(), role_style(kind, no_color)),
+                Span::raw(format!("  {rest}")),
+            ]);
+        }
+    }
+    Line::from(row.to_string())
+}
+
+fn header_line(header: &str, no_color: bool) -> Line<'static> {
+    let accent = role_style(ActivityKind::User, no_color);
+    match header.strip_prefix("nib") {
+        Some(rest) => Line::from(vec![
+            Span::styled("nib", accent),
+            Span::styled(rest.to_string(), muted_style(no_color)),
+        ]),
+        None => Line::from(Span::styled(header.to_string(), muted_style(no_color))),
+    }
+}
+
+fn status_line(status: &str, viewport: &TranscriptViewport, no_color: bool) -> Line<'static> {
+    let combined = if viewport.is_pinned_to_tail() {
+        status.to_string()
+    } else {
+        format!("{status}  ·  paused")
+    };
+    let (lifecycle, rest) = combined
+        .split_once("  ·  ")
+        .unwrap_or((combined.as_str(), ""));
+    let mut spans = vec![Span::styled(
+        lifecycle.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if !rest.is_empty() {
+        spans.push(Span::styled(format!("  ·  {rest}"), muted_style(no_color)));
+    }
+    Line::from(spans)
+}
+
+fn empty_state_lines(no_color: bool) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "nib",
+            role_style(ActivityKind::User, no_color),
+        )),
+        Line::from(""),
+        Line::from("Your AI agent for this project."),
+        Line::from(Span::styled(
+            "Ask me to inspect, plan, or change something.",
+            muted_style(no_color),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Type / for commands · @ to add project context",
+            muted_style(no_color),
+        )),
+    ]
+}
+
+fn footer_line(run_active: bool, viewport: &TranscriptViewport) -> String {
+    let mut hint = if run_active {
+        "Enter queue · Ctrl+S steer · Ctrl+C stop".to_string()
+    } else {
+        "Enter send · Ctrl+J newline · / commands · @ files".to_string()
+    };
+    if !viewport.is_pinned_to_tail() {
+        hint.push_str(" · Ctrl+End follow");
+    }
+    hint
 }
 
 fn approval_dock_style(no_color: bool) -> Style {
@@ -2472,6 +2716,7 @@ fn render_current_session_view(
         composer,
         pending_approval,
         pending_question,
+        false,
         &mut viewport,
     );
 }
@@ -2485,8 +2730,10 @@ fn render_current_session_view_with_viewport(
     composer: &Composer,
     pending_approval: Option<&TuiApprovalRequest>,
     pending_question: Option<&PendingQuestion>,
+    run_active: bool,
     viewport: &mut TranscriptViewport,
 ) {
+    let no_color = std::env::var_os("NO_COLOR").is_some();
     let composer_h = composer_height(composer, frame.area().width);
     let dock = pending_approval.is_some() || pending_question.is_some();
     let dock_h = if pending_question.is_some_and(|question| question.error.is_some()) {
@@ -2508,7 +2755,7 @@ fn render_current_session_view_with_viewport(
             Constraint::Length(1),
         ])
         .split(frame.area());
-    frame.render_widget(Paragraph::new(header), chunks[0]);
+    frame.render_widget(Paragraph::new(header_line(header, no_color)), chunks[0]);
     let body = if dock {
         Layout::default()
             .direction(Direction::Vertical)
@@ -2520,20 +2767,42 @@ fn render_current_session_view_with_viewport(
             .constraints([Constraint::Min(1)])
             .split(chunks[2])
     };
-    let rendered_rows = wrapped_display_rows(timeline_text, body[0].width.max(1));
+    let empty = timeline_text.trim().is_empty();
+    let rendered_rows = if empty {
+        vec![String::new(); empty_state_lines(no_color).len()]
+    } else {
+        wrapped_display_rows(timeline_text, body[0].width.max(1))
+    };
     viewport.observe_layout(rendered_rows.len(), usize::from(body[0].height.max(1)));
     frame.render_widget(
-        Paragraph::new(format!("{status}  {}", viewport.status_label())),
+        Paragraph::new(status_line(status, viewport, no_color)),
         chunks[1],
     );
-    let visible_start = viewport.top_row();
-    let visible_end = visible_start
-        .saturating_add(usize::from(body[0].height.max(1)))
-        .min(rendered_rows.len());
-    frame.render_widget(
-        Paragraph::new(rendered_rows[visible_start..visible_end].join("\n")),
-        body[0],
-    );
+    if empty {
+        let welcome_height = u16::try_from(empty_state_lines(no_color).len()).unwrap_or(6);
+        let welcome_area = Rect {
+            x: body[0].x,
+            y: body[0]
+                .y
+                .saturating_add(body[0].height.saturating_sub(welcome_height) / 3),
+            width: body[0].width,
+            height: welcome_height.min(body[0].height),
+        };
+        frame.render_widget(
+            Paragraph::new(empty_state_lines(no_color)).alignment(Alignment::Center),
+            welcome_area,
+        );
+    } else {
+        let visible_start = viewport.top_row();
+        let visible_end = visible_start
+            .saturating_add(usize::from(body[0].height.max(1)))
+            .min(rendered_rows.len());
+        let lines = rendered_rows[visible_start..visible_end]
+            .iter()
+            .map(|row| styled_transcript_row(row, no_color))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), body[0]);
+    }
     if let Some(req) = pending_approval {
         let mut lines = req.context.lines();
         let first = lines.remove(0);
@@ -2570,33 +2839,62 @@ fn render_current_session_view_with_viewport(
             body[1],
         );
     }
-    frame.render_widget(
-        Paragraph::new(composer.input.as_str())
-            .style(Style::default().add_modifier(Modifier::BOLD))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[3],
-    );
     let composer_area = chunks[3];
     if composer_area.width > 0 && composer_area.height > 0 {
-        let (cx, cy) = composer_cursor_cell(&composer.input, composer.cursor, composer_area.width);
+        let rows = composer_visual_rows(composer, composer_area.width);
+        let (cx, cursor_row) =
+            composer_cursor_cell(&composer.input, composer.cursor, composer_area.width);
+        let visible_height = usize::from(composer_area.height);
+        let first_visible = usize::from(cursor_row)
+            .saturating_sub(visible_height.saturating_sub(1))
+            .min(rows.len().saturating_sub(visible_height));
+        let lines = rows
+            .iter()
+            .skip(first_visible)
+            .take(visible_height)
+            .enumerate()
+            .map(|(offset, row)| {
+                if first_visible == 0 && offset == 0 {
+                    let input = row.strip_prefix("> ").unwrap_or(row);
+                    let mut spans =
+                        vec![Span::styled("> ", role_style(ActivityKind::User, no_color))];
+                    if composer.input.is_empty() {
+                        spans.push(Span::styled("Ask nib anything…", muted_style(no_color)));
+                    } else {
+                        spans.push(Span::styled(
+                            input.to_string(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    Line::from(spans)
+                } else {
+                    Line::from(Span::styled(
+                        row.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ))
+                }
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), composer_area);
+        let cy = usize::from(cursor_row).saturating_sub(first_visible);
         frame.set_cursor_position(Position {
             x: composer_area
                 .x
                 .saturating_add(cx.min(composer_area.width.saturating_sub(1))),
-            y: composer_area
-                .y
-                .saturating_add(cy.min(composer_area.height.saturating_sub(1))),
+            y: composer_area.y.saturating_add(
+                u16::try_from(cy)
+                    .unwrap_or(u16::MAX)
+                    .min(composer_area.height.saturating_sub(1)),
+            ),
         });
     }
     frame.render_widget(
-        Paragraph::new(format!(
-            "{}  pgup/pgdn scroll  ctrl+end follow  ctrl+r history  enter send/queue",
-            viewport.status_label(),
-        )),
+        Paragraph::new(footer_line(run_active, viewport)).style(muted_style(no_color)),
         chunks[4],
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_loop(
     mut terminal: DefaultTerminal,
     project_root: &Path,
@@ -2604,7 +2902,8 @@ fn draw_loop(
     store: SessionStore,
     run_goal: Option<String>,
     mut active_session_id: String,
-    session_notice: String,
+    mut session_origin: String,
+    session_notice: Option<String>,
 ) -> io::Result<Option<String>> {
     let agent_profile_scope = TuiAgentProfileScope {
         project_root: project_root.to_path_buf(),
@@ -2615,7 +2914,9 @@ fn draw_loop(
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
     let mut timeline = ActiveTimeline::load(&store, &active_session_id)?;
-    timeline.push_status(session_notice);
+    if let Some(notice) = session_notice {
+        timeline.push_status(notice);
+    }
     let mut worker = if let Some(goal) = run_goal {
         Some(spawn_tui_agent_worker(
             agent_profile_scope.clone(),
@@ -2735,18 +3036,21 @@ fn draw_loop(
             .as_ref()
             .map(|session| session.queued_follow_ups.len())
             .unwrap_or(0);
-        let (header, mut status_line) = format_interaction_chrome(
+        let terminal_width = match terminal.size() {
+            Ok(area) => area.width,
+            Err(error) => break Err(error),
+        };
+        let (header, status_line) = format_tui_interaction_chrome(
             project_root,
             &profile_id,
             session.as_ref(),
             &timeline.session_id,
+            &session_origin,
             worker_status,
             queued,
+            terminal_width,
         )
         .unwrap_or_else(|error| (error.clone(), error));
-        if let Some(notice) = &timeline.notice {
-            status_line = format!("{status_line}  {notice}");
-        }
         if let Err(error) = terminal.draw(|f| {
             render_current_session_view_with_viewport(
                 f,
@@ -2756,6 +3060,7 @@ fn draw_loop(
                 &composer,
                 pending_approval.as_ref(),
                 pending_question.as_ref(),
+                worker.is_some(),
                 &mut transcript_viewport,
             );
             render_interaction_overlay(
@@ -2766,6 +3071,7 @@ fn draw_loop(
                 pending_history_search.as_ref(),
                 &active_session_id,
                 &completion,
+                &composer,
             );
         }) {
             break Err(error);
@@ -3014,6 +3320,7 @@ fn draw_loop(
                                 &mut timeline,
                             ) {
                                 Ok(_) => {
+                                    session_origin = "resumed".to_string();
                                     completion = CompletionMenu::default();
                                     pending_switcher = None;
                                     transcript_viewport.pin_to_tail();
@@ -3125,6 +3432,12 @@ fn draw_loop(
                                     Some(PendingHistorySearch::new(&composer.history, query));
                             }
                             InteractionReduction::Command(command) => {
+                                let changed_origin = match &command {
+                                    crate::interactive::InteractiveCommand::New
+                                    | crate::interactive::InteractiveCommand::Clear => Some("new"),
+                                    crate::interactive::InteractiveCommand::Fork => Some("fork"),
+                                    _ => None,
+                                };
                                 if matches!(
                                     command,
                                     crate::interactive::InteractiveCommand::Session
@@ -3174,6 +3487,9 @@ fn draw_loop(
                                             "[command error] {error}; the active session is unchanged"
                                             ));
                                         } else {
+                                            if let Some(origin) = changed_origin {
+                                                session_origin = origin.to_string();
+                                            }
                                             transcript_viewport.pin_to_tail();
                                         }
                                     }
@@ -3472,6 +3788,95 @@ mod tests {
     }
 
     #[test]
+    fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "nib  ·  project  ·  session abc12345  ·  new",
+                    "idle  ·  mock/mock-model  ·  approval manual  ·  sandboxed",
+                    "",
+                    &Composer::default(),
+                    None,
+                    None,
+                )
+            })
+            .expect("render empty session");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Your AI agent for this project."));
+        assert!(rendered.contains("Ask me to inspect, plan, or change something."));
+        assert!(rendered.contains("> Ask nib anything…"));
+        assert!(rendered.contains("Enter send"));
+        assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
+    }
+
+    #[test]
+    fn activity_styles_keep_text_labels_without_color() {
+        let line = styled_transcript_row("nib  concise answer", true);
+        assert_eq!(line.spans[0].content, "nib");
+        assert_eq!(line.spans[1].content, "  concise answer");
+        assert_eq!(line.spans[0].style.fg, None);
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn footer_and_completion_follow_the_current_interaction() {
+        let mut viewport = TranscriptViewport::default();
+        assert_eq!(
+            footer_line(false, &viewport),
+            "Enter send · Ctrl+J newline · / commands · @ files"
+        );
+        assert_eq!(
+            footer_line(true, &viewport),
+            "Enter queue · Ctrl+S steer · Ctrl+C stop"
+        );
+        viewport.observe_layout(100, 10);
+        viewport.apply(TranscriptViewportAction::PageUp);
+        assert!(footer_line(true, &viewport).contains("Ctrl+End follow"));
+
+        let area = Rect::new(0, 0, 100, 30);
+        let completion = completion_rect(area, MAX_VISIBLE_COMPLETIONS, 2);
+        assert_eq!(completion.width, 92);
+        assert!(completion.y >= 16, "{completion:?}");
+        assert!(completion.y + completion.height <= 27, "{completion:?}");
+
+        let multiline = completion_rect(Rect::new(0, 0, 80, 24), MAX_VISIBLE_COMPLETIONS, 6);
+        let composer_top = 24 - 1 - 6;
+        assert!(
+            multiline.y + multiline.height <= composer_top,
+            "{multiline:?}"
+        );
+        assert!(multiline.height <= (composer_top - 2) / 2, "{multiline:?}");
+
+        let permissions = interactive_completions("/permissions ");
+        let rows = permissions
+            .iter()
+            .map(|suggestion| completion_line(suggestion, false, 76))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(rows.len(), 4, "fixed subcommands must have distinct rows");
+        assert!(rows.iter().any(|row| row.contains("/permissions manual")));
+        assert!(rows.iter().all(|row| unicode_display_width(row) <= 76));
+    }
+
+    #[test]
+    fn completion_truncation_preserves_complete_graphemes() {
+        for grapheme in ["☺\u{fe0f}", "👩\u{200d}💻"] {
+            let text = format!("a{grapheme}xy");
+            assert_eq!(truncate_completion_text(&text, 3), "a…");
+            assert_eq!(truncate_completion_text(&text, 4), format!("a{grapheme}…"));
+        }
+        assert_eq!(truncate_completion_text("e\u{301}xyz", 2), "e\u{301}…");
+    }
+
+    #[test]
     fn current_session_view_is_primary_and_has_no_permanent_browser() {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -3482,7 +3887,7 @@ mod tests {
                     frame,
                     "workspace  ·  sess active-one  ·  local  ·  -",
                     "idle  ·  mock/mock-model  ·  manual/hybrid net restricted  ·  queue 0",
-                    "you  persisted request\n\nassistant  persisted reply",
+                    "you  persisted request\n\nnib  persisted reply",
                     &composer,
                     None,
                     None,
@@ -3553,7 +3958,7 @@ mod tests {
             .expect("confirmed switch");
         assert_eq!(active_id, "session-b");
         assert_eq!(timeline.session_id, "session-b");
-        assert!(timeline.persisted.contains("from b"));
+        assert!(timeline.rendered_text().contains("from b"));
         assert!(!timeline.rendered_text().contains("live output owned by a"));
         assert_eq!(composer.input, "draft survives browsing");
         assert_eq!(
@@ -3800,12 +4205,14 @@ mod tests {
             .expect("assistant message");
 
         let timeline = ActiveTimeline::load(&store, "detail-session").expect("load timeline");
+        let persisted = store.load("detail-session").expect("persisted session");
+        let detail = SessionDetail::new("detail-session", Some(&persisted), &[]);
         assert_eq!(timeline.session_id, "detail-session");
-        assert!(timeline.persisted.contains("Session: detail-session"));
-        assert!(timeline.persisted.contains("Messages: 2"));
-        assert!(timeline.persisted.contains("inspect this session"));
-        assert!(timeline.persisted.len() <= MAX_SESSION_DETAIL_BYTES);
-        assert!(timeline.persisted.lines().count() <= MAX_SESSION_DETAIL_ROWS);
+        assert!(detail.text.contains("Session: detail-session"));
+        assert!(detail.text.contains("Messages: 2"));
+        assert!(detail.text.contains("inspect this session"));
+        assert!(detail.text.len() <= MAX_SESSION_DETAIL_BYTES);
+        assert!(detail.text.lines().count() <= MAX_SESSION_DETAIL_ROWS);
         assert!(timeline
             .activities
             .iter()
@@ -3905,7 +4312,7 @@ mod tests {
                         None,
                         None,
                     );
-                    render_completion(frame, &completion);
+                    render_completion(frame, &completion, &Composer::default());
                 })
                 .expect("render completion on small terminal");
             terminal
@@ -4010,6 +4417,62 @@ mod tests {
     }
 
     #[test]
+    fn timeline_ignores_intermediate_plan_reconciliation_and_deduplicates_end() {
+        let mut timeline = ActiveTimeline::default();
+        timeline.apply_event(StreamEvent::Reconciled {
+            outcome: "step_completed".to_string(),
+        });
+        assert!(timeline.reconciled_terminal.is_none());
+        assert!(timeline.activities.is_empty());
+
+        timeline.apply_event(StreamEvent::Reconciled {
+            outcome: "completed".to_string(),
+        });
+        timeline.apply_event(StreamEvent::End("completed".to_string()));
+        assert_eq!(
+            timeline.reconciled_terminal,
+            Some(InteractionTerminalOutcome::Completed)
+        );
+        assert_eq!(timeline.activities.len(), 1);
+        assert_eq!(timeline.activities[0].kind, ActivityKind::Reconcile);
+
+        timeline.bind_run(Some("next-run".to_string()));
+        timeline.apply_event(StreamEvent::End("local_error".to_string()));
+        assert_eq!(timeline.activities.len(), 2);
+        assert_eq!(timeline.activities[1].kind, ActivityKind::System);
+        assert_eq!(timeline.activities[1].title, "local_error");
+        assert_eq!(
+            timeline.reconciled_terminal,
+            Some(InteractionTerminalOutcome::Failed)
+        );
+    }
+
+    #[test]
+    fn timeline_preserves_a_final_error_after_successful_reconciliation() {
+        let mut timeline = ActiveTimeline::default();
+        timeline.apply_event(StreamEvent::Reconciled {
+            outcome: "completed".to_string(),
+        });
+        timeline.apply_event(StreamEvent::End("local_error".to_string()));
+
+        assert_eq!(timeline.activities.len(), 2);
+        assert_eq!(timeline.activities[1].title, "local_error");
+        assert!(timeline.live.text.contains("[stream ended] local_error"));
+        assert_eq!(
+            timeline.reconciled_terminal,
+            Some(InteractionTerminalOutcome::Failed)
+        );
+        assert_eq!(
+            tui_run_state(
+                false,
+                timeline.live.state.as_deref(),
+                timeline.reconciled_terminal
+            ),
+            InteractionRunState::Failed
+        );
+    }
+
+    #[test]
     fn test_backend_renders_one_bounded_control_free_failure_detail() {
         const SECRET: &str = "tui/observer+secret";
         let failure = crate::llm::LlmError::new(
@@ -4030,7 +4493,6 @@ mod tests {
         );
         let mut timeline = ActiveTimeline {
             session_id: "tui-failure-session".to_string(),
-            persisted: "Session: tui-failure-session".to_string(),
             ..ActiveTimeline::default()
         };
         timeline.apply_event(StreamEvent::Failure {
@@ -4624,17 +5086,19 @@ mod tests {
             plan.steps[plan.current_step_index].outcome.as_deref(),
             Some("cancelled_by_user")
         );
-        let reconciled = timeline
+        assert!(timeline
             .live
             .text
-            .find("[reconciled] cancelled_by_user")
-            .expect("reconciled event was drained");
-        let ended = timeline
-            .live
-            .text
-            .find("[stream ended] cancelled_by_user")
-            .expect("end event was drained");
-        assert!(reconciled < ended);
+            .contains("[reconciled] cancelled_by_user"));
+        assert!(!timeline.live.text.contains("[stream ended]"));
+        assert_eq!(
+            timeline
+                .activities
+                .iter()
+                .filter(|entry| entry.kind == ActivityKind::Reconcile)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -5351,6 +5815,7 @@ mod tests {
                     None,
                     "session-a",
                     &CompletionMenu::default(),
+                    &Composer::default(),
                 )
             })
             .expect("recoverable modal render");
@@ -5495,6 +5960,7 @@ mod tests {
                     &composer,
                     None,
                     None,
+                    false,
                     &mut viewport,
                 );
                 render_interaction_overlay(
@@ -5505,6 +5971,7 @@ mod tests {
                     Some(&search),
                     "session-a",
                     &CompletionMenu::default(),
+                    &composer,
                 );
             })
             .expect("render history overlay");
@@ -5542,6 +6009,7 @@ mod tests {
                     &composer,
                     None,
                     None,
+                    true,
                     &mut viewport,
                 )
             })
@@ -5561,6 +6029,7 @@ mod tests {
                     &composer,
                     None,
                     None,
+                    true,
                     &mut viewport,
                 )
             })
@@ -5579,6 +6048,7 @@ mod tests {
                     &composer,
                     None,
                     None,
+                    false,
                     &mut viewport,
                 )
             })
@@ -5590,7 +6060,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("tail:following"));
+        assert!(rendered.contains("Enter send"));
         assert!(rendered.contains("row-31"));
     }
 
@@ -5599,6 +6069,68 @@ mod tests {
         let composer = Composer::from_text("a".repeat(200));
         assert_eq!(composer_height(&composer, 80), 3);
         assert_eq!(composer_height(&Composer::default(), 80), 2);
+
+        let combining = "e\u{301}";
+        assert_eq!(composer_cursor_cell(combining, combining.len(), 4), (3, 0));
+        assert_eq!(composer_cursor_cell("ab", 2, 4), (0, 1));
+        assert_eq!(composer_cursor_cell("a\n漢", "a\n漢".len(), 4), (2, 1));
+
+        let joined = "👩\u{200d}💻";
+        assert_eq!(unicode_display_width(joined), 2);
+        assert_eq!(composer_cursor_cell(joined, joined.len(), 4), (0, 1));
+
+        let exact = Composer::from_text("ab");
+        assert_eq!(composer_visual_rows(&exact, 4), ["> ab", ""]);
+    }
+
+    #[test]
+    fn composer_wraps_and_renders_complete_emoji_at_the_caret() {
+        for grapheme in ["☺\u{fe0f}", "1\u{fe0f}\u{20e3}", "👩\u{200d}💻"] {
+            let input = format!("a{grapheme}");
+            let composer = Composer::from_text(input.as_str());
+            assert_eq!(composer_cursor_cell(&input, input.len(), 4), (2, 1));
+            assert_eq!(
+                composer_visual_rows(&composer, 4),
+                vec!["> a".to_string(), grapheme.to_string()]
+            );
+            let mut terminal = Terminal::new(TestBackend::new(4, 12)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    render_current_session_view(frame, "nib", "idle", "", &composer, None, None)
+                })
+                .expect("render grapheme boundary");
+            let cursor = terminal.get_cursor_position().expect("cursor");
+            assert_eq!(cursor.x, 2);
+            assert_eq!(
+                terminal.backend().buffer()[(0, cursor.y)].symbol(),
+                grapheme
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_renders_exact_width_and_newline_carets_in_the_composer_viewport() {
+        for (input, width, expected_x) in [("abcdef", 8, 0), ("a\n漢", 8, 2)] {
+            let backend = TestBackend::new(width, 12);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let composer = Composer::from_text(input);
+            terminal
+                .draw(|frame| {
+                    render_current_session_view(
+                        frame,
+                        "header",
+                        "idle",
+                        "you  hello",
+                        &composer,
+                        None,
+                        None,
+                    )
+                })
+                .expect("render composer boundary");
+            let position = terminal.get_cursor_position().expect("cursor");
+            assert_eq!(position.x, expected_x, "input={input:?}");
+            assert!(position.y < 11, "input={input:?}, position={position:?}");
+        }
     }
 
     #[test]
@@ -5625,7 +6157,7 @@ mod tests {
             "caret y {} should be in the composer rows",
             position.y
         );
-        assert_eq!(position.x, 2);
+        assert_eq!(position.x, 4);
     }
 
     #[test]

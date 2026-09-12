@@ -489,22 +489,35 @@ nib --tui --session <id>
 nib tui                            # compatibility alias
 ```
 
-The TUI opens as a ledger: two fixed header/status rows, a typed activity transcript
-(user, assistant, plan, tool, approval, question, compression, reconcile, failure),
-and a wrapped multi-line composer. Historical sessions are not a permanent pane.
+The TUI opens as a conversation-first ledger: two compact header/status rows, a typed
+activity transcript (you, nib, plan, tool, approval, question, compression, reconcile,
+failure), and a wrapped multi-line composer. nib presents itself as the AI agent for
+the current project; it does not split the interface into separate coding and workload
+personas. Historical sessions are not a permanent pane. The fixed rows abbreviate the
+session, preserve its actual new/resumed/fork origin, and fit the execution posture to
+the current terminal width; `/status` retains the full session, transport, worktree,
+context, and effective-permission diagnostics. If a requested session is missing, the
+ledger shows a shortened recovery notice instead of silently presenting its replacement.
 `--run` submits an initial goal; `--session` hydrates an existing session before input
 is accepted, and `--auth` runs authentication before raw mode starts.
 
-Streamed model output and tool lifecycle events update typed activity entries. Calls
+Streamed model output and meaningful tool lifecycle events update typed activity
+entries. Routine run-start and state-transition events update the status row without
+adding transcript noise; their exact records remain in the persisted session audit.
+Failures remain visible after reopening a session, while matching successful terminal
+and reconciliation records appear as one outcome.
+The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
 that still require interactive approval or a question appear as a dock on the current
-entry so the transcript and plan summary stay visible. Press `Y` to approve, `N` or
-`Esc` to deny. `Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a
-turn is running.
+entry so the transcript stays visible. Press `Y` to approve, `N` or `Esc` to deny.
+`Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a turn is running.
 
-The composer has focus initially. A slash-command prefix opens bounded completion from
-the same command registry used by parsing and help. Use `Up`/`Down` to select, `Tab` to
-insert, and `Esc` to close completion without clearing the draft. When completion is
-closed, `Up`/`Down` restore bounded in-process draft history. Typing `@` offers
+The composer has focus initially and always shows a `> ` prompt. An empty session gives
+a short welcome cue and the empty composer displays `Ask nib anything…`. A
+slash-command prefix opens bounded completion immediately above the composer from the
+same command registry used by parsing and help. Each row shows one command signature
+and one description. Use `Up`/`Down` to select, `Tab` to insert, and `Esc` to close
+completion without clearing the draft. When completion is closed, `Up`/`Down` restore
+bounded in-process draft history. Typing `@` offers
 project-scoped path completion; submitted `@path` mentions become structured
 attachments (bounded file context) rather than expanding the file into the prompt
 string. Unknown and incomplete slash commands remain in the composer and show an error
@@ -521,7 +534,8 @@ The transcript follows new activity by default. `PageUp` and `PageDown` move by 
 current visible rendered rows without relying on raw terminal scrollback. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
 the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
-follow-tail. Resizes and narrow terminals clamp the row viewport safely.
+follow-tail. The footer otherwise shows only the relevant idle or active-run actions.
+Resizes and narrow terminals clamp the row viewport safely.
 
 Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
 and typing an exact session ID can preview an older session omitted from the bounded

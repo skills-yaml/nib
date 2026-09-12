@@ -12,7 +12,8 @@ use crate::{mcp_cmd, skill_cmd};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 const MAX_STATUS_VALUE_BYTES: usize = 160;
@@ -1515,7 +1516,7 @@ impl ActivityKind {
     pub fn role_label(self) -> &'static str {
         match self {
             Self::User => "you",
-            Self::Assistant => "assistant",
+            Self::Assistant => "nib",
             Self::Plan => "plan",
             Self::Tool => "tool",
             Self::Approval => "approval",
@@ -1780,15 +1781,15 @@ pub fn wrapped_display_rows(text: &str, width: u16) -> Vec<String> {
     let mut rows = Vec::new();
     for logical_line in text.split('\n') {
         let mut row = String::new();
-        let mut row_width = 0usize;
-        for character in logical_line.chars() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-            if !row.is_empty() && row_width.saturating_add(character_width) > width {
+        // A variation selector or joiner can change the preceding glyph's width.
+        // Decide whether to wrap only after its whole grapheme is available.
+        for grapheme in logical_line.graphemes(true) {
+            let mut candidate = row.clone();
+            candidate.push_str(grapheme);
+            if !row.is_empty() && unicode_display_width(&candidate) > width {
                 rows.push(std::mem::take(&mut row));
-                row_width = 0;
             }
-            row.push(character);
-            row_width = row_width.saturating_add(character_width);
+            row.push_str(grapheme);
         }
         if !row.is_empty() || logical_line.is_empty() {
             rows.push(row);
@@ -1899,18 +1900,48 @@ fn project_session_event(
     sensitive_values: &[String],
 ) -> Option<ActivityEntry> {
     let kind = event.kind.as_str();
-    if matches!(kind, "tool_started" | "tool_completed") {
-        // ToolCallRecord is the authoritative completed audit projection. Rendering
-        // lifecycle events as well would duplicate the same persisted operation.
+    if matches!(
+        kind,
+        "tool_started"
+            | "tool_completed"
+            | "run_started"
+            | "state_transition"
+            | "context_bounded"
+            | "plan_generated"
+            | "plan_approved"
+    ) {
+        // ToolCallRecord and reconciliation are the authoritative completed
+        // projections. Routine lifecycle events remain persisted in the session
+        // audit but do not compete with the conversation in the default ledger.
+        return None;
+    }
+    if kind == "reconciliation"
+        && event
+            .details
+            .get("continue")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
         return None;
     }
 
     let (activity_kind, title, body) = match kind {
-        "run_started" => (
-            ActivityKind::System,
-            "run started".to_string(),
-            String::new(),
-        ),
+        "run_terminal" => {
+            let outcome =
+                safe_event_atom(&event.details, "outcome").unwrap_or_else(|| "unknown".to_string());
+            let activity_kind = if outcome.contains("cancel") {
+                ActivityKind::Cancellation
+            } else if outcome == "local_error" || is_failure_outcome(&outcome) {
+                ActivityKind::Failure
+            } else {
+                ActivityKind::Reconcile
+            };
+            (
+                activity_kind,
+                format!("run terminal: {outcome}"),
+                String::new(),
+            )
+        }
         "steering_input" => (
             ActivityKind::User,
             "steer".to_string(),
@@ -1936,32 +1967,6 @@ fn project_session_event(
             "tool proposal superseded by steering".to_string(),
             safe_event_fields(&event.details, &["first_sequence", "last_sequence"]),
         ),
-        "run_terminal" => {
-            let outcome =
-                safe_event_atom(&event.details, "outcome").unwrap_or_else(|| "unknown".to_string());
-            let activity_kind = if outcome.contains("cancel") {
-                ActivityKind::Cancellation
-            } else if outcome == "local_error" || is_failure_outcome(&outcome) {
-                ActivityKind::Failure
-            } else {
-                ActivityKind::Reconcile
-            };
-            (
-                activity_kind,
-                format!("run terminal: {outcome}"),
-                String::new(),
-            )
-        }
-        "approval_required" => {
-            let subject = safe_event_atom(&event.details, "tool_name")
-                .or_else(|| safe_event_atom(&event.details, "kind"))
-                .unwrap_or_else(|| "action".to_string());
-            (
-                ActivityKind::Approval,
-                format!("{subject} approval required"),
-                String::new(),
-            )
-        }
         "question_required" => {
             let option_count = event
                 .details
@@ -1974,6 +1979,25 @@ fn project_session_event(
                 "agent question required".to_string(),
                 format!("options={option_count}"),
             )
+        }
+        "approval_required" => {
+            let approval_kind =
+                safe_event_atom(&event.details, "kind").unwrap_or_else(|| "action".to_string());
+            if approval_kind == "plan" {
+                (
+                    ActivityKind::Approval,
+                    "plan approval requested".to_string(),
+                    safe_event_fields(&event.details, &["step_count"]),
+                )
+            } else {
+                let tool = safe_event_atom(&event.details, "tool_name")
+                    .unwrap_or_else(|| "tool".to_string());
+                (
+                    ActivityKind::Approval,
+                    format!("{tool} approval requested"),
+                    String::new(),
+                )
+            }
         }
         "compression" => (
             ActivityKind::Compression,
@@ -2016,15 +2040,8 @@ fn project_session_event(
                 )
             }
         }
-        "state_transition" => (
-            ActivityKind::System,
-            "run state transition".to_string(),
-            safe_event_fields(&event.details, &["from", "to"]),
-        ),
         kind @ ("plan_generation_conflict"
-        | "plan_generated"
         | "stale_plan_approval_ignored"
-        | "plan_approved"
         | "plan_invalidated"
         | "plan_binding_conflict"
         | "plan_superseded_by_steering"
@@ -2061,16 +2078,12 @@ fn project_session_event(
             "background task completed".to_string(),
             String::new(),
         ),
-        "context_bounded" | "queued_follow_up_start_committed" | "timer_fired" => (
+        "queued_follow_up_start_committed" | "timer_fired" => (
             ActivityKind::System,
             bounded_activity_label(&kind.replace('_', " ")),
             String::new(),
         ),
-        _ => (
-            ActivityKind::System,
-            "unclassified session event".to_string(),
-            String::new(),
-        ),
+        _ => return None,
     };
     Some(ActivityEntry {
         kind: activity_kind,
@@ -2123,6 +2136,51 @@ fn project_session_message(
     ActivityEntry { kind, title, body }
 }
 
+fn is_transport_only_message(message: &crate::session::SessionMessage) -> bool {
+    if message.role.eq_ignore_ascii_case("tool") {
+        return true;
+    }
+    if !message.role.eq_ignore_ascii_case("assistant") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&message.content)
+        .ok()
+        .is_some_and(|value| {
+            let has_tool_calls = value
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+            let has_visible_content = value
+                .get("content")
+                .is_some_and(|content| !content.is_null() && content.as_str() != Some(""));
+            has_tool_calls && !has_visible_content
+        })
+}
+
+fn approved_plan_continuation<'a>(
+    session: &Session,
+    message: &'a crate::session::SessionMessage,
+) -> Option<&'a str> {
+    let step = message
+        .role
+        .eq_ignore_ascii_case("user")
+        .then(|| {
+            message
+                .content
+                .strip_prefix("Continue with approved plan step: ")
+        })
+        .flatten()?;
+    session
+        .plan
+        .as_ref()
+        .is_some_and(|plan| {
+            plan.steps
+                .iter()
+                .any(|candidate| candidate.description == step)
+        })
+        .then_some(step)
+}
+
 pub fn project_session_activities(
     session: &Session,
     sensitive_values: &[String],
@@ -2144,11 +2202,23 @@ pub fn project_session_activities(
     }
     let mut persisted = Vec::new();
     for message in &session.messages {
+        if is_transport_only_message(message) {
+            continue;
+        }
+        let activity = if let Some(step) = approved_plan_continuation(session, message) {
+            ActivityEntry {
+                kind: ActivityKind::Plan,
+                title: "continuing approved step".to_string(),
+                body: bounded_activity_body(step, sensitive_values),
+            }
+        } else {
+            project_session_message(message, sensitive_values)
+        };
         persisted.push(PersistedActivity {
             timestamp: message.timestamp,
             source_rank: 0,
             source_index: message.index,
-            activity: project_session_message(message, sensitive_values),
+            activity,
         });
     }
     let event_start = session
@@ -2167,7 +2237,13 @@ pub fn project_session_activities(
             },
         });
     }
-    for event in &session.events[event_start..] {
+    let projected_events = &session.events[event_start..];
+    for (offset, event) in projected_events.iter().enumerate() {
+        if event.kind == "run_terminal"
+            && terminal_has_projected_reconciliation(&projected_events[..offset], event)
+        {
+            continue;
+        }
         if let Some(activity) = project_session_event(event, sensitive_values) {
             persisted.push(PersistedActivity {
                 timestamp: event.timestamp,
@@ -2186,10 +2262,8 @@ pub fn project_session_activities(
         let status = if call.error.is_some() { "failed" } else { "ok" };
         let body = if call.error.is_some() {
             "recorded tool error; inspect the bounded session audit for details"
-        } else if call.result.is_some() {
-            "recorded tool result; inspect the bounded session audit for details"
         } else {
-            "recorded tool call"
+            ""
         };
         persisted.push(PersistedActivity {
             timestamp: call.timestamp,
@@ -2210,7 +2284,7 @@ pub fn project_session_activities(
     });
     activities.extend(persisted.into_iter().map(|entry| entry.activity));
     if let Some(plan) = &session.plan {
-        activities.push(plan_activity(plan, sensitive_values));
+        activities.push(plan_summary_activity(plan, sensitive_values));
     }
     if let Some(summary) = &session.summary {
         activities.push(ActivityEntry {
@@ -2223,6 +2297,53 @@ pub fn project_session_activities(
         sanitize_activity(activity, sensitive_values);
     }
     activities
+}
+
+fn terminal_has_projected_reconciliation(events: &[SessionEvent], terminal: &SessionEvent) -> bool {
+    let Some(run_id) = terminal
+        .details
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(outcome) = safe_event_atom(&terminal.details, "outcome") else {
+        return false;
+    };
+    let Some(start) = events.iter().rposition(|event| event.kind == "run_started") else {
+        return false;
+    };
+    if run_id.is_empty()
+        || events[start]
+            .details
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(run_id)
+    {
+        return false;
+    }
+    let run_events = &events[start + 1..];
+    if run_events.iter().any(|event| event.kind == "run_terminal") {
+        return false;
+    }
+    // Reconciliation records predate exact run IDs. Their enclosing admitted run
+    // proves ownership, but an explicit conflicting ID must never be ignored.
+    run_events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "reconciliation")
+        .is_some_and(|event| {
+            event
+                .details
+                .get("run_id")
+                .is_none_or(|id| id.as_str() == Some(run_id))
+                && event
+                    .details
+                    .get("continue")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                && safe_event_atom(&event.details, "outcome").as_deref() == Some(outcome.as_str())
+        })
 }
 
 fn sanitize_activity(activity: &mut ActivityEntry, sensitive_values: &[String]) {
@@ -2246,14 +2367,21 @@ pub fn apply_stream_event(
     live_state: &mut Option<String>,
     sensitive_values: &[String],
 ) {
+    if matches!(
+        &event,
+        StreamEvent::StateTransition { .. } | StreamEvent::Reconciled { .. } | StreamEvent::End(_)
+    ) {
+        // Quiet lifecycle events still end the current assistant turn. Otherwise
+        // the next plan step's content would append to the preceding response.
+        if let Some(last) = activities.last_mut() {
+            if last.kind == ActivityKind::Assistant && last.title == "live" {
+                last.title.clear();
+            }
+        }
+    }
     match event {
         StreamEvent::StateTransition { state } => {
-            *live_state = Some(state.clone());
-            activities.push(ActivityEntry {
-                kind: ActivityKind::System,
-                title: format!("state {state}"),
-                body: String::new(),
-            });
+            *live_state = Some(state);
         }
         StreamEvent::Content(content) => {
             if let Some(last) = activities.last_mut() {
@@ -2355,6 +2483,7 @@ pub fn apply_stream_event(
             title: format!("{before_tokens} -> {after_tokens} tokens"),
             body: format!("summarized through message {summarized_through}"),
         }),
+        StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {}
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
                 &InteractionState::default(),
@@ -2424,6 +2553,15 @@ fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> Ac
         title: format!("{current}/{} {title}", plan.steps.len()),
         body: bounded_activity_body(&body, sensitive_values),
     }
+}
+
+fn plan_summary_activity(
+    plan: &crate::session::Plan,
+    sensitive_values: &[String],
+) -> ActivityEntry {
+    let mut activity = plan_activity(plan, sensitive_values);
+    activity.body.clear();
+    activity
 }
 
 fn bounded_activity_body(content: &str, sensitive_values: &[String]) -> String {
@@ -2524,6 +2662,174 @@ fn persisted_context_usage(session: Option<&Session>, context_limit: usize) -> u
         return 0;
     };
     bounded_session_context(session, context_limit).approximate_tokens
+}
+
+fn abbreviated_session_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
+}
+
+fn compact_sandbox_label(posture: &EffectiveExecutionPosture) -> &'static str {
+    match &posture.sandbox_route {
+        crate::sandbox::SandboxExecutionRoute::Bwrap => "sandboxed",
+        crate::sandbox::SandboxExecutionRoute::Direct => "direct",
+        crate::sandbox::SandboxExecutionRoute::FailClosed(_) => "blocked",
+    }
+}
+
+fn compact_context_label(used: usize, limit: usize) -> String {
+    if used == 0 || limit == 0 {
+        return "0%".to_string();
+    }
+    let percent = used.saturating_mul(100).checked_div(limit).unwrap_or(0);
+    if percent == 0 {
+        "<1%".to_string()
+    } else {
+        format!("{}%", percent.min(999))
+    }
+}
+
+fn truncate_display_cells(value: &str, max_cells: usize) -> String {
+    if unicode_display_width(value) <= max_cells {
+        return value.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let content_cells = max_cells.saturating_sub(1);
+    let mut truncated = String::new();
+    for grapheme in value.graphemes(true) {
+        let mut candidate = truncated.clone();
+        candidate.push_str(grapheme);
+        if unicode_display_width(&candidate) > content_cells {
+            break;
+        }
+        truncated.push_str(grapheme);
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn fit_tui_chrome_line(verbose: String, compact: String, width: u16) -> String {
+    let width = usize::from(width.max(1));
+    if unicode_display_width(&verbose) <= width {
+        verbose
+    } else {
+        truncate_display_cells(&compact, width)
+    }
+}
+
+/// Formats the two terse rows used by the full-screen TUI. The complete diagnostic
+/// contract intentionally remains in [`format_interaction_chrome`] for `/status`.
+#[allow(clippy::too_many_arguments)]
+pub fn format_tui_interaction_chrome(
+    project_root: &Path,
+    runtime_profile_id: &str,
+    session: Option<&Session>,
+    session_id: &str,
+    session_origin: &str,
+    lifecycle: &str,
+    queued: usize,
+    terminal_width: u16,
+) -> Result<(String, String), String> {
+    let config = load_nib_config_full(project_root)
+        .map_err(|error| bounded_status_value(&error.to_string()))?;
+    let sensitive_values = config.public_session_sensitive_values();
+    let diagnostics = provider_diagnostics(&config.llm, None).map_err(|error| {
+        format!(
+            "failed resolving LLM transport: {}",
+            bounded_sensitive_status_value(&error, &sensitive_values)
+        )
+    })?;
+    let posture = ToolExecutor::effective_execution_posture(
+        project_root,
+        config.execution.clone(),
+        &config.approvals,
+    );
+    let project = bounded_sensitive_status_value(
+        project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project"),
+        &sensitive_values,
+    );
+    let session_value = session
+        .and_then(|session| session.display_name.as_deref())
+        .filter(|name| !name.is_empty())
+        .map(|name| bounded_sensitive_status_value(name, &sensitive_values))
+        .unwrap_or_else(|| {
+            bounded_sensitive_status_value(&abbreviated_session_id(session_id), &sensitive_values)
+        });
+    let origin = if session
+        .and_then(|session| session.forked_from.as_deref())
+        .is_some()
+    {
+        "fork"
+    } else {
+        session_origin
+    };
+    let worktree = crate::integrations::worktree::with_validated_session_worktree(
+        project_root,
+        session_id,
+        |_path| Ok("managed".to_string()),
+    )?
+    .unwrap_or_else(|| "root".to_string());
+    let worktree = bounded_sensitive_status_value(&worktree, &sensitive_values);
+    let profile = bounded_sensitive_status_value(runtime_profile_id, &sensitive_values);
+    let origin = bounded_sensitive_status_value(origin, &sensitive_values);
+    let header = fit_tui_chrome_line(
+        format!(
+            "nib · {project} · session {session_value} · {origin} · profile {profile} · wt {worktree}"
+        ),
+        format!(
+            "nib · p:{} · s:{} · {} · prof:{} · wt:{}",
+            truncate_display_cells(&project, 10),
+            truncate_display_cells(&session_value, 14),
+            truncate_display_cells(&origin, 7),
+            truncate_display_cells(&profile, 8),
+            truncate_display_cells(&worktree, 8),
+        ),
+        terminal_width,
+    );
+
+    let provider = bounded_sensitive_status_value(&diagnostics.provider, &sensitive_values);
+    let model = bounded_sensitive_status_value(&diagnostics.model, &sensitive_values);
+    let context_used = persisted_context_usage(session, config.llm.context_length);
+    let context = compact_context_label(context_used, config.llm.context_length);
+    let plan = session
+        .and_then(|session| session.plan.as_ref())
+        .map(|plan| {
+            format!(
+                "{}/{}",
+                plan.current_step_index.min(plan.steps.len()),
+                plan.steps.len()
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let lifecycle = bounded_sensitive_status_value(lifecycle, &sensitive_values);
+    let approval = posture.effective_approval_mode.to_string();
+    let sandbox = compact_sandbox_label(&posture);
+    let provider_model = format!("{provider}/{model}");
+    let compact_sandbox = match sandbox {
+        "sandboxed" => "sbx",
+        other => other,
+    };
+    let status = fit_tui_chrome_line(
+        format!(
+            "{lifecycle} · {provider_model} · approval {approval} · {sandbox} · queue {queued} · plan {plan} · ctx {context}"
+        ),
+        format!(
+            "{} · {} · appr:{} · {} · q:{} · p:{} · ctx:{}",
+            truncate_display_cells(&lifecycle, 7),
+            truncate_display_cells(&provider_model, 17),
+            truncate_display_cells(&approval, 6),
+            truncate_display_cells(compact_sandbox, 7),
+            truncate_display_cells(&queued.to_string(), 3),
+            truncate_display_cells(&plan, 5),
+            truncate_display_cells(&context, 4),
+        ),
+        terminal_width,
+    );
+    Ok((header, status))
 }
 
 pub fn format_interaction_chrome(
@@ -3245,6 +3551,24 @@ impl SessionResolution {
             Self::RequestedMissing { requested, created } => {
                 format!("Session {requested} was not found; started session {created}.")
             }
+        }
+    }
+
+    pub fn tui_origin(&self) -> &'static str {
+        match self {
+            Self::Created(_) | Self::RequestedMissing { .. } => "new",
+            Self::Resumed(_) => "resumed",
+        }
+    }
+
+    pub fn tui_notice(&self) -> Option<String> {
+        match self {
+            Self::RequestedMissing { requested, created } => Some(format!(
+                "Requested session {} was not found; started {}.",
+                abbreviated_session_id(requested),
+                abbreviated_session_id(created),
+            )),
+            Self::Created(_) | Self::Resumed(_) => None,
         }
     }
 }
@@ -4536,6 +4860,38 @@ mod tests {
         assert!(!unsafe_name.contains('\u{1b}'));
         assert!(!unsafe_name.contains('\n'));
         assert!(!unsafe_name.contains("sk-privateapproval"));
+
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        let session = store.try_create_session().expect("session");
+        store
+            .record_event(
+                &session.id,
+                "approval_required",
+                serde_json::json!({
+                    "kind": "tool",
+                    "tool_name": "run_terminal",
+                    "arguments": "RAW_APPROVAL_SENTINEL"
+                }),
+            )
+            .expect("persist approval");
+        store
+            .record_event(
+                &session.id,
+                "approval_required",
+                serde_json::json!({"kind": "plan", "step_count": 2}),
+            )
+            .expect("persist plan approval");
+        let reloaded = store.load(&session.id).expect("reload approvals");
+        let approvals = project_session_activities(&reloaded, &[])
+            .into_iter()
+            .filter(|entry| entry.kind == ActivityKind::Approval)
+            .collect::<Vec<_>>();
+        assert_eq!(approvals.len(), 2);
+        assert_eq!(approvals[0].title, "run_terminal approval requested");
+        assert_eq!(approvals[1].title, "plan approval requested");
+        assert_eq!(approvals[1].body, "step_count=2");
+        assert!(!format!("{approvals:?}").contains("RAW_APPROVAL_SENTINEL"));
     }
 
     #[test]
@@ -5168,6 +5524,30 @@ mod tests {
     }
 
     #[test]
+    fn display_rows_preserve_graphemes_at_wrap_boundaries() {
+        for grapheme in ["☺\u{fe0f}", "1\u{fe0f}\u{20e3}", "👩\u{200d}💻", "👍🏽"] {
+            assert_eq!(unicode_display_width(grapheme), 2);
+            let text = format!("> a{grapheme}");
+            assert_eq!(
+                wrapped_display_rows(&text, 4),
+                vec!["> a".to_string(), grapheme.to_string()],
+                "grapheme={grapheme:?}"
+            );
+        }
+        assert_eq!(wrapped_display_rows("> ae\u{301}", 4), ["> ae\u{301}"]);
+    }
+
+    #[test]
+    fn chrome_truncation_preserves_complete_graphemes() {
+        for grapheme in ["☺\u{fe0f}", "👩\u{200d}💻"] {
+            let text = format!("a{grapheme}xy");
+            assert_eq!(truncate_display_cells(&text, 3), "a…");
+            assert_eq!(truncate_display_cells(&text, 4), format!("a{grapheme}…"));
+        }
+        assert_eq!(truncate_display_cells("e\u{301}xyz", 2), "e\u{301}…");
+    }
+
+    #[test]
     fn background_projection_is_session_scoped_bounded_and_command_free() {
         let project = tempdir().expect("project");
         let mut config = NibConfig::default();
@@ -5405,6 +5785,162 @@ mod tests {
     }
 
     #[test]
+    fn tui_chrome_is_compact_while_status_keeps_full_diagnostics() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config.llm.context_length = 1_000;
+        config.execution.provider = "internal".to_string();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(project.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(project.path()).expect("store");
+        let session = store.try_create_session().expect("session");
+        store
+            .try_append_message(&session.id, "user", "inspect the TUI")
+            .expect("message");
+        let persisted = store.load(&session.id).expect("persisted session");
+
+        let (header, status) = format_tui_interaction_chrome(
+            project.path(),
+            "default",
+            Some(&persisted),
+            &session.id,
+            "new",
+            "idle",
+            0,
+            80,
+        )
+        .expect("compact chrome");
+        assert!(header.starts_with("nib · "), "{header}");
+        assert!(
+            header.contains(&abbreviated_session_id(&session.id)),
+            "{header}"
+        );
+        assert!(!header.contains(&session.id), "{header}");
+        assert!(
+            header.contains("wt root") || header.contains("wt:root"),
+            "{header}"
+        );
+        assert!(status.contains("mock/mock-model"), "{status}");
+        assert!(status.contains("manual"), "{status}");
+        assert!(status.contains("direct"), "{status}");
+        assert!(
+            status.contains("ctx <1%") || status.contains("ctx:<1%"),
+            "{status}"
+        );
+        assert!(
+            status.contains("queue 0") || status.contains("q:0"),
+            "{status}"
+        );
+        assert!(
+            status.contains("plan -") || status.contains("p:-"),
+            "{status}"
+        );
+        assert!(header.contains("new"), "{header}");
+        assert!(unicode_display_width(&header) <= 80, "{header}");
+        assert!(unicode_display_width(&status) <= 80, "{status}");
+        assert!(!status.contains("transport"), "{status}");
+
+        config
+            .llm
+            .providers
+            .get_mut("mock")
+            .expect("mock provider")
+            .model = "model-with-a-deliberately-long-identifier".to_string();
+        save_nib_config_full(project.path(), &mut config).expect("long model config");
+        let (resumed_header, constrained_status) = format_tui_interaction_chrome(
+            project.path(),
+            "long-runtime-profile-name",
+            Some(&persisted),
+            &session.id,
+            "resumed",
+            "waiting for approval",
+            128,
+            80,
+        )
+        .expect("width-aware chrome");
+        assert!(resumed_header.contains("resumed"), "{resumed_header}");
+        assert!(
+            unicode_display_width(&resumed_header) <= 80,
+            "{resumed_header}"
+        );
+        assert!(
+            unicode_display_width(&constrained_status) <= 80,
+            "{constrained_status}"
+        );
+        for summary in ["appr:", "q:", "p:", "ctx:"] {
+            assert!(constrained_status.contains(summary), "{constrained_status}");
+        }
+
+        let detailed =
+            format_session_status(project.path(), "default", &store, &session.id, "idle")
+                .expect("detailed status");
+        assert!(detailed.contains(&session.id), "{detailed}");
+        assert!(detailed.contains("transport local"), "{detailed}");
+        assert!(
+            detailed.contains("Effective execution posture"),
+            "{detailed}"
+        );
+    }
+
+    #[test]
+    fn session_resolution_keeps_tui_origin_truthful_and_missing_notice_short() {
+        let missing = SessionResolution::RequestedMissing {
+            requested: "requested-session-123456789".to_string(),
+            created: "created-session-987654321".to_string(),
+        };
+        assert_eq!(missing.tui_origin(), "new");
+        let notice = missing.tui_notice().expect("missing session notice");
+        assert!(notice.contains("requeste"));
+        assert!(notice.contains("created-"));
+        assert!(!notice.contains("requested-session-123456789"));
+        assert!(!notice.contains("created-session-987654321"));
+
+        assert_eq!(
+            SessionResolution::Resumed("session-a".to_string()).tui_origin(),
+            "resumed"
+        );
+        assert!(SessionResolution::Created("session-b".to_string())
+            .tui_notice()
+            .is_none());
+    }
+
+    #[test]
+    fn tui_chrome_never_exposes_a_managed_worktree_session_uuid() {
+        let repository = git_repository();
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(repository.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(repository.path()).expect("store");
+        let session = store.try_create_session().expect("session");
+        let mut manager =
+            crate::integrations::worktree::WorktreeManager::new(repository.path().to_path_buf());
+        let path = manager
+            .create_for_session(&session.id)
+            .expect("managed worktree");
+        assert!(path.to_string_lossy().contains(&session.id));
+
+        let persisted = store.load(&session.id).expect("persisted session");
+        let (header, _) = format_tui_interaction_chrome(
+            repository.path(),
+            "default",
+            Some(&persisted),
+            &session.id,
+            "new",
+            "idle",
+            0,
+            120,
+        )
+        .expect("managed-worktree chrome");
+        assert!(header.contains("wt managed"), "{header}");
+        assert!(!header.contains(&session.id), "{header}");
+        assert!(unicode_display_width(&header) <= 120, "{header}");
+    }
+
+    #[test]
     fn model_commands_rename_and_session_history_share_sensitive_projection() {
         let project = tempdir().expect("project");
         let secret = "surface/credential";
@@ -5549,7 +6085,11 @@ mod tests {
                 "credential prefix survived redaction-before-bounding: {forbidden:?}"
             );
         }
-        assert!(public.matches("[REDACTED]").count() >= 4, "{public:?}");
+        assert!(public.matches("[REDACTED]").count() >= 3, "{public:?}");
+        assert!(projected
+            .iter()
+            .find(|activity| activity.kind == ActivityKind::Plan)
+            .is_some_and(|activity| activity.body.is_empty()));
         assert!(projected
             .iter()
             .chain(live.iter())
@@ -5608,6 +6148,13 @@ mod tests {
                 updated_at: None,
             }],
         ));
+        session.messages.push(crate::session::SessionMessage {
+            index: 1,
+            role: "user".to_string(),
+            content: "Continue with approved plan step: write tests".to_string(),
+            timestamp: None,
+            attachments: Vec::new(),
+        });
         let projected = project_session_activities(&session, &[]);
         assert!(projected
             .iter()
@@ -5615,9 +6162,35 @@ mod tests {
         assert!(projected
             .iter()
             .any(|entry| entry.kind == ActivityKind::Plan));
+        let plan = projected
+            .iter()
+            .find(|entry| entry.kind == ActivityKind::Plan && entry.title.starts_with("0/1"))
+            .expect("plan summary");
+        assert!(plan.body.is_empty());
+        assert!(projected.iter().any(|entry| {
+            entry.kind == ActivityKind::Plan
+                && entry.title == "continuing approved step"
+                && entry.body == "write tests"
+        }));
+        assert!(projected.iter().all(|entry| {
+            !(entry.kind == ActivityKind::User
+                && entry.body.starts_with("Continue with approved plan step:"))
+        }));
+        assert!(format_current_plan(Some(&session), &[]).contains("1. [InProgress] write tests"));
+        assert_eq!(ActivityKind::Assistant.role_label(), "nib");
 
         let mut live = Vec::new();
         let mut state = None;
+        apply_stream_event(
+            &mut live,
+            StreamEvent::StateTransition {
+                state: "planning".to_string(),
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(state.as_deref(), Some("planning"));
+        assert!(live.is_empty());
         apply_stream_event(
             &mut live,
             StreamEvent::Content("hello".to_string()),
@@ -5635,6 +6208,14 @@ mod tests {
         apply_stream_event(
             &mut live,
             StreamEvent::Reconciled {
+                outcome: "step_completed".to_string(),
+            },
+            &mut state,
+            &[],
+        );
+        apply_stream_event(
+            &mut live,
+            StreamEvent::Reconciled {
                 outcome: "completed".to_string(),
             },
             &mut state,
@@ -5643,10 +6224,75 @@ mod tests {
         assert_eq!(live[0].kind, ActivityKind::Assistant);
         assert_eq!(live[1].kind, ActivityKind::Tool);
         assert_eq!(live[2].kind, ActivityKind::Reconcile);
+        assert_eq!(
+            live.iter()
+                .filter(|entry| entry.kind == ActivityKind::Reconcile)
+                .count(),
+            1
+        );
+        let mut unreconciled = Vec::new();
+        apply_stream_event(
+            &mut unreconciled,
+            StreamEvent::End("local_error".to_string()),
+            &mut state,
+            &[],
+        );
+        assert_eq!(unreconciled[0].kind, ActivityKind::System);
+        assert_eq!(unreconciled[0].title, "local_error");
     }
 
     #[test]
-    fn exact_run_identity_lifecycle_projects_as_typed_bounded_local_activity() {
+    fn quiet_lifecycle_boundaries_keep_assistant_turns_separate() {
+        for boundary in [
+            StreamEvent::StateTransition {
+                state: "reconciliation".to_string(),
+            },
+            StreamEvent::Reconciled {
+                outcome: "step_completed".to_string(),
+            },
+        ] {
+            let mut activities = Vec::new();
+            let mut state = None;
+            for event in [
+                StreamEvent::Content("First ".to_string()),
+                StreamEvent::Content("response.".to_string()),
+                boundary,
+            ] {
+                apply_stream_event(&mut activities, event, &mut state, &[]);
+            }
+            assert_eq!(activities.len(), 1, "quiet events add no transcript rows");
+            assert_eq!(activities[0].body, "First response.");
+            assert!(activities[0].title.is_empty());
+
+            for event in [
+                StreamEvent::Content("Second ".to_string()),
+                StreamEvent::Content("response.".to_string()),
+                StreamEvent::Reconciled {
+                    outcome: "completed".to_string(),
+                },
+            ] {
+                apply_stream_event(&mut activities, event, &mut state, &[]);
+            }
+            assert_eq!(
+                activities
+                    .iter()
+                    .map(|entry| entry.kind)
+                    .collect::<Vec<_>>(),
+                vec![
+                    ActivityKind::Assistant,
+                    ActivityKind::Assistant,
+                    ActivityKind::Reconcile
+                ]
+            );
+            assert_eq!(activities[0].body, "First response.");
+            assert_eq!(activities[1].body, "Second response.");
+            assert!(activities[1].title.is_empty());
+            assert_eq!(activities[2].title, "completed");
+        }
+    }
+
+    #[test]
+    fn routine_lifecycle_projection_is_quiet_and_keeps_reconciliation() {
         let run_id = "0123456789abcdef0123456789abcdef";
         let started = project_session_event(
             &SessionEvent {
@@ -5656,11 +6302,8 @@ mod tests {
                 timestamp: None,
             },
             &[],
-        )
-        .expect("started activity");
-        assert_eq!(started.kind, ActivityKind::System);
-        assert_eq!(started.title, "run started");
-        assert!(started.body.is_empty());
+        );
+        assert!(started.is_none());
 
         let cancelled = project_session_event(
             &SessionEvent {
@@ -5675,20 +6318,148 @@ mod tests {
             },
             &[],
         )
-        .expect("terminal activity");
+        .expect("unmatched terminal remains visible");
         assert_eq!(cancelled.kind, ActivityKind::Cancellation);
-        assert_eq!(cancelled.title, "run terminal: cancelled_by_user");
-        assert!(cancelled.body.is_empty());
-        assert!(!started.render_line().contains(run_id));
-        assert!(!cancelled.render_line().contains(run_id));
-        assert!(!started.render_line().contains("DO_NOT_RENDER"));
         assert!(!cancelled.render_line().contains("DO_NOT_RENDER"));
-        assert_ne!(started.title, "unclassified session event");
-        assert_ne!(cancelled.title, "unclassified session event");
+
+        let reconciled = project_session_event(
+            &SessionEvent {
+                index: 2,
+                kind: "reconciliation".to_string(),
+                details: serde_json::json!({
+                    "run_id": run_id,
+                    "outcome": "cancelled_by_user",
+                    "error": "DO_NOT_RENDER"
+                }),
+                timestamp: None,
+            },
+            &[],
+        )
+        .expect("reconciliation activity");
+        assert_eq!(reconciled.kind, ActivityKind::Cancellation);
+        assert_eq!(reconciled.title, "run cancelled: cancelled_by_user");
+        assert!(reconciled.body.is_empty());
+        assert!(!reconciled.render_line().contains(run_id));
+        assert!(!reconciled.render_line().contains("DO_NOT_RENDER"));
     }
 
     #[test]
-    fn persisted_message_roles_are_explicit_and_legacy_safe() {
+    fn persisted_terminal_deduplication_requires_matching_projected_run_evidence() {
+        let directory = tempdir().expect("dir");
+        let template = SessionStore::at_dir(directory.path().join("s"))
+            .try_create_session()
+            .expect("session");
+        let started = |run_id: &str| ("run_started", serde_json::json!({"run_id": run_id}));
+        let reconciled = |outcome: &str| {
+            (
+                "reconciliation",
+                serde_json::json!({"outcome": outcome, "continue": false}),
+            )
+        };
+        let terminal = |run_id: &str, outcome: &str| {
+            (
+                "run_terminal",
+                serde_json::json!({"run_id": run_id, "outcome": outcome}),
+            )
+        };
+        for (events, expected) in [
+            (
+                vec![started("a"), terminal("a", "local_error")],
+                vec!["run terminal: local_error"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    reconciled("completed"),
+                    terminal("a", "completed"),
+                ],
+                vec!["run reconciled: completed"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    reconciled("completed"),
+                    terminal("a", "local_error"),
+                ],
+                vec!["run reconciled: completed", "run terminal: local_error"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    reconciled("completed"),
+                    terminal("a", "completed"),
+                    started("b"),
+                    terminal("b", "completed"),
+                ],
+                vec!["run reconciled: completed", "run terminal: completed"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    reconciled("completed"),
+                    terminal("b", "completed"),
+                ],
+                vec!["run reconciled: completed", "run terminal: completed"],
+            ),
+            (
+                vec![reconciled("completed"), terminal("a", "completed")],
+                vec!["run reconciled: completed", "run terminal: completed"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    (
+                        "reconciliation",
+                        serde_json::json!({"outcome": "step_completed", "continue": true}),
+                    ),
+                    terminal("a", "step_completed"),
+                ],
+                vec!["run terminal: step_completed"],
+            ),
+            (
+                vec![
+                    started("a"),
+                    (
+                        "reconciliation",
+                        serde_json::json!({"run_id": "b", "outcome": "completed", "continue": false}),
+                    ),
+                    terminal("a", "completed"),
+                ],
+                vec!["run reconciled: completed", "run terminal: completed"],
+            ),
+        ] {
+            let mut session = template.clone();
+            session.events = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, (kind, details))| SessionEvent {
+                    index,
+                    kind: kind.to_string(),
+                    details,
+                    timestamp: None,
+                })
+                .collect();
+            let activities = project_session_activities(&session, &[]);
+            assert_eq!(
+                activities
+                    .iter()
+                    .map(|entry| entry.title.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "events={:?}",
+                session.events,
+            );
+            for activity in activities
+                .iter()
+                .filter(|entry| entry.title.ends_with("local_error"))
+            {
+                assert_eq!(activity.kind, ActivityKind::Failure);
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_projection_hides_transport_messages_and_keeps_legacy_safe() {
         let directory = tempdir().expect("dir");
         let mut session = SessionStore::at_dir(directory.path().join("s"))
             .try_create_session()
@@ -5696,6 +6467,10 @@ mod tests {
         for (index, (role, content)) in [
             ("user", "request"),
             ("assistant", "answer"),
+            (
+                "assistant",
+                r#"{"content":null,"tool_calls":[{"name":"read_file"}]}"#,
+            ),
             ("tool", r#"{"observations":[{"secret":"do-not-render"}]}"#),
             ("system", "local notice"),
             (
@@ -5721,19 +6496,22 @@ mod tests {
             vec![
                 ActivityKind::User,
                 ActivityKind::Assistant,
-                ActivityKind::Tool,
                 ActivityKind::System,
                 ActivityKind::System,
             ]
         );
-        assert_eq!(projected[2].body, "1 persisted observation(s)");
-        assert!(!projected[2].render_line().contains("do-not-render"));
-        assert_eq!(projected[4].title, "unsupported legacy message role");
-        assert_eq!(projected[4].body, "legacy message content omitted");
-        assert!(!projected[4]
+        assert!(projected
+            .iter()
+            .all(|entry| !entry.render_line().contains("read_file")));
+        assert!(projected
+            .iter()
+            .all(|entry| !entry.render_line().contains("do-not-render")));
+        assert_eq!(projected[3].title, "unsupported legacy message role");
+        assert_eq!(projected[3].body, "legacy message content omitted");
+        assert!(!projected[3]
             .render_line()
             .contains("PRIVATE_LEGACY_SENTINEL"));
-        assert!(!projected[4].title.contains('\n'));
+        assert!(!projected[3].title.contains('\n'));
     }
 
     #[test]
@@ -5866,8 +6644,7 @@ mod tests {
         assert!(!first_projection[1]
             .render_line()
             .contains("PRIVATE_LEGACY_SENTINEL"));
-        assert_eq!(first_projection[2].title, "unclassified session event");
-        assert!(!first_projection[2].render_line().contains("not projected"));
+        assert_eq!(first_projection.len(), 2);
     }
 
     #[test]
