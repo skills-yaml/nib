@@ -2245,6 +2245,9 @@ fn shutdown_agent_worker_with_timeout(
     if let Some(active_worker) = worker.as_mut() {
         active_worker.join()?;
     }
+    // The worker can publish a modal request after the early cleanup while
+    // cancellation is settling. Joining closes that producer before the final drain.
+    cancel_pending_interactions(pending_approval, pending_question, approval_rx, question_rx);
     drain_stream_events(stream_rx, timeline);
     timeline.active_run_id = None;
     *worker = None;
@@ -5098,6 +5101,143 @@ mod tests {
                 .filter(|entry| entry.kind == ActivityKind::Reconcile)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn tui_shutdown_rejects_modal_requests_published_after_initial_cleanup() {
+        let session_id = "late-modal-session";
+        let run_id = "0123456789abcdef0123456789abcdef";
+        let cancellation = CancellationSignal::new();
+        let worker_cancellation = cancellation.clone();
+        let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
+        let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
+        let (initial_reply_tx, initial_reply_rx) = oneshot::channel();
+        let (approval_reply_tx, mut approval_reply_rx) = oneshot::channel();
+        let (question_reply_tx, mut question_reply_rx) = oneshot::channel();
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1);
+        stream_tx
+            .try_send(SessionStreamEvent {
+                session_id: session_id.to_string(),
+                run_id: run_id.to_string(),
+                event: StreamEvent::StateTransition {
+                    state: "planning".to_string(),
+                },
+            })
+            .expect("fill the stream before shutdown");
+
+        let handle = std::thread::spawn(move || {
+            assert_eq!(
+                initial_reply_rx
+                    .blocking_recv()
+                    .expect("early question rejection"),
+                Err("cancelled_by_user".to_string())
+            );
+            assert!(worker_cancellation.is_cancelled());
+            // This send cannot finish until shutdown drains the full stream. That
+            // drain follows early modal cleanup, so both requests below are late
+            // by construction, without a timing sleep or production test hook.
+            stream_tx
+                .blocking_send(SessionStreamEvent {
+                    session_id: session_id.to_string(),
+                    run_id: run_id.to_string(),
+                    event: StreamEvent::Reconciled {
+                        outcome: "cancelled_by_user".to_string(),
+                    },
+                })
+                .expect("shutdown reached its post-cleanup stream drain");
+            approval_tx
+                .send(approval_request(
+                    ToolCall {
+                        invocation_id: crate::tools::ToolInvocationId::new(),
+                        tool_name: "run_terminal".to_string(),
+                        arguments: json!({}),
+                        session_id: Some(session_id.to_string()),
+                        project_root: None,
+                    },
+                    PermissionLevel::Destructive,
+                    approval_reply_tx,
+                ))
+                .expect("publish late approval");
+            question_tx
+                .send(TuiQuestionRequest {
+                    question: "This cancelled question must not reopen".to_string(),
+                    options: Vec::new(),
+                    reply: question_reply_tx,
+                })
+                .expect("publish late question");
+        });
+        let mut worker = Some(TuiAgentWorker {
+            run_id: run_id.to_string(),
+            cancellation,
+            steering: None,
+            handle: Some(handle),
+        });
+        let mut pending_approval = None;
+        let mut pending_question = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Initial question".to_string(),
+            options: Vec::new(),
+            reply: initial_reply_tx,
+        }));
+        let mut timeline = ActiveTimeline {
+            session_id: session_id.to_string(),
+            active_run_id: Some(run_id.to_string()),
+            ..ActiveTimeline::default()
+        };
+
+        shutdown_agent_worker(
+            &mut worker,
+            &mut pending_approval,
+            &mut pending_question,
+            &approval_rx,
+            &question_rx,
+            &mut stream_rx,
+            &mut timeline,
+        )
+        .expect("cancel and join the late producer");
+        assert!(worker.is_none());
+        assert!(timeline.active_run_id.is_none());
+        assert_eq!(
+            timeline.reconciled_terminal,
+            Some(InteractionTerminalOutcome::Cancelled)
+        );
+
+        refresh_pending_interactions(
+            &mut pending_approval,
+            &mut pending_question,
+            &approval_rx,
+            &question_rx,
+        );
+        assert!(
+            pending_approval.is_none(),
+            "cancelled approval must not reopen"
+        );
+        assert!(
+            pending_question.is_none(),
+            "cancelled question must not reopen"
+        );
+        assert!(
+            !approval_reply_rx
+                .try_recv()
+                .expect("late approval rejected")
+                .granted
+        );
+        assert_eq!(
+            question_reply_rx
+                .try_recv()
+                .expect("late question rejected"),
+            Err("cancelled_by_user".to_string())
+        );
+        assert_eq!(
+            active_interaction_layer(
+                pending_approval.is_some(),
+                pending_question.is_some(),
+                false,
+                None,
+                false,
+                false,
+            ),
+            InteractionLayer::Composer
         );
     }
 

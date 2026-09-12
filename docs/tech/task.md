@@ -34,6 +34,8 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task test:task-contract` — validate fast-check and full-verification Task composition
 - `task test:interactive` — run deterministic plain/TUI reducer, composer, history,
   transcript, dock, and redirected-CLI tests without a pseudo-terminal or network
+- `task test:tui-shutdown` — verify cancellation, late modal cleanup, and bounded
+  shutdown when a TUI worker is blocked or unresponsive
 - `task test:llm-conformance` — run the shared credential-free complete/stream adapter
   conformance matrix without provider credentials or external provider calls
 - `task test:llm-live:offline` — run the credential-free live-harness parsers, planner,

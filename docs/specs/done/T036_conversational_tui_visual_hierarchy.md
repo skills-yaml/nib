@@ -231,3 +231,8 @@ interactive tests and `task verify` passed again, including all 1,418 tests and 
 checks. Session-file polling tolerates the brief absence of the published path during
 replacement while retaining its deadline. Hosted results for the final committed
 revision are recorded in PR #25 before merge.
+
+The next hosted run exposed a missing post-cancellation draft.
+[T037](T037_tui_cancellation_modal_cleanup.md) documents the deterministic late-modal
+race found during that investigation, its post-join cleanup repair, and bounded native
+failure diagnostics. Final hosted qualification remains the PR merge gate.

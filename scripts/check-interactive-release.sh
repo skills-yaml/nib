@@ -10,7 +10,7 @@ case "$platform" in
     ;;
 esac
 
-for command in basename dirname env find git grep head mktemp pgrep script sed sleep sort stty tr uname wc; do
+for command in basename dirname env find git grep head mktemp pgrep script sed sleep sort stty tail tr uname wc; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'required command is unavailable: %s\n' "$command" >&2
     exit 1
@@ -35,14 +35,39 @@ fixture="$(mktemp -d "$temporary_root/nib-interactive-smoke.XXXXXX")"
 current_case='preflight'
 
 cleanup() {
+  # Pipeline producers and command substitutions share this fixture. Only the
+  # outer script may remove it, after the bounded terminal process has returned.
+  if [ "${BASH_SUBSHELL:-0}" -ne 0 ]; then
+    return
+  fi
   if [[ -n "${fixture:-}" && "$fixture" == "$temporary_root"/nib-interactive-smoke.* ]]; then
     rm -rf -- "$fixture"
   fi
 }
 
+report_smoke_context() {
+  local capture="$fixture/$current_case.txt"
+  local diagnostic_session
+  local redaction="s/${private_sentinel:-interactive-private-sentinel-q7v9k2}/[fixture-secret]/g"
+  if [ -f "$capture" ]; then
+    printf '%s\n' 'Last terminal bytes from isolated Mock fixture (escaped, at most 16 KiB before escaping):' >&2
+    tail -c 16384 "$capture" | LC_ALL=C sed -n -e "$redaction" -e l >&2 || true
+  fi
+  for diagnostic_session in "$fixture"/.nib/profiles/default/sessions/*.json; do
+    if [ -f "$diagnostic_session" ] &&
+      grep -Fq 'edit line' "$diagnostic_session" 2>/dev/null; then
+      printf '%s\n' 'Composer session messages and lifecycle fields (escaped, at most 8 KiB before escaping):' >&2
+      grep -E '"(role|content|kind|from|to|outcome)":' "$diagnostic_session" |
+        head -c 8192 | LC_ALL=C sed -n -e "$redaction" -e l >&2 || true
+      break
+    fi
+  done
+}
+
 report_error() {
   local status=$?
   trap - ERR
+  report_smoke_context
   if [ "${NIB_KEEP_INTERACTIVE_SMOKE_FIXTURE:-0}" = "1" ]; then
     trap - EXIT
     printf 'interactive release smoke failed in case %s near line %s; fixture retained at %s\n' \

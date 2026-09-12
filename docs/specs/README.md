@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **45 done, 1 development, and 1 backlog**.
+The current lifecycle is **46 done, 1 development, and 1 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -39,6 +39,8 @@ requires owner-approved exact OpenRouter IDs, provider accounts and credentials,
 spend and execution ceilings, protected environment approvals, and privacy-reviewed
 catalog/canary/selected/full evidence for all six provider groups. T036 completed the
 conversation-first TUI hierarchy refinement with local verification and native PTY smoke.
+T037 closes a cancellation modal-cleanup race identified while qualifying the revised
+interaction on hosted macOS, with deterministic regression and native local evidence.
 FT-020 remains backlog for any future protected Windows/macOS production delegation
 authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
 bwrap containment; native non-Linux mechanism tests are complete and production use
@@ -83,6 +85,7 @@ work or narrower guarantees.
 - [T034: FT-019 Native Terminal Qualification](done/T034_ft019_native_terminal_qualification.md)
 - [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
 - [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
+- [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
 
 ### Feature specs
 

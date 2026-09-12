@@ -175,6 +175,11 @@ tasks:
         task_workflow_keeps_fast_feedback_separate_from_full_verification --
         --exact --test-threads=1
 
+  test:tui-shutdown:
+    desc: Verify TUI cancellation, late modal cleanup, and shutdown deadlines
+    cmds:
+      - 'cargo test --lib tui::tests::tui_shutdown_ -- --test-threads=1'
+
   test:interactive:
     desc: Run deterministic plain/TUI interaction semantics without a pseudo-terminal
     cmds:
