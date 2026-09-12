@@ -1,11 +1,11 @@
 # T024: Configurable Provider Model Catalog and Curated Defaults
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
-[T007: Configuration Schema Alignment](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
-[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
-[T022: Provider-Neutral LLM Contract and Adapter Conformance](../development/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
+[T007: Configuration Schema Alignment](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
+[T022: Provider-Neutral LLM Contract and Adapter Conformance](../done/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
 [T023: Live LLM Provider and Model Integration Qualification](../development/T023_live_llm_provider_model_integration_qualification.md), and
 [User Guide](../../user/guide.md)
 
@@ -198,7 +198,7 @@ costly suggestions. The selected model is the only automatic addition.
 - [x] `/model` renders the effective provider list and can select by number or exact ID.
 - [x] User documentation includes current defaults, override syntax, precedence, and
   the advisory—not live-qualified—support boundary.
-- [ ] `task check`, `task test`, `task docs:check`, `task check:all-targets`, and
+- [x] `task check`, `task test`, `task docs:check`, `task check:all-targets`, and
   `git diff --check` pass.
 
 ## Affected Areas
@@ -244,8 +244,22 @@ provider/account dependent and are intentionally delegated to T022/T023.
   `crashed_supervisor_is_recovered_only_after_pid_namespace_exit` timing fixture
   because the namespace root had already exited. The exact managed-process recovery
   target reproduced the same precondition failure in isolation (three tests passed,
-  one failed). T024 therefore remains in Development until the canonical repository
-  gates are green; no LLM catalog/config failure remains open.
+  one failed). T024 therefore remained in Development until the canonical repository
+  gates were green; no LLM catalog/config failure remained open.
+
+## Implementation Reconciliation (2026-08-21)
+
+Canonical gates on this Linux revision are green, including the previously failing
+Linux `crashed_supervisor_is_recovered_only_after_pid_namespace_exit` fixture:
+
+- `task docs:check` (5/5)
+- `task check` (installers, `cargo fmt -- --check`, Clippy `-D warnings`, `cargo check`,
+  serial unit and integration suite)
+- `task test` (independent serial suite, same revision)
+- `task check:all-targets`
+- `git diff --check`
+
+No catalog or configuration defect remains. T024 moves to done.
 
 ## External References
 

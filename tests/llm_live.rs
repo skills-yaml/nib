@@ -21,7 +21,15 @@ fn selected_live_ci_contract_is_protected_and_reported() {
     assert!(workflow.contains("catalog | canary | selected | full"));
     assert!(workflow.contains("NIB_LIVE_SCHEDULE_MODE"));
     assert!(workflow.contains(".schema_version == 2"));
+    assert!(workflow.contains(".source_revision == $revision"));
     assert!(workflow.contains(".selected_suite.matrix_sha256"));
+    assert!(workflow.contains("Provider reports do not match the requested provider set."));
+    assert!(workflow.contains("Provider reports do not have unique run identities."));
+    assert!(workflow.contains("Selected provider reports do not share identical suite provenance."));
+    assert!(workflow.contains(".scenario == \"complete_text\""));
+    assert!(workflow.contains(".scenario == \"streamed_text\""));
+    assert!(workflow.contains(".scenario == \"single_tool_continuation\""));
+    assert!(workflow.contains(".scenario == \"parallel_tool_continuation\""));
     assert!(workflow.contains(".not_applicable_scenarios[]"));
     assert!(workflow.contains("      - name: Upload sanitized live reports\n        if: always()"));
     assert!(workflow.contains("          if-no-files-found: ignore\n"));

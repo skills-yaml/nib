@@ -42,12 +42,14 @@ nib does not currently ship a Projects/Tasks/Epics database or a Backlog/Working
 
 4. **Pull Request / Change Process**
    - All changes go through review (human or structured agent review).
-   - Quality gates must pass (`task check`, `task test`).
+   - Use `task check` and focused tests for iterative feedback; the complete local
+     quality gate is `task verify`.
    - For agent-driven work, follow subagent-driven-development patterns (fresh context + spec compliance review + quality review).
    - Update specs when behavior or interfaces change.
    - Moving a development spec to `done/` requires its acceptance evidence and canonical gates to be recorded.
 
 5. **Quality Gates (minimum)**
+   - `task verify` before completion
    - Linting + formatting
    - Type / static checking
    - Relevant tests

@@ -15,7 +15,7 @@ use crate::tools::models::{
 use crate::tools::registry::get_tool_metadata;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -24,6 +24,81 @@ use tokio::io::AsyncBufReadExt;
 use uuid::Uuid;
 
 const MAX_INSTRUCTION_POLICY_BYTES: u64 = 1_048_576;
+const MAX_APPROVAL_FIELD_BYTES: usize = 240;
+const MAX_APPROVAL_LINE_BYTES: usize = 320;
+const MAX_APPROVAL_LINES: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionExecutionPosture {
+    Configured,
+    Tightened,
+    InvalidFailClosed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveExecutionPosture {
+    pub configured_approval_preset: String,
+    pub effective_approval_mode: &'static str,
+    pub provider: String,
+    pub profile: String,
+    pub network: String,
+    pub mutation_plan_gate: bool,
+    pub mutation_owned_worktree_gate: bool,
+    pub instruction_posture: InstructionExecutionPosture,
+    pub sandbox_route: crate::sandbox::SandboxExecutionRoute,
+    pub broad_or_off: bool,
+}
+
+struct ResolvedExecutionConfig {
+    config: ExecutionConfig,
+    policy_rules: Vec<PolicyRule>,
+    instruction_posture: InstructionExecutionPosture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalContext {
+    pub action: String,
+    pub permission_and_risk: String,
+    pub target_scope: String,
+    pub network: String,
+    pub worktree: String,
+    pub reason: String,
+    pub choices: String,
+}
+
+impl ApprovalContext {
+    pub fn compatibility(call: &ToolCall, level: PermissionLevel) -> Self {
+        Self {
+            action: normalized_approval_action(call, &[]),
+            permission_and_risk: format!("{} / not classified", permission_label(level)),
+            target_scope: "not available to compatibility handler".to_string(),
+            network: "not available to compatibility handler".to_string(),
+            worktree: "not available to compatibility handler".to_string(),
+            reason: "interactive approval requested".to_string(),
+            choices: "approve once or deny".to_string(),
+        }
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        let lines = vec![
+            format!("Action: {}", self.action),
+            format!("Permission / risk: {}", self.permission_and_risk),
+            format!("Target scope: {}", self.target_scope),
+            format!("Network: {}", self.network),
+            format!("Worktree: {}", self.worktree),
+            format!("Reason: {} | Choices: {}", self.reason, self.choices),
+        ]
+        .into_iter()
+        .map(|line| bounded_approval_field_with_limit(&line, &[], MAX_APPROVAL_LINE_BYTES))
+        .collect::<Vec<_>>();
+        debug_assert_eq!(lines.len(), MAX_APPROVAL_LINES);
+        lines
+    }
+
+    pub fn render(&self) -> String {
+        self.lines().join("\n")
+    }
+}
 
 struct PreparedTaskGuard {
     task_id: Option<String>,
@@ -84,6 +159,8 @@ impl Drop for PreparedTaskGuard {
 const REDACTION_MARKER: &[u8] = b"[REDACTED]";
 const GENERIC_SECRET_MIN_BODY_BYTES: usize = 7;
 const GENERIC_SECRET_LOOKAHEAD_BYTES: usize = 4 + GENERIC_SECRET_MIN_BODY_BYTES;
+const MAX_PERCENT_DECODE_PASSES: usize = 8;
+const MAX_STREAM_REDACTION_PENDING_BYTES: usize = 1024 * 1024;
 static GENERIC_SECRET_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?:sk|xai)-[A-Za-z0-9_-]{7,}").expect("static secret pattern is valid")
 });
@@ -109,20 +186,225 @@ impl StreamingTerminalRedactor {
     }
 }
 
+struct RedactedTerminalCapture {
+    stdout: VecDeque<u8>,
+    stderr: VecDeque<u8>,
+    limit: usize,
+}
+
+impl RedactedTerminalCapture {
+    fn new(limit: usize) -> Self {
+        Self {
+            stdout: VecDeque::with_capacity(limit.min(64 * 1024)),
+            stderr: VecDeque::with_capacity(limit.min(64 * 1024)),
+            limit,
+        }
+    }
+
+    fn push(&mut self, stream: core::TerminalOutputStream, chunk: &[u8]) {
+        let captured = match stream {
+            core::TerminalOutputStream::Stdout => &mut self.stdout,
+            core::TerminalOutputStream::Stderr => &mut self.stderr,
+        };
+        if chunk.len() >= self.limit {
+            captured.clear();
+            captured.extend(&chunk[chunk.len() - self.limit..]);
+            return;
+        }
+        let overflow = captured
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(self.limit);
+        if overflow > 0 {
+            captured.drain(..overflow);
+        }
+        captured.extend(chunk);
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, Vec<u8>) {
+        (
+            self.stdout.iter().copied().collect(),
+            self.stderr.iter().copied().collect(),
+        )
+    }
+}
+
+struct RedactedTerminalProjection {
+    redactor: StreamingTerminalRedactor,
+    capture: Option<RedactedTerminalCapture>,
+}
+
+fn projected_terminal_stream(
+    captured: Vec<u8>,
+    limit: usize,
+    raw_was_truncated: bool,
+    has_sensitive_values: bool,
+) -> Vec<u8> {
+    if raw_was_truncated && has_sensitive_values {
+        bounded_redaction_marker(limit)
+    } else {
+        captured
+    }
+}
+
+fn bounded_redaction_marker(limit: usize) -> Vec<u8> {
+    REDACTION_MARKER[..limit.min(REDACTION_MARKER.len())].to_vec()
+}
+
+fn projected_terminal_error(output: &Map<String, Value>) -> String {
+    let exit_code = output
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    let stdout = output.get("stdout").and_then(Value::as_str).unwrap_or("");
+    let stderr = output.get("stderr").and_then(Value::as_str).unwrap_or("");
+    let stdout_bytes = output
+        .get("stdout_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let stderr_bytes = output
+        .get("stderr_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let stdout_retained = output
+        .get("stdout_bytes_retained")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let stderr_retained = output
+        .get("stderr_bytes_retained")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let stdout_truncated = output
+        .get("stdout_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let stderr_truncated = output
+        .get("stderr_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    format!(
+        "command exited with {exit_code}\nstdout ({stdout_bytes} bytes, {stdout_retained} retained, truncated={stdout_truncated}):\n{}\nstderr ({stderr_bytes} bytes, {stderr_retained} retained, truncated={stderr_truncated}):\n{}",
+        stdout.trim(),
+        stderr.trim(),
+    )
+}
+
 struct TerminalStreamRedactor {
-    pending: Vec<u8>,
+    pending: Vec<ProjectedTerminalByte>,
     utf8_pending: Vec<u8>,
     secrets: Vec<Vec<u8>>,
     lookahead: usize,
     redacting_generic_secret: bool,
+    percent_decoders: Vec<StreamingPercentDecoder>,
+    overflow_percent_decoder: StreamingPercentDecoder,
+    secret_decode_overflow: bool,
+    failed_closed: bool,
+}
+
+struct ProjectedTerminalByte {
+    value: u8,
+    source: TerminalByteSource,
+}
+
+enum TerminalByteSource {
+    Single(u8),
+    Multiple(Vec<u8>),
+}
+
+impl TerminalByteSource {
+    fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Multiple(bytes) => bytes.len(),
+        }
+    }
+
+    fn append_to(self, output: &mut Vec<u8>) {
+        match self {
+            Self::Single(byte) => output.push(byte),
+            Self::Multiple(mut bytes) => output.append(&mut bytes),
+        }
+    }
+
+    fn append_to_ref(&self, output: &mut Vec<u8>) {
+        match self {
+            Self::Single(byte) => output.push(*byte),
+            Self::Multiple(bytes) => output.extend_from_slice(bytes),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StreamingPercentDecoder {
+    pending: VecDeque<ProjectedTerminalByte>,
+}
+
+impl StreamingPercentDecoder {
+    fn push(
+        &mut self,
+        input: Vec<ProjectedTerminalByte>,
+        eof: bool,
+    ) -> (Vec<ProjectedTerminalByte>, bool) {
+        self.pending.extend(input);
+        let mut output = Vec::with_capacity(self.pending.len());
+        let mut decoded_escape = false;
+        while let Some(first) = self.pending.front() {
+            if first.value != b'%' {
+                output.push(self.pending.pop_front().expect("percent decoder front"));
+                continue;
+            }
+            if self.pending.len() < 3 {
+                if !eof {
+                    break;
+                }
+                output.extend(self.pending.drain(..));
+                break;
+            }
+            let high = percent_hex_value(self.pending.get(1).expect("percent high byte").value);
+            let low = percent_hex_value(self.pending.get(2).expect("percent low byte").value);
+            let (Some(high), Some(low)) = (high, low) else {
+                output.push(self.pending.pop_front().expect("percent decoder front"));
+                continue;
+            };
+            let bytes = [
+                self.pending.pop_front().expect("percent marker"),
+                self.pending.pop_front().expect("percent high byte"),
+                self.pending.pop_front().expect("percent low byte"),
+            ];
+            let source_len = bytes.iter().map(|byte| byte.source.len()).sum();
+            let mut source = Vec::with_capacity(source_len);
+            for byte in bytes {
+                byte.source.append_to(&mut source);
+            }
+            output.push(ProjectedTerminalByte {
+                value: (high << 4) | low,
+                source: TerminalByteSource::Multiple(source),
+            });
+            decoded_escape = true;
+        }
+        (output, decoded_escape)
+    }
 }
 
 impl TerminalStreamRedactor {
     fn new(secrets: &[String]) -> Self {
-        let secrets: Vec<Vec<u8>> = secrets
+        let mut secret_decode_overflow = false;
+        let mut secrets = secrets
             .iter()
-            .map(|secret| secret.as_bytes().to_vec())
-            .collect();
+            .flat_map(|secret| match percent_decoded_byte_stages(secret) {
+                Some(stages) => stages
+                    .into_iter()
+                    .map(|stage| stage.bytes)
+                    .collect::<Vec<_>>(),
+                None => {
+                    secret_decode_overflow = true;
+                    Vec::new()
+                }
+            })
+            .filter(|secret| !secret.is_empty())
+            .collect::<Vec<_>>();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets.dedup();
         let lookahead = secrets
             .iter()
             .map(Vec::len)
@@ -135,21 +417,72 @@ impl TerminalStreamRedactor {
             secrets,
             lookahead,
             redacting_generic_secret: false,
+            percent_decoders: (0..MAX_PERCENT_DECODE_PASSES)
+                .map(|_| StreamingPercentDecoder::default())
+                .collect(),
+            overflow_percent_decoder: StreamingPercentDecoder::default(),
+            secret_decode_overflow,
+            failed_closed: false,
         }
     }
 
     fn push(&mut self, chunk: &[u8], eof: bool) -> Vec<u8> {
-        let redacted = self.redact_bytes(chunk, eof);
-        self.decode_utf8(redacted, eof)
+        if self.failed_closed {
+            return Vec::new();
+        }
+        if self.secret_decode_overflow {
+            self.fail_closed();
+            return REDACTION_MARKER.to_vec();
+        }
+        let mut projected = chunk
+            .iter()
+            .copied()
+            .map(|byte| ProjectedTerminalByte {
+                value: byte,
+                source: TerminalByteSource::Single(byte),
+            })
+            .collect();
+        for decoder in &mut self.percent_decoders {
+            projected = decoder.push(projected, eof).0;
+        }
+        let (projected, percent_decode_overflow) =
+            self.overflow_percent_decoder.push(projected, eof);
+        if percent_decode_overflow {
+            self.fail_closed();
+            return REDACTION_MARKER.to_vec();
+        }
+        let redacted = self.redact_bytes(projected, eof);
+        let decoded = self.decode_utf8(redacted, eof);
+        let decoded = std::str::from_utf8(&decoded).expect("terminal redactor returns valid UTF-8");
+        crate::interactive::control_safe_text(decoded, true).into_bytes()
     }
 
-    fn redact_bytes(&mut self, chunk: &[u8], eof: bool) -> Vec<u8> {
-        self.pending.extend_from_slice(chunk);
+    fn fail_closed(&mut self) {
+        self.pending.clear();
+        self.utf8_pending.clear();
+        self.redacting_generic_secret = false;
+        self.failed_closed = true;
+    }
+
+    fn redact_bytes(&mut self, chunk: Vec<ProjectedTerminalByte>, eof: bool) -> Vec<u8> {
+        self.pending.extend(chunk);
+        let pending_source_bytes = self
+            .pending
+            .iter()
+            .map(|byte| byte.source.len())
+            .try_fold(0usize, usize::checked_add);
+        if !matches!(pending_source_bytes, Some(bytes) if bytes <= MAX_STREAM_REDACTION_PENDING_BYTES)
+        {
+            self.fail_closed();
+            return REDACTION_MARKER.to_vec();
+        }
         let mut output = Vec::with_capacity(self.pending.len());
         let mut index = 0usize;
 
         if self.redacting_generic_secret {
-            while index < self.pending.len() && is_generic_secret_body_byte(self.pending[index]) {
+            while index < self.pending.len()
+                && is_generic_secret_body_byte(self.pending[index].value)
+            {
                 index += 1;
             }
             if index == self.pending.len() {
@@ -173,7 +506,7 @@ impl TerminalStreamRedactor {
             if let Some(secret_len) = self
                 .secrets
                 .iter()
-                .find(|secret| self.pending[index..].starts_with(secret))
+                .find(|secret| terminal_bytes_start_with(&self.pending[index..], secret))
                 .map(Vec::len)
             {
                 output.extend_from_slice(REDACTION_MARKER);
@@ -181,10 +514,12 @@ impl TerminalStreamRedactor {
                 continue;
             }
 
-            if let Some(prefix_len) = generic_secret_prefix_len(&self.pending[index..]) {
+            if let Some(prefix_len) = generic_terminal_secret_prefix_len(&self.pending[index..]) {
                 let body_start = index + prefix_len;
                 let mut end = body_start;
-                while end < self.pending.len() && is_generic_secret_body_byte(self.pending[end]) {
+                while end < self.pending.len()
+                    && is_generic_secret_body_byte(self.pending[end].value)
+                {
                     end += 1;
                 }
                 if end.saturating_sub(body_start) >= GENERIC_SECRET_MIN_BODY_BYTES {
@@ -200,7 +535,7 @@ impl TerminalStreamRedactor {
                 }
             }
 
-            output.push(self.pending[index]);
+            self.pending[index].source.append_to_ref(&mut output);
             index += 1;
         }
         self.pending.drain(..index);
@@ -237,10 +572,18 @@ impl TerminalStreamRedactor {
     }
 }
 
-fn generic_secret_prefix_len(bytes: &[u8]) -> Option<usize> {
-    if bytes.starts_with(b"sk-") {
+fn terminal_bytes_start_with(bytes: &[ProjectedTerminalByte], expected: &[u8]) -> bool {
+    bytes.len() >= expected.len()
+        && bytes
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.value == *expected)
+}
+
+fn generic_terminal_secret_prefix_len(bytes: &[ProjectedTerminalByte]) -> Option<usize> {
+    if terminal_bytes_start_with(bytes, b"sk-") {
         Some(3)
-    } else if bytes.starts_with(b"xai-") {
+    } else if terminal_bytes_start_with(bytes, b"xai-") {
         Some(4)
     } else {
         None
@@ -263,6 +606,15 @@ pub trait ApprovalHandler: Send + Sync {
     }
 
     async fn handle_approval(&self, call: &ToolCall, level: PermissionLevel) -> ApprovalDecision;
+
+    async fn handle_approval_with_context(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        _context: &ApprovalContext,
+    ) -> ApprovalDecision {
+        self.handle_approval(call, level).await
+    }
 }
 
 pub trait ToolPolicyHook: Send + Sync {
@@ -274,9 +626,23 @@ pub struct StdinApprovalHandler;
 #[async_trait::async_trait]
 impl ApprovalHandler for StdinApprovalHandler {
     async fn handle_approval(&self, call: &ToolCall, level: PermissionLevel) -> ApprovalDecision {
-        eprintln!("\nApproval required for {}", call.tool_name);
-        eprintln!("Permission level: {level:?}");
-        eprintln!("Arguments: {}", call.arguments);
+        let context = ApprovalContext::compatibility(call, level);
+        self.prompt(&context).await
+    }
+
+    async fn handle_approval_with_context(
+        &self,
+        _call: &ToolCall,
+        _level: PermissionLevel,
+        context: &ApprovalContext,
+    ) -> ApprovalDecision {
+        self.prompt(context).await
+    }
+}
+
+impl StdinApprovalHandler {
+    async fn prompt(&self, context: &ApprovalContext) -> ApprovalDecision {
+        eprintln!("\nApproval required\n{}", context.render());
         eprint!("Approve? [y/N]: ");
         let _ = io::stderr().flush();
 
@@ -315,32 +681,20 @@ pub struct ToolExecutor {
 impl ToolExecutor {
     pub fn new(project_root: PathBuf, execution_config: ExecutionConfig) -> Self {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
-        let mut policy_rules = load_instruction_policy_rules(&project_root);
-        let mut execution_config = execution_config;
-        if let Err(error) =
-            apply_instruction_execution_tightening(&project_root, &mut execution_config)
-        {
-            fail_closed_execution_config(&mut execution_config);
-            policy_rules.push(PolicyRule {
-                effect: PolicyEffect::Deny,
-                tool_name: "*".to_string(),
-                argument_contains: None,
-                reason: format!("invalid instruction execution directive: {error}"),
-            });
-        }
+        let resolved = resolve_execution_config(&project_root, execution_config);
         Self {
             session_store: None,
             implicit_session_id: None,
             approval_mode: ApprovalMode::Manual,
             project_root,
             auto_approve: false,
-            execution_config,
+            execution_config: resolved.config,
             terminal_backend: TerminalConfig::default().backend,
             terminal_timeout_secs: TerminalConfig::default().timeout,
             approval_handler: Arc::new(StdinApprovalHandler),
             worktree_manager: None,
             mcp_manager: None,
-            policy_rules,
+            policy_rules: resolved.policy_rules,
             policy_hooks: Vec::new(),
             after_tool_hooks: Vec::new(),
             environment: HashMap::new(),
@@ -348,6 +702,38 @@ impl ToolExecutor {
             defer_background_start: false,
             terminal_output_callback: None,
             cancellation: None,
+        }
+    }
+
+    pub fn effective_execution_posture(
+        project_root: &Path,
+        execution_config: ExecutionConfig,
+        approvals_config: &ApprovalsConfig,
+    ) -> EffectiveExecutionPosture {
+        let project_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let resolved = resolve_execution_config(&project_root, execution_config);
+        let approval_mode = approval_mode_from_config(approvals_config);
+        let sandbox_route = crate::sandbox::resolve_sandbox_execution_route(
+            &resolved.config.provider,
+            &resolved.config.default_profile,
+            &resolved.config.boundaries,
+        );
+        let broad_or_off = approval_mode == ApprovalMode::Off
+            || matches!(sandbox_route, crate::sandbox::SandboxExecutionRoute::Direct)
+            || resolved.config.boundaries.network == "enabled";
+        EffectiveExecutionPosture {
+            configured_approval_preset: approvals_config.mode.clone(),
+            effective_approval_mode: approval_mode_label(approval_mode),
+            provider: resolved.config.provider,
+            profile: resolved.config.default_profile,
+            network: resolved.config.boundaries.network,
+            mutation_plan_gate: resolved.config.plan_mode,
+            mutation_owned_worktree_gate: true,
+            instruction_posture: resolved.instruction_posture,
+            sandbox_route,
+            broad_or_off,
         }
     }
 
@@ -362,13 +748,7 @@ impl ToolExecutor {
     }
 
     pub fn with_approvals_config(mut self, config: &ApprovalsConfig) -> Self {
-        self.approval_mode = match config.mode.to_ascii_lowercase().as_str() {
-            "manual" => ApprovalMode::Manual,
-            "smart" => ApprovalMode::Smart,
-            "policy" => ApprovalMode::Policy,
-            "off" => ApprovalMode::Off,
-            _ => ApprovalMode::Manual,
-        };
+        self.approval_mode = approval_mode_from_config(config);
         self
     }
 
@@ -808,7 +1188,16 @@ impl ToolExecutor {
         }
 
         let approval = self
-            .handle_approval(&call, level, risk, requires_approval, &effective_root)
+            .handle_approval(
+                &call,
+                level,
+                risk,
+                requires_approval,
+                requires_worktree,
+                &effective_root,
+                &effective_execution_config,
+                effective_session,
+            )
             .await;
         if !approval.granted {
             return self.finish_failure(
@@ -852,11 +1241,34 @@ impl ToolExecutor {
         ) {
             if let Some(arguments) = dispatch_arguments.as_object_mut() {
                 arguments.remove("_parent_session_id");
+                arguments.remove("_audit_sessions_dir");
                 if let Some(session) = effective_session {
                     arguments.insert(
                         "_parent_session_id".to_string(),
                         Value::String(session.to_string()),
                     );
+                    if let Some(store) = self.session_store.as_ref() {
+                        let audit_sessions_dir =
+                            match crate::tools::delegation::serialize_subagent_audit_destination(
+                                store,
+                            ) {
+                                Ok(path) => path,
+                                Err(error) => {
+                                    return self.finish_failure(
+                                        &call,
+                                        effective_session,
+                                        start,
+                                        error,
+                                        approval,
+                                        level,
+                                        risk,
+                                        worktree.as_deref(),
+                                        plan_id,
+                                    );
+                                }
+                            };
+                        arguments.insert("_audit_sessions_dir".to_string(), audit_sessions_dir);
+                    }
                 }
             }
         }
@@ -889,7 +1301,11 @@ impl ToolExecutor {
             }
         }
 
-        let terminal_output_callback = self.redacted_terminal_output_callback();
+        let terminal_capture_limit = (call.tool_name == "run_terminal" && !background_terminal)
+            .then(|| core::terminal_output_limit(&dispatch_arguments).ok())
+            .flatten();
+        let (terminal_output_callback, terminal_projection) =
+            self.redacted_terminal_output_projection(terminal_capture_limit);
         let outcome = if call.tool_name == "merge_subagent_worktree" {
             self.execute_subagent_merge(&dispatch_arguments, &effective_root, effective_session)
                 .await
@@ -915,6 +1331,13 @@ impl ToolExecutor {
             )
             .await
         };
+        let outcome = outcome.map(|output| {
+            self.project_authoritative_terminal_output(
+                output,
+                terminal_projection.as_ref(),
+                terminal_capture_limit,
+            )
+        });
         let mut prepared_task = PreparedTaskGuard::from_output(
             background_terminal || call.tool_name == "schedule",
             outcome.as_ref().ok(),
@@ -1005,6 +1428,7 @@ impl ToolExecutor {
             }
         }
         result.duration_seconds = start.elapsed().as_secs_f64();
+        self.sanitize_tool_result(&mut result);
         let record_succeeded = if let Err(error) = self.record(
             &call,
             &result,
@@ -1047,6 +1471,7 @@ impl ToolExecutor {
                 });
             }
         }
+        self.sanitize_tool_result(&mut result);
         result
     }
 
@@ -1165,28 +1590,106 @@ impl ToolExecutor {
         Ok(requested)
     }
 
+    #[cfg(test)]
     fn redacted_terminal_output_callback(&self) -> Option<core::TerminalOutputCallback> {
-        let callback = self.terminal_output_callback.clone()?;
-        let secrets = self.redaction_secrets();
-        let redactor = Arc::new(Mutex::new(StreamingTerminalRedactor::new(&secrets)));
-        Some(Arc::new(move |event| {
+        self.redacted_terminal_output_projection(None).0
+    }
+
+    fn redacted_terminal_output_projection(
+        &self,
+        capture_limit: Option<usize>,
+    ) -> (
+        Option<core::TerminalOutputCallback>,
+        Option<Arc<Mutex<RedactedTerminalProjection>>>,
+    ) {
+        let callback = self.terminal_output_callback.clone();
+        if callback.is_none() && capture_limit.is_none() {
+            return (None, None);
+        }
+        let secrets = normalized_encoded_sensitive_values(self.redaction_secrets());
+        let projection = Arc::new(Mutex::new(RedactedTerminalProjection {
+            redactor: StreamingTerminalRedactor::new(&secrets),
+            capture: capture_limit.map(RedactedTerminalCapture::new),
+        }));
+        let callback_projection = Arc::clone(&projection);
+        let projected_callback: core::TerminalOutputCallback = Arc::new(move |event| {
             let redacted = {
-                let Ok(mut redactor) = redactor.lock() else {
+                let Ok(mut projection) = callback_projection.lock() else {
                     return;
                 };
-                redactor.push(event.stream, &event.chunk, event.eof)
+                let redacted = projection
+                    .redactor
+                    .push(event.stream, &event.chunk, event.eof);
+                if let Some(capture) = projection.capture.as_mut() {
+                    capture.push(event.stream, &redacted);
+                }
+                redacted
             };
             if redacted.is_empty() {
                 return;
             }
-            callback(core::TerminalOutputEvent {
-                tool_name: event.tool_name,
-                stream: event.stream,
-                chunk: redacted,
-                background_task_id: event.background_task_id,
-                eof: false,
-            });
-        }))
+            if let Some(callback) = &callback {
+                callback(core::TerminalOutputEvent {
+                    tool_name: event.tool_name,
+                    stream: event.stream,
+                    chunk: redacted,
+                    background_task_id: event.background_task_id,
+                    eof: false,
+                });
+            }
+        });
+        (Some(projected_callback), Some(projection))
+    }
+
+    fn project_authoritative_terminal_output(
+        &self,
+        mut output: Value,
+        projection: Option<&Arc<Mutex<RedactedTerminalProjection>>>,
+        capture_limit: Option<usize>,
+    ) -> Value {
+        let (Some(projection), Some(limit), Some(object)) =
+            (projection, capture_limit, output.as_object_mut())
+        else {
+            return output;
+        };
+        let snapshot = projection.lock().ok().and_then(|projection| {
+            projection
+                .capture
+                .as_ref()
+                .map(|capture| capture.snapshot())
+        });
+        let has_sensitive_values = !self.redaction_secrets().is_empty();
+        let stdout_truncated = object
+            .get("stdout_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let stderr_truncated = object
+            .get("stderr_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let (stdout, stderr) = match snapshot {
+            Some((stdout, stderr)) => (
+                projected_terminal_stream(stdout, limit, stdout_truncated, has_sensitive_values),
+                projected_terminal_stream(stderr, limit, stderr_truncated, has_sensitive_values),
+            ),
+            None => (
+                bounded_redaction_marker(limit),
+                bounded_redaction_marker(limit),
+            ),
+        };
+        let stdout = String::from_utf8_lossy(&stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        object.insert("stdout_bytes_retained".to_string(), json!(stdout.len()));
+        object.insert("stderr_bytes_retained".to_string(), json!(stderr.len()));
+        object.insert("stdout".to_string(), Value::String(stdout));
+        object.insert("stderr".to_string(), Value::String(stderr));
+        if object.get("command_success").and_then(Value::as_bool) == Some(false) {
+            object.insert(
+                "error".to_string(),
+                Value::String(projected_terminal_error(object)),
+            );
+        }
+        output
     }
 
     fn redaction_secrets(&self) -> Vec<String> {
@@ -1197,11 +1700,23 @@ impl ToolExecutor {
     }
 
     fn redact_text(&self, text: &str) -> String {
-        redact_text_with_secrets(text, &self.redaction_secrets())
+        let redacted = redact_text_with_encoded_sensitive_values(text, self.redaction_secrets());
+        crate::interactive::control_safe_text(&redacted, true)
     }
 
     fn redact_value(&self, value: Value) -> Value {
-        redact_value_with_secrets(value, &self.redaction_secrets())
+        let redacted = redact_value_with_encoded_sensitive_values(value, self.redaction_secrets());
+        control_safe_public_value(redacted)
+    }
+
+    fn sanitize_tool_result(&self, result: &mut ToolResult) {
+        result.tool_name = self.redact_text(&result.tool_name);
+        result.output = result.output.take().map(|output| self.redact_value(output));
+        result.error = result.error.take().map(|error| self.redact_text(&error));
+        result.approval_source = result
+            .approval_source
+            .take()
+            .map(|source| self.redact_text(&source));
     }
 
     async fn ensure_worktree(
@@ -1247,13 +1762,17 @@ impl ToolExecutor {
         Ok(Some(target))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_approval(
         &self,
         call: &ToolCall,
         level: PermissionLevel,
         risk: ToolRisk,
         requires_approval: bool,
+        requires_worktree: bool,
         effective_root: &Path,
+        effective_execution_config: &ExecutionConfig,
+        session_id: Option<&str>,
     ) -> ApprovalDecision {
         let evaluations = self.matching_policy_rules(call, effective_root);
 
@@ -1270,7 +1789,20 @@ impl ToolExecutor {
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
         {
-            let mut decision = self.approval_handler.handle_approval(call, level).await;
+            let context = self.approval_context(
+                call,
+                level,
+                risk,
+                effective_root,
+                effective_execution_config,
+                requires_worktree,
+                session_id,
+                &format!("project or tool policy requires approval: {}", rule.reason),
+            );
+            let mut decision = self
+                .approval_handler
+                .handle_approval_with_context(call, level, &context)
+                .await;
             decision.note = Some(rule.reason.clone());
             return decision;
         }
@@ -1308,7 +1840,56 @@ impl ToolExecutor {
         if self.auto_approve {
             return ApprovalDecision::granted_user();
         }
-        self.approval_handler.handle_approval(call, level).await
+        let context = self.approval_context(
+            call,
+            level,
+            risk,
+            effective_root,
+            effective_execution_config,
+            requires_worktree,
+            session_id,
+            "effective tool metadata and risk classification require interactive approval",
+        );
+        self.approval_handler
+            .handle_approval_with_context(call, level, &context)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn approval_context(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        risk: ToolRisk,
+        effective_root: &Path,
+        effective_execution_config: &ExecutionConfig,
+        requires_worktree: bool,
+        session_id: Option<&str>,
+        reason: &str,
+    ) -> ApprovalContext {
+        let secrets = normalized_encoded_sensitive_values(self.redaction_secrets());
+        let worktree = if requires_worktree && session_id.is_some() {
+            "required; a session-owned managed worktree will be created or reused after approval"
+        } else if requires_worktree {
+            "required; execution will fail closed without an authoritative session"
+        } else {
+            "not required for this action"
+        };
+        ApprovalContext {
+            action: normalized_approval_action(call, &secrets),
+            permission_and_risk: bounded_approval_field(
+                &format!("{} / {}", permission_label(level), risk.as_str()),
+                &secrets,
+            ),
+            target_scope: bounded_approval_field(&effective_root.display().to_string(), &secrets),
+            network: bounded_approval_field(
+                &effective_execution_config.boundaries.network,
+                &secrets,
+            ),
+            worktree: bounded_approval_field(worktree, &secrets),
+            reason: bounded_approval_field(reason, &secrets),
+            choices: "approve once or deny".to_string(),
+        }
     }
 
     fn matching_policy_rules(&self, call: &ToolCall, effective_root: &Path) -> Vec<PolicyRule> {
@@ -1416,6 +1997,7 @@ impl ToolExecutor {
             approval_granted: approval.granted,
             approval_source: Some(approval.source.clone()),
         };
+        self.sanitize_tool_result(&mut result);
         if let Err(record_error) = self.record(
             call, &result, &approval, session_id, worktree, level, risk, plan_id,
         ) {
@@ -1424,6 +2006,7 @@ impl ToolExecutor {
                 result.error.as_deref().unwrap_or("tool execution failed")
             ));
         }
+        self.sanitize_tool_result(&mut result);
         result
     }
 
@@ -1479,7 +2062,7 @@ impl ToolExecutor {
 
         let mut provider = None;
         let mut sandbox_profile = None;
-        let mut bwrap_args = None;
+        let mut bwrap_args: Option<Vec<String>> = None;
         let mut boundaries = None;
         if call.tool_name == "run_terminal"
             || matches!(level, PermissionLevel::Network)
@@ -1512,34 +2095,58 @@ impl ToolExecutor {
                 .or(boundaries);
         }
 
+        provider = provider.map(|value| self.redact_text(&value));
+        sandbox_profile = sandbox_profile.map(|value| self.redact_text(&value));
+        bwrap_args = bwrap_args.map(|arguments| {
+            arguments
+                .into_iter()
+                .map(|argument| self.redact_text(&argument))
+                .collect()
+        });
+        boundaries = boundaries.map(|boundaries| crate::config::BoundaryConfig {
+            allow_write: boundaries
+                .allow_write
+                .into_iter()
+                .map(|path| self.redact_text(&path))
+                .collect(),
+            network: self.redact_text(&boundaries.network),
+        });
+        let plan_id = plan_id.map(|value| self.redact_text(&value));
+        let worktree_path = worktree.map(|path| self.redact_text(&path.to_string_lossy()));
+        let environment_keys = if call.tool_name == "run_terminal" {
+            let mut keys: Vec<_> = self
+                .environment
+                .keys()
+                .map(|key| self.redact_text(key))
+                .collect();
+            keys.sort();
+            keys
+        } else {
+            Vec::new()
+        };
+
         let record = ToolCallRecord {
             invocation_id: Some(call.invocation_id),
             id: Some(format!("tool-{}", Uuid::new_v4())),
             session_id: Some(session_id.to_string()),
             tool_name: Some(self.redact_text(&call.tool_name)),
             arguments: self.redact_value(call.arguments.clone()),
-            result: Some(json!({
+            result: Some(self.redact_value(json!({
                 "success": result.success,
-                "output": result.output,
-                "error": result.error,
-                "environment_keys": if call.tool_name == "run_terminal" {
-                    let mut keys: Vec<_> = self.environment.keys().cloned().collect();
-                    keys.sort();
-                    keys
-                } else {
-                    Vec::<String>::new()
-                },
+                "output": result.output.clone(),
+                "error": result.error.clone(),
+                "environment_keys": environment_keys,
                 "approval": {
                     "granted": approval.granted,
-                    "source": approval.source,
-                    "note": approval.note,
+                    "source": self.redact_text(&approval.source),
+                    "note": approval.note.as_deref().map(|note| self.redact_text(note)),
                 },
                 "permission_level": permission_label(level),
                 "risk": risk.as_str(),
-            })),
-            error: result.error.clone(),
+            }))),
+            error: result.error.as_deref().map(|error| self.redact_text(error)),
             duration_seconds: Some(result.duration_seconds),
-            worktree_path: worktree.map(|path| path.to_string_lossy().to_string()),
+            worktree_path,
             timestamp: Some(Utc::now()),
             provider,
             sandbox_profile,
@@ -1561,6 +2168,7 @@ fn schema_validation_arguments(call: &ToolCall) -> Value {
     match call.tool_name.as_str() {
         "spawn_subagent" | "invoke_subagent" => {
             object.remove("_parent_session_id");
+            object.remove("_audit_sessions_dir");
         }
         "schedule" | "run_terminal" => {
             object.remove("_session_id");
@@ -1583,27 +2191,48 @@ fn validate_tool_arguments(
     arguments: &Value,
 ) -> Result<(), String> {
     let validator = jsonschema::validator_for(schema)
-        .map_err(|error| format!("invalid input schema for tool '{tool_name}': {error}"))?;
+        .map_err(|_| format!("invalid input schema for tool '{tool_name}'"))?;
     let errors: Vec<_> = validator
         .iter_errors(arguments)
         .take(5)
         .map(|error| {
             let path = error.instance_path.to_string();
-            if path.is_empty() {
-                error.to_string()
+            let constraint = error.schema_path.to_string();
+            let location = if path.is_empty() {
+                "at the argument root".to_string()
             } else {
-                format!("at {path}: {error}")
-            }
+                format!("at {path}")
+            };
+            format!("{location}: failed schema constraint {constraint}")
         })
         .collect();
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!(
+        const MAX_VALIDATION_ERROR_BYTES: usize = 8 * 1024;
+        let mut error = format!(
             "invalid arguments for tool '{tool_name}': {}",
             errors.join("; ")
-        ))
+        );
+        if error.len() > MAX_VALIDATION_ERROR_BYTES {
+            let mut end = MAX_VALIDATION_ERROR_BYTES.saturating_sub(3);
+            while end > 0 && !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            error.truncate(end);
+            error.push_str("...");
+        }
+        Err(error)
     }
+}
+
+pub(crate) fn validate_registered_tool_arguments(
+    tool_name: &str,
+    arguments: &Value,
+) -> Result<(), String> {
+    let metadata = crate::tools::registry::get_tool_metadata(tool_name)
+        .ok_or_else(|| format!("tool is not registered: {tool_name}"))?;
+    validate_tool_arguments(tool_name, &metadata.input_schema, arguments)
 }
 
 pub fn tools_json_schema() -> Vec<Value> {
@@ -1633,12 +2262,232 @@ fn permission_label(level: PermissionLevel) -> &'static str {
     }
 }
 
+fn bounded_approval_field(value: &str, secrets: &[String]) -> String {
+    bounded_approval_field_with_limit(value, secrets, MAX_APPROVAL_FIELD_BYTES)
+}
+
+fn bounded_approval_field_with_limit(value: &str, secrets: &[String], limit: usize) -> String {
+    let redacted = redact_text_with_encoded_secrets(value, secrets);
+    let mut normalized = String::new();
+    let mut truncated = false;
+    for character in redacted.chars() {
+        let escaped = match character {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            character if character.is_control() => format!("\\u{{{:x}}}", character as u32),
+            character => character.to_string(),
+        };
+        if normalized.len().saturating_add(escaped.len()) > limit {
+            truncated = true;
+            break;
+        }
+        normalized.push_str(&escaped);
+    }
+    if truncated {
+        let maximum = limit.saturating_sub(3);
+        while normalized.len() > maximum {
+            normalized.pop();
+        }
+        normalized.push_str("...");
+    }
+    if normalized.is_empty() {
+        "(none)".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn approval_argument_string<'a>(call: &'a ToolCall, field: &str) -> Option<&'a str> {
+    call.arguments.get(field).and_then(Value::as_str)
+}
+
+fn normalized_approval_action(call: &ToolCall, secrets: &[String]) -> String {
+    let summary = match call.tool_name.as_str() {
+        "approve_plan" => {
+            let plan_id = bounded_approval_field_with_limit(
+                approval_argument_string(call, "plan_id").unwrap_or("(missing)"),
+                secrets,
+                64,
+            );
+            let goal = bounded_approval_field_with_limit(
+                approval_argument_string(call, "goal").unwrap_or("(missing)"),
+                secrets,
+                80,
+            );
+            let step_count = call
+                .arguments
+                .get("steps")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("approve_plan plan_id={plan_id} steps={step_count} goal={goal}")
+        }
+        "run_terminal" => {
+            let command = bounded_approval_field_with_limit(
+                approval_argument_string(call, "command").unwrap_or("(missing command)"),
+                secrets,
+                120,
+            );
+            let cwd = bounded_approval_field_with_limit(
+                approval_argument_string(call, "cwd").unwrap_or("."),
+                secrets,
+                48,
+            );
+            let background = call
+                .arguments
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            format!("run_terminal command={command} cwd={cwd} background={background}")
+        }
+        "apply_patch" => {
+            let patch = approval_argument_string(call, "patch").unwrap_or_default();
+            let mut targets = Vec::new();
+            let mut target_count = 0usize;
+            let mut in_hunk = false;
+            let mut pending_old_header = false;
+            for line in patch.lines() {
+                if line.starts_with("diff --git ") {
+                    in_hunk = false;
+                    pending_old_header = false;
+                    continue;
+                }
+                if line.starts_with("@@ ") {
+                    in_hunk = true;
+                    pending_old_header = false;
+                    continue;
+                }
+                let custom_path = line
+                    .strip_prefix("*** Update File: ")
+                    .or_else(|| line.strip_prefix("*** Add File: "))
+                    .or_else(|| line.strip_prefix("*** Delete File: "));
+                let unified_path = (!in_hunk && pending_old_header)
+                    .then(|| line.strip_prefix("+++ "))
+                    .flatten();
+                if !in_hunk && line.starts_with("--- ") {
+                    pending_old_header = true;
+                    continue;
+                }
+                pending_old_header = false;
+                let Some(path) = custom_path.or(unified_path) else {
+                    continue;
+                };
+                let path = path.trim().trim_start_matches("b/");
+                if path == "/dev/null" {
+                    continue;
+                }
+                target_count = target_count.saturating_add(1);
+                if targets.len() < 4 {
+                    targets.push(bounded_approval_field_with_limit(path, secrets, 40));
+                }
+            }
+            targets.sort();
+            targets.dedup();
+            let mode = if call
+                .arguments
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                "check"
+            } else {
+                "apply"
+            };
+            format!(
+                "apply_patch mode={mode} files={target_count} targets={}",
+                if targets.is_empty() {
+                    "(unparsed)".to_string()
+                } else {
+                    targets.join(",")
+                }
+            )
+        }
+        "merge_subagent_worktree" => format!(
+            "merge_subagent_worktree subagent_id={}",
+            bounded_approval_field_with_limit(
+                approval_argument_string(call, "subagent_id").unwrap_or("(missing)"),
+                secrets,
+                96,
+            )
+        ),
+        "manage_subagents" | "manage_task" | "manage_memory" => {
+            let action = bounded_approval_field_with_limit(
+                approval_argument_string(call, "action").unwrap_or("(missing)"),
+                secrets,
+                48,
+            );
+            let target = ["subagent_id", "task_id", "namespace", "key"]
+                .into_iter()
+                .filter_map(|field| {
+                    approval_argument_string(call, field).map(|value| {
+                        format!(
+                            " {field}={}",
+                            bounded_approval_field_with_limit(value, secrets, 64)
+                        )
+                    })
+                })
+                .collect::<String>();
+            format!("{} action={action}{target}", call.tool_name)
+        }
+        _ => bounded_approval_field(&call.tool_name, secrets),
+    };
+    bounded_approval_field(&summary, secrets)
+}
+
 fn valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty()
         && session_id.len() <= 128
         && session_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn approval_mode_from_config(config: &ApprovalsConfig) -> ApprovalMode {
+    match config.mode.to_ascii_lowercase().as_str() {
+        "manual" => ApprovalMode::Manual,
+        "smart" => ApprovalMode::Smart,
+        "policy" => ApprovalMode::Policy,
+        "off" => ApprovalMode::Off,
+        _ => ApprovalMode::Manual,
+    }
+}
+
+fn approval_mode_label(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Manual => "manual",
+        ApprovalMode::Smart => "smart",
+        ApprovalMode::Policy => "policy",
+        ApprovalMode::Off => "off",
+    }
+}
+
+fn resolve_execution_config(
+    project_root: &Path,
+    mut execution_config: ExecutionConfig,
+) -> ResolvedExecutionConfig {
+    let configured = execution_config.clone();
+    let mut policy_rules = load_instruction_policy_rules(project_root);
+    let instruction_posture =
+        match apply_instruction_execution_tightening(project_root, &mut execution_config) {
+            Ok(()) if execution_config == configured => InstructionExecutionPosture::Configured,
+            Ok(()) => InstructionExecutionPosture::Tightened,
+            Err(error) => {
+                fail_closed_execution_config(&mut execution_config);
+                policy_rules.push(PolicyRule {
+                    effect: PolicyEffect::Deny,
+                    tool_name: "*".to_string(),
+                    argument_contains: None,
+                    reason: format!("invalid instruction execution directive: {error}"),
+                });
+                InstructionExecutionPosture::InvalidFailClosed
+            }
+        };
+    ResolvedExecutionConfig {
+        config: execution_config,
+        policy_rules,
+        instruction_posture,
+    }
 }
 
 fn load_instruction_policy_rules(project_root: &Path) -> Vec<PolicyRule> {
@@ -1937,6 +2786,26 @@ pub(crate) fn redact_value_with_encoded_sensitive_values(
     redact_value_with_encoded_secrets(value, &secrets)
 }
 
+fn control_safe_public_value(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                *value = control_safe_public_value(std::mem::take(value));
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                *value = control_safe_public_value(std::mem::take(value));
+            }
+        }
+        Value::String(text) => {
+            *text = crate::interactive::control_safe_text(text, true);
+        }
+        _ => {}
+    }
+    value
+}
+
 fn redact_value_with_encoded_secrets(mut value: Value, secrets: &[String]) -> Value {
     value = redact_value(value);
     match &mut value {
@@ -2084,8 +2953,6 @@ struct PercentDecodedBytes {
 }
 
 fn percent_decoded_byte_stages(value: &str) -> Option<Vec<PercentDecodedBytes>> {
-    const MAX_PERCENT_DECODE_PASSES: usize = 8;
-
     let mut stages = vec![PercentDecodedBytes {
         bytes: value.as_bytes().to_vec(),
         origins: (0..value.len()).map(|index| (index, index + 1)).collect(),
@@ -2137,7 +3004,9 @@ fn percent_hex_value(value: u8) -> Option<u8> {
     }
 }
 
-fn normalized_encoded_sensitive_values(values: impl IntoIterator<Item = String>) -> Vec<String> {
+pub(crate) fn normalized_encoded_sensitive_values(
+    values: impl IntoIterator<Item = String>,
+) -> Vec<String> {
     let mut secrets = values.into_iter().collect::<Vec<_>>();
     secrets.extend(
         secrets
@@ -2145,8 +3014,60 @@ fn normalized_encoded_sensitive_values(values: impl IntoIterator<Item = String>)
             .map(|secret| secret.trim().to_string())
             .collect::<Vec<_>>(),
     );
+    let json_variants = secrets
+        .iter()
+        .filter_map(|secret| serde_json::to_string(secret).ok())
+        .filter_map(|quoted| {
+            quoted
+                .get(1..quoted.len().saturating_sub(1))
+                .map(str::to_string)
+        })
+        .flat_map(|escaped| [escaped.clone(), escaped.replace('/', "\\/")])
+        .collect::<Vec<_>>();
+    secrets.extend(json_variants);
+    let base64_variants = secrets
+        .iter()
+        .flat_map(|secret| {
+            let standard = base64_secret_variant(secret.as_bytes(), false);
+            let url_safe = base64_secret_variant(secret.as_bytes(), true);
+            [
+                standard.clone(),
+                standard.trim_end_matches('=').to_string(),
+                url_safe.clone(),
+                url_safe.trim_end_matches('=').to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    secrets.extend(base64_variants);
     normalize_sensitive_values(&mut secrets);
     secrets
+}
+
+fn base64_secret_variant(bytes: &[u8], url_safe: bool) -> String {
+    let alphabet = if url_safe {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    } else {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    };
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(alphabet[usize::from(first >> 2)] as char);
+        encoded.push(alphabet[usize::from(((first & 0x03) << 4) | (second >> 4))] as char);
+        if chunk.len() > 1 {
+            encoded.push(alphabet[usize::from(((second & 0x0f) << 2) | (third >> 6))] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(alphabet[usize::from(third & 0x3f)] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }
 
 fn sensitive_environment_values(environment: &HashMap<String, String>) -> Vec<String> {
@@ -2183,6 +3104,196 @@ fn is_sensitive_environment_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct ContextCapturingApprovalHandler {
+        context: Mutex<Option<ApprovalContext>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalHandler for ContextCapturingApprovalHandler {
+        async fn handle_approval(
+            &self,
+            _call: &ToolCall,
+            _level: PermissionLevel,
+        ) -> ApprovalDecision {
+            ApprovalDecision::denied()
+        }
+
+        async fn handle_approval_with_context(
+            &self,
+            _call: &ToolCall,
+            _level: PermissionLevel,
+            context: &ApprovalContext,
+        ) -> ApprovalDecision {
+            *self.context.lock().expect("context lock") = Some(context.clone());
+            ApprovalDecision::granted_user()
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_context_is_redacted_bounded_and_preserves_decision_behavior() {
+        let root = tempfile::tempdir().expect("root");
+        let capture = Arc::new(ContextCapturingApprovalHandler::default());
+        let base64_secret = base64_secret_variant(b"provider-private-sentinel", false);
+        let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_approval_handler(capture.clone())
+            .with_sensitive_values(["provider-private-sentinel".to_string()]);
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({
+                "command": format!("{base64_secret} provider%2Dprivate%2Dsentinel {}LONG_ARGUMENT_SENTINEL", "x".repeat(5_000)),
+                "token": "sk-privateapproval123456",
+                "control": "\u{1b}[2J\nraw-json-sentinel",
+            }),
+            session_id: Some("approval-session".to_string()),
+            project_root: Some(root.path().to_path_buf()),
+        };
+        let effective = executor
+            .effective_execution_config(PermissionLevel::Destructive, ToolRisk::Destructive);
+        let target = PathBuf::from(format!(
+            "/tmp/provider-private-sentinel/\u{1b}[2J\n{}LONG_TARGET_SENTINEL",
+            "x".repeat(500)
+        ));
+        let decision = executor
+            .handle_approval(
+                &call,
+                PermissionLevel::Destructive,
+                ToolRisk::Destructive,
+                true,
+                true,
+                &target,
+                &effective,
+                Some("approval-session"),
+            )
+            .await;
+        assert!(decision.granted);
+        assert_eq!(decision.source, "user");
+        let context = capture
+            .context
+            .lock()
+            .expect("context lock")
+            .clone()
+            .expect("context captured");
+        let rendered = context.render();
+        assert_eq!(context.lines().len(), MAX_APPROVAL_LINES);
+        assert!(context
+            .lines()
+            .iter()
+            .all(|line| line.len() <= MAX_APPROVAL_LINE_BYTES));
+        assert!(rendered.len() < 2_048);
+        assert!(rendered.contains("Action: run_terminal command="));
+        assert!(rendered.contains("destructive / destructive"));
+        assert!(rendered.contains("Network: restricted"));
+        assert!(rendered.contains("session-owned managed worktree will be created or reused"));
+        assert!(!rendered.contains("provider-private-sentinel"));
+        assert!(!rendered.contains("provider%2Dprivate"));
+        assert!(!rendered.contains(&base64_secret));
+        assert!(!rendered.contains("sk-privateapproval"));
+        assert!(!rendered.contains("raw-json-sentinel"));
+        assert!(!rendered.contains("LONG_ARGUMENT_SENTINEL"));
+        assert!(!rendered.contains("LONG_TARGET_SENTINEL"));
+        assert!(context
+            .lines()
+            .iter()
+            .all(|line| !line.chars().any(char::is_control)));
+    }
+
+    #[tokio::test]
+    async fn contextual_method_defaults_to_legacy_handler_for_compatibility() {
+        struct LegacyGrant;
+        #[async_trait::async_trait]
+        impl ApprovalHandler for LegacyGrant {
+            async fn handle_approval(
+                &self,
+                _call: &ToolCall,
+                _level: PermissionLevel,
+            ) -> ApprovalDecision {
+                ApprovalDecision::granted_user()
+            }
+        }
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({"private": "not presented by compatibility context"}),
+            session_id: None,
+            project_root: None,
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+        let decision = LegacyGrant
+            .handle_approval_with_context(&call, PermissionLevel::Destructive, &context)
+            .await;
+        assert!(decision.granted);
+        assert_eq!(decision.source, "user");
+    }
+
+    #[test]
+    fn patch_approval_action_names_mode_and_targets_without_patch_body() {
+        let root = tempfile::tempdir().expect("root");
+        let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_sensitive_values(["configured-patch-secret".to_string()]);
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({
+                "dry_run": false,
+                "patch": "diff --git a/src/old.rs b/src/new.rs\n--- a/src/old.rs\n+++ b/src/new.rs\n@@ -1 +1 @@\n-configured-patch-secret\n+sk-privatepatch123456\ndiff --git a/docs/a.md b/docs/a.md\n--- a/docs/a.md\n+++ b/docs/a.md\n"
+            }),
+            session_id: Some("patch-session".to_string()),
+            project_root: Some(root.path().to_path_buf()),
+        };
+        let context = executor.approval_context(
+            &call,
+            PermissionLevel::Safe,
+            ToolRisk::Destructive,
+            root.path(),
+            &executor.execution_config,
+            true,
+            Some("patch-session"),
+            "patch requires approval",
+        );
+        assert!(context.action.contains("apply_patch mode=apply"));
+        assert!(context.action.contains("files=2"));
+        assert!(context.action.contains("src/new.rs"));
+        assert!(context.action.contains("docs/a.md"));
+        assert!(!context.render().contains("configured-patch-secret"));
+        assert!(!context.render().contains("sk-privatepatch"));
+    }
+
+    #[test]
+    fn plan_approval_action_identifies_plan_without_leaking_or_overrunning_goal() {
+        let root = tempfile::tempdir().expect("root");
+        let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_sensitive_values(["private-plan-secret".to_string()]);
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "approve_plan".to_string(),
+            arguments: json!({
+                "plan_id": "plan-123",
+                "goal": format!("inspect private-plan-secret \u{1b}[2J {}PLAN_GOAL_SENTINEL", "x".repeat(500)),
+                "steps": ["inspect", "change", "verify"],
+            }),
+            session_id: Some("plan-session".to_string()),
+            project_root: Some(root.path().to_path_buf()),
+        };
+        let context = executor.approval_context(
+            &call,
+            PermissionLevel::Plan,
+            ToolRisk::RequiresApproval,
+            root.path(),
+            &executor.execution_config,
+            false,
+            Some("plan-session"),
+            "approve the persisted plan",
+        );
+        assert!(context.action.contains("approve_plan plan_id=plan-123"));
+        assert!(context.action.contains("steps=3"));
+        assert!(context.action.contains("goal=inspect [REDACTED]"));
+        assert!(!context.action.contains("private-plan-secret"));
+        assert!(!context.action.contains("PLAN_GOAL_SENTINEL"));
+        assert!(!context.action.chars().any(char::is_control));
+    }
 
     #[test]
     fn prepared_guard_surfaces_and_audits_durable_compensation_failure() {
@@ -2456,6 +3567,71 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn non_utf8_session_audit_destination_fails_closed_without_partial_delegation() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root
+            .path()
+            .join(OsString::from_vec(b"workspace-\xff".to_vec()));
+        let sessions_dir = workspace
+            .join(".nib")
+            .join("profiles")
+            .join(OsString::from_vec(b"profile-\xfe".to_vec()))
+            .join(OsString::from_vec(b"sessions-\xfd".to_vec()));
+        std::fs::create_dir_all(&sessions_dir).expect("non-UTF-8 session directory");
+        let store = SessionStore::at_dir(sessions_dir);
+        let session = store.create_session_with_id("non-utf8-audit-session");
+        let mut executor = ToolExecutor::new(workspace.clone(), ExecutionConfig::default())
+            .with_session_store(store.clone())
+            .with_auto_approve(true);
+
+        for tool_name in ["spawn_subagent", "invoke_subagent"] {
+            let result = executor
+                .execute(
+                    ToolCall {
+                        invocation_id: crate::tools::ToolInvocationId::new(),
+                        tool_name: tool_name.to_string(),
+                        arguments: json!({"prompt": "must fail before delegation dispatch"}),
+                        session_id: Some(session.id.clone()),
+                        project_root: Some(workspace.clone()),
+                    },
+                    Some(&session.id),
+                )
+                .await;
+
+            assert!(!result.success, "{tool_name} unexpectedly dispatched");
+            assert!(
+                result.error.as_deref().is_some_and(|error| error.contains(
+                    "audit destination cannot be represented without changing its filesystem identity"
+                )),
+                "unexpected {tool_name} error: {:?}",
+                result.error
+            );
+            let audited = store.load(&session.id).expect("audited failure session");
+            let call = audited.tool_calls.last().expect("audited tool failure");
+            assert_eq!(call.tool_name.as_deref(), Some(tool_name));
+            assert!(call.error.as_deref().is_some_and(|error| error.contains(
+                "audit destination cannot be represented without changing its filesystem identity"
+            )));
+        }
+
+        for path in [
+            workspace.join(".nib/subagents"),
+            workspace.join(".nib/subagent-owner-leases"),
+            workspace.join(".nib/worktrees/subagents"),
+        ] {
+            assert!(
+                !path.exists(),
+                "failed path serialization created partial delegation state at {}",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn redacts_structured_and_inline_secrets() {
         let value = redact_value(json!({
@@ -2464,6 +3640,149 @@ mod tests {
         }));
         assert_eq!(value["api_key"], "[REDACTED]");
         assert!(!value["output"].as_str().unwrap().contains("sk-123456789"));
+    }
+
+    #[tokio::test]
+    async fn executor_results_and_audit_use_encoded_control_safe_projection() {
+        let root = tempfile::tempdir().expect("root");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("encoded-tool-audit");
+        let secret = "provider/env-secret".to_string();
+        let mut executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_session_store(store.clone())
+            .with_sensitive_values([secret.clone(), "read-only".to_string()])
+            .with_auto_approve(true);
+
+        let result = executor
+            .execute(
+                ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
+                    tool_name: "ask_question".to_string(),
+                    arguments: json!({
+                        "question": format!(
+                            "{secret} provider\\/env-secret cHJvdmlkZXIvZW52LXNlY3JldA== \u{1b}[2J"
+                        ),
+                        "options": ["provider%2Fenv-secret\r"],
+                        "answer": "cHJvdmlkZXIvZW52LXNlY3JldA==\t",
+                    }),
+                    session_id: Some(session.id.clone()),
+                    project_root: Some(root.path().to_path_buf()),
+                },
+                Some(&session.id),
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.error);
+        let persisted = store.load(&session.id).expect("tool audit session");
+        let public_surface = serde_json::to_string(&json!({
+            "result": result,
+            "session": persisted,
+        }))
+        .expect("serialize tool public surfaces");
+        for forbidden in [
+            secret.as_str(),
+            r"provider\/env-secret",
+            "provider%2Fenv-secret",
+            "cHJvdmlkZXIvZW52LXNlY3JldA==",
+            "read-only",
+            r"\u001b",
+        ] {
+            assert!(
+                !public_surface.contains(forbidden),
+                "tool public surface contained {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_audit_projects_every_auxiliary_metadata_field() {
+        const SECRET: &str = "audit/metadata-secret";
+        const JSON_SECRET: &str = r"audit\/metadata-secret";
+        const PERCENT_SECRET: &str = "audit%2Fmetadata-secret";
+        const BASE64_SECRET: &str = "YXVkaXQvbWV0YWRhdGEtc2VjcmV0";
+        let root = tempfile::tempdir().expect("root");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("auxiliary-metadata-audit");
+        let environment = HashMap::from([(
+            format!("ENV_{SECRET}\u{1b}[2J"),
+            "non-sensitive-value".to_string(),
+        )]);
+        let executor = ToolExecutor::new(
+            root.path().to_path_buf(),
+            ExecutionConfig {
+                provider: SECRET.to_string(),
+                default_profile: JSON_SECRET.to_string(),
+                boundaries: crate::config::BoundaryConfig {
+                    allow_write: vec![BASE64_SECRET.to_string()],
+                    network: PERCENT_SECRET.to_string(),
+                },
+                ..ExecutionConfig::default()
+            },
+        )
+        .with_session_store(store.clone())
+        .with_environment(&environment)
+        .with_sensitive_values([SECRET.to_string()]);
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({"command": "true"}),
+            session_id: Some(session.id.clone()),
+            project_root: Some(root.path().to_path_buf()),
+        };
+        let result = ToolResult {
+            invocation_id: call.invocation_id,
+            tool_name: call.tool_name.clone(),
+            success: false,
+            output: Some(json!({
+                "provider": PERCENT_SECRET,
+                "sandbox_profile": JSON_SECRET,
+                "bwrap_args": [format!("{BASE64_SECRET}\u{1b}[2J")],
+                "boundaries": {
+                    "allow_write": [SECRET],
+                    "network": PERCENT_SECRET,
+                },
+                "arbitrary_metadata": format!("{SECRET}\u{202e}"),
+            })),
+            error: Some(format!("{JSON_SECRET}\u{1b}[2J")),
+            duration_seconds: 0.0,
+            approval_granted: true,
+            approval_source: Some(SECRET.to_string()),
+        };
+        let approval = ApprovalDecision {
+            granted: true,
+            source: PERCENT_SECRET.to_string(),
+            note: Some(format!("{BASE64_SECRET}\u{202e}")),
+        };
+
+        executor
+            .record(
+                &call,
+                &result,
+                &approval,
+                Some(&session.id),
+                Some(Path::new("/tmp/audit/metadata-secret")),
+                PermissionLevel::Destructive,
+                ToolRisk::Destructive,
+                Some(format!("plan-{SECRET}\u{1b}")),
+            )
+            .expect("record redacted audit metadata");
+
+        let persisted = store.load(&session.id).expect("persisted audit");
+        let public = serde_json::to_string(&persisted).expect("serialize audit");
+        for forbidden in [
+            SECRET,
+            JSON_SECRET,
+            PERCENT_SECRET,
+            BASE64_SECRET,
+            r"\u001b",
+            r"\u202e",
+        ] {
+            assert!(
+                !public.contains(forbidden),
+                "audit contained {forbidden:?}: {public}"
+            );
+        }
+        assert!(public.contains("[REDACTED]"), "{public}");
     }
 
     #[tokio::test]
@@ -2526,6 +3845,20 @@ mod tests {
 
     #[test]
     fn provider_redaction_is_symmetric_across_percent_decoding_stages() {
+        assert_eq!(base64_secret_variant(b"f", false), "Zg==");
+        assert_eq!(base64_secret_variant(b"fo", false), "Zm8=");
+        assert_eq!(base64_secret_variant(b"foo", false), "Zm9v");
+        assert_eq!(
+            redact_text_with_encoded_sensitive_values("request-Zm9v", ["foo".to_string()]),
+            "request-[REDACTED]"
+        );
+        assert_eq!(
+            redact_text_with_encoded_sensitive_values(
+                r#"before-active\/credential-after"#,
+                ["active/credential".to_string()]
+            ),
+            "before-[REDACTED]-after"
+        );
         for (text, secret) in [
             ("model-prefix-env%2Fonly-suffix", "env/only"),
             ("model-prefix-env/only-suffix", "env%2Fonly"),
@@ -2550,6 +3883,25 @@ mod tests {
             ),
             "[REDACTED]"
         );
+
+        let secret = "provider-\u{0fff}-secret";
+        let standard = base64_secret_variant(secret.as_bytes(), false);
+        let url_safe = base64_secret_variant(secret.as_bytes(), true);
+        assert_ne!(standard, url_safe);
+        for encoded in [
+            standard.clone(),
+            standard.trim_end_matches('=').to_string(),
+            url_safe.clone(),
+            url_safe.trim_end_matches('=').to_string(),
+        ] {
+            assert_eq!(
+                redact_text_with_encoded_sensitive_values(
+                    &format!("before-{encoded}-after"),
+                    [secret.to_string()]
+                ),
+                "before-[REDACTED]-after"
+            );
+        }
     }
 
     #[test]
@@ -2588,7 +3940,7 @@ mod tests {
         .expect_err("invalid nested arguments");
         assert!(error.contains("server::nested"));
         assert!(error.contains("/request/count") || error.contains("minimum"));
-        assert!(error.contains("extra") || error.contains("Additional properties"));
+        assert!(error.contains("additionalProperties"));
 
         let internal_hook_call = ToolCall {
             invocation_id: crate::tools::ToolInvocationId::new(),
@@ -2634,6 +3986,47 @@ mod tests {
         assert!(error.contains("invalid arguments for tool 'read_file'"));
         assert!(error.contains("max_bytes"));
         assert_eq!(result.approval_source.as_deref(), Some("policy"));
+    }
+
+    #[tokio::test]
+    async fn executor_schema_diagnostics_never_reflect_boundary_straddling_credentials() {
+        let root = tempfile::tempdir().expect("root");
+        let store = SessionStore::new(root.path());
+        let session = store.create_session_with_id("schema-diagnostic-redaction");
+        let secret = format!("schema/boundary/{}", "s".repeat(512));
+        let environment = HashMap::from([("DEPLOY_TOKEN".to_string(), secret.clone())]);
+        let mut executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_session_store(store.clone())
+            .with_environment(&environment);
+
+        let result = executor
+            .execute(
+                ToolCall {
+                    invocation_id: crate::tools::ToolInvocationId::new(),
+                    tool_name: "read_file".to_string(),
+                    arguments: json!({
+                        "path": format!("{}{}-tail", "p".repeat(8_000), secret)
+                    }),
+                    session_id: Some(session.id.clone()),
+                    project_root: Some(root.path().to_path_buf()),
+                },
+                Some(&session.id),
+            )
+            .await;
+
+        assert!(!result.success);
+        let persisted = store.load(&session.id).expect("schema audit session");
+        let public = serde_json::to_string(&json!({
+            "result": result,
+            "session": persisted,
+        }))
+        .expect("serialize public schema surfaces");
+        assert!(public.contains("/path"), "{public}");
+        assert!(public.contains("maxLength"), "{public}");
+        assert!(
+            !public.contains(&secret[..128]),
+            "credential prefix survived schema diagnostic truncation: {public}"
+        );
     }
 
     #[tokio::test]
@@ -2718,7 +4111,7 @@ mod tests {
         let chunks: &[&[u8]] = &[
             b"before provider-cre",
             b"dential-without-prefix and prefix_sk-123",
-            b"456789 after ",
+            b"456789 after and encoded cHJvdmlkZXItY3JlZGVudGlhbC13aXRob3V0LXByZWZpeA== \x1b[31m ",
             &[0xF0, 0x9F],
             &[0x98, 0x80],
         ];
@@ -2749,12 +4142,95 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "before [REDACTED] and prefix_[REDACTED] after {}",
+                "before [REDACTED] and prefix_[REDACTED] after and encoded [REDACTED] �[31m {}",
                 '\u{1f600}'
             )
         );
         assert!(!output.contains("provider-credential-without-prefix"));
+        assert!(!output.contains("cHJvdmlkZXItY3JlZGVudGlhbC13aXRob3V0LXByZWZpeA=="));
+        assert!(!output.contains('\u{1b}'));
         assert!(!output.contains("sk-123456789"));
+    }
+
+    #[test]
+    fn terminal_stream_redaction_hides_percent_encoded_secrets_across_chunks() {
+        let root = tempfile::tempdir().expect("root");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let callback: core::TerminalOutputCallback = Arc::new(move |event| {
+            captured.lock().unwrap().push(event);
+        });
+        let secret = "A ".repeat(100);
+        let percent_secret = "A%20".repeat(100);
+        let nested_secret = "A%2520".repeat(100);
+        let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_sensitive_values([secret.clone()])
+            .with_terminal_output_callback(callback);
+        let redacted = executor
+            .redacted_terminal_output_callback()
+            .expect("redacted callback");
+
+        let input = format!("before {percent_secret} middle {nested_secret} after url=a%20b");
+        for chunk in input.as_bytes().chunks(137) {
+            redacted(core::TerminalOutputEvent {
+                tool_name: "run_terminal".to_string(),
+                stream: core::TerminalOutputStream::Stdout,
+                chunk: chunk.to_vec(),
+                background_task_id: None,
+                eof: false,
+            });
+        }
+        redacted(core::TerminalOutputEvent {
+            tool_name: "run_terminal".to_string(),
+            stream: core::TerminalOutputStream::Stdout,
+            chunk: Vec::new(),
+            background_task_id: None,
+            eof: true,
+        });
+
+        let output = events
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|event| event.chunk.iter().copied())
+            .collect::<Vec<_>>();
+        let output = String::from_utf8(output).expect("redacted stream is valid UTF-8");
+        assert_eq!(
+            output,
+            "before [REDACTED] middle [REDACTED] after url=a%20b"
+        );
+        assert!(!output.contains(&secret));
+        assert!(!output.contains(&percent_secret));
+        assert!(!output.contains(&nested_secret));
+    }
+
+    #[test]
+    fn terminal_stream_redaction_decodes_percent_stages_symmetrically() {
+        let secret = "credential%2Fmarker";
+        let secrets = normalized_encoded_sensitive_values([secret.to_string()]);
+        let mut redactor = TerminalStreamRedactor::new(&secrets);
+        let input = format!(
+            "raw {secret}{} decoded credential/marker{} safe url=a%20b",
+            "x".repeat(64),
+            "y".repeat(64),
+        );
+        let mut output = Vec::new();
+        for chunk in input.as_bytes().chunks(7) {
+            output.extend(redactor.push(chunk, false));
+        }
+        output.extend(redactor.push(&[], true));
+
+        let output = String::from_utf8(output).expect("redacted stream is valid UTF-8");
+        assert_eq!(
+            output,
+            format!(
+                "raw [REDACTED]{} decoded [REDACTED]{} safe url=a%20b",
+                "x".repeat(64),
+                "y".repeat(64),
+            )
+        );
+        assert!(!output.contains(secret));
+        assert!(!output.contains("credential/marker"));
     }
 
     #[tokio::test]

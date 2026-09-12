@@ -1,6 +1,6 @@
 # T022: Provider-Neutral LLM Contract and Adapter Conformance
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
@@ -178,8 +178,10 @@ change during implementation, but the ownership and validation boundaries are fi
   explicit success/error classification.
 - `CompletedTurn` contains normalized content, terminal outcome, validated tool calls,
   a safe normalized finish classification, and optional opaque active-turn state.
-- `LlmDelta` contains only sanitized model text and tool-call assembly deltas. Agent,
-  workload, approval, and UI lifecycle events remain outside the provider stream type.
+- `LlmDelta` is private incremental adapter assembly data and is never directly
+  observable outside `crate::llm`. Agent, workload, approval, and UI lifecycle events
+  remain outside the provider stream type; their bounded redacted projection is derived
+  only from a validated completed response.
 - `LlmError` is typed and safe to display. It contains provider identity, transport,
   model context after redaction, error class, optional HTTP status, bounded safe
   request ID, retry disposition, and operator guidance. It never contains a raw body.
@@ -566,102 +568,102 @@ reconciliation is safer and auditable.
 
 ### Neutral Contract
 
-- [ ] Every production and Mock provider implements one typed `LlmProvider` contract;
+- [x] Every production and Mock provider implements one typed `LlmProvider` contract;
   callers do not branch on provider names or wire formats.
-- [ ] Core messages, tools, tool calls, tool results, terminal outcomes, stream deltas,
+- [x] Core messages, tools, tool calls, tool results, terminal outcomes, stream deltas,
   capabilities, and errors are typed. Raw JSON is limited to validated schemas,
   arguments, results, and private adapter payloads.
-- [ ] `GenerationOptions` represents provider-default versus explicit finite
+- [x] `GenerationOptions` represents provider-default versus explicit finite
   temperature and reasoning. Every explicit value is serialized or rejected before
   I/O, and no current caller relies on a silently discarded positional temperature.
-- [ ] One provider registry owns supported names, display metadata, defaults,
+- [x] One provider registry owns supported names, display metadata, defaults,
   credentials, config resolution, capabilities, and constructors.
-- [ ] Complete and streaming entry points share request validation and return equivalent
+- [x] Complete and streaming entry points share request validation and return equivalent
   normalized outcomes.
 
 ### Tool Continuation
 
-- [ ] Credential-free two-request fixtures prove tool call, exact correlated result,
+- [x] Credential-free two-request fixtures prove tool call, exact correlated result,
   and final answer for Responses, Chat Completions, Anthropic, Gemini, and Mock.
-- [ ] Parallel tool fixtures prove every result is matched once and missing, duplicate,
+- [x] Parallel tool fixtures prove every result is matched once and missing, duplicate,
   foreign, replayed, or cross-session call IDs fail before network I/O.
-- [ ] Every tool call has a persisted nib `ToolInvocationId` and a separate in-memory
+- [x] Every tool call has a persisted nib `ToolInvocationId` and a separate in-memory
   provider correlation handle; raw native IDs never become durable workload identity.
-- [ ] Anthropic emits `tool_result` with the exact `tool_use_id`; Gemini emits structured
+- [x] Anthropic emits `tool_result` with the exact `tool_use_id`; Gemini emits structured
   `functionResponse`; Chat emits `tool` messages with `tool_call_id`; Responses emits
   `function_call_output` with `call_id`.
-- [ ] Gemini fixtures without native call IDs use adapter-generated turn-bound handles
+- [x] Gemini fixtures without native call IDs use adapter-generated turn-bound handles
   and reject mismatched count, order, name, or required signature metadata.
-- [ ] Provider call IDs, opaque continuation, reasoning items, and thought signatures
+- [x] Provider call IDs, opaque continuation, reasoning items, and thought signatures
   never appear in public streams, debug output, logs, persisted sessions, CLI/TUI, or
   MCP responses.
-- [ ] Kill/restart after durable tool completion reconciles terminally and proves the
+- [x] Kill/restart after durable tool completion reconciles terminally and proves the
   tool is not executed twice when opaque turn state is lost.
 
 ### Errors and Terminal Authority
 
-- [ ] Complete and stream fixtures for every network provider prove HTTP 4xx/5xx and
+- [x] Complete and stream fixtures for every network provider prove HTTP 4xx/5xx and
   documented in-band errors where applicable return bounded typed safe errors without
   provider body text.
-- [ ] Error fixtures include raw, URL-encoded, JSON-escaped, and control-character
+- [x] Error fixtures include raw, URL-encoded, JSON-escaped, and control-character
   remote-only sentinel echoes of prompts, active and inactive credentials, and values
   resembling provider/model/endpoint labels; none reaches output or persistence.
   Separately reconstructed local provider/transport/status/model/path context remains
   present only after bounding, escaping, and redaction.
-- [ ] OpenRouter HTTP-200 completion and SSE errors with `finish_reason = "error"` fail
+- [x] OpenRouter HTTP-200 completion and SSE errors with `finish_reason = "error"` fail
   and cannot become a completed workload outcome.
-- [ ] Missing terminal markers, truncation, content/safety blocks, refusals, inconsistent
+- [x] Missing terminal markers, truncation, content/safety blocks, refusals, inconsistent
   tool terminal states, malformed tool arguments, and premature EOF are exhaustively
   tested for every applicable provider and both request modes.
-- [ ] Only a validated completed private turn can reach ToolExecutor. Partial/public
-  stream events and refused, failed, incomplete, or ambiguous turns cannot authorize a
-  tool.
+- [x] Only a validated completed private turn can reach ToolExecutor. Private partial
+  provider deltas and refused, failed, incomplete, or ambiguous turns cannot authorize
+  a tool or reach a public observer.
 
 ### Configuration, Capabilities, and Retry
 
-- [ ] Legacy TOML continues to parse and retains effective provider/API/reasoning
+- [x] Legacy TOML continues to parse and retains effective provider/API/reasoning
   defaults; every configured field is then consumed or rejected with an actionable
   error instead of remaining a silent no-op.
-- [ ] Anthropic and Gemini custom `base_url` values reach their adapters through public
+- [x] Anthropic and Gemini custom `base_url` values reach their adapters through public
   configuration and pass the same endpoint-security checks as compatible providers.
-- [ ] Unsupported provider/request option combinations, malformed messages/tools,
+- [x] Unsupported provider/request option combinations, malformed messages/tools,
   invalid schemas, and non-finite generation values fail identically in complete and
   stream before network I/O.
-- [ ] New canonical OpenAI still defaults to Responses; legacy/custom OpenAI, Grok,
+- [x] New canonical OpenAI still defaults to Responses; legacy/custom OpenAI, Grok,
   OpenRouter, and Meta retain only their explicitly documented T021 transport defaults.
-- [ ] Persisted provider IDs remain stable, and existing explicit Responses selections
+- [x] Persisted provider IDs remain stable, and existing explicit Responses selections
   are neither rewritten to Chat nor advertised as a provider default without evidence.
-- [ ] The tools-plus-reasoning matrix proves canonical OpenAI avoids the reported Chat
+- [x] The tools-plus-reasoning matrix proves canonical OpenAI avoids the reported Chat
   tuple, native providers never receive OpenAI reasoning fields, Mock does not ignore
   unsupported reasoning, and an explicit model-dependent Chat rejection is safe,
   actionable, non-retried, and never semantically downgraded.
-- [ ] Retry fixtures cover each provider's retryable statuses, bounded `Retry-After`,
+- [x] Retry fixtures cover each provider's retryable statuses, bounded `Retry-After`,
   the global three-attempt limit, cancellation, receiver drop, 429-only credential
   rotation, Anthropic 529, and proof that retried request semantics remain identical.
-- [ ] `nib doctor` reports resolved provider implementation, transport, endpoint path,
+- [x] `nib doctor` reports resolved provider implementation, transport, endpoint path,
   structural capabilities, reasoning mode, and compatibility warnings without a paid
   request or sensitive value.
 
 ### Provider Conformance and Runtime
 
-- [ ] The same conformance harness runs against OpenAI, xAI/Grok, OpenRouter, Meta,
+- [x] The same conformance harness runs against OpenAI, xAI/Grok, OpenRouter, Meta,
   Anthropic, Gemini, and Mock for complete/stream parity, validation, errors, terminal
   states, limits, cancellation, and tool correlation.
-- [ ] Each advertised default endpoint and transport has dated authoritative evidence
+- [x] Each advertised default endpoint and transport has dated authoritative evidence
   and a credential-free request/response fixture; unverifiable defaults fail readiness
   instead of being advertised.
-- [ ] Planner and full agent-loop fixtures complete a structured plan and one approved
+- [x] Planner and full agent-loop fixtures complete a structured plan and one approved
   tool round trip through every implemented wire dialect while preserving truthful
   session and workload reconciliation.
-- [ ] CLI, TUI, MCP, delegated runs, durable runs, and context compression handle typed
+- [x] CLI, TUI, MCP, delegated runs, durable runs, and context compression handle typed
   provider failures without leaking private provider state or leaving work running.
-- [ ] Architecture, Rust conventions, user guide, provider inventory, T021 relationship,
+- [x] Architecture, Rust conventions, user guide, provider inventory, T021 relationship,
   and config/doctor documentation describe the delivered behavior without overstating
   model-specific compatibility.
-- [ ] T021 exact-revision evidence either predates all T022 runtime changes as the
+- [x] T021 exact-revision evidence either predates all T022 runtime changes as the
   recorded baseline or is rerun on the final T022 revision according to the sequencing
   rule above; stale binary evidence cannot close either spec.
-- [ ] Independent spec-compliance and technical/security reviews find no unresolved
+- [x] Independent spec-compliance and technical/security reviews find no unresolved
   blocker, and all validation gates pass on the exact implementation revision.
 
 ## Affected Areas
@@ -722,11 +724,305 @@ provider/model/API/session/run mismatches still fail before I/O. The exact local
 `task check` gate passes; exact-revision hosted matrix evidence and the broader
 unchecked conformance criteria remain open.
 
+## Implementation Progress (2026-08-21)
+
+Shipped on this host, still insufficient to move the spec to done:
+
+- One canonical agent-facing `LlmProvider` port (`LlmClient` remains its compatibility
+  re-export), `LlmError`/`LlmErrorClass`/`RetryDisposition`,
+  opaque `ProviderContinuation`, and a registry/factory for OpenAI, xAI/Grok,
+  OpenRouter, Meta, Anthropic, Gemini, and Mock.
+- Per-adapter complete/stream fixtures for HTTP errors, redaction, continuation
+  binding, and OpenAI-compatible complete/stream class equality.
+- Typed `LlmRequest` messages (`LlmMessage` system/user/assistant) and
+  `ToolDefinition` (validated name, description, JSON schema). JSON remains only for
+  schemas, tool arguments, and private adapter payloads on the request boundary.
+- `GenerationOptions` with optional finite `0..=2` temperature and
+  provider-default / disabled / explicit reasoning. Planner, agent, and compression
+  callers use provider default. Chat/Anthropic/Gemini omit default temperature and
+  serialize explicit values; Responses and Mock reject explicit temperature before
+  I/O; Anthropic, Gemini, and Mock reject non-default reasoning before I/O.
+- Shared `src/llm/conformance.rs` fixtures for temperature/reasoning validation,
+  OpenAI-compatible plus Anthropic/Gemini complete/stream HTTP 401 class equality,
+  native/Mock unsupported-reasoning complete/stream identity, and Mock complete/stream
+  tool-outcome parity.
+
+Live-harness typed-error reconciliation on 2026-08-23:
+
+- T023's production-path scenarios now retain `LlmError` through complete, initial
+  stream, stream event, stream finish, and native continuation calls. Qualification
+  classification reads only `LlmErrorClass`, phase, and bounded HTTP status metadata;
+  it no longer stringifies and re-parses the compatibility message.
+- `unsupported_transport` is limited to a typed HTTP `UnsupportedRequest` from the
+  complete-text basic transport probe. Local request rejection, tool-scenario
+  rejection, and provider prose cannot select it.
+- This closes only the live-harness string-parsing drift. The shared provider
+  conformance, usage metadata, broader terminal/error matrices, and exact-revision
+  gates below remain open.
+
+Documented request-ID boundary evidence on 2026-08-23:
+
+- [OpenAI's API debugging reference](https://platform.openai.com/docs/api-reference/debugging-requests)
+  documents `x-request-id`; canonical `openai` Chat Completions and Responses now
+  capture only that response header. xAI/Grok, OpenRouter, and Meta do not inherit it
+  from their shared codecs.
+- [Anthropic's error reference](https://platform.claude.com/docs/en/api/errors)
+  documents `request-id`; the native Anthropic Messages adapter captures only that
+  response header. Gemini captures neither provider's header.
+- Both complete and stream HTTP rejection paths snapshot the provider-allowlisted
+  header before bounded body consumption, cap the snapshot at 128 bytes, and then pass
+  it through `LlmError::with_request_id` for strict syntax validation and sensitive
+  value redaction. Credential-free fixtures cover valid, oversized, malformed,
+  sensitive, wrong-header, and cross-provider cases.
+
+Registry/diagnostics reconciliation on 2026-08-23:
+
+- The central provider registry now owns one immutable structural capability record
+  per implemented transport: complete, stream, function tools, typed tool
+  continuation, parallel-tool transport, and provider-default-only versus
+  configurable-effort reasoning.
+- Factory resolution selects that registry record and `ProviderDiagnostics`,
+  `nib config show`, and `nib doctor` expose the registered implementation, selected
+  transport, and deterministic capability summary. The output documents adapter
+  structure only; it does not probe or assert live model compatibility.
+- Mock now truthfully advertises function-tool emission, typed continuation, and
+  parallel-tool transport. Complete and default-stream two-request fixtures return two
+  durable, distinct `ToolInvocationId` values, record results in reverse order, and
+  prove exact name/result/classification correlation in the final turn.
+- Mock continuation state retains a separate private in-memory correlation handle and
+  remains scope/provider/model/transport bound. Missing, duplicate, foreign, replayed,
+  cross-scope, and foreign-provider result fixtures fail before the Mock execution step
+  advances; `ProviderContinuation` ownership prevents a consumed continuation from
+  being submitted twice.
+- Native-provider rejection of `api`/`reasoning_effort` and the live qualification
+  harness's default transport enumeration now consume registry capability metadata
+  instead of maintaining separate supported-transport/provider branches.
+- Deterministic registry, factory, doctor-unit, and doctor-CLI assertions cover the
+  matrix without credentials or provider calls. This bounded slice does not yet add
+  the remaining terminal, endpoint-shape, or in-band-error capabilities required by
+  the full structural-capability acceptance criterion.
+
+Retry-controller reconciliation on 2026-08-23:
+
+- Each transport registry capability now owns its exact retryable HTTP statuses,
+  `Retry-After`-eligible statuses, and credential-rotation statuses. Network transports
+  share `408/425/429/500/502/503/504`; Anthropic alone adds `529`; only
+  `429/503` plus Anthropic `529` accept a hint; only `429` rotates credentials. Mock
+  advertises no transport retry.
+- The shared executor enforces exactly three global attempts and returns bounded typed
+  metadata containing actual attempt count, whether a different credential was used
+  after a `429`, whether retry was exhausted, and the validated final hint. The same
+  metadata reaches successful `LlmResponse` values, complete failures, private stream
+  completions, and post-handshake stream failures. Local/Mock responses explicitly
+  report zero network attempts.
+- A terminal transient HTTP error now reports `exhausted` or
+  `exhausted after credential rotation` from actual execution rather than inferring
+  retry state from status alone. A final valid seconds or HTTP-date hint is capped at
+  30 seconds and retained; invalid, negative, past, or larger values are omitted while
+  deterministic bounded backoff remains in force.
+- Credential-free controller fixtures cover the exact global budget, `429`-only
+  rotation, authentication/semantic no-retry, seconds/date hint validation, and
+  cancellation by abort or future drop during backoff. Local Chat, Responses,
+  Anthropic, and Gemini continuation fixtures compare byte-identical retry method,
+  path, provider-significant headers, and body including typed tool results; complete
+  and stream fixtures cover final exhaustion and post-handshake attempt propagation.
+  The broader per-provider terminal/error and exact-revision gates remain open.
+
+Provider-neutral usage reconciliation on 2026-08-23:
+
+- `LlmResponse` now carries optional `LlmUsage` with normalized input, output, and
+  total token counts plus optional cached-input and reasoning-output subsets. Counts
+  are non-negative integers bounded to 1,000,000,000 tokens, the subsets cannot exceed
+  their parent count, and normalized total must equal input plus output. The fixed
+  public JSON shape validates on deserialize, and checked multi-request aggregation
+  fails on overflow; it retains an optional breakdown only when both inputs supplied
+  that breakdown rather than guessing an absent value is zero.
+- Chat Completions parses complete usage and optional cached/reasoning details.
+  Canonical OpenAI streaming alone sends documented
+  `stream_options.include_usage = true`; xAI/Grok, OpenRouter, Meta, and arbitrary
+  compatible gateways receive no unevidenced option. The canonical reader emits its
+  one public terminal event, then privately validates an optional usage-only chunk and
+  the `[DONE]` marker without emitting a post-terminal public event. A valid stream
+  without a usage chunk still completes, while malformed, fractional, negative,
+  inconsistent, duplicate, or oversized returned usage fails the private completion.
+- Responses complete and stream paths normalize usage from the completed response
+  envelope, including cached input and reasoning output details. Anthropic normalizes
+  effective input as uncached input plus cache-creation plus cache-read counts; only
+  cache-read tokens are labeled as the cached subset, while cache creation remains
+  input rather than being mislabeled as a cache hit. Its streamed `message_start`
+  baseline and cumulative `message_delta` output/thinking counts must not decrease.
+- Gemini normalizes output as `candidatesTokenCount + thoughtsTokenCount` because its
+  documented total includes both. `cachedContentTokenCount` remains an input subset
+  and `thoughtsTokenCount` a reasoning-output subset. Mock explicitly returns no usage.
+  Credential-free complete and stream fixtures cover each provider plus malformed,
+  fractional, negative, inconsistent, decreasing, arithmetic-overflow, and bounded
+  overflow cases. Usage absence never invalidates an otherwise valid completion.
+- Wire mappings follow the dated official references for
+  [Chat streaming usage](https://developers.openai.com/api/reference/resources/chat),
+  [Responses usage](https://developers.openai.com/api/reference/resources/responses/methods/retrieve),
+  [Anthropic Messages usage](https://platform.claude.com/docs/en/api/messages/create),
+  [Anthropic cumulative streaming usage](https://platform.claude.com/docs/en/build-with-claude/streaming),
+  and [Gemini `UsageMetadata`](https://ai.google.dev/api/generate-content).
+  The exact-revision gate remains open.
+
+Endpoint and default-transport provenance reverified on 2026-08-26:
+
+- Canonical OpenAI uses `https://api.openai.com/v1` and new authenticated entries select
+  Responses. The official [create-response reference](https://developers.openai.com/api/reference/resources/responses/methods/create)
+  documents `POST /responses`, while current
+  [model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+  recommends Responses for reasoning, tool-calling, and multi-turn work.
+- Anthropic uses `https://api.anthropic.com` and Messages. Its official
+  [API overview](https://platform.claude.com/docs/en/api/overview) documents the base
+  service and `POST /v1/messages`.
+- Gemini uses `https://generativelanguage.googleapis.com/v1beta` and
+  GenerateContent. The official
+  [GenerateContent reference](https://ai.google.dev/api/generate-content) documents the
+  exact `POST .../v1beta/models/{model}:generateContent` endpoint.
+- xAI uses `https://api.x.ai/v1`; its official
+  [Chat Completions reference](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions)
+  documents `POST /v1/chat/completions`. That page now labels Chat legacy and points new
+  features toward Responses. nib retains T021's explicit compatibility default for
+  existing/legacy entries and never claims it is xAI's current recommendation; an
+  operator may select Responses explicitly.
+- OpenRouter uses `https://openrouter.ai/api/v1` and Chat Completions. The official
+  [quickstart](https://openrouter.ai/docs/quickstart) documents both the base URL and
+  `POST /api/v1/chat/completions`.
+- Meta remains deliberately not ready by default: the registry advertises no endpoint,
+  factory/doctor fail before I/O without an explicit compatible `base_url`, and every
+  fixture supplies a local endpoint. Mock is local and performs no network I/O.
+- The comments adjacent to the shared conformance matrix record the same dated primary
+  references. Credential-free fixtures assert every exact request path for complete and
+  stream, and the runtime E2E suite exercises structured planning plus approved tool
+  continuation through Chat, Responses, Anthropic Messages, and Gemini GenerateContent.
+
+Shared conformance and terminal-authority reconciliation on 2026-08-25:
+
+- The canonical provider-neutral Rust contract is now named `LlmProvider`; `LlmClient`
+  remains a compatibility re-export so existing callers keep one trait object without
+  provider-specific branches. A registry-equality fixture fails if the shared matrix
+  omits or duplicates any advertised provider/transport pair. The current matrix
+  covers all eleven registered pairs: Chat Completions and Responses for OpenAI,
+  Grok, OpenRouter, and Meta; Anthropic Messages; Gemini GenerateContent; and Mock.
+- Credential-free local HTTP fixtures apply the same complete/stream assertions to
+  successful terminal turns, generic `400/401/403`, every registry-declared transient
+  status (`408/425/429/500/502/503/504` and Anthropic `529`), documented in-band
+  errors, missing terminals and premature EOF, truncation, refusal/safety blocks,
+  unknown terminal reasons, inconsistent tool terminal state, malformed tool
+  arguments, receiver drop, and bounded response/stream bytes and items. OpenRouter's
+  HTTP-200 and SSE `finish_reason = "error"` forms are explicit fixtures. Error
+  fixtures include raw, percent-encoded, JSON-escaped, control-bearing, and Base64
+  prompt/active-key/inactive-key/label-like sentinels while separately asserting
+  bounded local provider, transport, numeric status, request path, attempts, and the
+  provider-allowlisted request ID. Configured-sensitive-value redaction generates
+  standard and URL-safe padded/unpadded Base64 variants even for short credentials,
+  so a provider-controlled request ID cannot expose a reversible short key.
+- Complete output arrays/tool calls/content blocks are capped at 256 items; stream
+  event count is capped at 65,536 in addition to the existing per-event and aggregate
+  byte budgets. A limit failure cannot yield a private completion or continuation.
+  Stream semantic terminal failures now retain the same typed class as their complete
+  counterpart while keeping the path-specific `stream` versus `terminal_validation`
+  phase.
+- Continuation retry and live qualification fixtures now reuse the exact original
+  first-turn messages and tool declarations, matching the production agent loop, and
+  assert native Chat/Responses/Anthropic/Gemini role and item ordering. Gemini's
+  idless parallel continuation fixture proves exact private thought-signature replay,
+  deterministic result order, and fail-closed count/order/invalid-signature handling.
+- Mock configuration now rejects unused `api_key`, `api_keys`, and `base_url` at both
+  configuration validation and factory resolution; `model` and `models` remain the
+  consumed local catalog fields. `task test:llm-conformance` is the canonical focused,
+  credential-free gate for this matrix.
+
+Provider-neutral terminal and delta reconciliation on 2026-08-26:
+
+- `LlmResponse.finish_reason` is now the finite `LlmFinishReason` classification rather
+  than a provider-native string. Validated successful turns expose only `complete`,
+  `tool_calls`, or `refusal`; truncation, filtering, safety failures, malformed values,
+  and unknown native reasons remain typed errors and cannot inhabit a successful
+  response. Chat Completions, Responses, Anthropic, Gemini, and Mock complete/stream
+  fixtures compare the same normalized value.
+- Provider adapters assemble `LlmStreamEvent` values incrementally inside `crate::llm`,
+  but `LlmStream` no longer exports its raw receiver. Application callers can only
+  `finish()` the stream; the agent loop derives bounded, encoded-sensitive-value and
+  control-safe `StreamEvent` values from that validated response and deliberately does
+  not translate a provider terminal into a run-level `End`. The private completed
+  response remains the sole tool-authorization authority.
+- The shared terminal matrix accepts a successful `Refused` turn only for its explicit
+  refusal/safety fixture. Truncation, unknown terminals, inconsistent tool terminals,
+  malformed arguments, missing terminals, and in-band errors must return typed errors
+  with complete/stream class parity. This bounded reconciliation does not close any
+  remaining acceptance checkbox or exact-revision gate.
+
+Combined local conformance evidence on 2026-08-26:
+
+- `task test:llm-conformance` passed its complete/stream provider matrix and focused
+  factory/configuration fixtures, including the reviewed-client override boundary.
+- `task test:runtime-e2e` passed 16/16. Its process-kill fixture proves a durable tool
+  result is not replayed after restart. If the provider continuation was interrupted,
+  recovery persists a bounded structured assistant-role boundary containing only
+  `provider_continuation_interrupted`; the following user turn remains role-valid and
+  starts a fresh provider request without reconstructing opaque continuation state.
+  Recovery runs before every cancellation branch, including an already-cancelled
+  restart, so a later generic cancellation reconciliation cannot hide the open
+  continuation. If that recovery update itself fails after exact-run admission, the
+  failure enters the common terminal path and persists one matching `local_error`
+  terminal without reaching cancellation or provider execution.
+- `LlmRequestScope` has a value-redacted `Debug` implementation. Formatting either the
+  scope or its enclosing `LlmRequest` exposes only scope presence and cannot emit the
+  private session/run identity; sentinel tests cover both public diagnostic surfaces.
+- `task check`, `task check:all-targets`, the full instrumented `task coverage` suite,
+  and the locked optimized `task build` passed on Linux. Runtime line coverage is
+  85.72% (82,705 / 96,482). T021's exact-binary localhost harness also passed, but its
+  dirty-worktree evidence is explicitly not acceptance-eligible.
+- A fresh spec-compliance review passed after the endpoint/default-transport provenance
+  and architecture/user documentation were reconciled. The fresh technical/security
+  review found one short-credential Base64 request-ID redaction gap; the shared encoded
+  redactor and typed request-ID regression were corrected, `task check` passed again,
+  and the same reviewer returned PASS on re-review.
+
+No paid live-provider, native macOS/Windows, or clean exact-revision evidence is created
+by these local gates, so the exact-revision criterion remains open.
+
+Historical items remaining before Done at this stage:
+
+- T021 exact-revision release-binary sequencing on a clean source revision, native
+  macOS/Windows exact-revision CI.
+
 ## External References
 
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [OpenAI Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+- [OpenAI API debugging requests](https://platform.openai.com/docs/api-reference/debugging-requests)
 - [Anthropic tool-use loop](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)
+- [Anthropic API errors](https://platform.claude.com/docs/en/api/errors)
 - [Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling)
 - [OpenRouter streaming error handling](https://openrouter.ai/docs/api/reference/streaming)
 - [OpenRouter errors and retry hints](https://openrouter.ai/docs/api/reference/errors-and-debugging)
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+T021 and T022 use this same final revision and release-binary matrix. The T021
+baseline is therefore not older than any T022 runtime change, and the documented
+sequencing rule is satisfied before either lifecycle transition.

@@ -2,7 +2,7 @@
 name = "nib"
 version = "0.1.0"
 edition = "2021"
-description = "Local-first AI coding agent with persistent plans, gated tools, and auditable execution."
+description = "Local-first AI agent with persistent plans, gated tools, and auditable execution."
 license = "MIT"
 authors = ["nib Contributors"]
 repository = "https://github.com/skills-yaml/nib"
@@ -37,10 +37,12 @@ serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "fs"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "fs", "signal"] }
 tempfile = "3.8"
 toml = "0.8"
 tracing = "0.1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 eventsource-stream = "0.2.3"
 

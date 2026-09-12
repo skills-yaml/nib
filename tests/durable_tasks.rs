@@ -263,12 +263,14 @@ fn detached_terminal_redacts_profile_and_config_secrets_before_persistence() {
     let config_secret = "provider-config-secret-value-84";
     std::fs::write(&env_path, format!("NIB_DURABLE_TOKEN={secret}\n")).expect("profile env");
     let mut config = load_nib_config_full(root.path()).expect("load config");
-    config
-        .llm
-        .providers
-        .get_mut("mock")
-        .expect("mock provider")
-        .api_key = Some(config_secret.to_string());
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-inactive-model".to_string(),
+            api_key: Some(config_secret.to_string()),
+            ..ProviderEntry::default()
+        },
+    );
     config.profiles.active = vec![ProfileConfig {
         id: "default".to_string(),
         root: PathBuf::from("."),

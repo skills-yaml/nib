@@ -1089,6 +1089,9 @@ fn persist_durable_ownership_revision(
     Ok(())
 }
 
+// Reservation persistence validates each durable identity independently; a
+// parameter bag would weaken that correspondence without simplifying callers.
+#[allow(clippy::too_many_arguments)]
 fn persist_managed_worktree_reservation(
     project_root: &Path,
     kind: ManagedWorktreeKind,
@@ -1097,6 +1100,7 @@ fn persist_managed_worktree_reservation(
     branch_reference: String,
     initial_oid: String,
     registration_snapshot: ManagedWorktreeRegistrationSnapshot,
+    planned_receipt_id: Option<&str>,
 ) -> Result<ManagedWorktreeReservation, String> {
     let ownership_directory = managed_worktree_ownership_directory(project_root)?;
     let _compaction_lock =
@@ -1143,7 +1147,9 @@ fn persist_managed_worktree_reservation(
         .map(|registrations| registrations.entries.values().copied().collect::<Vec<_>>())
         .unwrap_or_default();
     preexisting_registration_identities.sort_by_key(|identity| format!("{identity:?}"));
-    let receipt_id = uuid::Uuid::new_v4().to_string();
+    let receipt_id = planned_receipt_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let worktree_staging_path = reservation_worktree_staging_path(worktree_path, &receipt_id)?;
     let (_, branch_staging_path) =
         managed_branch_paths(&common_git_dir, &branch_reference, &receipt_id, 0)?;
@@ -1218,6 +1224,26 @@ pub(crate) fn reserve_managed_worktree_sync_controlled(
     branch: &str,
     cancellation: Option<&BlockingGitCancellation>,
 ) -> Result<ManagedWorktreeReservation, String> {
+    reserve_managed_worktree_sync_controlled_with_receipt(
+        project_root,
+        kind,
+        logical_id,
+        worktree_path,
+        branch,
+        cancellation,
+        None,
+    )
+}
+
+fn reserve_managed_worktree_sync_controlled_with_receipt(
+    project_root: &Path,
+    kind: ManagedWorktreeKind,
+    logical_id: &str,
+    worktree_path: &Path,
+    branch: &str,
+    cancellation: Option<&BlockingGitCancellation>,
+    planned_receipt_id: Option<&str>,
+) -> Result<ManagedWorktreeReservation, String> {
     let (project_root, worktree_path) =
         canonical_managed_worktree_reservation_paths(project_root, worktree_path)?;
     let head = run_git_bounded_sync_with_timeout_controlled(
@@ -1262,16 +1288,18 @@ pub(crate) fn reserve_managed_worktree_sync_controlled(
         branch_reference,
         initial_oid,
         registration_snapshot,
+        planned_receipt_id,
     )
 }
 
-async fn reserve_managed_worktree_cancellable(
+async fn reserve_managed_worktree_cancellable_with_receipt(
     project_root: &Path,
     kind: ManagedWorktreeKind,
     logical_id: &str,
     worktree_path: &Path,
     branch: &str,
     cancellation: Option<&crate::agent::CancellationSignal>,
+    planned_receipt_id: Option<&str>,
 ) -> Result<ManagedWorktreeReservation, String> {
     let (project_root, worktree_path) =
         canonical_managed_worktree_reservation_paths(project_root, worktree_path)?;
@@ -1317,6 +1345,7 @@ async fn reserve_managed_worktree_cancellable(
         branch_reference,
         initial_oid,
         registration_snapshot,
+        planned_receipt_id,
     )
 }
 
@@ -2623,12 +2652,225 @@ pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
     pub branch_oid: String,
+    project_root: PathBuf,
+    pub(crate) ownership_receipt_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct WorktreePreparationAuthority {
+    id: String,
+    path: PathBuf,
+    branch: String,
+    branch_oid: String,
+    pub(crate) ownership_receipt_id: String,
 }
 
 impl Worktree {
-    pub fn create(project_root: &Path, id: &str) -> Result<Self, String> {
-        let project_root = repository_root(project_root)?;
+    pub(crate) fn plan_preparation_authority(
+        project_root: &Path,
+        id: &str,
+    ) -> Result<WorktreePreparationAuthority, String> {
+        let project_root = repository_root_bounded_sync(project_root)?;
         let safe_id = sanitize_component(id);
+        let branch = branch_name(&safe_id);
+        let head = run_git_bounded_sync(&project_root, ["rev-parse", "--verify", "HEAD^{commit}"])?;
+        let branch_oid = parse_git_oid(&head, "plan subagent worktree base")?;
+        Ok(WorktreePreparationAuthority {
+            id: safe_id.clone(),
+            path: project_root
+                .join(".nib")
+                .join("worktrees")
+                .join("subagents")
+                .join(safe_id),
+            branch,
+            branch_oid,
+            ownership_receipt_id: uuid::Uuid::new_v4().to_string(),
+        })
+    }
+
+    pub(crate) async fn plan_preparation_authority_cancellable(
+        project_root: &Path,
+        id: &str,
+        cancellation: Option<&crate::agent::CancellationSignal>,
+    ) -> Result<WorktreePreparationAuthority, String> {
+        let project_root = repository_root_bounded_cancellable(project_root, cancellation).await?;
+        let safe_id = sanitize_component(id);
+        let branch = branch_name(&safe_id);
+        let head = run_git_cancellable(
+            &project_root,
+            ["rev-parse", "--verify", "HEAD^{commit}"],
+            cancellation,
+        )
+        .await?;
+        let branch_oid = parse_git_oid(&head, "plan subagent worktree base")?;
+        Ok(WorktreePreparationAuthority {
+            id: safe_id.clone(),
+            path: project_root
+                .join(".nib")
+                .join("worktrees")
+                .join("subagents")
+                .join(safe_id),
+            branch,
+            branch_oid,
+            ownership_receipt_id: uuid::Uuid::new_v4().to_string(),
+        })
+    }
+
+    pub(crate) fn preparation_authority_matches(
+        authority: &WorktreePreparationAuthority,
+        id: &str,
+        path: &Path,
+        branch: &str,
+        branch_oid: Option<&str>,
+        receipt_id: Option<&str>,
+    ) -> bool {
+        authority.id == id
+            && authority.path == path
+            && authority.branch == branch
+            && branch_oid == Some(authority.branch_oid.as_str())
+            && receipt_id == Some(authority.ownership_receipt_id.as_str())
+    }
+
+    pub(crate) fn preparation_authority(&self) -> WorktreePreparationAuthority {
+        WorktreePreparationAuthority {
+            id: self.id.clone(),
+            path: self.path.clone(),
+            branch: self.branch.clone(),
+            branch_oid: self.branch_oid.clone(),
+            ownership_receipt_id: self.ownership_receipt_id.clone(),
+        }
+    }
+
+    pub(crate) fn cleanup_preparation_authority_with_guard(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+        timeout: Duration,
+        external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "worktree preparation cleanup deadline overflow".to_string())?;
+        Self::cleanup_preparation_authority_until_with_guard(
+            project_root,
+            authority,
+            deadline,
+            timeout,
+            external_guard,
+        )
+    }
+
+    pub(crate) fn cleanup_preparation_authority_until_with_guard(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+        deadline: Instant,
+        timeout: Duration,
+        mut external_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        external_guard()?;
+        let requested = canonical_requested_root(project_root)?;
+        let inspect = run_git_bounded_sync_with_timeout(
+            &requested,
+            ["rev-parse", "--show-toplevel"],
+            cleanup_time_remaining(deadline, timeout)?,
+        )?;
+        require_git_success(&inspect, "inspect repository for bounded worktree cleanup")?;
+        let project_root = validate_reported_repository_root(&requested, &inspect.stdout)?;
+        external_guard()?;
+        let safe_id = sanitize_component(&authority.id);
+        if let Some(revision) =
+            load_durable_ownership_revision(&project_root, ManagedWorktreeKind::Subagent, &safe_id)?
+        {
+            if revision.record.receipt_id != authority.ownership_receipt_id
+                || revision.record.worktree_path != authority.path
+            {
+                return Err(
+                    "persisted preparation worktree authority changed; replacement preserved"
+                        .to_string(),
+                );
+            }
+            if revision.record.phase == DurableOwnershipPhase::Complete {
+                return external_guard();
+            }
+            if revision.record.phase == DurableOwnershipPhase::Intent {
+                external_guard()?;
+                if load_managed_worktree_ownership(
+                    &project_root,
+                    ManagedWorktreeKind::Subagent,
+                    &safe_id,
+                )?
+                .is_none()
+                {
+                    let completed = load_durable_ownership_revision(
+                        &project_root,
+                        ManagedWorktreeKind::Subagent,
+                        &safe_id,
+                    )?
+                    .ok_or("prepared worktree ownership disappeared during exact recovery")?;
+                    if completed.record.receipt_id != authority.ownership_receipt_id
+                        || completed.record.worktree_path != authority.path
+                        || completed.record.phase != DurableOwnershipPhase::Complete
+                    {
+                        return Err(
+                            "prepared worktree recovery did not retain an exact complete ownership proof"
+                                .to_string(),
+                        );
+                    }
+                    return external_guard();
+                }
+                external_guard()?;
+            }
+        } else {
+            return prove_managed_worktree_namespace_absent_until(
+                &project_root,
+                &safe_id,
+                deadline,
+                timeout,
+            )
+            .and_then(|()| external_guard());
+        }
+        let worktree = Worktree {
+            id: authority.id.clone(),
+            path: authority.path.clone(),
+            branch: authority.branch.clone(),
+            branch_oid: authority.branch_oid.clone(),
+            project_root: project_root.clone(),
+            ownership_receipt_id: authority.ownership_receipt_id.clone(),
+        };
+        remove_registered_worktree_precommit_until_with_guard(
+            &project_root,
+            &worktree,
+            deadline,
+            timeout,
+            &mut external_guard,
+        )?;
+        external_guard()
+    }
+
+    pub fn create(project_root: &Path, id: &str) -> Result<Self, String> {
+        let authority = Self::plan_preparation_authority(project_root, id)?;
+        Self::create_from_preparation_authority(project_root, &authority)
+    }
+
+    pub(crate) fn create_from_preparation_authority(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+    ) -> Result<Self, String> {
+        Self::create_from_preparation_authority_with_guard(
+            project_root,
+            authority,
+            Arc::new(|| Ok(())),
+        )
+    }
+
+    pub(crate) fn create_from_preparation_authority_with_guard(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+        external_guard: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Result<Self, String> {
+        external_guard()?;
+        let project_root = repository_root(project_root)?;
+        external_guard()?;
+        let safe_id = sanitize_component(&authority.id);
         if WORKTREE_OWNERSHIP
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2649,16 +2891,29 @@ impl Worktree {
                 "worktree {safe_id} still has an active durable ownership receipt; cleanup is required before reuse"
             ));
         }
-        let worktree_path = project_root
+        let worktree_path = authority.path.clone();
+        let expected_path = project_root
             .join(".nib")
             .join("worktrees")
             .join("subagents")
             .join(&safe_id);
+        if worktree_path != expected_path || authority.id != safe_id {
+            return Err(
+                "planned subagent worktree authority does not match the repository".to_string(),
+            );
+        }
         let parent = worktree_path
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
-        let canonical_parent = crate::fs_security::ensure_directory_without_symlinks(parent)
-            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let root_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+        let canonical_parent_directory = root_directory
+            .open_or_create_descendant_directory_with_guard(
+                parent,
+                || external_guard(),
+                |_| Ok(()),
+            )?;
+        let canonical_parent = canonical_parent_directory.path().to_path_buf();
+        external_guard()?;
         if !canonical_parent.starts_with(&project_root) {
             return Err(format!(
                 "subagent worktree parent escapes the repository: {}",
@@ -2671,15 +2926,27 @@ impl Worktree {
             return Err(format!("worktree {} already exists", safe_id));
         }
 
-        let branch = branch_name(&safe_id);
-        let mut reservation = reserve_managed_worktree_sync_controlled(
+        let branch = authority.branch.clone();
+        if branch != branch_name(&safe_id) {
+            return Err("planned subagent worktree branch is invalid".to_string());
+        }
+        external_guard()?;
+        let mut reservation = reserve_managed_worktree_sync_controlled_with_receipt(
             &project_root,
             ManagedWorktreeKind::Subagent,
             &safe_id,
             &worktree_path,
             &branch,
             None,
+            Some(&authority.ownership_receipt_id),
         )?;
+        external_guard()?;
+        if reservation.intent.revision.record.initial_oid != authority.branch_oid {
+            return Err(reconcile_failed_managed_worktree_reservation(
+                reservation,
+                "planned subagent worktree base changed before reservation".to_string(),
+            ));
+        }
         macro_rules! fail_reserved_create {
             ($primary:expr) => {
                 return Err(reconcile_failed_managed_worktree_reservation(
@@ -2688,11 +2955,13 @@ impl Worktree {
                 ))
             };
         }
+        external_guard()?;
         let owned_branch =
             match create_reserved_worktree_branch_sync_controlled(&mut reservation, None) {
                 Ok(branch) => branch,
                 Err(error) => fail_reserved_create!(error),
             };
+        external_guard()?;
         #[cfg(test)]
         if let Some(replacement) = SYNC_BEFORE_ADD_DESTINATION_REPLACEMENTS
             .lock()
@@ -2717,6 +2986,7 @@ impl Worktree {
                 error,
             ));
         }
+        external_guard()?;
         let path_receipt = match publish_reserved_empty_worktree_destination(
             &mut reservation,
             &canonical_parent,
@@ -2733,6 +3003,7 @@ impl Worktree {
                 ));
             }
         };
+        external_guard()?;
         #[cfg(test)]
         if SYNC_AFTER_DESTINATION_PUBLICATION_REPLACEMENTS
             .lock()
@@ -2774,6 +3045,7 @@ impl Worktree {
             )
             .expect("write forged worktree pointer");
         }
+        external_guard()?;
         let create = run_git_bounded_sync(
             &project_root,
             [
@@ -2799,6 +3071,7 @@ impl Worktree {
                 ),
             ));
         }
+        external_guard()?;
 
         let ownership = match capture_managed_worktree_receipt_sync(
             &project_root,
@@ -2820,6 +3093,7 @@ impl Worktree {
                 ));
             }
         };
+        external_guard()?;
         let ownership = match finish_managed_worktree_reservation(reservation, ownership) {
             Ok(ownership) => ownership,
             Err(error) => {
@@ -2834,6 +3108,7 @@ impl Worktree {
                 ));
             }
         };
+        external_guard()?;
         #[cfg(test)]
         if SYNC_POST_CAPTURE_PATH_REPLACEMENTS
             .lock()
@@ -2892,26 +3167,78 @@ impl Worktree {
                 error,
             ));
         }
+        let ownership_receipt_id = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable
+            .as_ref()
+            .ok_or("created worktree has no durable ownership receipt")?
+            .record
+            .receipt_id
+            .clone();
+        if ownership_receipt_id != authority.ownership_receipt_id {
+            return Err(compensate_failed_create_sync(
+                &project_root,
+                &safe_id,
+                &owned_branch,
+                Some(&path_receipt),
+                Some(&ownership),
+                "created worktree ownership receipt differs from its durable plan".to_string(),
+            ));
+        }
         let ownership = Arc::new(ownership);
         WORKTREE_OWNERSHIP
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((project_root.clone(), safe_id.clone()), ownership);
+        external_guard()?;
         Ok(Self {
             id: safe_id,
             path,
             branch,
             branch_oid: owned_branch.expected_oid,
+            project_root,
+            ownership_receipt_id,
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_cancellable(
         project_root: &Path,
         id: &str,
         cancellation: Option<&crate::agent::CancellationSignal>,
     ) -> Result<Self, String> {
+        let authority = Self::plan_preparation_authority(project_root, id)?;
+        Self::create_cancellable_from_preparation_authority(project_root, &authority, cancellation)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn create_cancellable_from_preparation_authority(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+        cancellation: Option<&crate::agent::CancellationSignal>,
+    ) -> Result<Self, String> {
+        Self::create_cancellable_from_preparation_authority_with_guard(
+            project_root,
+            authority,
+            cancellation,
+            Arc::new(|| Ok(())),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_cancellable_from_preparation_authority_with_guard(
+        project_root: &Path,
+        authority: &WorktreePreparationAuthority,
+        cancellation: Option<&crate::agent::CancellationSignal>,
+        external_guard: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Result<Self, String> {
+        external_guard()?;
         let project_root = repository_root_bounded_cancellable(project_root, cancellation).await?;
-        let safe_id = sanitize_component(id);
+        external_guard()?;
+        let safe_id = sanitize_component(&authority.id);
         if WORKTREE_OWNERSHIP
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2932,16 +3259,29 @@ impl Worktree {
                 "worktree {safe_id} still has an active durable ownership receipt; cleanup is required before reuse"
             ));
         }
-        let worktree_path = project_root
+        let worktree_path = authority.path.clone();
+        let expected_path = project_root
             .join(".nib")
             .join("worktrees")
             .join("subagents")
             .join(&safe_id);
+        if worktree_path != expected_path || authority.id != safe_id {
+            return Err(
+                "planned subagent worktree authority does not match the repository".to_string(),
+            );
+        }
         let parent = worktree_path
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
-        let canonical_parent = crate::fs_security::ensure_directory_without_symlinks(parent)
-            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let root_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+        let canonical_parent_directory = root_directory
+            .open_or_create_descendant_directory_with_guard(
+                parent,
+                || external_guard(),
+                |_| Ok(()),
+            )?;
+        let canonical_parent = canonical_parent_directory.path().to_path_buf();
+        external_guard()?;
         if !canonical_parent.starts_with(&project_root) {
             return Err(format!(
                 "subagent worktree parent escapes the repository: {}",
@@ -2954,16 +3294,28 @@ impl Worktree {
             return Err(format!("worktree {} already exists", safe_id));
         }
 
-        let branch = branch_name(&safe_id);
-        let mut reservation = reserve_managed_worktree_cancellable(
+        let branch = authority.branch.clone();
+        if branch != branch_name(&safe_id) {
+            return Err("planned subagent worktree branch is invalid".to_string());
+        }
+        external_guard()?;
+        let mut reservation = reserve_managed_worktree_cancellable_with_receipt(
             &project_root,
             ManagedWorktreeKind::Subagent,
             &safe_id,
             &worktree_path,
             &branch,
             cancellation,
+            Some(&authority.ownership_receipt_id),
         )
         .await?;
+        external_guard()?;
+        if reservation.intent.revision.record.initial_oid != authority.branch_oid {
+            return Err(reconcile_failed_managed_worktree_reservation(
+                reservation,
+                "planned subagent worktree base changed before reservation".to_string(),
+            ));
+        }
         macro_rules! fail_reserved_create_async {
             ($primary:expr) => {
                 return Err(reconcile_failed_managed_worktree_reservation(
@@ -2972,11 +3324,13 @@ impl Worktree {
                 ))
             };
         }
+        external_guard()?;
         let owned_branch =
             match create_reserved_worktree_branch(&mut reservation, cancellation).await {
                 Ok(branch) => branch,
                 Err(error) => fail_reserved_create_async!(error),
             };
+        external_guard()?;
         if let Err(error) = prove_worktree_destination_absent(&canonical_parent, &worktree_path) {
             fail_reserved_create_async!(
                 compensate_failed_create(
@@ -2990,6 +3344,7 @@ impl Worktree {
                 .await
             );
         }
+        external_guard()?;
         let path_receipt = match publish_reserved_empty_worktree_destination(
             &mut reservation,
             &canonical_parent,
@@ -3009,7 +3364,9 @@ impl Worktree {
                 );
             }
         };
+        external_guard()?;
         let registration_snapshot = reserved_worktree_registration_snapshot(&reservation);
+        external_guard()?;
         let create = run_git_cancellable(
             &project_root,
             [
@@ -3040,6 +3397,7 @@ impl Worktree {
                 .await
             );
         }
+        external_guard()?;
 
         let ownership = match capture_managed_worktree_receipt_async(
             &project_root,
@@ -3067,6 +3425,7 @@ impl Worktree {
                 );
             }
         };
+        external_guard()?;
         let ownership = match finish_managed_worktree_reservation(reservation, ownership) {
             Ok(ownership) => ownership,
             Err(error) => {
@@ -3082,6 +3441,7 @@ impl Worktree {
                 .await);
             }
         };
+        external_guard()?;
 
         let path = match validate_created_path(&project_root, &canonical_parent, &worktree_path) {
             Ok(path) => path,
@@ -3109,16 +3469,40 @@ impl Worktree {
             )
             .await);
         }
+        let ownership_receipt_id = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable
+            .as_ref()
+            .ok_or("created worktree has no durable ownership receipt")?
+            .record
+            .receipt_id
+            .clone();
+        if ownership_receipt_id != authority.ownership_receipt_id {
+            return Err(compensate_failed_create(
+                &project_root,
+                &safe_id,
+                &owned_branch,
+                Some(&path_receipt),
+                Some(&ownership),
+                "created worktree ownership receipt differs from its durable plan".to_string(),
+            )
+            .await);
+        }
         let ownership = Arc::new(ownership);
         WORKTREE_OWNERSHIP
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((project_root.clone(), safe_id.clone()), ownership);
+        external_guard()?;
         Ok(Self {
             id: safe_id,
             path,
             branch,
             branch_oid: owned_branch.expected_oid,
+            project_root,
+            ownership_receipt_id,
         })
     }
 
@@ -3152,9 +3536,22 @@ impl Worktree {
         .map_err(|error| format!("reconciled worktree cleanup worker failed: {error}"))?
     }
 
-    pub(crate) fn remove_bounded_sync(
+    #[cfg(test)]
+    pub(crate) fn remove_precommit(project_root: &Path, worktree: &Self) -> Result<(), String> {
+        let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+        let project_root = repository_root_bounded_sync(project_root)?;
+        remove_registered_worktree_precommit_until(
+            &project_root,
+            worktree,
+            deadline,
+            GIT_COMMAND_TIMEOUT,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_precommit_bounded_sync(
         project_root: &Path,
-        id: &str,
+        worktree: &Self,
         timeout: Duration,
     ) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
@@ -3166,7 +3563,31 @@ impl Worktree {
         )?;
         require_git_success(&inspect, "inspect repository for bounded worktree cleanup")?;
         let project_root = validate_reported_repository_root(&requested, &inspect.stdout)?;
-        remove_registered_worktree_until(&project_root, id, deadline, timeout)
+        remove_registered_worktree_precommit_until(&project_root, worktree, deadline, timeout)
+    }
+
+    pub(crate) fn verify_owned_namespace(&self) -> Result<(), String> {
+        let key = (self.project_root.clone(), self.id.clone());
+        let ownership = WORKTREE_OWNERSHIP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()
+            .ok_or("created worktree ownership is no longer retained")?;
+        let receipt_id = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable
+            .as_ref()
+            .ok_or("created worktree has no durable ownership revision")?
+            .record
+            .receipt_id
+            .clone();
+        if receipt_id != self.ownership_receipt_id || ownership.path != self.path {
+            return Err("created worktree ownership generation changed".to_string());
+        }
+        validate_managed_worktree_ownership(&ownership)
     }
 }
 
@@ -3782,6 +4203,108 @@ fn remove_registered_worktree_until(
     Ok(())
 }
 
+#[cfg(test)]
+fn remove_registered_worktree_precommit_until(
+    project_root: &Path,
+    worktree: &Worktree,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<(), String> {
+    remove_registered_worktree_precommit_until_with_guard(
+        project_root,
+        worktree,
+        deadline,
+        timeout,
+        &mut || Ok(()),
+    )
+}
+
+fn remove_registered_worktree_precommit_until_with_guard(
+    project_root: &Path,
+    worktree: &Worktree,
+    deadline: Instant,
+    timeout: Duration,
+    external_guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    external_guard()?;
+    let safe_id = sanitize_component(&worktree.id);
+    let key = (project_root.to_path_buf(), safe_id.clone());
+    let cached = WORKTREE_OWNERSHIP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    let ownership = match cached {
+        Some(ownership) => Some(ownership),
+        None => {
+            load_managed_worktree_ownership(project_root, ManagedWorktreeKind::Subagent, &safe_id)?
+        }
+    }
+    .ok_or_else(|| {
+        format!(
+            "precommit worktree {} no longer has its exact durable ownership receipt",
+            safe_id
+        )
+    })?;
+    {
+        let state = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let durable = state
+            .durable
+            .as_ref()
+            .ok_or("precommit worktree has no durable ownership revision")?;
+        if durable.record.receipt_id != worktree.ownership_receipt_id {
+            return Err(
+                "precommit worktree ownership generation changed; replacement preserved"
+                    .to_string(),
+            );
+        }
+    }
+    cleanup_managed_worktree_with_guard(&ownership, deadline, timeout, external_guard)?;
+
+    external_guard()?;
+    let ownership_directory = managed_worktree_ownership_directory(project_root)?;
+    let _ownership_lock = OwnershipCompactionLock::acquire(
+        &ownership_directory,
+        cleanup_time_remaining(deadline, timeout)?,
+    )?;
+    let mut state = ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let durable = state
+        .durable
+        .as_ref()
+        .ok_or("precommit worktree has no durable ownership revision")?;
+    if durable.record.receipt_id != worktree.ownership_receipt_id
+        || durable.record.phase != DurableOwnershipPhase::Complete
+    {
+        return Err(
+            "precommit worktree cleanup did not reach its exact complete ownership generation"
+                .to_string(),
+        );
+    }
+    external_guard()?;
+    cleanup_time_remaining(deadline, timeout)?;
+    durable
+        .directory
+        .remove_visible_file_if_matches_direct_with_guard(&durable.path, &durable.file, || {
+            external_guard()?;
+            cleanup_time_remaining(deadline, timeout).map(|_| ())
+        })?;
+    external_guard()?;
+    cleanup_time_remaining(deadline, timeout)?;
+    state.durable = None;
+    drop(state);
+    WORKTREE_OWNERSHIP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key);
+    Ok(())
+}
+
 fn adopt_registered_worktree_branch(
     project_root: &Path,
     id: &str,
@@ -4069,12 +4592,24 @@ pub(crate) fn cleanup_managed_worktree(
     deadline: Instant,
     timeout: Duration,
 ) -> Result<(), String> {
+    cleanup_managed_worktree_with_guard(ownership, deadline, timeout, &mut || Ok(()))
+}
+
+fn cleanup_managed_worktree_with_guard(
+    ownership: &ManagedWorktreeReceipt,
+    deadline: Instant,
+    timeout: Duration,
+    external_guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    external_guard()?;
     let mut state = ownership
         .state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(durable) = state.durable.as_mut() {
+        external_guard()?;
         reconcile_previous_branch_anchor(durable)?;
+        external_guard()?;
     }
     let registration_parent = ownership
         .registration_path
@@ -4138,32 +4673,43 @@ pub(crate) fn cleanup_managed_worktree(
         && registration_validation.is_ok()
         && reciprocal_validation.is_ok()
     {
-        if let Err(error) = persist_cleanup_artifact_phase(
-            &mut state,
-            CleanupArtifact::Registration,
-            DurableArtifactPhase::Removing,
-        ) {
-            errors.push(error);
-        } else if let Err(error) =
-            crate::fs_security::remove_directory_tree_capability_bound_if_matches(
-                registration_parent,
-                &ownership.registration_path,
-                ownership.registration_receipt.clone().ok_or_else(|| {
-                    "Git worktree registration ownership receipt is unavailable".to_string()
-                })?,
-                deadline,
+        if let Err(error) = external_guard().and_then(|()| {
+            persist_cleanup_artifact_phase(
+                &mut state,
+                CleanupArtifact::Registration,
+                DurableArtifactPhase::Removing,
             )
+        }) {
+            errors.push(error);
+        } else if let Err(error) = external_guard()
+            .and_then(|()| {
+                crate::fs_security::remove_directory_tree_capability_bound_if_matches(
+                    registration_parent,
+                    &ownership.registration_path,
+                    ownership.registration_receipt.clone().ok_or_else(|| {
+                        "Git worktree registration ownership receipt is unavailable".to_string()
+                    })?,
+                    deadline,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .and_then(|()| external_guard())
         {
             errors.push(format!(
                 "failed to remove owned Git worktree registration: {error}"
             ));
         } else {
             state.registration_removed = true;
-            if let Err(error) = persist_cleanup_artifact_phase(
-                &mut state,
-                CleanupArtifact::Registration,
-                DurableArtifactPhase::Removed,
-            ) {
+            if let Err(error) = external_guard()
+                .and_then(|()| {
+                    persist_cleanup_artifact_phase(
+                        &mut state,
+                        CleanupArtifact::Registration,
+                        DurableArtifactPhase::Removed,
+                    )
+                })
+                .and_then(|()| external_guard())
+            {
                 errors.push(error);
             }
         }
@@ -4175,32 +4721,43 @@ pub(crate) fn cleanup_managed_worktree(
         );
     }
     if !state.path_removed && state.registration_removed && path_validation.is_ok() {
-        if let Err(error) = persist_cleanup_artifact_phase(
-            &mut state,
-            CleanupArtifact::Path,
-            DurableArtifactPhase::Removing,
-        ) {
-            errors.push(error);
-        } else if let Err(error) =
-            crate::fs_security::remove_directory_tree_capability_bound_if_matches(
-                path_parent,
-                &ownership.path,
-                ownership.path_receipt.clone().ok_or_else(|| {
-                    "managed worktree path ownership receipt is unavailable".to_string()
-                })?,
-                deadline,
+        if let Err(error) = external_guard().and_then(|()| {
+            persist_cleanup_artifact_phase(
+                &mut state,
+                CleanupArtifact::Path,
+                DurableArtifactPhase::Removing,
             )
+        }) {
+            errors.push(error);
+        } else if let Err(error) = external_guard()
+            .and_then(|()| {
+                crate::fs_security::remove_directory_tree_capability_bound_if_matches(
+                    path_parent,
+                    &ownership.path,
+                    ownership.path_receipt.clone().ok_or_else(|| {
+                        "managed worktree path ownership receipt is unavailable".to_string()
+                    })?,
+                    deadline,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .and_then(|()| external_guard())
         {
             errors.push(format!(
                 "failed to remove owned worktree directory: {error}"
             ));
         } else {
             state.path_removed = true;
-            if let Err(error) = persist_cleanup_artifact_phase(
-                &mut state,
-                CleanupArtifact::Path,
-                DurableArtifactPhase::Removed,
-            ) {
+            if let Err(error) = external_guard()
+                .and_then(|()| {
+                    persist_cleanup_artifact_phase(
+                        &mut state,
+                        CleanupArtifact::Path,
+                        DurableArtifactPhase::Removed,
+                    )
+                })
+                .and_then(|()| external_guard())
+            {
                 errors.push(error);
             }
         }
@@ -4219,24 +4776,34 @@ pub(crate) fn cleanup_managed_worktree(
                 .owned_branch
                 .clone()
                 .ok_or("managed worktree branch ownership receipt is unavailable")?;
-            if let Err(error) = persist_cleanup_artifact_phase(
-                &mut state,
-                CleanupArtifact::Branch,
-                DurableArtifactPhase::Removing,
-            ) {
+            if let Err(error) = external_guard().and_then(|()| {
+                persist_cleanup_artifact_phase(
+                    &mut state,
+                    CleanupArtifact::Branch,
+                    DurableArtifactPhase::Removing,
+                )
+            }) {
                 errors.push(error);
-            } else if let Err(error) =
-                delete_owned_branch_sync_with_timeout(&ownership.path, &owned_branch, remaining)
+            } else if let Err(error) = external_guard()
+                .and_then(|()| {
+                    delete_owned_branch_sync_with_timeout(&ownership.path, &owned_branch, remaining)
+                })
+                .and_then(|()| external_guard())
             {
                 errors.push(error);
                 match owned_ref_namespace_is_absent(&owned_branch) {
                     Ok(true) => {
                         state.branch_removed = true;
-                        if let Err(error) = persist_cleanup_artifact_phase(
-                            &mut state,
-                            CleanupArtifact::Branch,
-                            DurableArtifactPhase::Removed,
-                        ) {
+                        if let Err(error) = external_guard()
+                            .and_then(|()| {
+                                persist_cleanup_artifact_phase(
+                                    &mut state,
+                                    CleanupArtifact::Branch,
+                                    DurableArtifactPhase::Removed,
+                                )
+                            })
+                            .and_then(|()| external_guard())
+                        {
                             errors.push(error);
                         }
                     }
@@ -4247,17 +4814,23 @@ pub(crate) fn cleanup_managed_worktree(
                 }
             } else {
                 state.branch_removed = true;
-                if let Err(error) = persist_cleanup_artifact_phase(
-                    &mut state,
-                    CleanupArtifact::Branch,
-                    DurableArtifactPhase::Removed,
-                ) {
+                if let Err(error) = external_guard()
+                    .and_then(|()| {
+                        persist_cleanup_artifact_phase(
+                            &mut state,
+                            CleanupArtifact::Branch,
+                            DurableArtifactPhase::Removed,
+                        )
+                    })
+                    .and_then(|()| external_guard())
+                {
                     errors.push(error);
                 }
             }
         }
         Err(error) => errors.push(error),
     }
+    external_guard()?;
     finish_cleanup_errors(errors)
 }
 
@@ -4311,6 +4884,26 @@ pub(crate) fn validate_managed_worktree_ownership(
             .as_ref()
             .ok_or("managed worktree branch ownership receipt is unavailable")?,
     )
+}
+
+pub(crate) fn validate_managed_worktree_for_read(
+    ownership: &ManagedWorktreeReceipt,
+) -> Result<PathBuf, String> {
+    validate_managed_worktree_ownership(ownership)?;
+    let owned_branch = {
+        let state = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .owned_branch
+            .as_ref()
+            .cloned()
+            .ok_or("managed worktree branch ownership receipt is unavailable")?
+    };
+    validate_owned_worktree_sync(&ownership.path, &owned_branch)?;
+    validate_managed_worktree_ownership(ownership)?;
+    Ok(ownership.path.clone())
 }
 
 fn validate_managed_worktree_directories(ownership: &ManagedWorktreeReceipt) -> Result<(), String> {
@@ -6543,6 +7136,7 @@ struct SyncManagedChild {
     reaped: bool,
 }
 
+#[cfg(any(unix, test))]
 fn should_create_inner_process_group(is_macos: bool, managed_scope: bool) -> bool {
     !(is_macos && managed_scope)
 }
@@ -7453,6 +8047,31 @@ mod tests {
                 .expect("durable cleanup tombstone");
         assert_eq!(tombstone.record.phase, DurableOwnershipPhase::Complete);
         assert!(!canonical_worktree_path.exists());
+
+        let created_id = "dos-short-create";
+        let created = Worktree::create(&short_root, created_id)
+            .expect("create registered worktree through DOS short project root");
+        assert_eq!(
+            created.path,
+            canonical_root
+                .join(".nib/worktrees/subagents")
+                .join(created_id)
+        );
+        assert!(created.path.join(".git").is_file());
+        Worktree::remove(&short_root, created_id)
+            .expect("remove registered worktree through DOS short project root");
+        let created_tombstone = load_durable_ownership_revision(
+            &canonical_root,
+            ManagedWorktreeKind::Subagent,
+            created_id,
+        )
+        .expect("reload created ownership through canonical root")
+        .expect("created cleanup tombstone");
+        assert_eq!(
+            created_tombstone.record.phase,
+            DurableOwnershipPhase::Complete
+        );
+        assert!(!created.path.exists());
     }
 
     #[cfg(windows)]

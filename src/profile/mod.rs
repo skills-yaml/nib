@@ -5,6 +5,7 @@ use crate::session::memory::MemoryStore;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 use thiserror::Error;
 
 const MAX_ENV_FILE_BYTES: u64 = 1_048_576;
@@ -219,6 +220,112 @@ pub struct ProfileRegistry {
 
 impl ProfileRegistry {
     pub fn load(base: &Path, config: &ProfilesConfig) -> Result<Self, ProfileError> {
+        let registry = Self::resolve(base, config, None)?;
+        migration::migrate_legacy_state(base, registry.default_profile())?;
+        Ok(registry)
+    }
+
+    pub(crate) fn resolve_sessions_dir_without_migration_until(
+        base: &Path,
+        config: &ProfilesConfig,
+        deadline: Instant,
+    ) -> Result<PathBuf, ProfileError> {
+        Self::resolve_profile_sessions_without_migration_until(base, config, deadline)
+            .map(|(_, sessions_dir)| sessions_dir)
+    }
+
+    pub(crate) fn resolve_profile_sessions_without_migration_until(
+        base: &Path,
+        config: &ProfilesConfig,
+        deadline: Instant,
+    ) -> Result<(String, PathBuf), ProfileError> {
+        ensure_profile_resolution_deadline(Some(deadline))?;
+        let entries = if config.active.is_empty() {
+            vec![ProfileConfig {
+                id: config.default.clone(),
+                root: PathBuf::from("."),
+                ..ProfileConfig::default()
+            }]
+        } else {
+            config.active.clone()
+        };
+        let workspace = base.canonicalize()?;
+        let mut resolved = BTreeMap::new();
+        let mut state_owners = BTreeMap::new();
+        for entry in entries {
+            ensure_profile_resolution_deadline(Some(deadline))?;
+            validate_id(&entry.id)?;
+            if entry.root.as_os_str().is_empty() {
+                return Err(ProfileError::Invalid(format!(
+                    "profile {} has an empty root",
+                    entry.id
+                )));
+            }
+            let root_candidate = if entry.root.is_absolute() {
+                entry.root.clone()
+            } else {
+                base.join(&entry.root)
+            };
+            let root = root_candidate.canonicalize()?;
+            if !root.is_dir() {
+                return Err(ProfileError::Invalid(format!(
+                    "profile {} root is not a directory: {}",
+                    entry.id,
+                    root.display()
+                )));
+            }
+            let state_relative = entry
+                .state_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".nib").join("profiles").join(&entry.id));
+            let state_dir = resolve_scoped_path(&root, &state_relative, "state_dir")?;
+            if let Some(existing) = state_owners.insert(state_dir.clone(), entry.id.clone()) {
+                return Err(ProfileError::Invalid(format!(
+                    "profiles {existing} and {} share state directory {}",
+                    entry.id,
+                    state_dir.display()
+                )));
+            }
+            if resolved
+                .insert(entry.id.clone(), (root, state_dir.join("sessions")))
+                .is_some()
+            {
+                return Err(ProfileError::Invalid(format!(
+                    "duplicate profile id: {}",
+                    entry.id
+                )));
+            }
+        }
+        ensure_profile_resolution_deadline(Some(deadline))?;
+        let default = resolved.get(&config.default).ok_or_else(|| {
+            ProfileError::Invalid(format!(
+                "default profile does not exist: {}",
+                config.default
+            ))
+        })?;
+        let selected = if default.0 == workspace {
+            default
+        } else {
+            resolved
+                .values()
+                .find(|(root, _)| *root == workspace)
+                .unwrap_or(default)
+        };
+        let selected_id = resolved
+            .iter()
+            .find_map(|(id, candidate)| std::ptr::eq(candidate, selected).then(|| id.clone()))
+            .ok_or_else(|| {
+                ProfileError::Invalid("selected profile disappeared during resolution".to_string())
+            })?;
+        Ok((selected_id, selected.1.clone()))
+    }
+
+    fn resolve(
+        base: &Path,
+        config: &ProfilesConfig,
+        deadline: Option<Instant>,
+    ) -> Result<Self, ProfileError> {
+        ensure_profile_resolution_deadline(deadline)?;
         let entries = if config.active.is_empty() {
             vec![ProfileConfig {
                 id: config.default.clone(),
@@ -232,7 +339,9 @@ impl ProfileRegistry {
         let mut profiles = BTreeMap::new();
         let mut state_owners = BTreeMap::new();
         for entry in entries {
+            ensure_profile_resolution_deadline(deadline)?;
             let profile = Profile::from_config(base, &entry)?;
+            ensure_profile_resolution_deadline(deadline)?;
             if let Some(existing) =
                 state_owners.insert(profile.state_dir().to_path_buf(), profile.id().to_string())
             {
@@ -256,12 +365,11 @@ impl ProfileRegistry {
             )));
         }
 
-        let registry = Self {
+        ensure_profile_resolution_deadline(deadline)?;
+        Ok(Self {
             default_id: config.default.clone(),
             profiles,
-        };
-        migration::migrate_legacy_state(base, registry.default_profile())?;
-        Ok(registry)
+        })
     }
 
     pub fn default_profile(&self) -> &Profile {
@@ -288,6 +396,15 @@ impl ProfileRegistry {
             .values()
             .find(|profile| profile.root_path == workspace)
     }
+}
+
+fn ensure_profile_resolution_deadline(deadline: Option<Instant>) -> Result<(), ProfileError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(ProfileError::Invalid(
+            "profile resolution deadline elapsed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_id(id: &str) -> Result<(), ProfileError> {

@@ -3,6 +3,7 @@ use nib::llm::registry::{provider_descriptor, ProviderTransport};
 use nib::llm::LlmTerminalStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 mod catalog;
 mod config;
@@ -87,10 +88,15 @@ struct CatalogPricing {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct CatalogModel {
     id: String,
+    generation_target: Option<String>,
     aliases: Vec<String>,
     supports_text_generation: Option<bool>,
     supports_tools: Option<bool>,
     supports_parallel_tools: Option<bool>,
+    #[serde(default)]
+    input_modalities: BTreeSet<String>,
+    #[serde(default)]
+    output_modalities: BTreeSet<String>,
     supported_parameters: BTreeSet<String>,
     public_identifier: bool,
     owner: Option<String>,
@@ -103,10 +109,16 @@ impl std::fmt::Debug for CatalogModel {
         formatter
             .debug_struct("CatalogModel")
             .field("id", &"<redacted>")
+            .field(
+                "generation_target",
+                &self.generation_target.as_ref().map(|_| "<redacted>"),
+            )
             .field("alias_count", &self.aliases.len())
             .field("supports_text_generation", &self.supports_text_generation)
             .field("supports_tools", &self.supports_tools)
             .field("supports_parallel_tools", &self.supports_parallel_tools)
+            .field("input_modality_count", &self.input_modalities.len())
+            .field("output_modality_count", &self.output_modalities.len())
             .field(
                 "supported_parameter_count",
                 &self.supported_parameters.len(),
@@ -119,6 +131,9 @@ impl std::fmt::Debug for CatalogModel {
 impl CatalogModel {
     fn validate(&self) -> Result<(), String> {
         validate_catalog_identifier(&self.id, "model ID")?;
+        if let Some(generation_target) = &self.generation_target {
+            validate_catalog_identifier(generation_target, "generation target")?;
+        }
         if self.aliases.len() > 128 {
             return Err("catalog model exposes more than 128 aliases".to_string());
         }
@@ -132,6 +147,22 @@ impl CatalogModel {
             })
         {
             return Err("catalog supported parameters are malformed".to_string());
+        }
+        for (label, modalities) in [
+            ("input", &self.input_modalities),
+            ("output", &self.output_modalities),
+        ] {
+            if modalities.len() > 32
+                || modalities.iter().any(|modality| {
+                    modality.is_empty()
+                        || modality.len() > 64
+                        || !modality
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+            {
+                return Err(format!("catalog {label} modalities are malformed"));
+            }
         }
         let mut unique = BTreeSet::new();
         for alias in &self.aliases {
@@ -160,6 +191,16 @@ impl CatalogModel {
             }
         }
         Ok(())
+    }
+
+    fn generation_target(&self) -> &str {
+        self.generation_target.as_deref().unwrap_or(&self.id)
+    }
+
+    fn matches_reference(&self, reference: &str) -> bool {
+        self.id == reference
+            || self.generation_target.as_deref() == Some(reference)
+            || self.aliases.iter().any(|alias| alias == reference)
     }
 }
 
@@ -230,6 +271,7 @@ enum Classification {
     Qualified,
     RequiresProbe,
     NotApplicable,
+    OmittedByPolicy,
     UnsupportedTransport,
     FailedAdapter,
     CatalogDrift,
@@ -241,6 +283,30 @@ enum Classification {
     BlockedConfiguration,
     BlockedBudget,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AccountingJustification {
+    CatalogTextGenerationUnsupported,
+    CatalogMetadataRequiresProbe,
+    CanaryDefaultPolicy,
+    SelectedMatrixPolicy,
+    OpenRouterAllowlistPolicy,
+    QualificationProfileEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScenarioNotApplicableJustification {
+    CatalogParallelToolsUnsupported,
+    CatalogParallelToolsNotAdvertised,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScenarioNotExecutedReason {
+    TransportUnsupportedByBasicProbe,
 }
 
 impl Classification {
@@ -291,7 +357,7 @@ struct ModelProfile {
     transport: TransportId,
     advertised: bool,
     required_scenarios: BTreeSet<ScenarioId>,
-    not_applicable_scenarios: BTreeSet<ScenarioId>,
+    not_applicable_scenarios: BTreeMap<ScenarioId, ScenarioNotApplicableJustification>,
     projected_cost_ceiling_usd: Option<f64>,
 }
 
@@ -299,9 +365,7 @@ fn registry_transports(provider: &str) -> Result<Vec<TransportId>, String> {
     let descriptor = provider_descriptor(provider)
         .ok_or_else(|| format!("unsupported provider '{provider}'"))?;
     let transports = descriptor
-        .transports
-        .iter()
-        .copied()
+        .transports()
         .filter_map(TransportId::from_registry)
         .collect::<Vec<_>>();
     if transports.is_empty() {
@@ -313,29 +377,175 @@ fn registry_transports(provider: &str) -> Result<Vec<TransportId>, String> {
 pub async fn run_from_environment() -> Result<PublishedReport, String> {
     let settings = config::LiveSettings::from_environment()?;
     let started_at = Utc::now();
+    let run_started = Instant::now();
     let run_id = uuid::Uuid::new_v4().to_string();
-    let allowlist = plan::OpenRouterAllowlist::load_default()?;
-    let selected_matrix = (settings.mode == LiveMode::Selected)
-        .then(plan::SelectedMatrix::load_default)
-        .transpose()?;
-    let mut provider_reports = Vec::new();
-
-    for provider in &settings.providers {
-        let snapshot = catalog::fetch_catalog(provider, &settings).await?;
-        let run_plan =
-            plan::build_plan(&settings, &snapshot, &allowlist, selected_matrix.as_ref())?;
-        let mut report = if settings.mode == LiveMode::Catalog {
-            report::catalog_provider_report(&run_id, &snapshot, &run_plan)
-        } else {
-            scenario::execute_provider_plan(&settings, &run_id, &snapshot, run_plan).await
-        };
-        if settings.mode.makes_generation_requests() {
-            let confirmation = catalog::fetch_catalog(provider, &settings).await?;
-            if snapshot.models != confirmation.models {
-                report::mark_catalog_drift(&mut report);
+    let privacy_key = report::ReportPrivacyKey::random();
+    let allowlist = match plan::OpenRouterAllowlist::load_default() {
+        Ok(allowlist) => allowlist,
+        Err(_) => {
+            return publish_uniform_blocker(
+                &settings,
+                run_id,
+                started_at,
+                None,
+                Classification::BlockedConfiguration,
+                "blocked_allowlist_configuration",
+            )
+        }
+    };
+    let selected_matrix = if settings.mode == LiveMode::Selected {
+        match plan::SelectedMatrix::load_default() {
+            Ok(matrix) => Some(matrix),
+            Err(_) => {
+                return publish_uniform_blocker(
+                    &settings,
+                    run_id,
+                    started_at,
+                    None,
+                    Classification::BlockedConfiguration,
+                    "blocked_selected_matrix_configuration",
+                )
             }
         }
-        provider_reports.push(report);
+    } else {
+        None
+    };
+    let mut prepared = Vec::with_capacity(settings.providers.len());
+    let mut preparation_failed = false;
+
+    for provider in &settings.providers {
+        let capture =
+            match fetch_catalog_before_run_deadline(provider, &settings, run_started).await {
+                Ok(capture) => capture,
+                Err(error) => {
+                    preparation_failed = true;
+                    let (classification, safe_class) = classify_local_blocker(&error);
+                    prepared.push(Err(report::blocked_provider_report(
+                        provider,
+                        classification,
+                        safe_class,
+                    )));
+                    continue;
+                }
+            };
+        let snapshot = &capture.snapshot;
+        if remaining_run_duration(&settings, run_started).is_err() {
+            preparation_failed = true;
+            prepared.push(Err(report::blocked_provider_report(
+                provider,
+                Classification::BlockedBudget,
+                "blocked_run_deadline",
+            )));
+            continue;
+        }
+        match plan::build_plan(&settings, snapshot, &allowlist, selected_matrix.as_ref()) {
+            Ok(run_plan) => prepared.push(Ok((capture, run_plan))),
+            Err(error) => {
+                preparation_failed = true;
+                let (classification, safe_class) = classify_local_blocker(&error);
+                prepared.push(Err(report::blocked_provider_report(
+                    provider,
+                    classification,
+                    safe_class,
+                )));
+            }
+        }
+    }
+    let plans = prepared
+        .iter()
+        .filter_map(|prepared| prepared.as_ref().ok().map(|(_, plan)| plan.clone()))
+        .collect::<Vec<_>>();
+
+    if settings.mode == LiveMode::Catalog {
+        let provider_reports = prepared
+            .into_iter()
+            .map(|prepared| match prepared {
+                Ok((capture, plan)) => {
+                    report::catalog_provider_report(&privacy_key, &run_id, &capture.snapshot, &plan)
+                }
+                Err(report) => report,
+            })
+            .collect();
+        let qualification = report::QualificationReport::new(
+            run_id,
+            settings.mode,
+            started_at,
+            Utc::now(),
+            provider_reports,
+            None,
+            &settings,
+        );
+        return report::publish(&settings, qualification);
+    }
+
+    let matrix_failure = if preparation_failed {
+        Some((
+            Classification::BlockedConfiguration,
+            "blocked_incomplete_matrix_preflight",
+        ))
+    } else if remaining_run_duration(&settings, run_started).is_err() {
+        Some((Classification::BlockedBudget, "blocked_run_deadline"))
+    } else {
+        plan::validate_generation_matrix(&settings, &plans)
+            .err()
+            .map(|error| classify_local_blocker(&error))
+    };
+
+    if let Some((classification, safe_class)) = matrix_failure {
+        let provider_reports = prepared
+            .into_iter()
+            .map(|prepared| match prepared {
+                Ok((capture, plan)) => report::blocked_planned_provider_report(
+                    &privacy_key,
+                    &run_id,
+                    &capture.snapshot,
+                    &plan,
+                    classification,
+                    safe_class,
+                ),
+                Err(report) => report,
+            })
+            .collect();
+        let qualification = report::QualificationReport::new(
+            run_id,
+            settings.mode,
+            started_at,
+            Utc::now(),
+            provider_reports,
+            selected_matrix.as_ref().map(plan::SelectedMatrix::evidence),
+            &settings,
+        );
+        return report::publish(&settings, qualification);
+    }
+
+    // No generation request is reachable until every selected provider catalog and
+    // plan has contributed to the exact whole-run preflight denominator above.
+    let mut provider_reports = Vec::with_capacity(prepared.len());
+    let run_budget = scenario::RunBudget::new_at(run_started);
+    for prepared in prepared {
+        let (capture, run_plan) = prepared.expect("complete matrix preflight");
+        let snapshot = capture.snapshot;
+        let mut provider_report = scenario::execute_provider_plan(
+            &settings,
+            &privacy_key,
+            &run_id,
+            &snapshot,
+            run_plan,
+            &run_budget,
+            (snapshot.provider == "meta").then_some(capture.protected_client),
+        )
+        .await;
+        match fetch_catalog_before_run_deadline(&snapshot.provider, &settings, run_started).await {
+            Ok(confirmation) if snapshot.models != confirmation.snapshot.models => {
+                report::mark_catalog_drift(&mut provider_report);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let (classification, safe_class) = classify_local_blocker(&error);
+                report::mark_provider_blocker(&mut provider_report, classification, safe_class);
+            }
+        }
+        provider_reports.push(provider_report);
     }
 
     let report = report::QualificationReport::new(
@@ -345,8 +555,98 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
         Utc::now(),
         provider_reports,
         selected_matrix.as_ref().map(plan::SelectedMatrix::evidence),
+        &settings,
     );
     report::publish(&settings, report)
+}
+
+fn remaining_run_duration(
+    settings: &config::LiveSettings,
+    started: Instant,
+) -> Result<Duration, String> {
+    settings
+        .limits
+        .max_run_duration
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| "blocked_budget: live run deadline exhausted".to_string())
+}
+
+async fn fetch_catalog_before_run_deadline(
+    provider: &str,
+    settings: &config::LiveSettings,
+    started: Instant,
+) -> Result<catalog::CatalogCapture, String> {
+    let remaining = remaining_run_duration(settings, started)?;
+    tokio::time::timeout(remaining, catalog::fetch_catalog(provider, settings))
+        .await
+        .map_err(|_| "blocked_budget: live run deadline exhausted".to_string())?
+}
+
+fn classify_local_blocker(error: &str) -> (Classification, &'static str) {
+    for (token, classification, safe_class) in [
+        ("blocked_auth", Classification::BlockedAuth, "blocked_auth"),
+        (
+            "blocked_rate_limit",
+            Classification::BlockedRateLimit,
+            "blocked_rate_limit",
+        ),
+        (
+            "blocked_billing",
+            Classification::BlockedBilling,
+            "blocked_billing",
+        ),
+        (
+            "blocked_region",
+            Classification::BlockedRegion,
+            "blocked_region",
+        ),
+        (
+            "blocked_quota",
+            Classification::BlockedQuota,
+            "blocked_quota",
+        ),
+        (
+            "blocked_budget",
+            Classification::BlockedBudget,
+            "blocked_budget",
+        ),
+        (
+            "blocked_configuration",
+            Classification::BlockedConfiguration,
+            "blocked_configuration",
+        ),
+    ] {
+        if error.contains(token) {
+            return (classification, safe_class);
+        }
+    }
+    (Classification::Unknown, "catalog_or_plan_failure")
+}
+
+fn publish_uniform_blocker(
+    settings: &config::LiveSettings,
+    run_id: String,
+    started_at: DateTime<Utc>,
+    selected_suite: Option<SelectedSuiteEvidence>,
+    classification: Classification,
+    safe_error_class: &'static str,
+) -> Result<PublishedReport, String> {
+    let providers = settings
+        .providers
+        .iter()
+        .map(|provider| report::blocked_provider_report(provider, classification, safe_error_class))
+        .collect();
+    let qualification = report::QualificationReport::new(
+        run_id,
+        settings.mode,
+        started_at,
+        Utc::now(),
+        providers,
+        selected_suite,
+        settings,
+    );
+    report::publish(settings, qualification)
 }
 
 #[cfg(test)]
@@ -356,10 +656,13 @@ mod tests {
     fn model(id: &str) -> CatalogModel {
         CatalogModel {
             id: id.to_string(),
+            generation_target: None,
             aliases: Vec::new(),
             supports_text_generation: Some(true),
             supports_tools: None,
             supports_parallel_tools: None,
+            input_modalities: ["text".to_string()].into_iter().collect(),
+            output_modalities: ["text".to_string()].into_iter().collect(),
             supported_parameters: BTreeSet::new(),
             public_identifier: true,
             owner: None,

@@ -189,6 +189,39 @@ impl WorktreeManager {
     }
 }
 
+pub(crate) fn with_validated_session_worktree<T>(
+    repo_root: &Path,
+    session_id: &str,
+    inspect: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve the project root: {error}"))?;
+    let Some(ownership) = crate::sandbox::worktree::load_managed_worktree_ownership(
+        &repo_root,
+        crate::sandbox::worktree::ManagedWorktreeKind::Session,
+        session_id,
+    )?
+    else {
+        return Ok(None);
+    };
+    let path = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
+        .map_err(|error| format!("session worktree ownership is invalid: {error}"))?;
+    if !path.starts_with(&repo_root) {
+        return Err("session worktree ownership escapes the project root".to_string());
+    }
+
+    let inspected = inspect(&path);
+    let revalidated = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
+        .map_err(|error| format!("session worktree ownership changed during inspection: {error}"));
+    match (inspected, revalidated) {
+        (Ok(value), Ok(_)) => Ok(Some(value)),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(ownership_error)) => Err(format!("{error}; {ownership_error}")),
+    }
+}
+
 struct BlockingCreateCancellationGuard {
     cancellation: crate::sandbox::worktree::BlockingGitCancellation,
     completion: std::sync::mpsc::Receiver<()>,

@@ -1193,6 +1193,35 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn windows_dos_short_path(path: &Path) -> PathBuf {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let canonical = path.canonicalize().expect("canonical Windows source path");
+        let mut input = canonical.as_os_str().encode_wide().collect::<Vec<_>>();
+        input.push(0);
+        let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+        assert_ne!(
+            required,
+            0,
+            "failed to size DOS short-path buffer: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut output = vec![0_u16; required as usize];
+        let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+        assert_ne!(
+            written,
+            0,
+            "failed to resolve DOS short path: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!((written as usize) < output.len());
+        output.truncate(written as usize);
+        PathBuf::from(OsString::from_wide(&output))
+    }
+
     #[test]
     fn cleanup_failures_remain_visible_with_primary_and_secondary_errors() {
         assert_eq!(
@@ -1225,6 +1254,28 @@ mod tests {
         remove_skill_from("safe-rust", global.path()).expect("remove skill");
         assert!(!installed.exists());
         assert!(remove_skill_from("safe-rust", global.path()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installs_a_real_directory_through_its_dos_short_alias() {
+        let source = tempdir().expect("source tempdir");
+        let global = tempdir().expect("global tempdir");
+        let long_root = source.path().join("Long Skill Source Directory");
+        let skill = create_skill(&long_root, "windows-short-skill");
+        let canonical = skill.canonicalize().expect("canonical skill source");
+        let short = windows_dos_short_path(&skill);
+        assert_ne!(
+            short, canonical,
+            "fixture requires a distinct DOS short alias for the real source directory"
+        );
+
+        let installed = install_skill_to(short.to_str().expect("UTF-8 short path"), global.path())
+            .expect("install through DOS short alias");
+        assert_eq!(
+            fs::read_to_string(installed.join("SKILL.md")).expect("installed manifest"),
+            fs::read_to_string(canonical.join("SKILL.md")).expect("source manifest")
+        );
     }
 
     #[test]

@@ -5,9 +5,9 @@
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
-[T007: Configuration Schema Alignment](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
-[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../development/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
-[T022: Provider-Neutral LLM Contract and Adapter Conformance](../development/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
+[T007: Configuration Schema Alignment](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](../done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md),
+[T022: Provider-Neutral LLM Contract and Adapter Conformance](../done/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
 [Task Runner](../../tech/task.md), and
 [CI](../../tech/ci.md)
 
@@ -315,8 +315,8 @@ prompt.
 #### 2. Streamed Text
 
 - Send a new request with a different nonce through the production stream path.
-- Require bounded UTF-8-safe public deltas, exactly one private terminal result, prompt
-  nonce presence in the reconstructed sanitized text, and no event after termination.
+- Require one bounded validated private terminal response containing the nonce. Raw
+  adapter deltas remain inside `crate::llm` and are not a live-harness observer surface.
 - Assert structural parity with `complete` (valid completion and finish class), not
   byte-for-byte content equality between two independent generations.
 - Fail premature EOF, duplicate terminal delivery, malformed chunks, remote in-band
@@ -363,8 +363,8 @@ The initial `nib-llm-core-v1` suite defines the tasks nib's LLM layer must compl
 
 1. `complete_text`: return a bounded non-streamed answer containing the run nonce and
    an authoritative successful terminal status.
-2. `streamed_text`: emit ordered text deltas containing a distinct nonce and exactly one
-   authoritative terminal outcome.
+2. `streamed_text`: use the production incremental transport and return a bounded
+   nonce-bearing authoritative terminal outcome.
 3. `single_tool_continuation`: emit one schema-valid inert tool call, preserve the exact
    neutral call/result correlation through the provider-native continuation path, and
    return the final receipt nonce. This is required for every selected model because it
@@ -808,6 +808,27 @@ can classify a transport as unsupported.
 - [ ] Independent spec-compliance and technical/security reviews have no unresolved
   blocker.
 
+## Closure Classification (2026-09-02)
+
+The implementation and external evidence boundaries are now explicit:
+
+- Offline implementation evidence is green. The normal suite passed 66 credential-free
+  live-harness tests (with the paid test ignored), covering catalog parsing and bounds,
+  scenario planning, matrix/report provenance, typed outcomes, cost accounting, privacy,
+  and workflow contracts. `task verify`, `task docs:check`, host and Windows-target
+  all-target checks, 85.87 percent runtime coverage, and the locked release build also
+  passed locally.
+- No catalog, canary, selected, or full live run was authorized in this work session.
+  No provider credentials, spending acknowledgement, approved OpenRouter-model decision,
+  or protected environment authority was inferred. Consequently none of the acceptance
+  checkboxes above is promoted solely from offline evidence.
+- Closure requires an owner-approved current OpenRouter exact-ID allowlist, dedicated
+  provider credentials and budgets, protected-workflow approval, then catalog/canary/
+  selected/full execution. The resulting complete reports must be inspected for all six
+  provider groups, privacy scans, exact revision and matrix/catalog fingerprints,
+  denominators, blockers, and bounded usage/cost evidence before this spec can move to
+  `done/`.
+
 ## Affected Areas
 
 - `tests/llm_live.rs` and live-only support modules/fixtures
@@ -909,6 +930,96 @@ Credential-free validation for this slice on 2026-08-17:
   suppression, and the combined-tree `task check` passed on 2026-08-17. No
   selected-suite lint finding was emitted.
 
+Credential-free evidence-fidelity reconciliation on 2026-08-23:
+
+- Gemini catalog normalization now preserves the returned `name` as the canonical
+  accounting identity, requires the documented unprefixed `baseModelId`, and uses that
+  separate target for production generation configuration. Canary/selected matching
+  accepts the documented target only when it resolves to exactly one catalog entry.
+- OpenRouter catalog discovery now requests
+  `/api/v1/models?output_modalities=all`, with an exact URL fixture, so accounting does
+  not inherit the endpoint's default output-modality filter.
+- Whole-artifact sensitive-value scans now include standard and URL-safe Base64, both
+  padded and unpadded, in addition to the existing raw, percent-encoded, and
+  JSON-escaped variants.
+- `task test:llm-live:offline` passed 33 tests with the live network entrypoint ignored.
+  These credential-free corrections do not satisfy the remaining live-provider,
+  exact-revision, or independent-review acceptance gates.
+
+Catalog boundary fixture reconciliation on 2026-08-24:
+
+- All six catalog clients now execute deterministic localhost success fixtures. The
+  Anthropic and Gemini fixtures exercise exact cursor/token pagination and request
+  headers; negative fixtures cover repeated pagination state, page/model limits,
+  conflicting duplicates, malformed JSON, declared response oversize, status-only
+  remote failures, request deadlines, and cancellation-driven socket closure.
+- Fixture observation channels are deliberately non-authoritative so a negative test
+  that discards captured request text cannot turn a correctly served response into a
+  background-thread failure. The cancellation fixture uses a multi-thread Tokio
+  runtime so its synchronous server observation cannot starve the request future.
+- `cargo test --test llm_live catalog::tests -- --test-threads=1` passed 12 tests with
+  loopback access. No provider endpoint, credential, or paid generation request was
+  used. Live completeness, exact-revision evidence, and independent review remain
+  open, so no acceptance checkbox changed.
+
+Typed scenario-failure reconciliation on 2026-08-23:
+
+- Complete, stream-open, stream-finish, and both native continuation
+  requests now preserve T022's typed `LlmError`; the harness no longer stringifies and
+  searches provider error text.
+- A separate finite harness-failure code identifies local configuration, deadline,
+  scope, response, and tool-correlation failures. Adapter stream-contract and output
+  bounds remain typed provider failures rather than harness-invented classifications. Its
+  optional diagnostic is escaped and bounded to 256 bytes and is never used to infer a
+  provider capability.
+- Blocked auth, rate, quota, billing, region, and configuration classifications derive
+  deterministically from `LlmErrorClass` and bounded HTTP status. `unsupported_transport`
+  requires a typed HTTP `UnsupportedRequest` from the complete-text basic probe;
+  provider prose, local pre-I/O rejection, and tool-scenario rejection remain failures.
+- `task test:llm-live:offline` passed 36 tests with the live network entrypoint ignored.
+  Live-provider results and the broader T022/exact-revision/review gates remain open.
+
+Artifact-publication and aggregate-evidence hardening on 2026-08-23:
+
+- JSON and Markdown reports are serialized, byte-bounded, and sensitive-scanned before
+  publication. A component-by-component `cap_std` walk creates or validates the results
+  directory without accepting symlink components, retains its file identity, and
+  revalidates the visible directory identity after both publications.
+- Each report is staged with no-replace directory-relative creation, durably synced,
+  published with a platform no-replace primitive, read back through an open ownership
+  receipt, compared byte-for-byte, and sensitive-scanned again. Linux/Android, Apple,
+  and Windows use their native handle/directory-relative primitives; other targets fail
+  closed rather than reverting to an overwrite-prone path operation.
+- Pair rollback quarantines and identity-checks aliases before deletion. If Markdown
+  publication fails, only the owned JSON final is removed; a raced replacement is
+  restored or otherwise preserved and the publication fails. Staging cleanup follows
+  the same ownership rule.
+- Passing publication now rejects inconsistent completion state, unsupported or
+  duplicate provider identities, catalog/accounting denominator drift, duplicate
+  accounting identities, empty or duplicate generation profiles, non-qualified
+  profiles, and failed, duplicated, or overlapping scenario evidence. Complete and
+  streamed text are required for every passing generation profile; selected mode also
+  requires the persisted single-tool scenario and exactly one passed/not-applicable
+  parallel disposition. Canary/full validation deliberately accepts text-only and
+  non-parallel profiles when that is the scenario set the real planner persisted.
+- Deterministic fault hooks cover existing regular files/directories, existing and
+  broken target symlinks, results-directory and parent-component symlinks, directory
+  replacement before and between publication, second-file collision, raced first-file
+  replacement, truncation, and oversize/sensitive suppression. Incomplete evidence can
+  publish only with `passed = false`; forged or truncated green evidence is rejected.
+- The protected aggregate job independently requires the exact requested provider set,
+  unique run IDs, the exact workflow source revision, identical complete selected-suite
+  provenance, three mandatory passed scenarios per selected profile, and exactly one
+  passed/not-applicable parallel disposition.
+- `task test:llm-live:offline` passed 46 tests with the paid live entrypoint ignored;
+  `task check:all-targets` and its `x86_64-pc-windows-msvc` cross-target form passed on
+  the final tree. The installed Apple target was also attempted, but this Linux host has
+  no Apple C cross-compiler, so `ring` stopped on unsupported `-arch`/
+  `-mmacosx-version-min` flags before compiling nib. No live/provider request was made.
+  These credential-free checks do not satisfy the remaining live-provider,
+  exact-revision, artifact-retention, or independent-review gates, so no acceptance
+  checkbox changed.
+
 Credential-free validation completed on 2026-08-06:
 
 - `task check`, `task test`, `task docs:check`, and `task check:all-targets` passed;
@@ -931,10 +1042,152 @@ acceptance item is being claimed prematurely:
 - every initial OpenRouter entry is `approved = false` pending an authenticated catalog,
   capability, regional-availability, and price review; paid OpenRouter modes therefore
   fail closed; and
-- T022 still lacks typed provider error/usage/actual-attempt metadata and the complete
-  deterministic conformance matrix required for release-authoritative evidence. The
-  harness consequently keeps ambiguous model rejections as adapter failures rather
-  than inferring unsupported capability from remote prose.
+- T022 now supplies typed provider errors, bounded actual-attempt metadata, and
+  provider-neutral usage on successful complete/private-stream outcomes. The complete
+  deterministic conformance matrix required for release-authoritative evidence remains
+  open. The harness consequently keeps ambiguous model rejections as adapter failures
+  rather than inferring unsupported capability from remote prose.
+
+Provider-neutral usage prerequisite reconciliation on 2026-08-23:
+
+- Production `LlmResponse` values now expose optional, bounded, strictly validated
+  input/output/total usage and documented cached/reasoning breakdowns for Chat
+  Completions, Responses, Anthropic, and Gemini; Mock explicitly reports no usage.
+  Checked aggregation is available for two-request tool-continuation scenarios and
+  fails rather than saturating or guessing through overflow or absent optional details.
+- Canonical OpenAI Chat waits privately through its optional usage chunk and `[DONE]`
+  after the sole public terminal event. Responses consumes `response.completed`,
+  Anthropic combines the start baseline with cumulative deltas, and Gemini includes
+  thought tokens in normalized output. Malformed returned usage is a protocol failure;
+  absent usage does not fail a valid qualification response.
+- The mappings are backed by the official
+  [OpenAI Chat](https://developers.openai.com/api/reference/resources/chat),
+  [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/retrieve),
+  [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create),
+  [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming),
+  and [Gemini GenerateContent](https://ai.google.dev/api/generate-content) references.
+  Persisting actual attempts/usage in live scenario reports and enforcing aggregate
+  live token ceilings remain T023 work; no live or paid request was made for this slice.
+
+Typed live-evidence and cumulative-budget reconciliation on 2026-08-24:
+
+- Scenario execution now returns a typed evidence record instead of discarding a
+  successful result. Every production complete request, stream open/terminal failure,
+  and private stream completion contributes its typed T022 attempt metadata; successful
+  usage is aggregated with `LlmUsage::checked_add`. The single- and parallel-tool
+  continuation scenarios persist two logical requests and checked combined usage.
+- Schema 2 remains compatible and adds bounded scenario, provider, and run actuals:
+  logical requests, optional actual attempts, usage totals plus complete/partial/unknown
+  state, failure-only HTTP status, checked actual cost when both pricing and required
+  usage exist, and elapsed/budget-completion evidence. Required scenarios are persisted
+  independently from observed results so a missing execution cannot rewrite its own
+  denominator.
+- One shared run ledger and one provider ledger admit each generation request only when
+  the worst-case next request still fits the logical-request, three-attempt,
+  output-token, elapsed/deadline, and priced-cost ceilings. Returned actual metadata is
+  charged after the request; absent attempts or usage are conservatively charged at the
+  bounded maximum when complete pricing is available, without inventing report
+  actuals. Incomplete pricing remains unknown and still requires the existing explicit
+  unpriced allowance plus provider-side hard spend cap. A ceiling or checked-arithmetic
+  failure produces `blocked_budget`, explicitly reports every remaining required
+  scenario as blocked, and makes provider/run completion and pass false.
+- Report validation recomputes every aggregate and rejects plan/config overruns,
+  missing or contradictory request/attempt evidence, invalid usage completeness,
+  inconsistent cost claims, success-side HTTP status, absent required scenarios,
+  elapsed mismatches, and any complete/passing claim on budget-truncated evidence.
+  Markdown renders only bounded aggregate counts, usage, cost, elapsed time, and local
+  classifications; prompts, nonces, remote bodies, headers, request IDs, continuation
+  state, and private tool correlation remain absent.
+- The focused Task-compatible offline gate passed all 12 planner, 12 scenario, and 18
+  report tests after implementation. The tests cover two-request aggregation, typed
+  success/error retry attempts, complete/partial/unknown usage, checked usage overflow,
+  each pre-I/O cumulative budget blocker, provider/run ledger separation, checked
+  actual cost, and forged/incomplete report rejection. No live or paid provider request
+  was made, and no live acceptance checkbox changes in this reconciliation.
+
+Catalog origin and identifier privacy reconciliation on 2026-08-26:
+
+- Every live catalog endpoint is now resolved before request construction, rejects an
+  empty, loopback, private, carrier-grade NAT, link-local, documentation, multicast,
+  transition, special-purpose, non-global-allocation, or mixed public/private address
+  set, disables ambient proxies, and pins the exact validated host/port/address set into
+  the no-redirect client. IPv6 is admitted only from the global-unicast `2000::/3`
+  allocation after explicit IANA special-purpose exclusions; reserved top-level,
+  benchmarking, both documentation, 6to4/ORCHID/Teredo, NAT64, and mapped/compatible
+  IPv4 fixtures fail closed. Failure text omits the configured host and resolved
+  addresses. Local fixture clients remain a separate credential-free path and cannot
+  be selected by the live entrypoint.
+- `NIB_LIVE_META_BASE_URL` is rejected during settings preflight unless it is a bounded
+  absolute HTTPS catalog root without credentials, query, or fragment. The complete
+  configured value remains in the sensitive-value corpus and is never rendered.
+- Account-visible Anthropic and Gemini catalog entries no longer gain public ownership
+  merely from the parser used for their endpoint. Because those response schemas carry
+  no ownership discriminator, persisted reports pseudonymize their identifiers by
+  default; OpenAI-compatible and xAI identifiers require an exact provider-owned field,
+  while reviewed public OpenRouter canonical slugs retain their existing policy.
+- Deterministic coverage now includes private and mixed DNS answers, every relevant
+  literal address family/class, repeated Gemini pagination tokens, and malformed
+  top-level evidence for all six providers. `task test:llm-live:offline` passed 62/62
+  credential-free tests with the paid live entrypoint intentionally ignored;
+  `task check:all-targets`, `task fmt`, and `git diff --check` were green before this
+  reconciliation text. No live/provider request was made and no acceptance checkbox
+  changed.
+
+All-provider admission, accounting, and blocker reconciliation on 2026-08-26:
+
+- Paid modes now require explicit values for all nine request, attempt, per-request
+  output-token, total-output-token, actual-cost, concurrency, scenario-timeout,
+  provider-timeout, and run-timeout ceilings. The protected workflow supplies these as
+  provider-scoped environment variables and fails before Cargo or network execution if
+  any reviewed paid ceiling is absent.
+- A multi-provider invocation fetches and plans the complete requested provider set
+  before the first generation request. Any catalog, configuration, matrix, deadline,
+  or budget blocker prevents generation for every provider and atomically publishes a
+  complete blocked report covering every provider instead of leaving partial paid
+  evidence. Catalog and generation work share the same whole-run deadline; every
+  request/stream phase is additionally bounded by the remaining scenario and provider
+  duration.
+- Actual T022 attempts, usage, elapsed time, and checked price-derived cost are charged
+  to provider and run ledgers after every request. Missing accounting is charged
+  conservatively for admission while remaining explicitly incomplete in evidence;
+  ceiling exhaustion reports every unexecuted required scenario as `blocked_budget`.
+- Private model identifiers use an ephemeral random per-run HMAC key and a provider
+  domain separator. Reports retain stable correlation only within one run and cannot
+  be joined across runs through a repository or environment-held privacy secret.
+- Meta catalog execution carries the exact preflighted no-proxy, no-redirect,
+  DNS-pinned client through the production adapter rather than re-resolving a merely
+  text-equal URL after validation. The protected workflow sources its explicit Meta
+  catalog root only from the provider environment's protected secret.
+- `task test:llm-live:offline` passed 63 credential-free tests with the paid entrypoint
+  ignored. The combined `task check`, `task check:all-targets`, and 85.51% coverage
+  gates passed; no provider credential was read and no paid request was made.
+
+The external catalog, credential, cost-account, supported-region Meta, retained hosted
+artifact, and exact-revision live matrix criteria remain open. No live acceptance item
+is claimed by this reconciliation.
+
+Windows report-publication remediation on 2026-09-02:
+
+- Exact revision `f7b1212050bf7bc4878d60fbf69fcb6759344b9e` passed the complete
+  Linux and macOS jobs in hosted run `33660307444`, but the Windows offline live-report
+  fixture exposed two Windows-specific assumptions. The retained `cap_std` directory
+  handle lacked the write access required by `NtFlushBuffersFile`, and the raced-file
+  fixture used ordinary Windows deferred deletion while an ownership handle remained
+  open. Five report tests failed before the Windows release qualification step, so the
+  run is not closure evidence for any native-matrix criterion.
+- Windows directory durability now opens a second no-follow, share-safe, write-capable
+  handle to the already anchored visible directory, verifies its file identity against
+  the retained anchor, and flushes that exact handle. It does not accept a path-only
+  replacement or weaken a failed durability barrier into success.
+- The raced-replacement fixture now removes the exact opened regular file with
+  `FileDispositionInfoEx` POSIX semantics before creating the replacement. This makes
+  the intended immediate namespace transition explicit instead of depending on
+  deferred `DeleteFile` behavior; the production no-replace publication and
+  identity-bound rollback paths are unchanged.
+- The credential-free offline gate passed 66 tests with one paid live entrypoint
+  intentionally ignored. `task check`, Windows MSVC all-target compilation, and
+  `git diff --check` passed. Replacement native hosted evidence remains required, and
+  no provider credential was read or paid request made.
 
 ## Open Questions
 
@@ -962,3 +1215,23 @@ The Meta reference establishes the direct public-preview service and OpenAI-comp
 developer surface, but not yet a stable catalog endpoint in the accessible public
 reference. The explicit-base-URL blocker above is intentional until implementation can
 record authoritative catalog documentation and a bounded fixture.
+
+## Final Offline Native Matrix Reconciliation (2026-09-02)
+
+PR [#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100) passed
+Validate, macOS Tests, and Windows Tests for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. This includes the complete
+credential-free offline live-harness suite on every native job; the paid live entrypoint
+remained explicitly ignored by ordinary CI. No provider credential was read and no paid
+request was made.
+
+This evidence closes the offline implementation and portability risk, but it does not
+close T023. Completion still requires owner-approved exact OpenRouter IDs with rationale
+and review/expiry dates; dedicated provider credentials and accounts; explicit per-request,
+provider, and run budgets plus hard spend caps; protected environment approvals; catalog
+and dry-run review; then canary, selected, and full exact-revision runs with retained
+privacy-reviewed reports for all six provider groups. The live acceptance items remain
+unchecked and T023 remains in `development/` until that external authority and evidence
+exist.

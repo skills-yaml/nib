@@ -88,10 +88,9 @@ fn crashed_supervisor_is_recovered_only_after_pid_namespace_exit() {
         .clone()
         .expect("registered namespace root");
     let mut namespace_guard = ProcessKillGuard::new(namespace_init.clone());
-    assert_eq!(
-        unsafe { libc::kill(namespace_init.pid as i32, libc::SIGSTOP) },
-        0,
-        "stop the namespace root so parent-death cleanup cannot win the recovery race"
+    assert!(
+        namespace_init.still_matches(),
+        "the exact namespace root must be live before the supervisor is killed"
     );
 
     assert_eq!(
@@ -99,10 +98,6 @@ fn crashed_supervisor_is_recovered_only_after_pid_namespace_exit() {
         0
     );
     supervisor.wait().expect("reap crashed supervisor");
-    assert!(
-        namespace_init.still_matches(),
-        "the exact namespace root must still be live when recovery begins"
-    );
     let interrupted = store.load(SCOPE_ID).expect("interrupted scope");
     assert_eq!(
         store

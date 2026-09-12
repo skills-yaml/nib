@@ -104,8 +104,15 @@ jobs:
       NIB_LIVE_PROVIDER: ${{ matrix.provider }}
       NIB_LIVE_RESULTS_DIR: target/llm-live/${{ matrix.provider }}
       NIB_LIVE_ALLOW_UNPRICED: ${{ vars.NIB_LIVE_ALLOW_UNPRICED || '0' }}
-      NIB_LIVE_MAX_REQUESTS: ${{ vars.NIB_LIVE_MAX_REQUESTS || '10000' }}
-      NIB_LIVE_MAX_OUTPUT_TOKENS: ${{ vars.NIB_LIVE_MAX_OUTPUT_TOKENS || '64' }}
+      NIB_LIVE_MAX_REQUESTS: ${{ needs.prepare.outputs.mode == 'catalog' && '10000' || vars.NIB_LIVE_MAX_REQUESTS }}
+      NIB_LIVE_MAX_ATTEMPTS: ${{ needs.prepare.outputs.mode == 'catalog' && '30000' || vars.NIB_LIVE_MAX_ATTEMPTS }}
+      NIB_LIVE_MAX_OUTPUT_TOKENS: ${{ needs.prepare.outputs.mode == 'catalog' && '64' || vars.NIB_LIVE_MAX_OUTPUT_TOKENS }}
+      NIB_LIVE_MAX_TOTAL_OUTPUT_TOKENS: ${{ needs.prepare.outputs.mode == 'catalog' && '640000' || vars.NIB_LIVE_MAX_TOTAL_OUTPUT_TOKENS }}
+      NIB_LIVE_MAX_ACTUAL_COST_USD: ${{ needs.prepare.outputs.mode == 'catalog' && '100' || vars.NIB_LIVE_MAX_ACTUAL_COST_USD }}
+      NIB_LIVE_CONCURRENCY: ${{ needs.prepare.outputs.mode == 'catalog' && '1' || vars.NIB_LIVE_CONCURRENCY }}
+      NIB_LIVE_SCENARIO_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '120' || vars.NIB_LIVE_SCENARIO_TIMEOUT_SECS }}
+      NIB_LIVE_PROVIDER_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '3600' || vars.NIB_LIVE_PROVIDER_TIMEOUT_SECS }}
+      NIB_LIVE_RUN_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '14400' || vars.NIB_LIVE_RUN_TIMEOUT_SECS }}
       RUST_LOG: warn
       RUST_LOG_STYLE: never
       RUST_BACKTRACE: "0"
@@ -128,6 +135,24 @@ jobs:
           META_BASE_URL: ${{ secrets.NIB_LIVE_META_BASE_URL }}
         run: |
           set -euo pipefail
+          if [ "${{ needs.prepare.outputs.mode }}" != "catalog" ]; then
+            for required_limit in \
+              NIB_LIVE_MAX_REQUESTS \
+              NIB_LIVE_MAX_ATTEMPTS \
+              NIB_LIVE_MAX_OUTPUT_TOKENS \
+              NIB_LIVE_MAX_TOTAL_OUTPUT_TOKENS \
+              NIB_LIVE_MAX_ACTUAL_COST_USD \
+              NIB_LIVE_CONCURRENCY \
+              NIB_LIVE_SCENARIO_TIMEOUT_SECS \
+              NIB_LIVE_PROVIDER_TIMEOUT_SECS \
+              NIB_LIVE_RUN_TIMEOUT_SECS
+            do
+              test -n "${!required_limit:-}" || {
+                echo "Protected paid qualification requires reviewed provider-scoped $required_limit." >&2
+                exit 1
+              }
+            done
+          fi
           case "$NIB_LIVE_PROVIDER" in
             openai) export OPENAI_API_KEY="$PROVIDER_API_KEY" ;;
             anthropic) export ANTHROPIC_API_KEY="$PROVIDER_API_KEY" ;;
@@ -185,6 +210,7 @@ jobs:
           PROVIDERS: ${{ needs.prepare.outputs.providers }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
           QUALIFY_RESULT: ${{ needs.qualify.result }}
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -208,9 +234,23 @@ jobs:
             echo "Expected $expected_count provider reports, found ${#reports[@]}." >&2
             exit 1
           fi
+
+          expected_providers="$(jq -c 'sort' <<<"$PROVIDERS")"
+          actual_providers="$(jq -s -c '[.[].providers[0].provider] | sort' "${reports[@]}")"
+          if [ "$actual_providers" != "$expected_providers" ]; then
+            echo "Provider reports do not match the requested provider set." >&2
+            exit 1
+          fi
+
+          unique_run_count="$(jq -r '.run_id' "${reports[@]}" | sort -u | wc -l)"
+          if [ "$unique_run_count" -ne "$expected_count" ]; then
+            echo "Provider reports do not have unique run identities." >&2
+            exit 1
+          fi
           for report in "${reports[@]}"; do
-            jq -e --arg mode "$MODE" '
+            jq -e --arg mode "$MODE" --arg revision "$SOURCE_REVISION" '
               .schema_version == 2 and
+              .source_revision == $revision and
               .mode == $mode and
               .complete == true and
               .passed == true and
@@ -220,7 +260,30 @@ jobs:
               (if $mode == "selected" then
                 (.selected_suite.suite_id | length) > 0 and
                 (.selected_suite.matrix_sha256 | test("^[0-9a-f]{64}$")) and
-                .selected_suite.required_task_count >= 3
+                .selected_suite.required_task_count >= 3 and
+                (.providers[0].profiles | length) > 0 and
+                all(.providers[0].profiles[];
+                  .classification == "qualified" and
+                  all(.scenarios[]; .passed == true) and
+                  (([.scenarios[].scenario] | length) ==
+                    ([.scenarios[].scenario] | unique | length)) and
+                  (([.not_applicable_scenarios[]] | length) ==
+                    ([.not_applicable_scenarios[]] | unique | length)) and
+                  ([.scenarios[] |
+                    select(.scenario == "complete_text" and .passed == true)] |
+                    length) == 1 and
+                  ([.scenarios[] |
+                    select(.scenario == "streamed_text" and .passed == true)] |
+                    length) == 1 and
+                  ([.scenarios[] |
+                    select(.scenario == "single_tool_continuation" and .passed == true)] |
+                    length) == 1 and
+                  (([.scenarios[] |
+                    select(.scenario == "parallel_tool_continuation" and .passed == true)] |
+                    length) +
+                    ([.not_applicable_scenarios[] |
+                      select(. == "parallel_tool_continuation")] | length)) == 1
+                )
               else
                 .selected_suite == null
               end)
@@ -228,15 +291,16 @@ jobs:
           done
 
           if [ "$MODE" = "selected" ]; then
-            mapfile -t matrix_hashes < <(jq -r '.selected_suite.matrix_sha256' "${reports[@]}" | sort -u)
-            if [ "${#matrix_hashes[@]}" -ne 1 ]; then
-              echo "Selected provider reports do not share one matrix fingerprint." >&2
+            mapfile -t suites < <(jq -S -c '.selected_suite' "${reports[@]}" | sort -u)
+            if [ "${#suites[@]}" -ne 1 ]; then
+              echo "Selected provider reports do not share identical suite provenance." >&2
               exit 1
             fi
+            matrix_hash="$(jq -r '.selected_suite.matrix_sha256' "${reports[0]}")"
             {
               echo
               echo "- Suite: \`$(jq -r '.selected_suite.suite_id' "${reports[0]}")\`"
-              echo "- Matrix SHA-256: \`${matrix_hashes[0]}\`"
+              echo "- Matrix SHA-256: \`$matrix_hash\`"
               for report in "${reports[@]}"; do
                 provider="$(jq -r '.providers[0].provider' "$report")"
                 echo

@@ -1,11 +1,11 @@
 # T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
-[T007: Configuration and Doctor](../development/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
+[T007: Configuration and Doctor](../done/T007_configuration_schema_alignment_and_nib_doctor_validation.md),
 [T010: Release Process](../done/T010_release_process.md)
 
 ## Summary
@@ -150,9 +150,9 @@ MCP, and delegated agent loops use the same request builder and validation path.
 Both completion modes yield a provider-neutral completed-turn envelope containing
 content, terminal status, tool calls with typed provider call IDs, and an optional
 provider continuation. Streaming returns a private provider-stream handle: the agent
-loop may project sanitized content and tool deltas onto public `StreamEvent`s, while a
-separate private completion channel yields the envelope after all deltas have been
-validated. Partial or public events cannot authorize tool execution. The continuation
+loop can finish it but cannot receive raw provider deltas. After terminal validation,
+the loop derives sanitized content and tool events only from the completed envelope.
+Partial provider events cannot authorize tool execution or reach a public observer. The continuation
 is an ordered, byte/item-bounded provider value bound to the originating provider,
 model, API mode, session, and run. It is returned explicitly to the loop, consumed only
 by the matching next request, and never becomes mutable state hidden inside a shared
@@ -180,10 +180,10 @@ Implement Responses as a separate dialect within `src/llm/`:
 - Keep opaque reasoning/continuation items in memory only for the active run. Persist
   normalized tool intent, approvals, results, errors, and reconciliation evidence in
   the existing provider-neutral session format.
-- Parse Responses SSE event types inside the private provider stream, project only
-  sanitized content/tool deltas to public events, and return one private completed-turn
-  envelope while retaining current byte limits, early receiver-drop behavior,
-  cancellation, retry policy, and credential rotation.
+- Parse Responses SSE event types inside the private provider stream and return one
+  private completed-turn envelope while retaining current byte limits, early
+  receiver-drop behavior, cancellation, retry policy, and credential rotation. Public
+  content/tool events are projected from that envelope only after validation.
 
 `store: false` prevents nib from asking the API to retain application response state;
 it is not presented as a Zero Data Retention guarantee. User documentation must keep
@@ -340,9 +340,9 @@ rule with a deterministic operator-requested repair.
 - [x] Complete and streaming paths return bounded continuation explicitly, reject a
   continuation used with another provider/model/API/session/run, and prove concurrent
   sessions cannot observe or consume each other's call IDs or opaque items.
-- [x] CLI, TUI, MCP, and other public stream observers receive only sanitized projected
-  events and cannot receive provider call IDs, encrypted reasoning, or opaque
-  continuation items.
+- [x] CLI, TUI, MCP, and other public observers receive only terminal-authoritative,
+  sanitized projected events and cannot receive provider call IDs, encrypted
+  reasoning, opaque continuation items, or preterminal provider deltas.
 - [x] Planner and runtime provider failures execute no unauthorized tool, persist a
   bounded redacted failure, and reconcile the session/workload to a truthful terminal
   state.
@@ -361,7 +361,7 @@ rule with a deterministic operator-requested repair.
 - [x] A kill/restart fixture between persisted tool completion and model continuation
   reconciles the interrupted run terminally and proves the completed tool is not
   executed twice.
-- [ ] An exact release binary exercises help, version, doctor, structured planning,
+- [x] An exact release binary exercises help, version, doctor, structured planning,
   one Responses tool round trip through a credential-free local fixture, and failure
   reconciliation; its reported SHA matches the validated artifact.
 - [x] User and technical documentation explain API-mode selection, migration, privacy,
@@ -390,6 +390,67 @@ technical reviews found no remaining source-code blockers.
 The unchecked release criterion remains blocked on committing the implementation,
 running the complete release-binary smoke against that exact SHA, and obtaining native
 Linux, macOS, and Windows CI evidence. T021 therefore remains in Development.
+
+## Release-Binary Harness Progress (2026-08-23)
+
+The remaining release path now has a repository-owned, credential-free qualification
+target without claiming that this uncommitted worktree is the required artifact:
+
+- `task qualify:llm-release` injects the checkout's full `git rev-parse HEAD` into the
+  locked optimized build and fails if `nib version` reports any other embedded commit.
+- The resulting executable exercises `--help`, `--version`, `version`, and `doctor`,
+  then runs structured planning and one correlated Responses tool-result round trip
+  through bounded `127.0.0.1` fixtures. A second fixture proves a typed, redacted
+  planning failure reaches terminal session reconciliation.
+- The harness computes the executable SHA-256 and writes bounded JSON evidence to
+  `target/release-qualification/t021-release-binary.json`, including platform,
+  architecture, source revision, embedded revision, and the exercised path names.
+- Evidence records whether the source worktree was clean and sets
+  `acceptance_eligible` to that value. The current dirty source can validate harness
+  behavior but cannot satisfy the unchecked exact committed artifact criterion.
+- Deterministic tests enforce the Task contract and exact build-identity parser. The
+  full ignored release-binary test runs only through the explicit Task target and does
+  not read provider environment credentials or make a non-local network request.
+
+The acceptance checkbox remains unchecked until this target passes for the clean,
+committed implementation revision on the required native release artifacts/CI hosts.
+
+## Native CI Qualification Wiring (2026-09-02)
+
+The Validate, Windows Tests, and macOS Tests jobs now run
+`task qualify:llm-release` in place of a build-only step, before their native smoke.
+Static installer coverage asserts that all three jobs retain that exact qualification
+boundary. A local dirty-tree run passed help, embedded version, doctor, structured
+planning, Responses tool continuation, typed failure reconciliation, and executable
+stability for source revision `8803408240d4c00ebc4027041c073c7f540360cc`; its
+evidence correctly reports `source_worktree_clean = false` and is not acceptance
+eligible. The checkbox remains open until the pushed clean revision produces native
+hosted evidence.
+
+## Local Release-Artifact Qualification (2026-08-26)
+
+`task qualify:llm-release` passed against the locked optimized Linux binary. The
+resulting bounded evidence records source revision
+`10389e0b61cf097b4a48f26afbbae75c632f0a1f`, executable SHA-256
+`54bd156293a512e179aa4675c601b440292c7cb350981555b474d43eb2daa5bd`, and successful
+help, embedded-version, doctor, structured-planning, Responses tool-result, and typed
+failure-reconciliation exercises. The sequential success/failure fixture now reloads
+the committed configuration revision before its second mutation, so the harness also
+honors the production stale-snapshot guard.
+
+This evidence deliberately reports `source_worktree_clean = false` and
+`acceptance_eligible = false`. It proves the local harness and exact built executable,
+not the required clean committed cross-platform release artifact; the acceptance
+checkbox and Development state therefore remain unchanged.
+
+## Windows Task-Contract Portability (2026-09-02)
+
+Hosted Windows run `33665599019` passed the complete test suite through the native Job
+Object, MCP lifecycle, and credential-free LLM report-publication coverage, then exposed
+that the deterministic release Task contract test parsed only LF-delimited YAML. Windows
+checks out the Taskfile with CRLF delimiters, so the test now normalizes CRLF to LF before
+inspecting the same exact target and required commands. The Task target and production
+release qualification behavior are unchanged.
 
 ## Affected Areas
 
@@ -463,3 +524,31 @@ done.
 - [T027: Doctor-Guided OpenAI Transport Repair](../done/T027_doctor_guided_openai_transport_repair.md)
   owns the explicit configuration repair while preserving this spec's runtime
   no-fallback contract.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+T021 and T022 use this same final revision and release-binary matrix. T021 therefore
+provides a non-stale baseline before the T022 lifecycle transition, satisfying the
+documented sequencing rule without relying on an older artifact.

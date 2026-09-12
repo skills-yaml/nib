@@ -3,7 +3,9 @@ use crate::config::{
     is_valid_mcp_server_name, McpServerEntry, NibConfig, MAX_MCP_CONFIGURED_SERVERS,
     MAX_MCP_REQUEST_TIMEOUT_SECS,
 };
-use crate::tools::executor::{contains_generic_secret, redact_text, redact_value};
+use crate::tools::executor::{
+    contains_generic_secret, normalized_encoded_sensitive_values, redact_text, redact_value,
+};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -394,22 +396,30 @@ impl McpSecretMatcher {
 
     fn redact(&self, value: &str) -> String {
         let generically_redacted = redact_text(value);
-        let Some(matcher) = &self.exact else {
-            return generically_redacted;
+        let redacted = match &self.exact {
+            Some(matcher) if matcher.is_match(&generically_redacted) => {
+                let mut redacted = String::with_capacity(generically_redacted.len());
+                let mut cursor = 0usize;
+                for matched in matcher.find_iter(generically_redacted.as_bytes()) {
+                    redacted.push_str(&generically_redacted[cursor..matched.start()]);
+                    redacted.push_str("[REDACTED]");
+                    cursor = matched.end();
+                }
+                redacted.push_str(&generically_redacted[cursor..]);
+                redacted
+            }
+            _ => generically_redacted,
         };
-        if !matcher.is_match(&generically_redacted) {
-            return generically_redacted;
+        let mut safe = crate::interactive::control_safe_text(&redacted, true);
+        if safe.len() > MAX_MCP_SENSITIVE_VALUE_BYTES {
+            let mut end = MAX_MCP_SENSITIVE_VALUE_BYTES.saturating_sub(3);
+            while end > 0 && !safe.is_char_boundary(end) {
+                end -= 1;
+            }
+            safe.truncate(end);
+            safe.push_str("...");
         }
-
-        let mut redacted = String::with_capacity(generically_redacted.len());
-        let mut cursor = 0usize;
-        for matched in matcher.find_iter(generically_redacted.as_bytes()) {
-            redacted.push_str(&generically_redacted[cursor..matched.start()]);
-            redacted.push_str("[REDACTED]");
-            cursor = matched.end();
-        }
-        redacted.push_str(&generically_redacted[cursor..]);
-        redacted
+        safe
     }
 }
 
@@ -1111,7 +1121,28 @@ fn mcp_sensitive_spellings(
                 MCP_SECRET_BOUNDARY_LIMIT_ERROR.to_string(),
             ));
         }
-        let mut candidates = vec![(sensitive.clone(), 0u8)];
+        let normalized = normalized_encoded_sensitive_values([sensitive.clone()]);
+        let percent_variants = [sensitive.as_str(), sensitive.trim()]
+            .into_iter()
+            .flat_map(|spelling| {
+                let upper = percent_encode_sensitive_spelling(spelling, false);
+                let lower = percent_encode_sensitive_spelling(spelling, true);
+                [
+                    upper.clone(),
+                    upper.replace('%', "%25"),
+                    lower.clone(),
+                    lower.replace('%', "%25"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut candidates = normalized
+            .into_iter()
+            .map(|spelling| {
+                let depth = u8::from(spelling != sensitive.as_str());
+                (spelling, depth)
+            })
+            .collect::<Vec<_>>();
+        candidates.extend(percent_variants.into_iter().map(|spelling| (spelling, 2)));
         while let Some((spelling, depth)) = candidates.pop() {
             if spelling.is_empty() || spellings.contains(&spelling) {
                 continue;
@@ -1147,6 +1178,25 @@ fn mcp_sensitive_spellings(
     let mut spellings = spellings.into_iter().collect::<Vec<_>>();
     spellings.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
     Ok(spellings)
+}
+
+fn percent_encode_sensitive_spelling(value: &str, lowercase: bool) -> String {
+    let digits = if lowercase {
+        b"0123456789abcdef"
+    } else {
+        b"0123456789ABCDEF"
+    };
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(digits[usize::from(byte >> 4)]));
+            encoded.push(char::from(digits[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn validate_server_config(config: &HashMap<String, McpServerEntry>) -> Result<(), McpError> {
@@ -1306,10 +1356,21 @@ fn validate_external_tool_metadata_boundary(
     })?;
     let serialized = std::str::from_utf8(&serialized)
         .map_err(|_| McpError::Rpc("MCP tools/list metadata is not UTF-8".to_string()))?;
-    if secret_matcher.contains(serialized) {
+    if contains_terminal_active_control(metadata) || secret_matcher.contains(serialized) {
         return Err(McpError::Rpc(MCP_METADATA_SECRET_ERROR.to_string()));
     }
     Ok(())
+}
+
+fn contains_terminal_active_control(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.values().any(contains_terminal_active_control),
+        Value::Array(values) => values.iter().any(contains_terminal_active_control),
+        Value::String(value) => {
+            crate::interactive::control_safe_text(value, true) != value.as_str()
+        }
+        _ => false,
+    }
 }
 
 fn invalid_tools_response(server_name: &str, message: impl Into<String>) -> McpError {
@@ -1489,6 +1550,45 @@ mod tests {
         ] {
             assert!(!error.contains(offending), "metadata escaped: {error}");
         }
+    }
+
+    #[test]
+    fn mcp_metadata_and_errors_reject_encoded_secrets_and_controls() {
+        let secret = "active/credential".to_string();
+        let matcher = secret_matcher(std::slice::from_ref(&secret));
+        for spelling in [
+            "active%2Fcredential",
+            r"active\/credential",
+            "YWN0aXZlL2NyZWRlbnRpYWw=",
+            "YWN0aXZlL2NyZWRlbnRpYWw",
+            "\u{1b}[2J",
+        ] {
+            let result = json!({
+                "tools": [{
+                    "name": "encoded_secret",
+                    "description": format!("metadata={spelling}"),
+                    "inputSchema": {"type": "object"},
+                }]
+            });
+            assert_eq!(
+                parse_external_tools("fixture", &result, &matcher)
+                    .expect_err("unsafe MCP metadata must reject atomically")
+                    .to_string(),
+                format!("RPC error: {MCP_METADATA_SECRET_ERROR}"),
+            );
+        }
+
+        let error = matcher.redact(&format!(
+            "remote={secret}; percent=active%2Fcredential; base64=YWN0aXZlL2NyZWRlbnRpYWw=; \u{1b}[31m"
+        ));
+        for forbidden in [
+            secret.as_str(),
+            "active%2Fcredential",
+            "YWN0aXZlL2NyZWRlbnRpYWw=",
+        ] {
+            assert!(!error.contains(forbidden));
+        }
+        assert!(!error.contains('\u{1b}'));
     }
 
     #[test]

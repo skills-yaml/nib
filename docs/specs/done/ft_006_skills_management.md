@@ -1,7 +1,7 @@
 # FT-006: Skills Management CLI
 
 **Status:** Done
-**Related:** [T006](../development/T006_enhanced_skills_framework_and_mcp_gateway_alignment.md)
+**Related:** [T006](../done/T006_enhanced_skills_framework_and_mcp_gateway_alignment.md)
 
 ## Scope
 
