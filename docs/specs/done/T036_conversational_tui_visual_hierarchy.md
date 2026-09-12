@@ -207,3 +207,27 @@ The final live capture confirms separate assistant turns and a single final outc
 No runtime persistence schema, tool authority, approval policy, or provider request
 contract changed. T023 live qualification and FT-020 non-Linux production delegation
 remain outside this completed presentation refinement.
+
+## Hosted Native Smoke Follow-up
+
+The first hosted run for the T036 commit passed Linux and Windows validation and
+the macOS test and exact-release gates, but the macOS composer smoke could not match
+the history title in raw terminal output. Incremental terminal drawing can reuse existing cells,
+so normalizing escape sequences does not reconstruct the visible screen. The removed
+hosted fixture does not establish whether this failure also involved input timing.
+
+The follow-up is confined to `scripts/check-interactive-release.sh`: synchronize
+composer actions with persisted draft and terminal records, retain native path
+completion, and prove history search by restoring, editing, and submitting the exact
+multiline draft. This replaces the raw history-title assertion with observable
+behavior. The dedicated approval/question case continues to cover those docks.
+Privacy, cancellation, hard timeouts, and exact terminal restoration remain gates.
+Validation requires focused interactive tests, the native binary smoke, documentation
+checks, `task verify`, and fresh Linux/macOS/Windows CI before merge.
+
+Independent spec-compliance and code-quality reviews passed this follow-up. The final
+Linux native smoke proved the exact history restoration with clean output; focused
+interactive tests and `task verify` passed again, including all 1,418 tests and static
+checks. Session-file polling tolerates the brief absence of the published path during
+replacement while retaining its deadline. Hosted results for the final committed
+revision are recorded in PR #25 before merge.

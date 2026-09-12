@@ -247,7 +247,7 @@ wait_for_pty_output() {
   local expected=$2
   local attempts=0
   while [ "$attempts" -lt 100 ]; do
-    if [ -f "$output" ] && grep -Fq "$expected" "$output"; then
+    if [ -f "$output" ] && grep -Fq "$expected" "$output" 2>/dev/null; then
       return 0
     fi
     attempts=$((attempts + 1))
@@ -432,6 +432,48 @@ grep -Fq 'approval  Action: approve_plan' "$fixture/tui-approval-question-docks.
 grep -Fq 'Which verification mode?' "$fixture/tui-approval-question-docks.txt"
 grep -Fq 'question  Which verification mode?' "$fixture/tui-approval-question-docks.txt"
 
+wait_for_composer_session() {
+  local attempts=0
+  local candidate
+  while [ "$attempts" -lt 100 ]; do
+    for candidate in "$session_directory"/*.json; do
+      if [ -f "$candidate" ] &&
+        grep -Fq '"content": "edit line\nunicode 🙂X"' "$candidate" 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf '%s\n' 'composer smoke did not persist its edited multiline draft' >&2
+  return 1
+}
+
+wait_for_composer_terminal() {
+  local session_file=$1
+  local expected=$2
+  local attempts=0
+  local count
+  while [ "$attempts" -lt 100 ]; do
+    # Session replacement can briefly remove the published path. Treat that as
+    # pending evidence, subject to the same deadline, rather than an empty integer.
+    count="$(grep -F -c '"kind": "run_terminal"' "$session_file" 2>/dev/null || true)"
+    count=${count:-0}
+    if [ "$count" -eq "$expected" ]; then
+      return 0
+    fi
+    if [ "$count" -gt "$expected" ]; then
+      printf 'composer smoke published more than %s terminal records\n' "$expected" >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'composer smoke did not publish terminal record %s\n' "$expected" >&2
+  return 1
+}
+
 tui_composer_input() {
   sleep 0.8
   printf '/hel\t\r'
@@ -448,17 +490,27 @@ tui_composer_input() {
   sleep 0.8
   printf '\033[200~edit line\r\nunicode 🙂XY\000\007\033[201~'
   printf '\033[D\033[3~\r'
-  sleep 1.8
-  printf 'n'
-  sleep 1
-  printf 'inspect @REA\t\r'
-  sleep 1.8
-  printf 'n'
-  sleep 1
+  local composer_session
+  composer_session="$(wait_for_composer_session)"
+  # Ctrl+C handles both planning and approval. Await its persisted terminal record
+  # before sending another draft instead of racing a fixed approval delay.
+  printf '\003'
+  wait_for_composer_terminal "$composer_session" 1
+  printf '\033[200~inspect @REA\033[201~\t\r'
+  wait_for_pty_output "$composer_session" '"content": "inspect @README.md"'
+  printf '\003'
+  wait_for_composer_terminal "$composer_session" 2
   printf '\022unicode'
   sleep 0.6
   printf '\r'
   sleep 0.6
+  # A successful search must restore the exact earlier multiline draft. Edit and
+  # submit it so the ledger proves restoration independently of VT redraw chunks.
+  printf '\033[200~\nrestored history smoke\033[201~\r'
+  wait_for_pty_output "$composer_session" \
+    '"content": "edit line\nunicode 🙂X\nrestored history smoke"'
+  printf '\003'
+  wait_for_composer_terminal "$composer_session" 3
   printf '\021'
 }
 
@@ -474,9 +526,9 @@ grep -Fq 'Commands' "$composer_words"
 grep -Fq 'Tab insert' "$composer_words"
 grep -Fq 'Ctrl+End follow' "$composer_words"
 grep -Fq 'Enter send' "$composer_words"
-grep -Fq 'History | type' "$composer_words"
 grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
 grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
+grep -R -Fq '"content": "edit line\nunicode 🙂X\nrestored history smoke"' "$session_directory"
 grep -R -Fq '"path": "README.md"' "$session_directory"
 if grep -R -Eq '\\u0000|\\u0007|\\u001b' "$session_directory"; then
   printf '%s\n' 'unsafe pasted control data reached the session ledger' >&2
