@@ -364,6 +364,7 @@ pub struct InteractiveCompletion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveSessionCandidate {
     pub id: String,
+    pub label: String,
     pub preview: String,
     pub is_active: bool,
     pub(crate) snapshot_token: [u8; 32],
@@ -534,8 +535,15 @@ impl InteractiveSessionCandidate {
         .chars()
         .take(MAX_INTERACTIVE_SESSION_PREVIEW_CHARS)
         .collect();
+        let label = session
+            .display_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(|name| bounded_sensitive_status_value(name, sensitive_values))
+            .unwrap_or_else(|| abbreviated_session_id(&session.id));
         Ok(Self {
             id: session.id.clone(),
+            label,
             preview,
             is_active: session.id == active_session_id,
             snapshot_token: session_snapshot_token(session)?,
@@ -926,6 +934,15 @@ impl TranscriptViewport {
         } else {
             self.top_row.min(self.bottom_row())
         }
+    }
+
+    pub fn page_rows(&self) -> usize {
+        self.page_rows
+    }
+
+    pub fn reveal_row(&mut self, row: usize) {
+        self.pinned_to_tail = false;
+        self.top_row = row.min(self.bottom_row());
     }
 
     pub fn is_pinned_to_tail(&self) -> bool {
@@ -1510,6 +1527,7 @@ pub struct ActivityEntry {
     pub kind: ActivityKind,
     pub title: String,
     pub body: String,
+    pub folded: bool,
 }
 
 impl ActivityKind {
@@ -1531,12 +1549,56 @@ impl ActivityKind {
 }
 
 impl ActivityEntry {
-    pub fn render_line(&self) -> String {
-        if self.body.is_empty() {
+    pub fn new(kind: ActivityKind, title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            body: body.into(),
+            folded: false,
+        }
+    }
+
+    pub fn folded(mut self) -> Self {
+        self.folded = true;
+        self
+    }
+
+    pub fn display_text(&self) -> String {
+        let label = self.kind.role_label();
+        let header = if self.title.is_empty() {
+            if self.body.is_empty() {
+                label.to_string()
+            } else {
+                format!("{label}  {}", self.body)
+            }
+        } else if self.body.is_empty() || self.folded {
+            format!("{label}  {}", self.title)
+        } else {
+            format!("{label}  {}\n{}", self.title, self.body)
+        };
+        if self.folded && !self.body.is_empty() {
+            format!("› {header}")
+        } else {
+            header
+        }
+    }
+
+    pub fn copy_text(&self) -> String {
+        if self.title.is_empty() {
+            if self.body.is_empty() {
+                self.kind.role_label().to_string()
+            } else {
+                format!("{}  {}", self.kind.role_label(), self.body)
+            }
+        } else if self.body.is_empty() {
             format!("{}  {}", self.kind.role_label(), self.title)
         } else {
             format!("{}  {}\n{}", self.kind.role_label(), self.title, self.body)
         }
+    }
+
+    pub fn render_line(&self) -> String {
+        self.display_text()
     }
 }
 
@@ -2085,11 +2147,11 @@ fn project_session_event(
         ),
         _ => return None,
     };
-    Some(ActivityEntry {
-        kind: activity_kind,
+    Some(ActivityEntry::new(
+        activity_kind,
         title,
-        body: bounded_activity_body(&body, sensitive_values),
-    })
+        bounded_activity_body(&body, sensitive_values),
+    ))
 }
 
 fn project_session_message(
@@ -2133,7 +2195,7 @@ fn project_session_message(
             "legacy message content omitted".to_string(),
         ),
     };
-    ActivityEntry { kind, title, body }
+    ActivityEntry::new(kind, title, body)
 }
 
 fn is_transport_only_message(message: &crate::session::SessionMessage) -> bool {
@@ -2187,18 +2249,18 @@ pub fn project_session_activities(
 ) -> Vec<ActivityEntry> {
     let mut activities = Vec::new();
     if let Some(name) = session.display_name.as_deref() {
-        activities.push(ActivityEntry {
-            kind: ActivityKind::System,
-            title: format!("session {name}"),
-            body: String::new(),
-        });
+        activities.push(ActivityEntry::new(
+            ActivityKind::System,
+            format!("session {name}"),
+            String::new(),
+        ));
     }
     if let Some(parent) = session.forked_from.as_deref() {
-        activities.push(ActivityEntry {
-            kind: ActivityKind::System,
-            title: format!("forked from {parent}"),
-            body: String::new(),
-        });
+        activities.push(ActivityEntry::new(
+            ActivityKind::System,
+            format!("forked from {parent}"),
+            String::new(),
+        ));
     }
     let mut persisted = Vec::new();
     for message in &session.messages {
@@ -2206,11 +2268,11 @@ pub fn project_session_activities(
             continue;
         }
         let activity = if let Some(step) = approved_plan_continuation(session, message) {
-            ActivityEntry {
-                kind: ActivityKind::Plan,
-                title: "continuing approved step".to_string(),
-                body: bounded_activity_body(step, sensitive_values),
-            }
+            ActivityEntry::new(
+                ActivityKind::Plan,
+                "continuing approved step",
+                bounded_activity_body(step, sensitive_values),
+            )
         } else {
             project_session_message(message, sensitive_values)
         };
@@ -2230,11 +2292,11 @@ pub fn project_session_activities(
             timestamp: None,
             source_rank: 1,
             source_index: 0,
-            activity: ActivityEntry {
-                kind: ActivityKind::System,
-                title: format!("{event_start} earlier session event(s) omitted"),
-                body: String::new(),
-            },
+            activity: ActivityEntry::new(
+                ActivityKind::System,
+                format!("{event_start} earlier session event(s) omitted"),
+                String::new(),
+            ),
         });
     }
     let projected_events = &session.events[event_start..];
@@ -2269,11 +2331,12 @@ pub fn project_session_activities(
             timestamp: call.timestamp,
             source_rank: 2,
             source_index: index,
-            activity: ActivityEntry {
-                kind: ActivityKind::Tool,
-                title: format!("{name} {status}"),
-                body: body.to_string(),
-            },
+            activity: ActivityEntry::new(
+                ActivityKind::Tool,
+                format!("{name} {status}"),
+                body.to_string(),
+            )
+            .folded(),
         });
     }
     persisted.sort_by(|left, right| {
@@ -2287,11 +2350,14 @@ pub fn project_session_activities(
         activities.push(plan_summary_activity(plan, sensitive_values));
     }
     if let Some(summary) = &session.summary {
-        activities.push(ActivityEntry {
-            kind: ActivityKind::Compression,
-            title: format!("summarized through message {}", session.summary_index),
-            body: bounded_activity_body(summary, sensitive_values),
-        });
+        activities.push(
+            ActivityEntry::new(
+                ActivityKind::Compression,
+                format!("summarized through message {}", session.summary_index),
+                bounded_activity_body(summary, sensitive_values),
+            )
+            .folded(),
+        );
     }
     for activity in &mut activities {
         sanitize_activity(activity, sensitive_values);
@@ -2392,35 +2458,33 @@ pub fn apply_stream_event(
                     return;
                 }
             }
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Assistant,
-                title: "live".to_string(),
-                body: bounded_activity_body(&content, sensitive_values),
-            });
+            activities.push(ActivityEntry::new(
+                ActivityKind::Assistant,
+                "live",
+                bounded_activity_body(&content, sensitive_values),
+            ));
         }
         StreamEvent::ToolCallChunk {
             name: Some(name), ..
-        } if !name.is_empty() => activities.push(ActivityEntry {
-            kind: ActivityKind::Tool,
-            title: format!("{name} requested"),
-            body: String::new(),
-        }),
+        } if !name.is_empty() => {
+            upsert_tool_activity(activities, &name, "requested", String::new())
+        }
         StreamEvent::ToolCallChunk { .. } => {}
         StreamEvent::PlanGenerated { step_count } => {
             let noun = if step_count == 1 { "step" } else { "steps" };
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Plan,
-                title: format!("generated {step_count} {noun}"),
-                body: String::new(),
-            });
+            activities.push(ActivityEntry::new(
+                ActivityKind::Plan,
+                format!("generated {step_count} {noun}"),
+                String::new(),
+            ));
         }
         StreamEvent::ApprovalRequired { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Approval,
-                title: format!("{tool_name} needs approval"),
-                body: "Open the approval dock for bounded action context.".to_string(),
-            });
+            activities.push(ActivityEntry::new(
+                ActivityKind::Approval,
+                format!("{tool_name} needs approval"),
+                "Open the approval dock for bounded action context.",
+            ));
         }
         StreamEvent::QuestionRequired { question, options } => {
             let options = if options.is_empty() {
@@ -2428,31 +2492,26 @@ pub fn apply_stream_event(
             } else {
                 format!("options: {}", options.join(" | "))
             };
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Question,
-                title: question,
-                body: options,
-            });
+            activities.push(ActivityEntry::new(
+                ActivityKind::Question,
+                question,
+                options,
+            ));
         }
         StreamEvent::ToolStarted { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Tool,
-                title: format!("{tool_name} running"),
-                body: "started; bounded result follows authoritative tool audit".to_string(),
-            });
+            upsert_tool_activity(activities, &tool_name, "running", String::new());
         }
         StreamEvent::TerminalOutput {
             tool_name, chunk, ..
         } => {
-            if let Some(last) = activities.iter_mut().rev().find(|entry| {
-                entry.kind == ActivityKind::Tool && entry.title.starts_with(&tool_name)
-            }) {
+            if let Some(last) = find_tool_activity_mut(activities, &tool_name, false) {
                 if !last.body.is_empty() && !last.body.ends_with('\n') {
                     last.body.push('\n');
                 }
                 last.body.push_str(chunk.trim_end_matches(['\r', '\n']));
                 last.body = bounded_activity_body(&last.body, sensitive_values);
+                last.folded = true;
             }
         }
         StreamEvent::ToolCompleted {
@@ -2461,28 +2520,31 @@ pub fn apply_stream_event(
             output,
             error,
         } => {
-            let status = if success { "ok" } else { "failed" };
-            let detail = match (output.as_ref(), error.as_deref()) {
-                (Some(output), Some(error)) => format!("{}; error: {error}", inline_json(output)),
-                (Some(output), None) => inline_json(output),
-                (None, Some(error)) => error.to_string(),
-                (None, None) => "no result".to_string(),
-            };
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Tool,
-                title: format!("{tool_name} {status}"),
-                body: bounded_activity_body(&detail, sensitive_values),
-            });
+            let (title, detail) =
+                summarize_tool_result(&tool_name, success, output.as_ref(), error.as_deref());
+            let body = bounded_activity_body(&detail, sensitive_values);
+            if let Some(existing) = find_tool_activity_mut(activities, &tool_name, true) {
+                existing.title = title;
+                if !body.is_empty() {
+                    existing.body = body;
+                }
+                existing.folded = !existing.body.is_empty();
+            } else {
+                activities.push(ActivityEntry::new(ActivityKind::Tool, title, body).folded());
+            }
         }
         StreamEvent::Compression {
             before_tokens,
             after_tokens,
             summarized_through,
-        } => activities.push(ActivityEntry {
-            kind: ActivityKind::Compression,
-            title: format!("{before_tokens} -> {after_tokens} tokens"),
-            body: format!("summarized through message {summarized_through}"),
-        }),
+        } => activities.push(
+            ActivityEntry::new(
+                ActivityKind::Compression,
+                format!("{before_tokens} -> {after_tokens} tokens"),
+                format!("summarized through message {summarized_through}"),
+            )
+            .folded(),
+        ),
         StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {}
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
@@ -2496,11 +2558,11 @@ pub fn apply_stream_event(
                 InteractionReduction::Reconciled { outcome, .. } => outcome,
                 _ => unreachable!("reconciliation input always has a terminal reduction"),
             };
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Reconcile,
+            activities.push(ActivityEntry::new(
+                ActivityKind::Reconcile,
                 title,
-                body: String::new(),
-            });
+                String::new(),
+            ));
         }
         StreamEvent::Failure {
             failure,
@@ -2510,11 +2572,11 @@ pub fn apply_stream_event(
             let (title, body) = report
                 .split_once('\n')
                 .map_or((report.as_str(), ""), |(title, body)| (title, body));
-            activities.push(ActivityEntry {
-                kind: ActivityKind::Failure,
-                title: title.to_string(),
-                body: bounded_activity_body(body, sensitive_values),
-            });
+            activities.push(ActivityEntry::new(
+                ActivityKind::Failure,
+                title.to_string(),
+                bounded_activity_body(body, sensitive_values),
+            ));
         }
         StreamEvent::End(reason) => {
             let kind = if reason.to_ascii_lowercase().contains("cancel") {
@@ -2522,16 +2584,146 @@ pub fn apply_stream_event(
             } else {
                 ActivityKind::System
             };
-            activities.push(ActivityEntry {
-                kind,
-                title: reason,
-                body: String::new(),
-            });
+            activities.push(ActivityEntry::new(kind, reason, String::new()));
         }
     }
     if let Some(last) = activities.last_mut() {
         sanitize_activity(last, sensitive_values);
     }
+}
+
+fn tool_name_from_title(title: &str) -> &str {
+    title.split(' ').next().unwrap_or(title)
+}
+
+fn tool_title_is_terminal(title: &str) -> bool {
+    title.contains(" ok") || title.contains(" failed")
+}
+
+fn find_tool_activity_mut<'a>(
+    activities: &'a mut [ActivityEntry],
+    tool_name: &str,
+    include_terminal: bool,
+) -> Option<&'a mut ActivityEntry> {
+    activities.iter_mut().rev().find(|entry| {
+        entry.kind == ActivityKind::Tool
+            && tool_name_from_title(&entry.title) == tool_name
+            && (include_terminal || !tool_title_is_terminal(&entry.title))
+    })
+}
+
+fn upsert_tool_activity(
+    activities: &mut Vec<ActivityEntry>,
+    tool_name: &str,
+    phase: &str,
+    body: String,
+) {
+    if let Some(existing) = find_tool_activity_mut(activities, tool_name, false) {
+        existing.title = format!("{tool_name} {phase}");
+        if !body.is_empty() {
+            existing.body = body;
+            existing.folded = true;
+        }
+        return;
+    }
+    activities.push(ActivityEntry::new(
+        ActivityKind::Tool,
+        format!("{tool_name} {phase}"),
+        body,
+    ));
+}
+
+pub fn summarize_tool_result(
+    tool_name: &str,
+    success: bool,
+    output: Option<&serde_json::Value>,
+    error: Option<&str>,
+) -> (String, String) {
+    let status = if success { "ok" } else { "failed" };
+    let (summary, mut detail) = match (tool_name, output) {
+        ("list_directory", Some(value)) => {
+            let count = value
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .or_else(|| {
+                    value
+                        .get("entries_scanned")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|count| count as usize)
+                })
+                .unwrap_or(0);
+            let truncated = value
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let extra = if truncated { ", truncated" } else { "" };
+            (format!("{count} entries{extra}"), String::new())
+        }
+        ("read_file", Some(value)) => {
+            let content = value
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let lines = if content.is_empty() {
+                0
+            } else {
+                content.lines().count()
+            };
+            (format!("{lines} lines"), String::new())
+        }
+        ("grep", Some(value)) => {
+            let matches = value
+                .get("matches")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            (format!("{matches} matches"), String::new())
+        }
+        ("run_terminal", Some(value)) => {
+            let code = value
+                .get("exit_code")
+                .or_else(|| value.get("status"))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| {
+                    if success {
+                        "0".to_string()
+                    } else {
+                        "error".to_string()
+                    }
+                });
+            let output_text = value
+                .get("stdout")
+                .or_else(|| value.get("output"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            (format!("exit {code}"), output_text.to_string())
+        }
+        _ => {
+            let detail = match (output, error) {
+                (Some(output), Some(error)) => format!("{}; error: {error}", inline_json(output)),
+                (Some(output), None) => inline_json(output),
+                (None, Some(error)) => error.to_string(),
+                (None, None) => String::new(),
+            };
+            (String::new(), detail)
+        }
+    };
+    if let Some(error) = error {
+        if !detail.contains(error) {
+            if detail.is_empty() {
+                detail = error.to_string();
+            } else {
+                detail = format!("{detail}; error: {error}");
+            }
+        }
+    }
+    let title = if summary.is_empty() {
+        format!("{tool_name} {status}")
+    } else {
+        format!("{tool_name} {status} · {summary}")
+    };
+    (title, detail)
 }
 
 fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> ActivityEntry {
@@ -2548,11 +2740,11 @@ fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> Ac
         .map(|(index, step)| format!("{}. [{}] {}", index + 1, step.status, step.description))
         .collect::<Vec<_>>()
         .join("\n");
-    ActivityEntry {
-        kind: ActivityKind::Plan,
-        title: format!("{current}/{} {title}", plan.steps.len()),
-        body: bounded_activity_body(&body, sensitive_values),
-    }
+    ActivityEntry::new(
+        ActivityKind::Plan,
+        format!("{current}/{} {title}", plan.steps.len()),
+        bounded_activity_body(&body, sensitive_values),
+    )
 }
 
 fn plan_summary_activity(
@@ -6123,6 +6315,55 @@ mod tests {
         let after = persisted_context_usage(Some(&persisted), 32);
         assert_eq!(before, after);
         assert!(after <= 32, "{after}");
+    }
+
+    #[test]
+    fn tool_lifecycle_mutates_one_folded_summary_entry() {
+        let mut activities = Vec::new();
+        let mut state = None;
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCallChunk {
+                index: 0,
+                name: Some("list_directory".to_string()),
+                arguments: Some("{}".to_string()),
+            },
+            &mut state,
+            &[],
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolStarted {
+                tool_name: "list_directory".to_string(),
+            },
+            &mut state,
+            &[],
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCompleted {
+                tool_name: "list_directory".to_string(),
+                success: true,
+                output: Some(serde_json::json!({
+                    "entries": [{"path": "README.md"}],
+                    "entries_scanned": 1,
+                    "truncated": false
+                })),
+                error: None,
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].kind, ActivityKind::Tool);
+        assert_eq!(activities[0].title, "list_directory ok · 1 entries");
+        assert!(!activities[0].render_line().contains("README.md"));
+        assert!(!activities[0].render_line().contains("{\"entries\""));
+        assert!(
+            activities[0].body.is_empty() || activities[0].folded,
+            "{}",
+            activities[0].body
+        );
     }
 
     #[test]

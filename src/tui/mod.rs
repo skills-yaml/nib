@@ -28,10 +28,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::DefaultTerminal;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -57,6 +58,54 @@ const MAX_SESSION_DETAIL_ROWS: usize = 400;
 #[cfg(test)]
 const SESSION_DETAIL_TRUNCATED_MARKER: &str = "\n[session detail truncated]\n";
 const MAX_VISIBLE_COMPLETIONS: usize = 7;
+const COMPOSER_BORDER_ROWS: u16 = 1;
+const CLEAR_DRAFT_CONFIRM: Duration = Duration::from_millis(800);
+const QUIT_CONFIRM: Duration = Duration::from_millis(1000);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TuiFocus {
+    #[default]
+    Composer,
+    Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionKeyResult {
+    Ignored,
+    Consumed,
+    Submit,
+}
+
+#[derive(Debug, Clone)]
+struct ChromeCache {
+    generation: u64,
+    session_id: String,
+    origin: String,
+    queued: usize,
+    width: u16,
+    lifecycle: String,
+    header: String,
+    status: String,
+}
+
+impl ChromeCache {
+    fn matches(
+        &self,
+        generation: u64,
+        session_id: &str,
+        origin: &str,
+        queued: usize,
+        width: u16,
+        lifecycle: &str,
+    ) -> bool {
+        self.generation == generation
+            && self.session_id == session_id
+            && self.origin == origin
+            && self.queued == queued
+            && self.width == width
+            && self.lifecycle == lifecycle
+    }
+}
 const MAX_SWITCHER_CANDIDATES: usize = 100;
 const MAX_SWITCHER_EXACT_ID_BYTES: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -285,19 +334,19 @@ impl ActiveTimeline {
         let status =
             bounded_public_text(&status, &self.sensitive_values, MAX_LIVE_OUTPUT_BYTES, true);
         self.live.push_status(status.clone());
-        self.activities.push(ActivityEntry {
-            kind: ActivityKind::System,
-            title: status,
-            body: String::new(),
-        });
+        self.activities.push(ActivityEntry::new(
+            ActivityKind::System,
+            status,
+            String::new(),
+        ));
     }
 
     fn push_steering(&mut self, _text: &str, sequence: usize) {
-        self.activities.push(ActivityEntry {
-            kind: ActivityKind::User,
-            title: format!("steer {sequence}"),
-            body: "instruction persisted for the exact active run".to_string(),
-        });
+        self.activities.push(ActivityEntry::new(
+            ActivityKind::User,
+            format!("steer {sequence}"),
+            "instruction persisted for the exact active run",
+        ));
         self.live
             .push_status(format!("[steer] accepted for safe boundary #{sequence}"));
     }
@@ -353,6 +402,7 @@ impl ActiveTimeline {
         self.active_run_id = run_id;
     }
 
+    #[cfg(test)]
     fn rendered_text(&self) -> String {
         let text = self
             .activities
@@ -738,6 +788,12 @@ fn composer_action_for_key(
             composer.insert_str("\n");
             ComposerAction::Pending
         }
+        KeyCode::Enter
+            if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT) =>
+        {
+            composer.insert_str("\n");
+            ComposerAction::Pending
+        }
         KeyCode::Char(character) if !modifiers.contains(KeyModifiers::CONTROL) => {
             composer.insert_str(&character.to_string());
             ComposerAction::Pending
@@ -801,33 +857,50 @@ impl CompletionMenu {
         !self.suggestions.is_empty()
     }
 
-    fn handle_key(&mut self, composer: &mut Composer, code: KeyCode) -> bool {
+    fn handle_key(&mut self, composer: &mut Composer, code: KeyCode) -> CompletionKeyResult {
         if !self.is_open() {
-            return false;
+            return CompletionKeyResult::Ignored;
         }
         match code {
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
+                CompletionKeyResult::Consumed
             }
             KeyCode::Down => {
                 self.selected = (self.selected + 1).min(self.suggestions.len() - 1);
+                CompletionKeyResult::Consumed
             }
-            KeyCode::Tab | KeyCode::Enter => {
+            KeyCode::Tab => {
                 if let Some(completion) = self.suggestions.get(self.selected) {
                     composer.set_text(completion.insertion.clone());
                 }
                 self.dismissed_for_input = Some(composer.input.clone());
                 self.suggestions.clear();
                 self.selected = 0;
+                CompletionKeyResult::Consumed
+            }
+            KeyCode::Enter => {
+                if let Some(completion) = self.suggestions.get(self.selected) {
+                    composer.set_text(completion.insertion.clone());
+                }
+                let runnable = !composer.input.ends_with(' ');
+                self.dismissed_for_input = Some(composer.input.clone());
+                self.suggestions.clear();
+                self.selected = 0;
+                if runnable && !composer.input.trim().is_empty() {
+                    CompletionKeyResult::Submit
+                } else {
+                    CompletionKeyResult::Consumed
+                }
             }
             KeyCode::Esc => {
                 self.dismissed_for_input = Some(composer.input.clone());
                 self.suggestions.clear();
                 self.selected = 0;
+                CompletionKeyResult::Consumed
             }
-            _ => return false,
+            _ => CompletionKeyResult::Ignored,
         }
-        true
     }
 }
 
@@ -1503,7 +1576,7 @@ fn render_session_switcher(
                 } else {
                     " "
                 };
-                ListItem::new(format!("{selected}{active} {}", candidate.id))
+                ListItem::new(format!("{selected}{active} {}", candidate.label))
             })
             .collect()
     };
@@ -1669,7 +1742,8 @@ fn render_completion(
     if !completion.is_open() {
         return;
     }
-    let composer_height = composer_height(composer, frame.area().width);
+    let composer_height =
+        composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
     let modal_area = completion_rect(
         frame.area(),
         completion.suggestions.len().min(MAX_VISIBLE_COMPLETIONS),
@@ -1705,16 +1779,13 @@ fn render_completion(
         .collect::<Vec<_>>();
     lines.push(Line::from(Span::styled(
         truncate_completion_text(
-            "  Up/Down select · Tab insert · Esc close",
+            "  Up/Down select · Tab insert · Enter run · Esc close",
             usize::from(inner_width),
         ),
         muted_style(no_color),
     )));
     frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Commands ")),
-        modal_area,
-    );
+    frame.render_widget(Paragraph::new(lines), modal_area);
 }
 
 fn render_history_search(frame: &mut ratatui::Frame<'_>, search: &PendingHistorySearch) {
@@ -2574,35 +2645,65 @@ fn status_line(status: &str, viewport: &TranscriptViewport, no_color: bool) -> L
 }
 
 fn empty_state_lines(no_color: bool) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            "nib",
-            role_style(ActivityKind::User, no_color),
-        )),
-        Line::from(""),
-        Line::from("Your AI agent for this project."),
-        Line::from(Span::styled(
-            "Ask me to inspect, plan, or change something.",
-            muted_style(no_color),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Type / for commands · @ to add project context",
-            muted_style(no_color),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        "Type / for commands · @ to add project context",
+        muted_style(no_color),
+    ))]
 }
 
-fn footer_line(run_active: bool, viewport: &TranscriptViewport) -> String {
-    let mut hint = if run_active {
+fn footer_line(
+    run_active: bool,
+    viewport: &TranscriptViewport,
+    focus: TuiFocus,
+    queued: usize,
+) -> String {
+    let mut hint = if focus == TuiFocus::Transcript {
+        "↑↓ select · ←/→ fold · Ctrl+Y copy · Tab prompt".to_string()
+    } else if run_active {
         "Enter queue · Ctrl+S steer · Ctrl+C stop".to_string()
     } else {
-        "Enter send · Ctrl+J newline · / commands · @ files".to_string()
+        "Enter send · Shift+Enter newline · / commands · @ files".to_string()
     };
+    if queued > 0 && focus != TuiFocus::Transcript {
+        hint = format!("queue {queued} · {hint}");
+    }
     if !viewport.is_pinned_to_tail() {
         hint.push_str(" · Ctrl+End follow");
     }
     hint
+}
+
+fn copy_text_osc52(text: &str) {
+    let encoded = encode_base64(text.as_bytes());
+    let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
+    let _ = io::stdout().flush();
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let remaining = bytes.len() - index;
+        let b0 = bytes[index];
+        let b1 = if remaining > 1 { bytes[index + 1] } else { 0 };
+        let b2 = if remaining > 2 { bytes[index + 2] } else { 0 };
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if remaining == 1 {
+            output.push('=');
+            output.push('=');
+        } else {
+            output.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+            if remaining == 2 {
+                output.push('=');
+            } else {
+                output.push(TABLE[(b2 & 0x3f) as usize] as char);
+            }
+        }
+        index += 3;
+    }
+    output
 }
 
 fn approval_dock_style(no_color: bool) -> Style {
@@ -2701,6 +2802,116 @@ fn tui_complete_session_switch(
 }
 
 #[cfg(test)]
+fn parse_role_line(line: &str) -> Option<(ActivityKind, &str)> {
+    for kind in [
+        ActivityKind::User,
+        ActivityKind::Assistant,
+        ActivityKind::Plan,
+        ActivityKind::Tool,
+        ActivityKind::Approval,
+        ActivityKind::Question,
+        ActivityKind::Compression,
+        ActivityKind::Reconcile,
+        ActivityKind::Cancellation,
+        ActivityKind::Failure,
+        ActivityKind::System,
+    ] {
+        let prefix = format!("{}  ", kind.role_label());
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            return Some((kind, rest));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn activities_from_timeline_text(text: &str) -> Vec<ActivityEntry> {
+    let mut entries = Vec::new();
+    let mut current: Option<ActivityEntry> = None;
+    for line in text.lines() {
+        if let Some((kind, rest)) = parse_role_line(line) {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(ActivityEntry::new(kind, rest.to_string(), String::new()));
+        } else if line.is_empty() {
+            continue;
+        } else if let Some(entry) = current.as_mut() {
+            if !entry.body.is_empty() {
+                entry.body.push('\n');
+            }
+            entry.body.push_str(line);
+        } else {
+            entries.push(ActivityEntry::new(
+                ActivityKind::System,
+                line.to_string(),
+                String::new(),
+            ));
+        }
+    }
+    if let Some(entry) = current {
+        entries.push(entry);
+    }
+    entries
+}
+
+fn activity_row_style(row: &str, selected: bool, no_color: bool) -> Line<'static> {
+    let mut line = styled_transcript_row(row, no_color);
+    if selected {
+        if no_color {
+            line.spans
+                .iter_mut()
+                .for_each(|span| span.style = span.style.add_modifier(Modifier::REVERSED));
+        } else {
+            line.spans.iter_mut().for_each(|span| {
+                span.style = span.style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+            });
+        }
+    }
+    line
+}
+
+fn wrapped_activity_rows(entry: &ActivityEntry, width: u16) -> Vec<String> {
+    wrapped_display_rows(&entry.display_text(), width.max(1))
+}
+
+fn flatten_activity_rows(activities: &[ActivityEntry], width: u16) -> (Vec<String>, Vec<usize>) {
+    let mut rows = Vec::new();
+    let mut owners = Vec::new();
+    for (index, entry) in activities.iter().enumerate() {
+        let wrapped = wrapped_activity_rows(entry, width);
+        if wrapped.is_empty() {
+            rows.push(String::new());
+            owners.push(index);
+        } else {
+            for row in wrapped {
+                rows.push(row);
+                owners.push(index);
+            }
+        }
+    }
+    (rows, owners)
+}
+
+fn ensure_selected_visible(viewport: &mut TranscriptViewport, owners: &[usize], selected: usize) {
+    let Some(first) = owners.iter().position(|owner| *owner == selected) else {
+        return;
+    };
+    let last = owners
+        .iter()
+        .rposition(|owner| *owner == selected)
+        .unwrap_or(first);
+    let page = viewport.page_rows().max(1);
+    let top = viewport.top_row();
+    let bottom = top.saturating_add(page.saturating_sub(1));
+    if first < top {
+        viewport.reveal_row(first);
+    } else if last > bottom {
+        viewport.reveal_row(last.saturating_sub(page.saturating_sub(1)));
+    }
+}
+
+#[cfg(test)]
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
     header: &str,
@@ -2724,6 +2935,7 @@ fn render_current_session_view(
     );
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_current_session_view_with_viewport(
     frame: &mut ratatui::Frame<'_>,
@@ -2736,8 +2948,41 @@ fn render_current_session_view_with_viewport(
     run_active: bool,
     viewport: &mut TranscriptViewport,
 ) {
+    let activities = activities_from_timeline_text(timeline_text);
+    render_session_activities(
+        frame,
+        header,
+        status,
+        &activities,
+        composer,
+        pending_approval,
+        pending_question,
+        run_active,
+        viewport,
+        TuiFocus::Composer,
+        None,
+        0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_session_activities(
+    frame: &mut ratatui::Frame<'_>,
+    header: &str,
+    status: &str,
+    activities: &[ActivityEntry],
+    composer: &Composer,
+    pending_approval: Option<&TuiApprovalRequest>,
+    pending_question: Option<&PendingQuestion>,
+    run_active: bool,
+    viewport: &mut TranscriptViewport,
+    focus: TuiFocus,
+    selected: Option<usize>,
+    queued: usize,
+) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
-    let composer_h = composer_height(composer, frame.area().width);
+    let composer_h =
+        composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
     let dock = pending_approval.is_some() || pending_question.is_some();
     let dock_h = if pending_question.is_some_and(|question| question.error.is_some()) {
         9
@@ -2770,24 +3015,30 @@ fn render_current_session_view_with_viewport(
             .constraints([Constraint::Min(1)])
             .split(chunks[2])
     };
-    let empty = timeline_text.trim().is_empty();
-    let rendered_rows = if empty {
-        vec![String::new(); empty_state_lines(no_color).len()]
+    let empty = activities.is_empty();
+    let (rendered_rows, owners) = if empty {
+        (
+            vec![String::new(); empty_state_lines(no_color).len()],
+            Vec::new(),
+        )
     } else {
-        wrapped_display_rows(timeline_text, body[0].width.max(1))
+        flatten_activity_rows(activities, body[0].width.max(1))
     };
     viewport.observe_layout(rendered_rows.len(), usize::from(body[0].height.max(1)));
+    if let Some(selected) = selected {
+        ensure_selected_visible(viewport, &owners, selected);
+    }
     frame.render_widget(
         Paragraph::new(status_line(status, viewport, no_color)),
         chunks[1],
     );
     if empty {
-        let welcome_height = u16::try_from(empty_state_lines(no_color).len()).unwrap_or(6);
+        let welcome_height = u16::try_from(empty_state_lines(no_color).len()).unwrap_or(1);
         let welcome_area = Rect {
             x: body[0].x,
             y: body[0]
                 .y
-                .saturating_add(body[0].height.saturating_sub(welcome_height) / 3),
+                .saturating_add(body[0].height.saturating_sub(welcome_height) / 2),
             width: body[0].width,
             height: welcome_height.min(body[0].height),
         };
@@ -2802,7 +3053,17 @@ fn render_current_session_view_with_viewport(
             .min(rendered_rows.len());
         let lines = rendered_rows[visible_start..visible_end]
             .iter()
-            .map(|row| styled_transcript_row(row, no_color))
+            .enumerate()
+            .map(|(offset, row)| {
+                let activity_index = owners.get(visible_start + offset).copied();
+                activity_row_style(
+                    row,
+                    selected.is_some()
+                        && activity_index == selected
+                        && focus == TuiFocus::Transcript,
+                    no_color,
+                )
+            })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), body[0]);
     }
@@ -2844,55 +3105,70 @@ fn render_current_session_view_with_viewport(
     }
     let composer_area = chunks[3];
     if composer_area.width > 0 && composer_area.height > 0 {
-        let rows = composer_visual_rows(composer, composer_area.width);
-        let (cx, cursor_row) =
-            composer_cursor_cell(&composer.input, composer.cursor, composer_area.width);
-        let visible_height = usize::from(composer_area.height);
-        let first_visible = usize::from(cursor_row)
-            .saturating_sub(visible_height.saturating_sub(1))
-            .min(rows.len().saturating_sub(visible_height));
-        let lines = rows
-            .iter()
-            .skip(first_visible)
-            .take(visible_height)
-            .enumerate()
-            .map(|(offset, row)| {
-                if first_visible == 0 && offset == 0 {
-                    let input = row.strip_prefix("> ").unwrap_or(row);
-                    let mut spans =
-                        vec![Span::styled("> ", role_style(ActivityKind::User, no_color))];
-                    if composer.input.is_empty() {
-                        spans.push(Span::styled("Ask nib anything…", muted_style(no_color)));
+        let border_style = if focus == TuiFocus::Composer {
+            role_style(ActivityKind::User, no_color)
+        } else {
+            muted_style(no_color)
+        };
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(border_style);
+        let inner = block.inner(composer_area);
+        frame.render_widget(block, composer_area);
+        if inner.width > 0 && inner.height > 0 {
+            let rows = composer_visual_rows(composer, inner.width);
+            let (cx, cursor_row) =
+                composer_cursor_cell(&composer.input, composer.cursor, inner.width);
+            let visible_height = usize::from(inner.height);
+            let first_visible = usize::from(cursor_row)
+                .saturating_sub(visible_height.saturating_sub(1))
+                .min(rows.len().saturating_sub(visible_height));
+            let lines = rows
+                .iter()
+                .skip(first_visible)
+                .take(visible_height)
+                .enumerate()
+                .map(|(offset, row)| {
+                    if first_visible == 0 && offset == 0 {
+                        let input = row.strip_prefix("> ").unwrap_or(row);
+                        let mut spans =
+                            vec![Span::styled("> ", role_style(ActivityKind::User, no_color))];
+                        if composer.input.is_empty() {
+                            spans.push(Span::styled("Ask nib anything…", muted_style(no_color)));
+                        } else {
+                            spans.push(Span::styled(
+                                input.to_string(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        Line::from(spans)
                     } else {
-                        spans.push(Span::styled(
-                            input.to_string(),
+                        Line::from(Span::styled(
+                            row.clone(),
                             Style::default().add_modifier(Modifier::BOLD),
-                        ));
+                        ))
                     }
-                    Line::from(spans)
-                } else {
-                    Line::from(Span::styled(
-                        row.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ))
-                }
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines), composer_area);
-        let cy = usize::from(cursor_row).saturating_sub(first_visible);
-        frame.set_cursor_position(Position {
-            x: composer_area
-                .x
-                .saturating_add(cx.min(composer_area.width.saturating_sub(1))),
-            y: composer_area.y.saturating_add(
-                u16::try_from(cy)
-                    .unwrap_or(u16::MAX)
-                    .min(composer_area.height.saturating_sub(1)),
-            ),
-        });
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(lines), inner);
+            if focus == TuiFocus::Composer {
+                let cy = usize::from(cursor_row).saturating_sub(first_visible);
+                frame.set_cursor_position(Position {
+                    x: inner
+                        .x
+                        .saturating_add(cx.min(inner.width.saturating_sub(1))),
+                    y: inner.y.saturating_add(
+                        u16::try_from(cy)
+                            .unwrap_or(u16::MAX)
+                            .min(inner.height.saturating_sub(1)),
+                    ),
+                });
+            }
+        }
     }
     frame.render_widget(
-        Paragraph::new(footer_line(run_active, viewport)).style(muted_style(no_color)),
+        Paragraph::new(footer_line(run_active, viewport, focus, queued))
+            .style(muted_style(no_color)),
         chunks[4],
     );
 }
@@ -2943,6 +3219,12 @@ fn draw_loop(
     let mut composer = Composer::default();
     let mut completion = CompletionMenu::default();
     let mut transcript_viewport = TranscriptViewport::default();
+    let mut tui_focus = TuiFocus::Composer;
+    let mut selected_activity: Option<usize> = None;
+    let mut clear_armed_at: Option<Instant> = None;
+    let mut quit_armed_at: Option<Instant> = None;
+    let mut chrome_generation: u64 = 0;
+    let mut chrome_cache: Option<ChromeCache> = None;
     let mut exit_requested = false;
     let mut exit_requested_with_active_run = false;
 
@@ -3010,7 +3292,6 @@ fn draw_loop(
             &question_rx,
         );
 
-        let timeline_text = timeline.rendered_text();
         let interaction_layer = active_interaction_layer(
             pending_approval.is_some(),
             pending_question.is_some(),
@@ -3043,28 +3324,59 @@ fn draw_loop(
             Ok(area) => area.width,
             Err(error) => break Err(error),
         };
-        let (header, status_line) = format_tui_interaction_chrome(
-            project_root,
-            &profile_id,
-            session.as_ref(),
-            &timeline.session_id,
-            &session_origin,
-            worker_status,
-            queued,
-            terminal_width,
-        )
-        .unwrap_or_else(|error| (error.clone(), error));
+        let (header, status_line) = if chrome_cache.as_ref().is_some_and(|cache| {
+            cache.matches(
+                chrome_generation,
+                &timeline.session_id,
+                &session_origin,
+                queued,
+                terminal_width,
+                worker_status,
+            )
+        }) {
+            let cache = chrome_cache.as_ref().expect("checked");
+            (cache.header.clone(), cache.status.clone())
+        } else {
+            let (header, status) = format_tui_interaction_chrome(
+                project_root,
+                &profile_id,
+                session.as_ref(),
+                &timeline.session_id,
+                &session_origin,
+                worker_status,
+                queued,
+                terminal_width,
+            )
+            .unwrap_or_else(|error| (error.clone(), error));
+            chrome_cache = Some(ChromeCache {
+                generation: chrome_generation,
+                session_id: timeline.session_id.clone(),
+                origin: session_origin.clone(),
+                queued,
+                width: terminal_width,
+                lifecycle: worker_status.to_string(),
+                header: header.clone(),
+                status: status.clone(),
+            });
+            (header, status)
+        };
+        if selected_activity.is_some_and(|index| index >= timeline.activities.len()) {
+            selected_activity = timeline.activities.len().checked_sub(1);
+        }
         if let Err(error) = terminal.draw(|f| {
-            render_current_session_view_with_viewport(
+            render_session_activities(
                 f,
                 &header,
                 &status_line,
-                &timeline_text,
+                &timeline.activities,
                 &composer,
                 pending_approval.as_ref(),
                 pending_question.as_ref(),
                 worker.is_some(),
                 &mut transcript_viewport,
+                tui_focus,
+                selected_activity,
+                queued,
             );
             render_interaction_overlay(
                 f,
@@ -3146,11 +3458,6 @@ fn draw_loop(
                         &interaction_state,
                         InteractionInput::CancelRun,
                     ))
-                } else if control_c || control_q {
-                    Some(reduce_interaction(
-                        &interaction_state,
-                        InteractionInput::Quit,
-                    ))
                 } else {
                     None
                 };
@@ -3172,10 +3479,38 @@ fn draw_loop(
                     }
                     continue;
                 }
-                if global_reduction == Some(InteractionReduction::Quit) {
-                    exit_requested_with_active_run = worker.is_some();
-                    exit_requested = true;
-                    break Ok(());
+                if control_c {
+                    if !composer.input.is_empty() {
+                        composer.set_text(String::new());
+                        completion.sync_for(&composer.input, Some(project_root));
+                        timeline.push_status("Draft cleared.".to_string());
+                    }
+                    continue;
+                }
+                if control_q {
+                    let now = Instant::now();
+                    if quit_armed_at.is_some_and(|armed| now.duration_since(armed) <= QUIT_CONFIRM)
+                    {
+                        exit_requested_with_active_run = worker.is_some();
+                        exit_requested = true;
+                        break Ok(());
+                    }
+                    quit_armed_at = Some(now);
+                    timeline.push_status("Press Ctrl+Q again to quit.".to_string());
+                    continue;
+                }
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && tui_focus == TuiFocus::Transcript
+                {
+                    if let Some(index) = selected_activity {
+                        if let Some(entry) = timeline.activities.get(index) {
+                            copy_text_osc52(&entry.copy_text());
+                            timeline
+                                .push_status(format!("Copied {} block.", entry.kind.role_label()));
+                        }
+                    }
+                    continue;
                 }
                 let semantic_reduction = match key.code {
                     KeyCode::PageUp => Some(reduce_interaction(
@@ -3326,6 +3661,7 @@ fn draw_loop(
                                     session_origin = "resumed".to_string();
                                     completion = CompletionMenu::default();
                                     pending_switcher = None;
+                                    chrome_generation = chrome_generation.saturating_add(1);
                                     transcript_viewport.pin_to_tail();
                                 }
                                 Err(error) => {
@@ -3344,19 +3680,112 @@ fn draw_loop(
                     continue;
                 }
                 if interaction_layer == InteractionLayer::Completion {
-                    if completion.handle_key(&mut composer, key.code) {
+                    match completion.handle_key(&mut composer, key.code) {
+                        CompletionKeyResult::Ignored => {
+                            match composer_action_for_key(&mut composer, key.code, key.modifiers) {
+                                ComposerAction::Pending => {
+                                    completion.sync_for(&composer.input, Some(project_root));
+                                }
+                                ComposerAction::Submit(submitted) => {
+                                    composer.set_text(submitted);
+                                    timeline.push_status(
+                                        "[ui error] completion input could not be submitted"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                        CompletionKeyResult::Consumed => continue,
+                        CompletionKeyResult::Submit => {
+                            tui_focus = TuiFocus::Composer;
+                        }
+                    }
+                }
+                if key.code == KeyCode::Tab
+                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(
+                        interaction_layer,
+                        InteractionLayer::Composer | InteractionLayer::Completion
+                    )
+                    && !completion.is_open()
+                {
+                    match tui_focus {
+                        TuiFocus::Composer => {
+                            tui_focus = TuiFocus::Transcript;
+                            selected_activity = timeline.activities.len().checked_sub(1);
+                        }
+                        TuiFocus::Transcript => tui_focus = TuiFocus::Composer,
+                    }
+                    continue;
+                }
+                if tui_focus == TuiFocus::Transcript
+                    && matches!(
+                        interaction_layer,
+                        InteractionLayer::Composer | InteractionLayer::Completion
+                    )
+                {
+                    match key.code {
+                        KeyCode::Up => {
+                            let len = timeline.activities.len();
+                            if len > 0 {
+                                selected_activity =
+                                    Some(selected_activity.unwrap_or(len - 1).saturating_sub(1));
+                            }
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            let len = timeline.activities.len();
+                            if len > 0 {
+                                let current = selected_activity.unwrap_or(len - 1);
+                                selected_activity = Some((current + 1).min(len - 1));
+                            }
+                            continue;
+                        }
+                        KeyCode::Left | KeyCode::Right => {
+                            if let Some(index) = selected_activity {
+                                if let Some(entry) = timeline.activities.get_mut(index) {
+                                    if !entry.body.is_empty() {
+                                        entry.folded = !entry.folded;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        KeyCode::Enter => continue,
+                        KeyCode::Esc => {
+                            tui_focus = TuiFocus::Composer;
+                            continue;
+                        }
+                        KeyCode::Char(character)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            tui_focus = TuiFocus::Composer;
+                            composer.insert_str(&character.to_string());
+                            completion.sync_for(&composer.input, Some(project_root));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                if key.code == KeyCode::Esc
+                    && tui_focus == TuiFocus::Composer
+                    && matches!(interaction_layer, InteractionLayer::Composer)
+                {
+                    if composer.input.is_empty() {
                         continue;
                     }
-                    match composer_action_for_key(&mut composer, key.code, key.modifiers) {
-                        ComposerAction::Pending => {
-                            completion.sync_for(&composer.input, Some(project_root));
-                        }
-                        ComposerAction::Submit(submitted) => {
-                            composer.set_text(submitted);
-                            timeline.push_status(
-                                "[ui error] completion input could not be submitted".to_string(),
-                            );
-                        }
+                    let now = Instant::now();
+                    if clear_armed_at
+                        .is_some_and(|armed| now.duration_since(armed) <= CLEAR_DRAFT_CONFIRM)
+                    {
+                        composer.set_text(String::new());
+                        completion.sync_for(&composer.input, Some(project_root));
+                        clear_armed_at = None;
+                        timeline.push_status("Draft cleared.".to_string());
+                    } else {
+                        clear_armed_at = Some(now);
+                        timeline.push_status("Press Esc again to clear.".to_string());
                     }
                     continue;
                 }
@@ -3473,6 +3902,7 @@ fn draw_loop(
                                         break Ok(());
                                     }
                                     Ok(InteractiveEffect::Output(output)) => {
+                                        chrome_generation = chrome_generation.saturating_add(1);
                                         timeline.push_status(output)
                                     }
                                     Ok(InteractiveEffect::SessionChanged {
@@ -3493,6 +3923,7 @@ fn draw_loop(
                                             if let Some(origin) = changed_origin {
                                                 session_origin = origin.to_string();
                                             }
+                                            chrome_generation = chrome_generation.saturating_add(1);
                                             transcript_viewport.pin_to_tail();
                                         }
                                     }
@@ -3763,7 +4194,10 @@ mod tests {
             .iter()
             .position(|item| item.insertion == "/session")
             .expect("session completion");
-        assert!(completion.handle_key(&mut composer, KeyCode::Tab));
+        assert_eq!(
+            completion.handle_key(&mut composer, KeyCode::Tab),
+            CompletionKeyResult::Consumed
+        );
         assert_eq!(composer.input, "/session");
         assert!(!completion.is_open());
 
@@ -3774,7 +4208,10 @@ mod tests {
             .iter()
             .position(|item| item.insertion == "/help")
             .expect("help completion");
-        assert!(completion.handle_key(&mut composer, KeyCode::Enter));
+        assert_eq!(
+            completion.handle_key(&mut composer, KeyCode::Enter),
+            CompletionKeyResult::Submit
+        );
         assert_eq!(composer.input, "/help");
         assert!(!completion.is_open());
 
@@ -3785,9 +4222,73 @@ mod tests {
         completion.sync(&composer.input);
         assert!(completion.is_open());
         let preserved = composer.input.clone();
-        assert!(completion.handle_key(&mut composer, KeyCode::Esc));
+        assert_eq!(
+            completion.handle_key(&mut composer, KeyCode::Esc),
+            CompletionKeyResult::Consumed
+        );
         assert_eq!(composer.input, preserved);
         assert!(!completion.is_open());
+
+        let mut skills = CompletionMenu::default();
+        composer.set_text("/skills ".to_string());
+        skills.sync(&composer.input);
+        skills.selected = skills
+            .suggestions
+            .iter()
+            .position(|item| item.insertion.ends_with(' '))
+            .expect("free-form skill argument completion");
+        assert_eq!(
+            skills.handle_key(&mut composer, KeyCode::Enter),
+            CompletionKeyResult::Consumed
+        );
+        assert!(composer.input.ends_with(' '));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_instead_of_submitting() {
+        let mut composer = Composer::from_text("hello");
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Enter, KeyModifiers::SHIFT),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "hello\n");
+        assert_eq!(
+            composer_action_for_key(&mut composer, KeyCode::Enter, KeyModifiers::ALT),
+            ComposerAction::Pending
+        );
+        assert_eq!(composer.input, "hello\n\n");
+    }
+
+    #[test]
+    fn chrome_cache_skips_identical_idle_frames() {
+        let cache = ChromeCache {
+            generation: 1,
+            session_id: "abc".to_string(),
+            origin: "new".to_string(),
+            queued: 0,
+            width: 80,
+            lifecycle: "idle".to_string(),
+            header: "h".to_string(),
+            status: "s".to_string(),
+        };
+        assert!(cache.matches(1, "abc", "new", 0, 80, "idle"));
+        assert!(!cache.matches(1, "abc", "new", 1, 80, "idle"));
+        assert!(!cache.matches(2, "abc", "new", 0, 80, "idle"));
+        assert!(!cache.matches(1, "abc", "new", 0, 80, "running"));
+    }
+
+    #[test]
+    fn selected_tool_block_can_expand_and_collapse() {
+        let mut entry = ActivityEntry::new(
+            ActivityKind::Tool,
+            "list_directory ok · 1 entries",
+            "{\"path\":\"README.md\"}",
+        )
+        .folded();
+        assert!(entry.render_line().starts_with('›'));
+        assert!(!entry.render_line().contains("README.md"));
+        entry.folded = false;
+        assert!(entry.render_line().contains("README.md"));
     }
 
     #[test]
@@ -3814,8 +4315,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Your AI agent for this project."));
-        assert!(rendered.contains("Ask me to inspect, plan, or change something."));
+        assert!(!rendered.contains("Your AI agent for this project."));
+        assert!(rendered.contains("Type / for commands"));
         assert!(rendered.contains("> Ask nib anything…"));
         assert!(rendered.contains("Enter send"));
         assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
@@ -3834,16 +4335,21 @@ mod tests {
     fn footer_and_completion_follow_the_current_interaction() {
         let mut viewport = TranscriptViewport::default();
         assert_eq!(
-            footer_line(false, &viewport),
-            "Enter send · Ctrl+J newline · / commands · @ files"
+            footer_line(false, &viewport, TuiFocus::Composer, 0),
+            "Enter send · Shift+Enter newline · / commands · @ files"
         );
         assert_eq!(
-            footer_line(true, &viewport),
+            footer_line(true, &viewport, TuiFocus::Composer, 0),
             "Enter queue · Ctrl+S steer · Ctrl+C stop"
         );
+        assert_eq!(
+            footer_line(true, &viewport, TuiFocus::Composer, 2),
+            "queue 2 · Enter queue · Ctrl+S steer · Ctrl+C stop"
+        );
+        assert!(footer_line(false, &viewport, TuiFocus::Transcript, 0).contains("↑↓ select"));
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
-        assert!(footer_line(true, &viewport).contains("Ctrl+End follow"));
+        assert!(footer_line(true, &viewport, TuiFocus::Composer, 0).contains("Ctrl+End follow"));
 
         let area = Rect::new(0, 0, 100, 30);
         let completion = completion_rect(area, MAX_VISIBLE_COMPLETIONS, 2);
@@ -4254,6 +4760,7 @@ mod tests {
         let switcher = SessionSwitcher {
             candidates: vec![InteractiveSessionCandidate {
                 id: "visible-session".to_string(),
+                label: "visible-session".to_string(),
                 preview: "Latest user message: visible content".to_string(),
                 is_active: false,
                 snapshot_token: [0; 32],
@@ -4290,6 +4797,7 @@ mod tests {
         let switcher = SessionSwitcher {
             candidates: vec![InteractiveSessionCandidate {
                 id: "small-session".to_string(),
+                label: "small-session".to_string(),
                 preview: "bounded preview".to_string(),
                 is_active: true,
                 snapshot_token: [0; 32],

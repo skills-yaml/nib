@@ -260,6 +260,8 @@ child_status_marker='__NIB_INTERACTIVE_CHILD_STATUS__'
 quit_tui_input() {
   sleep 0.8
   printf '\021'
+  sleep 0.2
+  printf '\021'
 }
 
 quit_plain_input() {
@@ -444,6 +446,8 @@ tui_docks_input() {
   printf '\033[B\r'
   sleep 1.8
   printf '\021'
+  sleep 0.2
+  printf '\021'
 }
 
 run_tui_case \
@@ -537,6 +541,8 @@ tui_composer_input() {
   printf '\003'
   wait_for_composer_terminal "$composer_session" 3
   printf '\021'
+  sleep 0.2
+  printf '\021'
 }
 
 run_tui_case tui-composer-scroll-history tui_composer_input '--tui' yes
@@ -547,10 +553,9 @@ terminal_escape="$(printf '\033')"
 composer_words="$fixture/tui-composer-scroll-history.words"
 sed "s/${terminal_escape}\\[[0-9;?]*[ -/]*[@-~]/ /g" \
   "$fixture/tui-composer-scroll-history.txt" | tr -s '[:space:]' ' ' >"$composer_words"
-grep -Fq 'Commands' "$composer_words"
 grep -Fq 'Tab insert' "$composer_words"
-grep -Fq 'Ctrl+End follow' "$composer_words"
 grep -Fq 'Enter send' "$composer_words"
+grep -Fq 'Ctrl+End follow' "$composer_words"
 grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
 grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
 grep -R -Fq '"content": "edit line\nunicode 🙂X\nrestored history smoke"' "$session_directory"
@@ -596,6 +601,8 @@ tui_queue_input() {
   sleep 2.5
   printf '\003'
   sleep 1.4
+  printf '\021'
+  sleep 0.2
   printf '\021'
 }
 

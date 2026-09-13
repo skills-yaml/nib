@@ -421,11 +421,13 @@ Parity matrix (same command/session effect in both renderers):
 | Action | TUI | Plain |
 | --- | --- | --- |
 | Idle submit | `Enter` | `Enter` |
-| Newline | `Ctrl+J` | continuation / editor |
+| Newline | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | continuation / editor |
 | Queue next | `Enter` while running, or `queue: text` | `queue: text` |
 | Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
-| Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
+| Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
+| Quit | `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
+| Transcript | `Tab`, then arrows / fold / `Ctrl+Y` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
 | Approvals | dock on the current tool | Y/N prompt |
@@ -509,14 +511,15 @@ and reconciliation records appear as one outcome.
 The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
 that still require interactive approval or a question appear as a dock on the current
 entry so the transcript stays visible. Press `Y` to approve, `N` or `Esc` to deny.
-`Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a turn is running.
+`Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
+when idle and queues when a turn is running.
 
-The composer has focus initially and always shows a `> ` prompt. An empty session gives
-a short welcome cue and the empty composer displays `Ask nib anything…`. A
+The composer has focus initially, a top border, and a `> ` prompt. An empty session
+keeps the prompt and a muted `/` · `@` hint. A
 slash-command prefix opens bounded completion immediately above the composer from the
 same command registry used by parsing and help. Each row shows one command signature
-and one description. Use `Up`/`Down` to select, `Tab` to insert, and `Esc` to close
-completion without clearing the draft. When completion is closed, `Up`/`Down` restore
+and one description. Use `Up`/`Down` to select, `Tab` to insert, `Enter` to run a
+complete command, and `Esc` to close completion without clearing the draft. When completion is closed, `Up`/`Down` restore
 bounded in-process draft history. Typing `@` offers
 project-scoped path completion; submitted `@path` mentions become structured
 attachments (bounded file context) rather than expanding the file into the prompt
@@ -530,11 +533,18 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
+The transcript is a list of typed blocks. A tool call is one block that mutates from
+requested to running to a collapsed summary; `Left`/`Right` expand or fold the
+selected block. `Tab` moves focus between the composer and the transcript. With the
+transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it. Printable
+keys return to the composer and insert.
+
 The transcript follows new activity by default. `PageUp` and `PageDown` move by the
 current visible rendered rows without relying on raw terminal scrollback. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
 the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
-follow-tail. The footer otherwise shows only the relevant idle or active-run actions.
+follow-tail. The footer otherwise shows only the relevant idle, transcript, or
+active-run actions.
 Resizes and narrow terminals clamp the row viewport safely.
 
 Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
@@ -548,8 +558,10 @@ active. Switching is rejected while an agent worker is running. `/clear` uses th
 full-view replacement boundary for its new session.
 
 Approval, question, model, and session overlays take input before command completion.
-Switcher and selector errors render on the overlay that caused them. `Ctrl+C` cancels
-an active run; with no active run it exits. `Ctrl+Q` or `/quit` also exits.
+Switcher and selector errors render on the overlay that caused them. `Esc` never
+cancels a run; press it twice within 800ms to clear a non-empty draft. `Ctrl+C`
+cancels an active run, or clears an idle draft; it does not quit. `Ctrl+Q` twice
+within 1000ms quits. `/quit` still exits.
 Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.
 

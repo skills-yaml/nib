@@ -86,6 +86,7 @@ work or narrower guarantees.
 - [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
 - [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
 - [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
+- [T038: TUI Block Transcript and Key Contract](development/T038_tui_block_transcript_and_key_contract.md)
 
 ### Feature specs
 
