@@ -4,13 +4,29 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const MAX_RESULTS_PATH_BYTES: usize = 4 * 1024;
+pub(super) const MAX_LIVE_CONCURRENCY: usize = 16;
+const PAID_GENERATION_CEILING_VARS: [&str; 9] = [
+    "NIB_LIVE_MAX_REQUESTS",
+    "NIB_LIVE_MAX_ATTEMPTS",
+    "NIB_LIVE_MAX_OUTPUT_TOKENS",
+    "NIB_LIVE_MAX_TOTAL_OUTPUT_TOKENS",
+    "NIB_LIVE_MAX_ACTUAL_COST_USD",
+    "NIB_LIVE_CONCURRENCY",
+    "NIB_LIVE_SCENARIO_TIMEOUT_SECS",
+    "NIB_LIVE_PROVIDER_TIMEOUT_SECS",
+    "NIB_LIVE_RUN_TIMEOUT_SECS",
+];
 
 #[derive(Debug, Clone)]
 pub(super) struct LiveLimits {
     pub max_logical_requests: usize,
+    pub max_attempts: usize,
     pub max_output_tokens_per_request: u32,
+    pub max_total_output_tokens: u64,
+    pub max_actual_cost_usd: f64,
     pub max_scenario_duration: Duration,
     pub max_provider_duration: Duration,
+    pub max_run_duration: Duration,
     pub allow_unpriced: bool,
 }
 
@@ -18,6 +34,7 @@ pub(super) struct LiveLimits {
 pub(super) struct LiveSettings {
     pub mode: LiveMode,
     pub providers: Vec<String>,
+    pub concurrency: usize,
     pub results_dir: PathBuf,
     pub limits: LiveLimits,
     pub meta_base_url: Option<String>,
@@ -30,6 +47,7 @@ impl std::fmt::Debug for LiveSettings {
             .debug_struct("LiveSettings")
             .field("mode", &self.mode)
             .field("providers", &self.providers)
+            .field("concurrency", &self.concurrency)
             .field("results_dir", &self.results_dir)
             .field("limits", &self.limits)
             .field(
@@ -47,8 +65,16 @@ impl LiveSettings {
         let mode = LiveMode::parse(&required("NIB_LIVE_MODE")?)?;
         if mode.makes_generation_requests() {
             require_flag("NIB_LIVE_ACK_COSTS")?;
+            for name in PAID_GENERATION_CEILING_VARS {
+                required(name).map_err(|_| {
+                    format!(
+                        "blocked_configuration: paid live generation requires an explicit {name} ceiling"
+                    )
+                })?;
+            }
         }
         let providers = parse_providers(&required("NIB_LIVE_PROVIDER")?)?;
+        let concurrency = parse_usize("NIB_LIVE_CONCURRENCY", 1, 1, MAX_LIVE_CONCURRENCY)?;
         let results_dir = env::var_os("NIB_LIVE_RESULTS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("target/llm-live"));
@@ -62,6 +88,22 @@ impl LiveSettings {
 
         let max_logical_requests = parse_usize("NIB_LIVE_MAX_REQUESTS", 10_000, 1, 100_000)?;
         let max_output_tokens_per_request = parse_u32("NIB_LIVE_MAX_OUTPUT_TOKENS", 64, 1, 512)?;
+        let default_max_attempts = max_logical_requests
+            .checked_mul(3)
+            .ok_or_else(|| "live attempt ceiling overflowed".to_string())?;
+        let max_attempts = parse_usize("NIB_LIVE_MAX_ATTEMPTS", default_max_attempts, 1, 300_000)?;
+        let default_total_output_tokens = u64::try_from(max_logical_requests)
+            .ok()
+            .and_then(|requests| requests.checked_mul(u64::from(max_output_tokens_per_request)))
+            .ok_or_else(|| "live output-token ceiling overflowed".to_string())?;
+        let max_total_output_tokens = parse_u64(
+            "NIB_LIVE_MAX_TOTAL_OUTPUT_TOKENS",
+            default_total_output_tokens,
+            1,
+            51_200_000,
+        )?;
+        let max_actual_cost_usd =
+            parse_f64("NIB_LIVE_MAX_ACTUAL_COST_USD", 100.0, 0.000_001, 1_000.0)?;
         let max_scenario_duration =
             Duration::from_secs(parse_u64("NIB_LIVE_SCENARIO_TIMEOUT_SECS", 120, 5, 600)?);
         let max_provider_duration = Duration::from_secs(parse_u64(
@@ -70,10 +112,18 @@ impl LiveSettings {
             60,
             14_400,
         )?);
+        let max_run_duration =
+            Duration::from_secs(parse_u64("NIB_LIVE_RUN_TIMEOUT_SECS", 14_400, 60, 86_400)?);
         let allow_unpriced = optional_flag("NIB_LIVE_ALLOW_UNPRICED")?;
         let meta_base_url = env::var("NIB_LIVE_META_BASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        if let Some(value) = &meta_base_url {
+            super::catalog::catalog_url(value, "models").map_err(|_| {
+                "provider 'meta' is blocked_configuration because NIB_LIVE_META_BASE_URL is not a safe HTTPS catalog root"
+                    .to_string()
+            })?;
+        }
 
         let mut sensitive_values = NETWORK_PROVIDERS
             .iter()
@@ -109,12 +159,17 @@ impl LiveSettings {
         Ok(Self {
             mode,
             providers,
+            concurrency,
             results_dir,
             limits: LiveLimits {
                 max_logical_requests,
+                max_attempts,
                 max_output_tokens_per_request,
+                max_total_output_tokens,
+                max_actual_cost_usd,
                 max_scenario_duration,
                 max_provider_duration,
+                max_run_duration,
                 allow_unpriced,
             },
             meta_base_url,
@@ -227,6 +282,18 @@ fn parse_u64(name: &str, default: u64, min: u64, max: u64) -> Result<u64, String
     }
 }
 
+fn parse_f64(name: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && (min..=max).contains(value))
+            .ok_or_else(|| format!("{name} must be finite and between {min} and {max}")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(_) => Err(format!("{name} is not valid UTF-8")),
+    }
+}
+
 pub(super) fn credential_env(provider: &str) -> Option<&'static str> {
     match provider {
         "openai" => Some("OPENAI_API_KEY"),
@@ -264,5 +331,13 @@ mod tests {
             .makes_generation_requests());
         assert!(LiveMode::parse("full").unwrap().makes_generation_requests());
         assert!(LiveMode::parse("smoke").is_err());
+    }
+
+    #[test]
+    fn paid_generation_requires_every_protected_ceiling_name() {
+        assert_eq!(PAID_GENERATION_CEILING_VARS.len(), 9);
+        assert!(PAID_GENERATION_CEILING_VARS.contains(&"NIB_LIVE_MAX_ACTUAL_COST_USD"));
+        assert!(PAID_GENERATION_CEILING_VARS.contains(&"NIB_LIVE_CONCURRENCY"));
+        assert!(PAID_GENERATION_CEILING_VARS.contains(&"NIB_LIVE_RUN_TIMEOUT_SECS"));
     }
 }

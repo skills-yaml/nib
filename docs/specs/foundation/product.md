@@ -2,11 +2,11 @@
 
 ## Project description
 
-nib is a local-first AI agent specialized in coding and workload execution. It turns a goal into a persisted, reviewable plan, runs approved tools in scoped worktrees and optional `bwrap` isolation, and reconciles every run into a profile-scoped session record.
+nib is a local-first AI agent. It turns a goal into a persisted, reviewable plan, runs approved tools in scoped worktrees and optional `bwrap` isolation, and reconciles every run into a profile-scoped session record.
 
 The shipped workload model is the session: indexed messages, a structured plan and step outcomes, lifecycle events, skill usage, memory, and audited tool executions. Goals enter through the CLI, chat, TUI, stdio MCP, or an external adapter using nib's normalized gateway contract. GitHub/Notion intake and a richer cross-project Projects/Tasks/Epics domain are possible bridges, not current built-in behavior.
 
-Target users are individual developers, technical founders, and small teams who want an auditable coding agent that preserves context between runs and makes approval, execution, and verification state visible. Key positioning: session-workload native, execution-strong, local-first, and interoperable through Skills and MCP.
+Target users are individual developers, technical founders, and small teams who want an auditable AI agent that preserves context between runs and makes approval, execution, and verification state visible. Key positioning: session-workload native, execution-strong, local-first, and interoperable through Skills and MCP.
 
 ## Project vision
 

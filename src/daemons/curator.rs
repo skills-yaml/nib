@@ -2600,6 +2600,7 @@ mod tests {
                     role: "user".to_string(),
                     content: "recent".to_string(),
                     timestamp: Some(fresh),
+                    attachments: Vec::new(),
                 }),
                 "tool" => session.tool_calls.push(ToolCallRecord {
                     timestamp: Some(fresh),

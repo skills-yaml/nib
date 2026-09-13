@@ -1,7 +1,8 @@
 use super::config::LiveSettings;
 use super::{
-    registry_transports, CatalogModel, CatalogSnapshot, Classification, LiveMode, ModelProfile,
-    ScenarioId, SelectedSuiteEvidence, TransportId, NETWORK_PROVIDERS,
+    registry_transports, AccountingJustification, CatalogModel, CatalogSnapshot, Classification,
+    LiveMode, ModelProfile, ScenarioId, ScenarioNotApplicableJustification, SelectedSuiteEvidence,
+    TransportId, NETWORK_PROVIDERS,
 };
 use chrono::NaiveDate;
 use nib::llm::registry::provider_descriptor;
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const OPENROUTER_ALLOWLIST: &str = include_str!("../fixtures/llm_live/openrouter_models.toml");
 const SELECTED_MODELS: &str = include_str!("../fixtures/llm_live/selected_models.toml");
 // Includes the synthetic prompt, system defaults, and bounded inert tool schemas.
-const ESTIMATED_PROMPT_TOKENS_PER_REQUEST: usize = 512;
+pub(super) const ESTIMATED_PROMPT_TOKENS_PER_REQUEST: usize = 512;
 const MAX_ALLOWLIST_MODELS: usize = 64;
 const MAX_SELECTED_MODELS_PER_PROVIDER: usize = 64;
 
@@ -207,6 +208,10 @@ pub(super) struct AllowlistEntry {
     required_scenarios: BTreeSet<ScenarioId>,
     #[serde(default)]
     required_parameters: BTreeSet<String>,
+    #[serde(default)]
+    required_input_modalities: BTreeSet<String>,
+    #[serde(default)]
+    required_output_modalities: BTreeSet<String>,
     rationale: String,
     owner: String,
     reviewed_at: String,
@@ -315,6 +320,25 @@ fn validate_entry(entry: &AllowlistEntry, today: NaiveDate) -> Result<(), String
     {
         return Err("OpenRouter allowlist required parameters are invalid".to_string());
     }
+    for (label, modalities) in [
+        ("input", &entry.required_input_modalities),
+        ("output", &entry.required_output_modalities),
+    ] {
+        if modalities.is_empty()
+            || modalities.len() > 16
+            || modalities.iter().any(|modality| {
+                modality.is_empty()
+                    || modality.len() > 64
+                    || !modality
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+        {
+            return Err(format!(
+                "OpenRouter allowlist required {label} modalities are invalid"
+            ));
+        }
+    }
     for (label, value, max) in [
         ("rationale", entry.rationale.as_str(), 1024usize),
         ("owner", entry.owner.as_str(), 128usize),
@@ -343,6 +367,7 @@ fn validate_entry(entry: &AllowlistEntry, today: NaiveDate) -> Result<(), String
 pub(super) struct AccountingEntry {
     pub model: CatalogModel,
     pub classification: Classification,
+    pub justification: AccountingJustification,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +381,89 @@ pub(super) struct RunPlan {
     pub projected_cost_usd: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct MatrixPlan {
+    pub logical_requests: usize,
+    pub maximum_attempts: usize,
+    pub maximum_output_tokens: usize,
+    pub projected_cost_usd: Option<f64>,
+}
+
+pub(super) fn validate_generation_matrix(
+    settings: &LiveSettings,
+    plans: &[RunPlan],
+) -> Result<MatrixPlan, String> {
+    if !settings.mode.makes_generation_requests() {
+        return Ok(MatrixPlan {
+            logical_requests: 0,
+            maximum_attempts: 0,
+            maximum_output_tokens: 0,
+            projected_cost_usd: Some(0.0),
+        });
+    }
+    if plans.len() != settings.providers.len()
+        || plans
+            .iter()
+            .zip(&settings.providers)
+            .any(|(plan, provider)| plan.provider != *provider)
+    {
+        return Err(
+            "live generation matrix is blocked_configuration because provider plans are incomplete or reordered"
+                .to_string(),
+        );
+    }
+    let logical_requests = plans
+        .iter()
+        .try_fold(0usize, |total, plan| {
+            total.checked_add(plan.logical_requests)
+        })
+        .ok_or_else(|| "live generation matrix request count overflowed".to_string())?;
+    let maximum_attempts = plans
+        .iter()
+        .try_fold(0usize, |total, plan| {
+            total.checked_add(plan.maximum_attempts)
+        })
+        .ok_or_else(|| "live generation matrix attempt count overflowed".to_string())?;
+    let maximum_output_tokens = plans
+        .iter()
+        .try_fold(0usize, |total, plan| {
+            total.checked_add(plan.maximum_output_tokens)
+        })
+        .ok_or_else(|| "live generation matrix output-token count overflowed".to_string())?;
+    let projected_cost_usd = if plans.iter().all(|plan| plan.projected_cost_usd.is_some()) {
+        let total = plans
+            .iter()
+            .filter_map(|plan| plan.projected_cost_usd)
+            .try_fold(0.0, |total, cost| {
+                let next = total + cost;
+                (total.is_finite() && cost.is_finite() && cost >= 0.0 && next.is_finite())
+                    .then_some(next)
+            })
+            .ok_or_else(|| "live generation matrix projected cost overflowed".to_string())?;
+        Some(total)
+    } else {
+        None
+    };
+    if logical_requests > settings.limits.max_logical_requests
+        || maximum_attempts > settings.limits.max_attempts
+        || u64::try_from(maximum_output_tokens)
+            .ok()
+            .is_none_or(|tokens| tokens > settings.limits.max_total_output_tokens)
+        || projected_cost_usd.is_some_and(|cost| cost > settings.limits.max_actual_cost_usd)
+    {
+        return Err(
+            "live generation matrix is blocked_budget because the complete selected provider/profile denominator exceeds a configured run ceiling"
+                .to_string(),
+        );
+    }
+    Ok(MatrixPlan {
+        logical_requests,
+        maximum_attempts,
+        maximum_output_tokens,
+        projected_cost_usd,
+    })
+}
+
 pub(super) fn build_plan(
     settings: &LiveSettings,
     snapshot: &CatalogSnapshot,
@@ -367,13 +475,24 @@ pub(super) fn build_plan(
             .models
             .iter()
             .cloned()
-            .map(|model| AccountingEntry {
-                classification: if model.supports_text_generation == Some(false) {
-                    Classification::NotApplicable
-                } else {
-                    Classification::RequiresProbe
-                },
-                model,
+            .map(|model| {
+                let (classification, justification) =
+                    if model.supports_text_generation == Some(false) {
+                        (
+                            Classification::NotApplicable,
+                            AccountingJustification::CatalogTextGenerationUnsupported,
+                        )
+                    } else {
+                        (
+                            Classification::RequiresProbe,
+                            AccountingJustification::CatalogMetadataRequiresProbe,
+                        )
+                    };
+                AccountingEntry {
+                    classification,
+                    justification,
+                    model,
+                }
             })
             .collect();
         return Ok(RunPlan {
@@ -411,16 +530,39 @@ pub(super) fn build_plan(
         .models
         .iter()
         .cloned()
-        .map(|model| AccountingEntry {
-            classification: if model.supports_text_generation == Some(false)
-                || ((snapshot.provider == "openrouter" || settings.mode == LiveMode::Selected)
-                    && !selected_model_ids.contains(model.id.as_str()))
-            {
-                Classification::NotApplicable
+        .map(|model| {
+            let selected = selected_model_ids.contains(model.id.as_str());
+            let (classification, justification) = if model.supports_text_generation == Some(false) {
+                (
+                    Classification::NotApplicable,
+                    AccountingJustification::CatalogTextGenerationUnsupported,
+                )
+            } else if !selected && snapshot.provider == "openrouter" {
+                (
+                    Classification::OmittedByPolicy,
+                    AccountingJustification::OpenRouterAllowlistPolicy,
+                )
+            } else if !selected && settings.mode == LiveMode::Selected {
+                (
+                    Classification::OmittedByPolicy,
+                    AccountingJustification::SelectedMatrixPolicy,
+                )
+            } else if !selected && settings.mode == LiveMode::Canary {
+                (
+                    Classification::OmittedByPolicy,
+                    AccountingJustification::CanaryDefaultPolicy,
+                )
             } else {
-                Classification::RequiresProbe
-            },
-            model,
+                (
+                    Classification::RequiresProbe,
+                    AccountingJustification::CatalogMetadataRequiresProbe,
+                )
+            };
+            AccountingEntry {
+                classification,
+                justification,
+                model,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -435,18 +577,28 @@ pub(super) fn build_plan(
     let mut profiles = Vec::new();
     for (model, allowlist_entry) in selected {
         let advertised = snapshot.provider == "openrouter"
-            || advertised_ids.contains(model.id.as_str())
-            || model
-                .aliases
+            || advertised_ids
                 .iter()
-                .any(|alias| advertised_ids.contains(alias.as_str()));
+                .any(|advertised| model.matches_reference(advertised));
         let transports = allowlist_entry
             .map(|entry| entry.transports.iter().copied().collect::<Vec<_>>())
             .unwrap_or_else(|| default_transports.clone());
         for transport in transports {
             let (scenarios, not_applicable_scenarios) = if let Some(matrix) = selected_suite {
                 let mut scenarios = matrix.required_scenarios.clone();
-                let mut not_applicable = matrix.conditional_scenarios.clone();
+                let mut not_applicable = matrix
+                    .conditional_scenarios
+                    .iter()
+                    .copied()
+                    .map(|scenario| {
+                        let justification = if model.supports_parallel_tools == Some(false) {
+                            ScenarioNotApplicableJustification::CatalogParallelToolsUnsupported
+                        } else {
+                            ScenarioNotApplicableJustification::CatalogParallelToolsNotAdvertised
+                        };
+                        (scenario, justification)
+                    })
+                    .collect::<BTreeMap<_, _>>();
                 if model.supports_parallel_tools == Some(true) {
                     scenarios.extend(matrix.conditional_scenarios.iter().copied());
                     not_applicable.clear();
@@ -471,7 +623,7 @@ pub(super) fn build_plan(
                 if model.supports_parallel_tools == Some(true) {
                     scenarios.insert(ScenarioId::ParallelToolContinuation);
                 }
-                (scenarios, BTreeSet::new())
+                (scenarios, BTreeMap::new())
             };
             profiles.push(ModelProfile {
                 model: model.clone(),
@@ -500,10 +652,31 @@ pub(super) fn build_plan(
     let maximum_attempts = logical_requests
         .checked_mul(3)
         .ok_or_else(|| "live maximum attempt count overflowed".to_string())?;
+    if maximum_attempts > settings.limits.max_attempts {
+        return Err(format!(
+            "provider '{}' is blocked_budget: planned {maximum_attempts} attempts exceeds the configured {} limit",
+            snapshot.provider, settings.limits.max_attempts
+        ));
+    }
     let maximum_output_tokens = logical_requests
         .checked_mul(settings.limits.max_output_tokens_per_request as usize)
         .ok_or_else(|| "live maximum output token count overflowed".to_string())?;
+    if u64::try_from(maximum_output_tokens)
+        .ok()
+        .is_none_or(|tokens| tokens > settings.limits.max_total_output_tokens)
+    {
+        return Err(format!(
+            "provider '{}' is blocked_budget: planned {maximum_output_tokens} output tokens exceeds the configured {} limit",
+            snapshot.provider, settings.limits.max_total_output_tokens
+        ));
+    }
     let projected_cost_usd = projected_cost(&profiles, settings)?;
+    if projected_cost_usd.is_some_and(|cost| cost > settings.limits.max_actual_cost_usd) {
+        return Err(format!(
+            "provider '{}' is blocked_budget: projected cost exceeds the configured actual-cost limit",
+            snapshot.provider
+        ));
+    }
 
     Ok(RunPlan {
         provider: snapshot.provider.clone(),
@@ -525,9 +698,11 @@ fn select_direct_models(
         .ok_or_else(|| "direct provider is not registered".to_string())?;
     if mode == LiveMode::Full {
         for advertised in descriptor.models() {
-            if !snapshot.models.iter().any(|model| {
-                model.id == *advertised || model.aliases.iter().any(|alias| alias == advertised)
-            }) {
+            if !snapshot
+                .models
+                .iter()
+                .any(|model| model.matches_reference(advertised))
+            {
                 return Err(format!(
                     "provider '{}' advertised model is absent from its live catalog",
                     snapshot.provider
@@ -536,45 +711,52 @@ fn select_direct_models(
         }
     }
     if mode == LiveMode::Canary {
-        let model = snapshot
+        let matches = snapshot
             .models
             .iter()
-            .find(|model| {
-                model.id == descriptor.default_model()
-                    || model
-                        .aliases
-                        .iter()
-                        .any(|alias| alias == descriptor.default_model())
-            })
+            .filter(|model| model.matches_reference(descriptor.default_model()))
             .cloned()
-            .ok_or_else(|| {
-                format!(
+            .collect::<Vec<_>>();
+        let model = match matches.as_slice() {
+            [model] => model.clone(),
+            [] => {
+                return Err(format!(
                     "provider '{}' default model is absent from its live catalog",
                     snapshot.provider
-                )
-            })?;
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "provider '{}' default model resolves to multiple live catalog entries",
+                    snapshot.provider
+                ))
+            }
+        };
         return Ok(vec![(model, None)]);
     }
     if mode == LiveMode::Selected {
         let selected_ids = selected_ids
             .ok_or_else(|| "selected mode is missing direct-provider model IDs".to_string())?;
-        let catalog = snapshot
-            .models
-            .iter()
-            .map(|model| (model.id.as_str(), model))
-            .collect::<BTreeMap<_, _>>();
         return selected_ids
             .iter()
             .map(|id| {
-                catalog
-                    .get(id.as_str())
-                    .map(|model| ((*model).clone(), None))
-                    .ok_or_else(|| {
-                        format!(
-                            "provider '{}' selected model '{}' is absent from its live canonical catalog",
-                            snapshot.provider, id
-                        )
-                    })
+                let matches = snapshot
+                    .models
+                    .iter()
+                    .filter(|model| model.matches_reference(id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [model] => Ok((model.clone(), None)),
+                    [] => Err(format!(
+                        "provider '{}' selected model '{}' is absent from its live canonical catalog",
+                        snapshot.provider, id
+                    )),
+                    _ => Err(format!(
+                        "provider '{}' selected model '{}' resolves to multiple live catalog entries",
+                        snapshot.provider, id
+                    )),
+                }
             })
             .collect();
     }
@@ -640,7 +822,24 @@ fn select_openrouter_models<'a>(
                 entry.id
             ));
         }
-        selected.push(((*model).clone(), Some(entry)));
+        if !entry
+            .required_input_modalities
+            .is_subset(&model.input_modalities)
+            || !entry
+                .required_output_modalities
+                .is_subset(&model.output_modalities)
+        {
+            return Err(format!(
+                "OpenRouter allowlist entry '{}' is missing a required catalog modality",
+                entry.id
+            ));
+        }
+        let mut approved_model = (*model).clone();
+        // OpenRouter catalog slugs carry no ownership discriminator. Only an exact,
+        // approved, reviewed allowlist entry may be rendered as a public profile ID;
+        // the account-visible catalog/accounting record remains pseudonymized.
+        approved_model.public_identifier = true;
+        selected.push((approved_model, Some(entry)));
     }
     Ok(selected)
 }
@@ -723,10 +922,13 @@ mod tests {
     fn model(id: &str, text: Option<bool>, tools: Option<bool>) -> CatalogModel {
         CatalogModel {
             id: id.to_string(),
+            generation_target: None,
             aliases: Vec::new(),
             supports_text_generation: text,
             supports_tools: tools,
             supports_parallel_tools: Some(false),
+            input_modalities: ["text".to_string()].into_iter().collect(),
+            output_modalities: ["text".to_string()].into_iter().collect(),
             supported_parameters: tools
                 .is_some_and(|supported| supported)
                 .then(|| "tools".to_string())
@@ -747,12 +949,17 @@ mod tests {
         LiveSettings {
             mode,
             providers: vec!["openai".to_string()],
+            concurrency: 1,
             results_dir: PathBuf::from("target/test"),
             limits: LiveLimits {
                 max_logical_requests: 100,
+                max_attempts: 300,
                 max_output_tokens_per_request: 64,
+                max_total_output_tokens: 6_400,
+                max_actual_cost_usd: 100.0,
                 max_scenario_duration: Duration::from_secs(30),
                 max_provider_duration: Duration::from_secs(60),
+                max_run_duration: Duration::from_secs(120),
                 allow_unpriced: false,
             },
             meta_base_url: None,
@@ -792,6 +999,10 @@ mod tests {
             run.accounting[1].classification,
             Classification::NotApplicable
         );
+        assert_eq!(
+            run.accounting[1].justification,
+            AccountingJustification::CatalogTextGenerationUnsupported
+        );
     }
 
     #[test]
@@ -815,6 +1026,27 @@ mod tests {
         assert_eq!(run.logical_requests, 8);
         assert_eq!(run.maximum_attempts, 24);
         assert_eq!(run.maximum_output_tokens, 512);
+    }
+
+    #[test]
+    fn gemini_canary_preserves_catalog_name_and_resolves_base_model_generation_target() {
+        let default_model = provider_descriptor("google").unwrap().default_model();
+        let mut gemini = model("models/catalog-resource", Some(true), Some(true));
+        gemini.generation_target = Some(default_model.to_string());
+        let gemini_snapshot = snapshot("google", vec![gemini]);
+
+        let selected = select_direct_models(LiveMode::Canary, &gemini_snapshot, None).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.id, "models/catalog-resource");
+        assert_eq!(selected[0].0.generation_target(), default_model);
+
+        let mut duplicate_target = model("models/other-resource", Some(true), Some(true));
+        duplicate_target.generation_target = Some(default_model.to_string());
+        let ambiguous = snapshot("google", vec![selected[0].0.clone(), duplicate_target]);
+        assert!(select_direct_models(LiveMode::Canary, &ambiguous, None)
+            .unwrap_err()
+            .contains("multiple live catalog entries"));
     }
 
     #[test]
@@ -850,13 +1082,20 @@ mod tests {
                         ScenarioId::SingleToolContinuation,
                     ])
                 && profile.not_applicable_scenarios
-                    == BTreeSet::from([ScenarioId::ParallelToolContinuation])
+                    == BTreeMap::from([(
+                        ScenarioId::ParallelToolContinuation,
+                        ScenarioNotApplicableJustification::CatalogParallelToolsUnsupported,
+                    )])
         }));
         assert_eq!(run.logical_requests, 8);
         assert_eq!(run.accounting.len(), 2);
         assert_eq!(
             run.accounting[1].classification,
-            Classification::NotApplicable
+            Classification::OmittedByPolicy
+        );
+        assert_eq!(
+            run.accounting[1].justification,
+            AccountingJustification::SelectedMatrixPolicy
         );
     }
 
@@ -932,6 +1171,35 @@ mod tests {
     }
 
     #[test]
+    fn plan_fails_before_io_for_attempt_output_and_cost_budgets() {
+        let allowlist = OpenRouterAllowlist::load_default().unwrap();
+        let default_model = provider_descriptor("openai").unwrap().default_model();
+        let configurations: [fn(&mut LiveSettings); 3] = [
+            |settings: &mut LiveSettings| settings.limits.max_attempts = 1,
+            |settings: &mut LiveSettings| settings.limits.max_total_output_tokens = 1,
+            |settings: &mut LiveSettings| settings.limits.max_actual_cost_usd = 0.000_001,
+        ];
+        for configure in configurations {
+            let mut settings = settings(LiveMode::Canary);
+            let mut priced = model(default_model, Some(true), Some(true));
+            priced.pricing = Some(super::super::CatalogPricing {
+                prompt_per_token_usd: Some(0.001),
+                completion_per_token_usd: Some(0.001),
+                request_usd: Some(0.01),
+            });
+            configure(&mut settings);
+            let error = build_plan(
+                &settings,
+                &snapshot("openai", vec![priced]),
+                &allowlist,
+                None,
+            )
+            .expect_err("preflight budget must fail before generation");
+            assert!(error.contains("blocked_budget"), "{error}");
+        }
+    }
+
+    #[test]
     fn full_plan_fails_when_an_advertised_model_is_absent() {
         let allowlist = OpenRouterAllowlist::load_default().unwrap();
         let error = build_plan(
@@ -965,6 +1233,8 @@ approved = true
 transports = ["chat_completions"]
 required_scenarios = ["complete_text", "streamed_text"]
 required_parameters = []
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
 rationale = "Bounded deterministic qualification fixture"
 owner = "nib-maintainers"
 reviewed_at = "2026-08-06"
@@ -992,7 +1262,49 @@ expires_at = "2027-02-06"
         assert_eq!(run.accounting.len(), 2);
         assert_eq!(
             run.accounting[1].classification,
-            Classification::NotApplicable
+            Classification::OmittedByPolicy
+        );
+        assert_eq!(
+            run.accounting[1].justification,
+            AccountingJustification::OpenRouterAllowlistPolicy
+        );
+    }
+
+    #[test]
+    fn openrouter_plan_fails_closed_when_catalog_modalities_drift() {
+        let allowlist = OpenRouterAllowlist::parse(
+            r#"
+version = 1
+[[model]]
+id = "owner/approved-model"
+approved = true
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text"]
+required_parameters = []
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Bounded deterministic qualification fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+"#,
+            NaiveDate::from_ymd_opt(2026, 8, 6).unwrap(),
+        )
+        .unwrap();
+        let mut drifted = model("owner/approved-model", Some(true), Some(false));
+        drifted.output_modalities.clear();
+
+        let error = build_plan(
+            &settings(LiveMode::Full),
+            &snapshot("openrouter", vec![drifted]),
+            &allowlist,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "OpenRouter allowlist entry 'owner/approved-model' is missing a required catalog modality"
         );
     }
 
@@ -1032,6 +1344,8 @@ approved = true
 transports = ["chat_completions"]
 required_scenarios = ["complete_text", "streamed_text"]
 required_parameters = []
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
 rationale = "Bounded deterministic qualification fixture"
 owner = "nib-maintainers"
 reviewed_at = "2026-08-06"
@@ -1064,12 +1378,20 @@ id = "owner/model"
 approved = false
 transports = ["chat_completions"]
 required_scenarios = ["complete_text", "streamed_text"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
 rationale = "bounded coverage"
 owner = "maintainers"
 reviewed_at = "2026-08-01"
 expires_at = "2026-12-01"
 "#;
         assert!(OpenRouterAllowlist::parse(base, today).is_ok());
+        assert!(OpenRouterAllowlist::parse(
+            &base.replace("required_input_modalities = [\"text\"]\n", ""),
+            today
+        )
+        .unwrap_err()
+        .contains("required input modalities"));
         assert!(
             OpenRouterAllowlist::parse(&base.replace("owner/model", "owner/*"), today).is_err()
         );
@@ -1083,5 +1405,100 @@ expires_at = "2026-12-01"
             today
         )
         .is_err());
+    }
+
+    #[test]
+    fn full_matrix_dry_run_has_an_exact_complete_denominator_and_ceiling() {
+        let allowlist = OpenRouterAllowlist::parse(
+            r#"
+version = 1
+[[model]]
+id = "openai/gpt-5.6-sol"
+approved = true
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text", "single_tool_continuation"]
+required_parameters = ["tools"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Deterministic full matrix fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+[[model]]
+id = "anthropic/claude-opus-5"
+approved = true
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text", "single_tool_continuation"]
+required_parameters = ["tools"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Deterministic full matrix fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+[[model]]
+id = "google/gemini-3.6-flash"
+approved = true
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text", "single_tool_continuation"]
+required_parameters = ["tools"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Deterministic full matrix fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+[[model]]
+id = "x-ai/grok-4.5"
+approved = true
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text", "single_tool_continuation"]
+required_parameters = ["tools"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Deterministic full matrix fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+"#,
+            NaiveDate::from_ymd_opt(2026, 8, 6).unwrap(),
+        )
+        .unwrap();
+        let mut full = settings(LiveMode::Full);
+        full.providers = NETWORK_PROVIDERS.iter().map(ToString::to_string).collect();
+        full.limits.max_logical_requests = 104;
+        full.limits.max_attempts = 312;
+        full.limits.max_total_output_tokens = 6_656;
+
+        let plans = NETWORK_PROVIDERS
+            .iter()
+            .map(|provider| {
+                let descriptor = provider_descriptor(provider).unwrap();
+                let models = descriptor
+                    .models()
+                    .iter()
+                    .map(|id| model(id, Some(true), Some(true)))
+                    .collect();
+                build_plan(&full, &snapshot(provider, models), &allowlist, None)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let matrix = validate_generation_matrix(&full, &plans).unwrap();
+
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.accounting.len())
+                .sum::<usize>(),
+            19
+        );
+        assert_eq!(
+            plans.iter().map(|plan| plan.profiles.len()).sum::<usize>(),
+            26
+        );
+        assert_eq!(matrix.logical_requests, 104);
+        assert_eq!(matrix.maximum_attempts, 312);
+        assert_eq!(matrix.maximum_output_tokens, 6_656);
+        assert_eq!(matrix.projected_cost_usd, Some(0.0));
     }
 }

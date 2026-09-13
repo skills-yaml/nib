@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -17,6 +19,13 @@ const MAX_DAEMON_AUDIT_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_IN_MEMORY_TASKS: usize = 10_000;
 const MAX_TASK_ID_BYTES: usize = 160;
 const MAX_TASK_KIND_BYTES: usize = 64;
+#[cfg(test)]
+static ROLLBACK_UNATTACHED_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn inject_rollback_unattached_failures(count: usize) {
+    ROLLBACK_UNATTACHED_FAILURES.store(count, Ordering::Release);
+}
 
 /// Represents a running background task or timer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -299,8 +308,16 @@ impl TaskManager {
         self.register_task_with_start(id, kind, None)
     }
 
-    #[cfg(test)]
     pub(crate) fn rollback_unattached_task(&self, id: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if ROLLBACK_UNATTACHED_FAILURES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err("injected background task rollback failure".to_string());
+        }
         let mut tasks = self
             .tasks
             .lock()
@@ -308,10 +325,7 @@ impl TaskManager {
         let task = tasks
             .get(id)
             .ok_or_else(|| format!("background task not found: {id}"))?;
-        if task.abort_handle.is_some()
-            || task.durable_store.is_some()
-            || task.start_sender.is_some()
-        {
+        if task.abort_handle.is_some() || task.durable_store.is_some() {
             return Err(format!(
                 "background task cannot be rolled back after execution ownership is attached: {id}"
             ));
@@ -908,6 +922,7 @@ fn deliver_timer_message(
                     })
                     .to_string(),
                     timestamp: Some(Utc::now()),
+                    attachments: Vec::new(),
                 }),
                 Some(role) => {
                     return Err(crate::session::SessionError::InvalidMutation(format!(
@@ -920,6 +935,7 @@ fn deliver_timer_message(
                 role: "user".to_string(),
                 content: prompt.to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             session.events.push(crate::session::SessionEvent {
                 index: session.events.len(),
@@ -992,6 +1008,7 @@ pub fn deliver_background_task_observation(
                 })
                 .to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             };
             match session.messages.last().map(|message| message.role.as_str()) {
                 None => {
@@ -1005,6 +1022,7 @@ pub fn deliver_background_task_observation(
                         })
                         .to_string(),
                         timestamp: Some(Utc::now()),
+                        attachments: Vec::new(),
                     });
                     let mut message = boundary();
                     message.index = session.messages.len();
@@ -1035,6 +1053,7 @@ pub fn deliver_background_task_observation(
                 })
                 .to_string(),
                 timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
             });
             session.events.push(crate::session::SessionEvent {
                 index: session.events.len(),

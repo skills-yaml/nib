@@ -10,7 +10,7 @@
 
 ## Overview
 
-nib requires a small, well-defined set of core tools to function as an effective coding and workload agent. These tools enable the agent to inspect, modify, and execute work in a local development environment while maintaining strict safety, permission, and audit boundaries.
+nib requires a small, well-defined set of core tools to function as an effective AI agent. These tools enable the agent to inspect, modify, and execute work in a local development environment while maintaining strict safety, permission, and audit boundaries.
 
 This feature defines the minimal viable tool surface, their interfaces, permission classifications, and integration points with the rest of the nib system (workload model, planner, executor, reconciler, MCP, Skills, and AGENTS.md).
 

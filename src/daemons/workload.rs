@@ -48,6 +48,26 @@ const MAX_TERMINAL_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_SCHEDULE_PROMPT_BYTES: usize = 20_000;
 const MAX_SCHEDULE_DELAY_SECONDS: u64 = 31_536_000;
 const MAX_COMPENSATION_AUDIT_DETAIL_CHARS: usize = 16_384;
+const SESSION_SCOPED_TASK_UNAVAILABLE: &str =
+    "background task is not available to the active session";
+
+enum SessionCancellationFailure {
+    Unavailable,
+    NotRunning(String),
+    Store(String),
+}
+
+impl SessionCancellationFailure {
+    fn into_public_message(self) -> String {
+        match self {
+            Self::Unavailable => SESSION_SCOPED_TASK_UNAVAILABLE.to_string(),
+            Self::NotRunning(status) => {
+                format!("background task is not running (status: {status})")
+            }
+            Self::Store(error) => error,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DurableTaskRecord {
@@ -72,6 +92,31 @@ pub struct DurableTaskRecord {
     pub completed_occurrences: u32,
     #[serde(default)]
     pub total_occurrences: u32,
+}
+
+/// Bounded, presentation-safe view of durable work owned by one session.
+///
+/// Command text, prompts, results, errors, worker identities, and cancellation
+/// internals intentionally remain private to the authoritative workload store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionOwnedDurableTask {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&DurableTaskRecord> for SessionOwnedDurableTask {
+    fn from(record: &DurableTaskRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            kind: record.kind.clone(),
+            status: record.status.clone(),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
 }
 
 impl DurableTaskRecord {
@@ -152,6 +197,14 @@ enum DurableJob {
         interval_secs: u64,
         repeat_count: u32,
     },
+}
+
+impl DurableJob {
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Terminal { session_id, .. } | Self::Schedule { session_id, .. } => session_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -637,8 +690,118 @@ impl DurableTaskStore {
         Ok(records)
     }
 
+    pub fn list_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionOwnedDurableTask>, String> {
+        crate::session::validate_session_id(session_id).map_err(|error| error.to_string())?;
+        let mut records = Vec::new();
+        let mut remaining_bytes = self.max_enumeration_bytes;
+        for path in self.record_paths()? {
+            let (_task_id, _lock) = self.acquire_record_path_lock(&path)?;
+            let (task, bytes_read, _) = self.read_path_bounded(&path, remaining_bytes)?;
+            remaining_bytes = remaining_bytes
+                .checked_sub(bytes_read)
+                .ok_or_else(|| "durable task enumeration byte count underflowed".to_string())?;
+            if task.job.session_id() == session_id {
+                records.push(SessionOwnedDurableTask::from(&task.record));
+            }
+        }
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(records)
+    }
+
     pub fn cancel(&self, id: &str) -> Result<DurableTaskRecord, String> {
+        self.cancel_scoped(id, None)
+    }
+
+    pub fn cancel_for_session(
+        &self,
+        id: &str,
+        session_id: &str,
+    ) -> Result<SessionOwnedDurableTask, String> {
+        crate::session::validate_session_id(session_id).map_err(|error| error.to_string())?;
+        self.cancel_session_scoped(id, session_id)
+            .map(|record| SessionOwnedDurableTask::from(&record))
+            .map_err(SessionCancellationFailure::into_public_message)
+    }
+
+    fn cancel_session_scoped(
+        &self,
+        id: &str,
+        session_id: &str,
+    ) -> Result<DurableTaskRecord, SessionCancellationFailure> {
+        validate_task_id(id).map_err(SessionCancellationFailure::Store)?;
+        let _lock = self
+            .acquire_task_lock(id)
+            .map_err(SessionCancellationFailure::Store)?;
+        let path = self.task_path(id);
+        if !self
+            .tasks_directory
+            .path_exists(&path)
+            .map_err(SessionCancellationFailure::Store)?
+        {
+            return Err(SessionCancellationFailure::Unavailable);
+        }
+        // Until a complete record proves ownership, malformed or substituted state
+        // is indistinguishable from a missing/foreign task to the session caller.
+        let mut opened = self
+            .read_path_opened(&path)
+            .map_err(|_| SessionCancellationFailure::Unavailable)?;
+        if opened.task.job.session_id() != session_id {
+            return Err(SessionCancellationFailure::Unavailable);
+        }
+        if opened.task.record.is_terminal() {
+            return Err(SessionCancellationFailure::NotRunning(
+                opened.task.record.status.clone(),
+            ));
+        }
+        opened.task.record.cancel_requested = true;
+        opened.task.record.updated_at = Utc::now();
+        if matches!(opened.task.record.status.as_str(), "prepared" | "starting")
+            && opened.task.record.worker_pid.is_none()
+        {
+            opened.task.record.status = "cancelled".to_string();
+            opened.task.record.error = Some("cancelled by user before start".to_string());
+            opened.task.worker_lease = None;
+            scrub_completed_job(&mut opened.task.job);
+        } else {
+            opened.task.record.status = "cancelling".to_string();
+        }
+        self.write_path_expected(
+            &path,
+            &opened.task,
+            crate::daemons::state::FileExpectation::Present(&opened.file),
+        )
+        .map_err(SessionCancellationFailure::Store)?;
+        let updated = opened.task.record;
+        if updated.is_terminal() {
+            return Ok(updated);
+        }
+        drop(_lock);
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(20));
+            let Some(record) = self.get(id).map_err(SessionCancellationFailure::Store)? else {
+                return Err(SessionCancellationFailure::Unavailable);
+            };
+            if record.is_terminal() {
+                return Ok(record);
+            }
+        }
+        self.get(id)
+            .map_err(SessionCancellationFailure::Store)?
+            .ok_or(SessionCancellationFailure::Unavailable)
+    }
+
+    fn cancel_scoped(
+        &self,
+        id: &str,
+        required_session_id: Option<&str>,
+    ) -> Result<DurableTaskRecord, String> {
         let updated = self.update(id, |task| {
+            if required_session_id.is_some_and(|session_id| task.job.session_id() != session_id) {
+                return Err(format!("{SESSION_SCOPED_TASK_UNAVAILABLE}: {id}"));
+            }
             if task.record.is_terminal() {
                 return Err(format!(
                     "background task {id} is not running (status: {})",
@@ -2349,7 +2512,9 @@ struct ScheduleFailure<'a> {
     session_id: &'a str,
     occurrence: u32,
     repeat_count: u32,
+    outcome: &'a str,
     error: String,
+    failure: Option<&'a crate::llm::LlmError>,
 }
 
 fn publish_schedule_completion_owned(
@@ -2444,7 +2609,9 @@ fn publish_schedule_failure_owned(
                 "execution_id": task.record.execution_id,
                 "occurrence": failure.occurrence,
                 "repeat_count": failure.repeat_count,
+                "outcome": failure.outcome,
                 "error": failure.error,
+                "failure": failure.failure,
                 "mode": "plan",
             }),
             &delivery_key,
@@ -2467,9 +2634,29 @@ fn publish_schedule_failure_owned(
                 "failed to record scheduled failure audit: {audit_error}"
             ));
         }
-        let final_error =
-            schedule_publication_error(&failure.error, errors).unwrap_or(failure.error);
-        let result = task.record.result.clone();
+        let final_error = schedule_publication_error(&failure.error, errors)
+            .unwrap_or_else(|| failure.error.clone());
+        let mut runs = task
+            .record
+            .result
+            .as_ref()
+            .and_then(|value| value.get("runs"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        runs.push(json!({
+            "occurrence": failure.occurrence,
+            "session_id": failure.session_id,
+            "outcome": failure.outcome,
+            "failure": failure.failure,
+            "mode": "plan",
+        }));
+        let result = Some(json!({
+            "delivered_count": task.record.completed_occurrences,
+            "repeat_count": task.record.total_occurrences,
+            "runs": runs,
+            "execution_mode": "plan",
+        }));
         finish_task_file(task, "failed", result, Some(final_error));
         Ok(())
     })
@@ -2671,11 +2858,17 @@ async fn run_schedule_worker(
                     return Ok(());
                 }
             }
-            Err(error) => {
-                let error = crate::tools::executor::redact_text_with_encoded_sensitive_values(
-                    &error,
-                    config_sensitive_values.iter().cloned(),
-                );
+            Err(failed) => {
+                let error = if failed.failure.is_some() {
+                    // Typed provider evidence is persisted separately. Keep rendered
+                    // user prose out of durable machine state and daemon audit text.
+                    "scheduled agent run failed".to_string()
+                } else {
+                    crate::tools::executor::redact_text_with_encoded_sensitive_values(
+                        &failed.report,
+                        config_sensitive_values.iter().cloned(),
+                    )
+                };
                 match publish_schedule_failure_owned(
                     store,
                     owner,
@@ -2686,7 +2879,9 @@ async fn run_schedule_worker(
                         session_id: &job.session_id,
                         occurrence,
                         repeat_count: job.repeat_count,
+                        outcome: &failed.outcome,
                         error,
+                        failure: failed.failure.as_ref(),
                     },
                 ) {
                     Ok(_) => {}
@@ -2937,9 +3132,16 @@ fn reconcile_expired_job(
     }
 }
 
+#[derive(Debug)]
+struct ScheduledAgentFailure {
+    outcome: String,
+    report: String,
+    failure: Option<crate::llm::LlmError>,
+}
+
 fn classify_agent_run_outcome(
     outcome: Result<crate::agent::AgentRunSummary, String>,
-) -> Result<crate::agent::AgentRunSummary, String> {
+) -> Result<crate::agent::AgentRunSummary, Box<ScheduledAgentFailure>> {
     match outcome {
         Ok(summary)
             if summary.final_state == crate::agent::state::AgentState::Done
@@ -2949,10 +3151,18 @@ fn classify_agent_run_outcome(
         {
             Ok(summary)
         }
-        Ok(summary) => Err(summary
-            .user_failure_report()
-            .unwrap_or_else(|| summary.outcome.clone())),
-        Err(error) => Err(error),
+        Ok(summary) => Err(Box::new(ScheduledAgentFailure {
+            outcome: summary.outcome.clone(),
+            report: summary
+                .user_failure_report()
+                .unwrap_or_else(|| summary.outcome.clone()),
+            failure: summary.failure,
+        })),
+        Err(error) => Err(Box::new(ScheduledAgentFailure {
+            outcome: "local_error".to_string(),
+            report: error,
+            failure: None,
+        })),
     }
 }
 
@@ -3772,6 +3982,7 @@ mod tests {
     fn scheduled_plan_summary_accepts_only_the_exact_plan_ready_contract() {
         let failed = crate::agent::AgentRunSummary {
             session_id: "scheduled-provider-failure".to_string(),
+            run_id: String::new(),
             steps_taken: 1,
             last_message: None,
             tool_call_count: 0,
@@ -3782,13 +3993,50 @@ mod tests {
             trace: Vec::new(),
         };
         let legacy = classify_agent_run_outcome(Ok(failed)).unwrap_err();
-        assert!(legacy.starts_with("LLM request failed [LLM-REJECTED]"));
-        assert!(legacy.contains("Provider: unknown (legacy)"));
-        assert!(legacy.contains("Session: scheduled-provider-failure"));
-        assert!(!legacy.contains("bounded provider error"));
+        assert_eq!(legacy.outcome, "planning_failed: bounded provider error");
+        assert!(legacy
+            .report
+            .starts_with("LLM request failed [LLM-REJECTED]"));
+        assert!(legacy.report.contains("Provider: unknown (legacy)"));
+        assert!(legacy
+            .report
+            .contains("Session: scheduled-provider-failure"));
+        assert!(!legacy.report.contains("bounded provider error"));
+        assert_eq!(legacy.failure, None);
+
+        let typed_failure = crate::llm::LlmError::new(
+            crate::llm::LlmErrorClass::Authentication,
+            crate::llm::LlmErrorPhase::HttpResponse,
+            crate::llm::RetryDisposition::NotAttempted,
+            crate::llm::LlmErrorMetadata::new(
+                "openai",
+                "responses",
+                Some("gpt-safe"),
+                Some(401),
+                &[],
+            ),
+            "provider-supplied detail omitted",
+        );
+        let typed = classify_agent_run_outcome(Ok(crate::agent::AgentRunSummary {
+            session_id: "scheduled-typed-failure".to_string(),
+            run_id: String::new(),
+            steps_taken: 1,
+            last_message: None,
+            tool_call_count: 0,
+            final_state: crate::agent::state::AgentState::Done,
+            outcome: "planning_failed".to_string(),
+            failure: Some(typed_failure.clone()),
+            bound_reached: false,
+            trace: Vec::new(),
+        }))
+        .unwrap_err();
+        assert_eq!(typed.outcome, "planning_failed");
+        assert!(typed.report.starts_with("LLM request failed [LLM-AUTH]"));
+        assert_eq!(typed.failure, Some(typed_failure));
 
         let refused = crate::agent::AgentRunSummary {
             session_id: "scheduled-provider-refusal".to_string(),
+            run_id: String::new(),
             steps_taken: 1,
             last_message: None,
             tool_call_count: 0,
@@ -3799,12 +4047,13 @@ mod tests {
             trace: Vec::new(),
         };
         assert_eq!(
-            classify_agent_run_outcome(Ok(refused)).unwrap_err(),
+            classify_agent_run_outcome(Ok(refused)).unwrap_err().report,
             "model_refusal"
         );
 
         let completed = crate::agent::AgentRunSummary {
             session_id: "scheduled-success".to_string(),
+            run_id: String::new(),
             steps_taken: 1,
             last_message: None,
             tool_call_count: 0,
@@ -3885,6 +4134,7 @@ mod tests {
         ] {
             let unexpected = crate::agent::AgentRunSummary {
                 session_id: "scheduled-unexpected-outcome".to_string(),
+                run_id: String::new(),
                 steps_taken: 1,
                 last_message: None,
                 tool_call_count,
@@ -3894,10 +4144,10 @@ mod tests {
                 bound_reached,
                 trace: Vec::new(),
             };
-            assert_eq!(
-                classify_agent_run_outcome(Ok(unexpected)).unwrap_err(),
-                outcome
-            );
+            let failed = classify_agent_run_outcome(Ok(unexpected)).unwrap_err();
+            assert_eq!(failed.outcome, outcome);
+            assert_eq!(failed.report, outcome);
+            assert_eq!(failed.failure, None);
         }
     }
 
@@ -4196,28 +4446,38 @@ mod tests {
         assert_eq!(failed.record.status, "failed");
         assert_eq!(failed.record.completed_occurrences, 0);
         let error = failed.record.error.expect("failed schedule error");
-        assert!(
-            error.starts_with("LLM request failed [LLM-REJECTED]"),
-            "{error}"
-        );
-        assert!(error.contains("Provider: openai (responses)"), "{error}");
-        assert!(error.contains("model: fixture-reasoning-model"), "{error}");
-        assert!(error.contains("Retry: not retryable"), "{error}");
-        assert!(error.contains("Action: Run `nib doctor`"), "{error}");
-        assert!(error.contains("Session: origin"), "{error}");
+        assert_eq!(error, "scheduled agent run failed");
         assert!(!error.contains(SECRET), "{error}");
         assert!(!error.contains("Responses API did not complete"), "{error}");
+        let run_failure = failed
+            .record
+            .result
+            .as_ref()
+            .and_then(|result| result.get("runs"))
+            .and_then(Value::as_array)
+            .and_then(|runs| runs.first())
+            .and_then(|run| run.get("failure"))
+            .expect("typed durable failure");
+        assert_eq!(run_failure["class"], "provider_rejected");
+        assert_eq!(run_failure["phase"], "planning");
+        assert_eq!(run_failure["retry"], "not_retryable");
+        assert_eq!(run_failure["provider"], "openai");
+        assert_eq!(run_failure["transport"], "responses");
+        assert_eq!(run_failure["model"], "fixture-reasoning-model");
+        assert_eq!(run_failure["incident_code"], "LLM-REJECTED");
 
         let session = session_store
             .load("origin")
             .expect("failed schedule session");
+        let failure_events = session
+            .events
+            .iter()
+            .filter(|event| event.kind == "scheduled_agent_run_failed")
+            .collect::<Vec<_>>();
+        assert_eq!(failure_events.len(), 1);
         assert_eq!(
-            session
-                .events
-                .iter()
-                .filter(|event| event.kind == "scheduled_agent_run_failed")
-                .count(),
-            1
+            failure_events[0].details["failure"]["incident_code"],
+            "LLM-REJECTED"
         );
         assert!(!session
             .events
@@ -4232,8 +4492,8 @@ mod tests {
             record.action == "wake_agent_loop"
                 && record.outcome == "failed"
                 && record.detail.as_deref().is_some_and(|detail| {
-                    detail.contains("LLM request failed [LLM-REJECTED]")
-                        && detail.contains("Action: Run `nib doctor`")
+                    detail.contains("error=scheduled agent run failed")
+                        && !detail.contains("LLM request failed")
                         && !detail.contains(SECRET)
                         && !detail.contains("Responses API did not complete")
                 })
@@ -4480,6 +4740,120 @@ mod tests {
             timeout_secs: 10,
             max_output_bytes: 1024,
         }
+    }
+
+    #[test]
+    fn session_owned_projection_and_cancellation_fail_closed_for_foreign_work() {
+        let (directory, store, session_store) = fixture();
+        session_store.create_session_with_id("other");
+        store
+            .prepare_terminal(terminal_request(&directory, &session_store, "owned-task"))
+            .expect("prepare owned task");
+        let mut foreign = terminal_request(&directory, &session_store, "foreign-task");
+        foreign.session_id = "other".to_string();
+        store
+            .prepare_terminal(foreign)
+            .expect("prepare foreign task");
+
+        let owned = store.list_for_session("origin").expect("list owned tasks");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].id, "owned-task");
+        assert_eq!(owned[0].kind, "terminal");
+        assert_eq!(owned[0].status, "prepared");
+        let encoded = serde_json::to_string(&owned).expect("safe projection JSON");
+        assert!(!encoded.contains("printf ok"));
+        assert!(!encoded.contains("worker_pid"));
+        assert!(!encoded.contains("result"));
+
+        let foreign_before = store.get("foreign-task").unwrap().unwrap();
+        let rejected = store
+            .cancel_for_session("foreign-task", "origin")
+            .expect_err("foreign cancellation must fail closed");
+        let missing = store
+            .cancel_for_session("missing-task", "origin")
+            .expect_err("missing cancellation must fail closed");
+        assert_eq!(rejected, SESSION_SCOPED_TASK_UNAVAILABLE);
+        assert_eq!(
+            rejected, missing,
+            "foreign IDs must not be an existence oracle"
+        );
+        assert!(store.cancel_for_session("../malformed", "origin").is_err());
+        assert_eq!(
+            store.get("foreign-task").unwrap().unwrap(),
+            foreign_before,
+            "foreign cancellation must not mutate the record"
+        );
+        let mut corrupt_foreign =
+            terminal_request(&directory, &session_store, "corrupt-foreign-task");
+        corrupt_foreign.session_id = "other".to_string();
+        store
+            .prepare_terminal(corrupt_foreign)
+            .expect("prepare corrupt foreign task");
+        std::fs::write(store.task_path("corrupt-foreign-task"), b"{not-json")
+            .expect("corrupt foreign task record");
+        assert_eq!(
+            store
+                .cancel_for_session("corrupt-foreign-task", "origin")
+                .expect_err("unproven corrupt ownership must fail closed"),
+            SESSION_SCOPED_TASK_UNAVAILABLE
+        );
+
+        let cancelled = store
+            .cancel_for_session("owned-task", "origin")
+            .expect("cancel owned task");
+        assert_eq!(cancelled.status, "cancelled");
+        let terminal_before = store.get("owned-task").unwrap().unwrap();
+        assert!(store.cancel_for_session("owned-task", "origin").is_err());
+        assert_eq!(store.get("owned-task").unwrap().unwrap(), terminal_before);
+        assert!(store.list_for_session("missing session").is_err());
+    }
+
+    #[test]
+    fn session_scoped_cancellation_reconciles_a_concurrent_terminal_transition() {
+        let (directory, store, session_store) = fixture();
+        let id = "owned-running-race";
+        store
+            .prepare_terminal(terminal_request(&directory, &session_store, id))
+            .expect("prepare owned task");
+        store
+            .update(id, |task| {
+                task.record.status = "running".to_string();
+                task.record.worker_pid = Some(42);
+                task.record.updated_at = Utc::now();
+                Ok(())
+            })
+            .expect("mark task running");
+
+        let cancelling_store = store.clone();
+        let cancellation =
+            std::thread::spawn(move || cancelling_store.cancel_for_session(id, "origin"));
+        for _ in 0..100 {
+            if store
+                .get(id)
+                .expect("poll task")
+                .is_some_and(|task| task.status == "cancelling")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(store.get(id).unwrap().unwrap().status, "cancelling");
+        store
+            .update(id, |task| {
+                task.record.status = "completed".to_string();
+                task.record.worker_pid = None;
+                task.record.updated_at = Utc::now();
+                scrub_completed_job(&mut task.job);
+                Ok(())
+            })
+            .expect("publish concurrent terminal state");
+
+        let reconciled = cancellation
+            .join()
+            .expect("cancellation thread")
+            .expect("session cancellation");
+        assert_eq!(reconciled.status, "completed");
+        assert_eq!(store.get(id).unwrap().unwrap().status, "completed");
     }
 
     #[cfg(any(unix, windows))]
@@ -5970,7 +6344,9 @@ mod tests {
                 session_id: "origin",
                 occurrence: 1,
                 repeat_count: 1,
+                outcome: "local_error",
                 error: "late owner".to_string(),
+                failure: None,
             },
         )
         .expect_err("reconciliation claim must fence the prior schedule owner");
@@ -6300,12 +6676,14 @@ mod tests {
                     role: "user".to_string(),
                     content: "legacy background task context".to_string(),
                     timestamp: Some(Utc::now()),
+                    attachments: Vec::new(),
                 });
                 session.messages.push(crate::session::SessionMessage {
                     index: session.messages.len(),
                     role: "assistant".to_string(),
                     content: "legacy boundary".to_string(),
                     timestamp: Some(Utc::now()),
+                    attachments: Vec::new(),
                 });
                 session.messages.push(crate::session::SessionMessage {
                     index: session.messages.len(),
@@ -6318,6 +6696,7 @@ mod tests {
                     })
                     .to_string(),
                     timestamp: Some(Utc::now()),
+                    attachments: Vec::new(),
                 });
                 session.events.push(SessionEvent {
                     index: session.events.len(),
@@ -6663,6 +7042,21 @@ mod tests {
                 Ok(())
             })
             .expect("seed failed schedule");
+        let secret = "durable-provider-secret";
+        let sensitive_values = vec![secret.to_string()];
+        let typed_failure = crate::llm::LlmError::new(
+            crate::llm::LlmErrorClass::Authentication,
+            crate::llm::LlmErrorPhase::HttpResponse,
+            crate::llm::RetryDisposition::NotAttempted,
+            crate::llm::LlmErrorMetadata::new(
+                "openai",
+                "responses",
+                Some(secret),
+                Some(401),
+                &sensitive_values,
+            ),
+            format!("remote detail contained {secret}"),
+        );
         let failed = publish_schedule_failure_owned(
             &store,
             &owner,
@@ -6673,12 +7067,57 @@ mod tests {
                 session_id: "origin",
                 occurrence: 1,
                 repeat_count: 1,
-                error: "agent failed".to_string(),
+                outcome: "planning_failed",
+                error: "scheduled agent run failed".to_string(),
+                failure: Some(&typed_failure),
             },
         )
         .expect("owned failure publication");
         assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.result.as_ref().and_then(|result| result
+                .get("runs")
+                .and_then(Value::as_array)
+                .and_then(|runs| runs.last())
+                .and_then(|run| run.get("failure"))
+                .and_then(|failure| failure.get("class"))
+                .and_then(Value::as_str)),
+            Some("authentication")
+        );
+        assert_eq!(
+            failed.result.as_ref().and_then(|result| result
+                .get("runs")
+                .and_then(Value::as_array)
+                .and_then(|runs| runs.last())
+                .and_then(|run| run.get("outcome"))
+                .and_then(Value::as_str)),
+            Some("planning_failed")
+        );
         let session = session_store.load("origin").expect("origin session");
+        let durable_failure_event = session
+            .events
+            .iter()
+            .find(|event| {
+                event.kind == "scheduled_agent_run_failed"
+                    && event.details.get("timer_id").and_then(Value::as_str) == Some(failed_id)
+            })
+            .expect("typed scheduled failure event");
+        assert_eq!(
+            durable_failure_event.details["failure"]["incident_code"],
+            "LLM-AUTH"
+        );
+        assert_eq!(
+            durable_failure_event.details["failure"]["class"],
+            "authentication"
+        );
+        assert_eq!(durable_failure_event.details["outcome"], "planning_failed");
+        let persisted = format!(
+            "{}\n{}",
+            serde_json::to_string(&failed).expect("serialize failed durable record"),
+            serde_json::to_string(durable_failure_event).expect("serialize failure event")
+        );
+        assert!(!persisted.contains(secret), "{persisted}");
+        assert!(!persisted.contains("LLM request failed"), "{persisted}");
         for id in [task_id, cancelled_id, failed_id] {
             assert!(session.events.iter().any(|event| {
                 event.details.get("timer_id").and_then(Value::as_str) == Some(id)
@@ -6837,7 +7276,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn open_task_directory_capability_blocks_lock_parent_replacement() {
+    fn open_task_directory_capability_preserves_lock_domain_after_parent_replacement() {
         let (_directory, store, _session_store) = fixture();
         let task_id = "anchored-windows-owner";
         for kind in ["task", "admission"] {
@@ -6851,11 +7290,10 @@ mod tests {
             };
             let held = TaskLock::acquire(path.clone(), anchor_path.clone())
                 .expect("held persistent task lock");
-            assert!(
-                std::fs::rename(&store.tasks_dir, store.daemon_dir().join("tasks.displaced"))
-                    .is_err(),
-                "Windows must deny replacement while the task directory capability is open"
-            );
+            let displaced_tasks = store.daemon_dir().join("tasks.displaced");
+            std::fs::rename(&store.tasks_dir, &displaced_tasks)
+                .expect("displace share-compatible durable tasks directory");
+            std::fs::create_dir(&store.tasks_dir).expect("replace durable tasks directory");
             let output = Command::new(std::env::current_exe().expect("test binary"))
                 .args([
                     "--exact",
@@ -6874,6 +7312,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            std::fs::remove_dir_all(&store.tasks_dir)
+                .expect("remove replacement durable tasks directory");
+            std::fs::rename(&displaced_tasks, &store.tasks_dir)
+                .expect("restore durable tasks directory");
             drop(held);
             TaskLock::acquire(path, anchor_path).expect("released lock remains usable");
         }

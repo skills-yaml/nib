@@ -1,5 +1,19 @@
 # Memory Changelog
 
+## 2026-08-20 - FT-019 presentation and delivery decisions recorded
+
+- Type: decision
+- Source: user
+- Confidence: high
+- Review: none
+- Supersedes: none
+
+Content:
+
+Updated `docs/specs/backlog/ft_019_codex_inspired_chat_and_tui_interactions.md` with
+TUI ledger presentation, shared view-model ownership, queue-first live input, default
+key semantics, and remaining open decisions. Spec stays in backlog.
+
 ## 2026-06-17 - Initialize Agent Memory
 
 - Type: fact
@@ -312,3 +326,48 @@ plain/TUI selection, approval, question, completion, session switching, cancella
 workload routing, and terminal restoration. One independent-suite attempt hit an
 unrelated namespace-recovery timing assertion; that exact test passed in the preceding
 canonical suite, the clean rerun, and the instrumented coverage suite.
+
+## 2026-09-02 - Development-spec closure remediation prepared
+
+- Type: implementation / documentation / validation milestone
+- Source: user-requested development-spec review and closure actions
+- Confidence: high
+- Review: pending exact-revision independent and hosted review
+
+Content:
+
+Implemented T004's caller-stack-independent root runtime boundary for `nib run`, durable
+task workers, and subagent workers. Reconciled an exact cleanup-lease finalization race
+that surfaced in the first complete suite, added deterministic disappearance coverage
+and `task test:delegation`, separated fast `task check` from the full `task verify`
+aggregate under T035, and changed all native CI jobs to exact release-binary LLM
+qualification. FT-015 now explicitly closes as a Linux-production-only v1 contract;
+FT-020 records protected non-Linux production delegation authority as future backlog.
+
+The final local gates passed: `task verify` (1,061 library, 86 CLI, 254 integration),
+documentation 5/5, host and Windows MSVC all-target checks, 85.87 percent runtime line
+coverage, locked optimized build, Linux interactive PTY smoke, abrupt-owner
+managed-process smoke, dirty-tree release-harness execution, and patch hygiene. T023's
+offline implementation is green but no paid/live authority was inferred; its external
+evidence remains open.
+
+## 2026-09-02 - Native matrix closed 15 development specs
+
+- Type: implementation / validation / lifecycle milestone
+- Source: PR #25, run 33683995100, local Task gates, and two-stage review
+- Confidence: high
+- Review: independent spec-compliance and code-quality/security reviews
+
+Content:
+
+Hosted Linux, macOS, and Windows passed the exact implementation revision, including
+complete serial suites, all-target checks, exact optimized-binary qualification,
+platform interaction smokes, coverage, and Linux managed-process owner-loss proof.
+Late hosted timing races were confined to phase-specific test fixtures and hardened
+without changing production deadlines or weakening fail-closed assertions.
+
+Fifteen evidence-complete specs moved to `done/`: T003, T004, T006, T007, T020,
+T021, T022, T026, T029, T034, T035, FT-015, FT-016, FT-017, and FT-019. The
+resulting lifecycle is 44 done, 1 development, and 1 backlog. T023 remains the sole
+development spec pending explicit live-provider authority and privacy-reviewed evidence;
+FT-020 remains backlog for protected non-Linux production delegation authority.

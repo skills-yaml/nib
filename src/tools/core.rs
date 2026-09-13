@@ -623,13 +623,7 @@ async fn run_terminal(
         .and_then(|v| v.as_u64())
         .unwrap_or(terminal_timeout_secs)
         .max(1);
-    let max_output_bytes = bounded_usize_arg(
-        args,
-        "max_output_bytes",
-        DEFAULT_TERMINAL_OUTPUT_BYTES,
-        1,
-        MAX_TERMINAL_OUTPUT_BYTES,
-    )?;
+    let max_output_bytes = terminal_output_limit(args)?;
     let run_cwd = args
         .get("cwd")
         .and_then(|value| value.as_str())
@@ -754,6 +748,16 @@ async fn run_terminal(
     Ok(res)
 }
 
+pub(crate) fn terminal_output_limit(args: &Value) -> Result<usize, String> {
+    bounded_usize_arg(
+        args,
+        "max_output_bytes",
+        DEFAULT_TERMINAL_OUTPUT_BYTES,
+        1,
+        MAX_TERMINAL_OUTPUT_BYTES,
+    )
+}
+
 fn sandbox_output_callback(
     callback: Option<TerminalOutputCallback>,
     background_task_id: Option<String>,
@@ -810,7 +814,7 @@ async fn manage_subagents(args: &Value, cwd: &Path) -> Result<Value, String> {
         }
         "cancel" | "terminate" => {
             let id = required_identifier(args, "subagent_id")?;
-            crate::tools::delegation::cancel_subagent(cwd, id)
+            crate::tools::delegation::cancel_subagent_async(cwd, id).await
         }
         other => Err(format!("unsupported manage_subagents action: {other}")),
     }
@@ -2091,6 +2095,58 @@ mod tests {
             crate::tools::delegation::spawn_subagent(&json!({"prompt": "nested"}), root.path())
                 .expect_err("nested subagent must be rejected");
         assert!(subagent_error.contains("foreground managed-process scope"));
+    }
+
+    #[tokio::test]
+    async fn manage_subagents_projects_running_internal_ownership_from_list_and_get() {
+        let root = tempfile::tempdir().expect("project root");
+        let id = format!("sub-public-core-{}", uuid::Uuid::new_v4());
+        let owner_lease = crate::tools::delegation::create_test_subagent_owner_lease(root.path())
+            .expect("live owner lease");
+        crate::tools::delegation::write_subagent_record(
+            root.path(),
+            &crate::tools::delegation::SubagentRecord {
+                id: id.clone(),
+                parent_session_id: Some("parent".to_string()),
+                child_session_id: format!("child-{id}"),
+                prompt: "public projection fixture".to_string(),
+                status: "running".to_string(),
+                execution_generation: Some(owner_lease.execution_generation()),
+                owner_lease: Some(owner_lease.lease_id().to_string()),
+                worktree_path: root.path().join("worktree"),
+                branch: format!("nib/subagent/{id}"),
+                branch_oid: None,
+                result: Some(json!({
+                    "_ownership_audit_target": {
+                        "sessions_dir": root.path().join("private-core-audit-sessions"),
+                        "directory_identity": "private-core-identity",
+                    }
+                })),
+                error: None,
+                verification: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .expect("running subagent record");
+
+        let listed = manage_subagents(&json!({"action": "list"}), root.path())
+            .await
+            .expect("core list");
+        let listed_record = &listed["subagents"][0];
+        let fetched = manage_subagents(&json!({"action": "get", "subagent_id": id}), root.path())
+            .await
+            .expect("core get");
+        for public in [listed_record, &fetched["subagent"]] {
+            assert_eq!(public["status"], "running");
+            assert!(public["result"].is_null());
+            assert!(public.get("execution_generation").is_none());
+            assert!(public.get("owner_lease").is_none());
+            let encoded = serde_json::to_string(public).expect("public core record");
+            assert!(!encoded.contains("_ownership_audit_target"));
+            assert!(!encoded.contains("private-core-audit-sessions"));
+            assert!(!encoded.contains("private-core-identity"));
+        }
     }
 
     #[tokio::test]

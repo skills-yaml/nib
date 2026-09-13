@@ -10,7 +10,7 @@ structured prompt assembly from sessions + context, a core agent loop (reason �
 selection → execution via ToolExecutor → observation), and profile-scoped session
 persistence for conversation history and tool call records.
 
-This enables nib to act as a full autonomous coding agent while preserving all safety, audit, and human-steerability guarantees.
+This enables nib to act as a full autonomous AI agent while preserving all safety, audit, and human-steerability guarantees.
 
 > Historical baseline: The sections from Historical Problem Statement through
 > Historical Open Questions record the pre-Rust proposal. The shipped Rust loop and

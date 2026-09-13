@@ -9,9 +9,62 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(debug_assertions)]
+fn pause_atomic_publication_phase(path: &Path, encoded: &[u8], phase: &str) -> Result<(), String> {
+    let Some(expected_phase) = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_PHASE") else {
+        return Ok(());
+    };
+    if expected_phase != std::ffi::OsStr::new(phase) {
+        return Ok(());
+    }
+    if let Some(component) = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_PATH_COMPONENT") {
+        if !path
+            .components()
+            .any(|candidate| candidate.as_os_str() == component)
+        {
+            return Ok(());
+        }
+    }
+    if let Some(needle) = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_CONTENT") {
+        let needle = needle.as_encoded_bytes();
+        if needle.is_empty() || !encoded.windows(needle.len()).any(|window| window == needle) {
+            return Ok(());
+        }
+    }
+    let ready = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_READY")
+        .map(PathBuf::from)
+        .ok_or_else(|| "missing atomic publication ready path".to_string())?;
+    let publishing = ready.with_extension("publishing");
+    std::fs::write(&publishing, path.as_os_str().as_encoded_bytes())
+        .map_err(|error| format!("failed to prepare atomic phase readiness: {error}"))?;
+    std::fs::rename(&publishing, &ready)
+        .map_err(|error| format!("failed to publish atomic phase readiness: {error}"))?;
+    let resume = std::env::var_os("NIB_TEST_ATOMIC_PUBLICATION_RESUME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "missing atomic publication resume path".to_string())?;
+    let started = Instant::now();
+    while !resume.exists() {
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err(format!("timed out at atomic publication phase {phase}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn pause_atomic_publication_phase(
+    _path: &Path,
+    _encoded: &[u8],
+    _phase: &str,
+) -> Result<(), String> {
+    Ok(())
+}
+
 const STRICT_RECOVERY_LIVE_WRITER_WAIT: Duration = Duration::from_millis(250);
 const STRICT_RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const FILE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const ATOMIC_READ_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HandlePublication {
@@ -48,6 +101,35 @@ impl From<String> for FilePublicationError {
             receipt: None,
         }
     }
+}
+
+fn ensure_atomic_read_deadline(deadline: Instant, path: &Path) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        return Err(format!(
+            "atomic state read deadline elapsed: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_atomic_read_namespace(deadline: Instant, path: &Path) -> Result<(), String> {
+    ensure_atomic_read_deadline(deadline, path)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| format!("atomic state read deadline elapsed: {}", path.display()))?;
+    thread::sleep(ATOMIC_READ_POLL_INTERVAL.min(remaining));
+    Ok(())
+}
+
+fn ensure_directory_namespace_deadline(deadline: Instant, path: &Path) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        return Err(format!(
+            "state directory namespace deadline elapsed: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 struct AtomicSaveExpectation<'a> {
@@ -217,16 +299,11 @@ impl StableDirectory {
         })?;
         #[cfg(windows)]
         let directory = {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true)._cap_fs_ext_maybe_dir(true);
-            configure_capability_no_follow(&mut options);
-            let file = self
-                .directory
-                .open_with(relative, &options)
-                .map(cap_std::fs::File::into_std)
-                .map_err(|error| {
-                    format!("failed to open state directory {}: {error}", path.display())
-                })?;
+            let file =
+                crate::fs_security::open_directory_child_windows(&self.directory, relative, false)
+                    .map_err(|error| {
+                        format!("failed to open state directory {}: {error}", path.display())
+                    })?;
             let metadata = file.metadata().map_err(|error| {
                 format!(
                     "failed to inspect state directory {}: {error}",
@@ -260,17 +337,14 @@ impl StableDirectory {
         })?;
         #[cfg(windows)]
         let directory = {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true)._cap_fs_ext_maybe_dir(true);
-            configure_capability_no_follow(&mut options);
-            configure_capability_delete_access(&mut options, true, false);
-            let file = self
-                .directory
-                .open_with(relative, &options)
-                .map(cap_std::fs::File::into_std)
-                .map_err(|error| {
-                    format!("failed to open state directory {}: {error}", path.display())
-                })?;
+            // Keep the long-lived capability share-compatible with future
+            // readers. DELETE access is acquired against this exact identity
+            // only at the final rename or removal boundary.
+            let file =
+                crate::fs_security::open_directory_child_windows(&self.directory, relative, false)
+                    .map_err(|error| {
+                        format!("failed to open state directory {}: {error}", path.display())
+                    })?;
             let metadata = file.metadata().map_err(|error| {
                 format!(
                     "failed to inspect state directory {}: {error}",
@@ -320,6 +394,226 @@ impl StableDirectory {
             .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
         self.sync_directory()?;
         self.open_owned_child(path)
+    }
+
+    pub(crate) fn create_owned_child_directory_until(
+        &self,
+        path: &Path,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        let mut deadline_guard = || ensure_directory_namespace_deadline(deadline, path);
+        self.create_child_directory_with_guard_and_hooks(
+            path,
+            &mut deadline_guard,
+            true,
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn create_owned_child_directory_no_replace_with_guard(
+        &self,
+        path: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        namespace_guard()?;
+        let relative = self.relative_file(path)?;
+        namespace_guard()?;
+        if self.entry_kind(path)?.is_some() {
+            return Err(format!(
+                "state directory appeared after its absence was proven: {}",
+                path.display()
+            ));
+        }
+        namespace_guard()?;
+        self.verify_visible()?;
+        namespace_guard()?;
+        self.directory.create_dir(relative).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "state directory appeared during no-replace creation: {}",
+                    path.display()
+                )
+            } else {
+                format!("failed to create {}: {error}", path.display())
+            }
+        })?;
+        namespace_guard()?;
+        self.sync_directory()?;
+        namespace_guard()?;
+        let child = self.open_owned_child(path)?;
+        namespace_guard()?;
+        child.verify_visible_at(path)?;
+        namespace_guard()?;
+        self.verify_visible()?;
+        namespace_guard()?;
+        Ok(child)
+    }
+
+    #[cfg(test)]
+    fn create_owned_child_directory_until_with_hook(
+        &self,
+        path: &Path,
+        deadline: Instant,
+        mut before_create: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let mut deadline_guard = || ensure_directory_namespace_deadline(deadline, path);
+        self.create_child_directory_with_guard_and_hooks(
+            path,
+            &mut deadline_guard,
+            true,
+            &mut before_create,
+            || Ok(()),
+        )
+    }
+
+    fn create_child_directory_with_guard_and_hooks(
+        &self,
+        path: &Path,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+        delete_capable: bool,
+        mut before_create: impl FnMut() -> Result<(), String>,
+        mut before_parent_sync: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        namespace_guard()?;
+        let relative = self.relative_file(path)?;
+        namespace_guard()?;
+        if self.entry_kind(path)?.is_some() {
+            return Err(format!("state entry already exists: {}", path.display()));
+        }
+        namespace_guard()?;
+        self.verify_visible()?;
+        namespace_guard()?;
+        before_create()?;
+        namespace_guard()?;
+        match self.directory.create_dir(relative) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                namespace_guard()?;
+                match self.entry_kind(path)? {
+                    Some(StableEntryKind::Directory) => {}
+                    Some(StableEntryKind::File) => {
+                        return Err(format!(
+                            "state directory component is not a local directory: {}",
+                            path.display()
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "state directory disappeared during concurrent creation: {}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!("failed to create {}: {error}", path.display()));
+            }
+        }
+        namespace_guard()?;
+        before_parent_sync()?;
+        namespace_guard()?;
+        self.sync_directory()?;
+        namespace_guard()?;
+        let child = if delete_capable {
+            self.open_owned_child(path)?
+        } else {
+            self.open_child(path)?
+        };
+        namespace_guard()?;
+        child.verify_visible_at(path)?;
+        namespace_guard()?;
+        self.verify_visible()?;
+        namespace_guard()?;
+        Ok(child)
+    }
+
+    pub(crate) fn open_or_create_descendant_directory_with_guard(
+        &self,
+        path: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+        mut before_create: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        self.open_or_create_descendant_directory_with_guard_and_hooks(
+            path,
+            &mut namespace_guard,
+            &mut before_create,
+            |_| Ok(()),
+        )
+    }
+
+    pub(crate) fn open_or_create_descendant_directory_with_guard_and_hooks(
+        &self,
+        path: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+        mut before_create: impl FnMut(&Path) -> Result<(), String>,
+        mut before_parent_sync: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        namespace_guard()?;
+        let relative = path.strip_prefix(&self.path).map_err(|_| {
+            format!(
+                "state directory is not below the retained ancestor {}: {}",
+                self.path.display(),
+                path.display()
+            )
+        })?;
+        if relative.as_os_str().is_empty() {
+            self.verify_visible()?;
+            namespace_guard()?;
+            let current = self.try_clone()?;
+            namespace_guard()?;
+            return Ok(current);
+        }
+
+        let mut current = self.try_clone()?;
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(format!(
+                    "state directory descendant contains an unsafe component: {}",
+                    path.display()
+                ));
+            };
+            namespace_guard()?;
+            let child_path = current.path.join(name);
+            let entry_kind = current.entry_kind(&child_path).map_err(|error| {
+                format!(
+                    "state directory component must be a local directory and not a symlink or reparse point: {} ({error})",
+                    child_path.display()
+                )
+            })?;
+            current = match entry_kind {
+                Some(StableEntryKind::Directory) => {
+                    before_parent_sync(&child_path)?;
+                    namespace_guard()?;
+                    current.sync_directory()?;
+                    namespace_guard()?;
+                    let child = current.open_child(&child_path)?;
+                    namespace_guard()?;
+                    child
+                }
+                Some(StableEntryKind::File) => {
+                    return Err(format!(
+                        "state directory component is not a local directory: {}",
+                        child_path.display()
+                    ));
+                }
+                None => {
+                    before_create(&child_path)?;
+                    namespace_guard()?;
+                    current.create_child_directory_with_guard_and_hooks(
+                        &child_path,
+                        &mut namespace_guard,
+                        false,
+                        || Ok(()),
+                        || before_parent_sync(&child_path),
+                    )?
+                }
+            };
+            namespace_guard()?;
+        }
+        current.verify_visible()?;
+        namespace_guard()?;
+        Ok(current)
     }
 
     pub(crate) fn verify_visible(&self) -> Result<(), String> {
@@ -382,13 +676,69 @@ impl StableDirectory {
         Ok(file)
     }
 
+    pub(crate) fn open_read_write_if_exists(&self, path: &Path) -> Result<Option<File>, String> {
+        self.open_read_write_if_exists_with_hook(path, || Ok(()))
+    }
+
+    fn open_read_write_if_exists_with_hook(
+        &self,
+        path: &Path,
+        after_open: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Option<File>, String> {
+        let relative = self.relative_file(path)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        configure_capability_no_follow(&mut options);
+        configure_capability_delete_access(&mut options, true, true);
+        let file = match self.directory.open_with(relative, &options) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!("failed to open {}: {error}", path.display()));
+            }
+        };
+        validate_stable_file_metadata(path, &file.metadata().map_err(|error| error.to_string())?)?;
+        after_open()?;
+
+        let mut visible_options = cap_std::fs::OpenOptions::new();
+        visible_options.read(true);
+        configure_capability_no_follow(&mut visible_options);
+        let visible = match self.directory.open_with(relative, &visible_options) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!("failed to re-open {}: {error}", path.display()));
+            }
+        };
+        validate_stable_file_metadata(
+            path,
+            &visible.metadata().map_err(|error| error.to_string())?,
+        )?;
+        if !same_open_file_identity(&file, &visible)? {
+            return Err(format!(
+                "state file identity changed while it was in use: {}",
+                path.display()
+            ));
+        }
+        Ok(Some(file))
+    }
+
     pub(crate) fn open_read_write_create(&self, path: &Path) -> Result<File, String> {
+        self.open_read_write_create_with_guard(path, || Ok(()))
+    }
+
+    pub(crate) fn open_read_write_create_with_guard(
+        &self,
+        path: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<File, String> {
         let relative = self.relative_file(path)?;
         let mut options = cap_std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
         configure_capability_owner_only(&mut options);
         configure_capability_no_follow(&mut options);
         configure_capability_delete_access(&mut options, true, true);
+        namespace_guard()?;
         let file = self
             .directory
             .open_with(relative, &options)
@@ -396,6 +746,30 @@ impl StableDirectory {
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
         validate_stable_file_metadata(path, &file.metadata().map_err(|error| error.to_string())?)?;
         self.verify_file_identity(path, &file)?;
+        namespace_guard()?;
+        Ok(file)
+    }
+
+    pub(crate) fn open_read_write_create_new_with_guard(
+        &self,
+        path: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<File, String> {
+        let relative = self.relative_file(path)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        configure_capability_owner_only(&mut options);
+        configure_capability_no_follow(&mut options);
+        configure_capability_delete_access(&mut options, true, true);
+        namespace_guard()?;
+        let file = self
+            .directory
+            .open_with(relative, &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+        validate_stable_file_metadata(path, &file.metadata().map_err(|error| error.to_string())?)?;
+        self.verify_file_identity(path, &file)?;
+        namespace_guard()?;
         Ok(file)
     }
 
@@ -405,15 +779,26 @@ impl StableDirectory {
         destination_directory: &Self,
         destination: &Path,
     ) -> Result<(), String> {
+        self.hard_link_to_with_guard(source, destination_directory, destination, || Ok(()))
+    }
+
+    pub(crate) fn hard_link_to_with_guard(
+        &self,
+        source: &Path,
+        destination_directory: &Self,
+        destination: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let source = self.relative_file(source)?;
         let destination_relative = destination_directory.relative_file(destination)?;
+        namespace_guard()?;
         match self.directory.hard_link(
             source,
             &destination_directory.directory,
             destination_relative,
         ) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Ok(()) => namespace_guard(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => namespace_guard(),
             Err(error) => Err(format!(
                 "failed to create stable link {}: {error}",
                 destination.display()
@@ -497,6 +882,7 @@ impl StableDirectory {
         }
     }
 
+    #[cfg(not(windows))]
     fn remove_file_bound_without_sync(&self, path: &Path) -> Result<(), String> {
         let relative = self.relative_file(path)?;
         self.directory
@@ -509,6 +895,16 @@ impl StableDirectory {
         path: &Path,
         quarantine_prefix: &str,
     ) -> Result<(), String> {
+        self.recover_quarantined_file_guarded(path, quarantine_prefix, &mut || Ok(()))
+    }
+
+    pub(crate) fn recover_quarantined_file_guarded(
+        &self,
+        path: &Path,
+        quarantine_prefix: &str,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        namespace_guard()?;
         let quarantine =
             self.deterministic_artifact_path(path, quarantine_prefix, ".quarantine")?;
         let source_exists = self.path_exists(path)?;
@@ -519,7 +915,12 @@ impl StableDirectory {
                 let source_file = self.open_read_write(path)?;
                 let quarantine_file = self.open_read_write(&quarantine)?;
                 if same_open_file_identity(&source_file, &quarantine_file)? {
-                    self.remove_visible_file_if_matches(&quarantine, &quarantine_file, || Ok(()))
+                    self.remove_visible_file_if_matches_guarded(
+                        &quarantine,
+                        &quarantine_file,
+                        namespace_guard,
+                        || Ok(()),
+                    )
                 } else {
                     Err(format!(
                         "state file and an ambiguous deletion quarantine both exist; both were preserved: {}",
@@ -543,6 +944,35 @@ impl StableDirectory {
         self.remove_file_if_matches_with_hook(path, expected, quarantine_prefix, || Ok(()))
     }
 
+    pub(crate) fn remove_file_if_matches_with_guard(
+        &self,
+        path: &Path,
+        expected: &File,
+        quarantine_prefix: &str,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.recover_quarantined_file_guarded(path, quarantine_prefix, &mut namespace_guard)?;
+        let quarantine =
+            self.deterministic_artifact_path(path, quarantine_prefix, ".quarantine")?;
+        self.verify_file_identity(path, expected)?;
+        namespace_guard()?;
+        self.verify_visible()?;
+        self.move_open_file_no_replace_bound_guarded(
+            path,
+            expected,
+            &quarantine,
+            &mut namespace_guard,
+        )?;
+        self.verify_visible()?;
+        namespace_guard()?;
+        self.remove_visible_file_if_matches_guarded(
+            &quarantine,
+            expected,
+            &mut namespace_guard,
+            || Ok(()),
+        )
+    }
+
     pub(crate) fn remove_visible_file_if_matches_direct(
         &self,
         path: &Path,
@@ -550,6 +980,92 @@ impl StableDirectory {
     ) -> Result<(), String> {
         self.verify_file_identity(path, expected)?;
         self.remove_visible_file_if_matches(path, expected, || Ok(()))
+    }
+
+    pub(crate) fn remove_visible_file_if_matches_direct_with_guard(
+        &self,
+        path: &Path,
+        expected: &File,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.remove_visible_file_if_matches_guarded(path, expected, &mut namespace_guard, || Ok(()))
+    }
+
+    /// Opens one stable, read-only snapshot of an atomically published file.
+    ///
+    /// A live atomic writer may temporarily evacuate `path` to its deterministic
+    /// previous artifact. Treating that gap as a missing file would let a reader
+    /// incorrectly substitute defaults. This read-only helper waits for those
+    /// transaction artifacts to clear without recovering, deleting, or creating
+    /// any namespace entry, and returns an opened file whose identity was
+    /// verified at the read linearization point.
+    pub(crate) fn open_atomic_file_read_only_until(
+        &self,
+        path: &Path,
+        temporary_prefix: &str,
+        deadline: Instant,
+    ) -> Result<Option<File>, String> {
+        let destination = self.relative_file(path)?.to_path_buf();
+        let temporary = deterministic_artifact_name(
+            temporary_prefix,
+            destination.as_os_str().as_encoded_bytes(),
+            ".tmp",
+        );
+        let temporary_path = self.path.join(temporary);
+        let previous =
+            deterministic_previous_artifact_name(temporary_prefix, destination.as_os_str())?;
+        let previous_path = self.path.join(previous);
+
+        loop {
+            ensure_atomic_read_deadline(deadline, path)?;
+            if self.path_exists(&temporary_path)? || self.path_exists(&previous_path)? {
+                wait_for_atomic_read_namespace(deadline, path)?;
+                continue;
+            }
+            if !self.path_exists(path)? {
+                ensure_atomic_read_deadline(deadline, path)?;
+                if self.path_exists(&temporary_path)? || self.path_exists(&previous_path)? {
+                    wait_for_atomic_read_namespace(deadline, path)?;
+                    continue;
+                }
+                return Ok(None);
+            }
+
+            let file = match self.open_read(path) {
+                Ok(file) => file,
+                Err(error) => {
+                    if !self.path_exists(path)?
+                        || self.path_exists(&temporary_path)?
+                        || self.path_exists(&previous_path)?
+                    {
+                        wait_for_atomic_read_namespace(deadline, path)?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            ensure_atomic_read_deadline(deadline, path)?;
+            if self.path_exists(&temporary_path)? || self.path_exists(&previous_path)? {
+                wait_for_atomic_read_namespace(deadline, path)?;
+                continue;
+            }
+            match self.verify_file_identity(path, &file) {
+                Ok(()) => {
+                    ensure_atomic_read_deadline(deadline, path)?;
+                    return Ok(Some(file));
+                }
+                Err(error) => {
+                    if !self.path_exists(path)?
+                        || self.path_exists(&temporary_path)?
+                        || self.path_exists(&previous_path)?
+                    {
+                        wait_for_atomic_read_namespace(deadline, path)?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
     }
 
     pub(crate) fn remove_file_if_matches_with_hook(
@@ -613,10 +1129,15 @@ impl StableDirectory {
         }
         self.verify_visible()?;
         expected.verify_visible_at(source)?;
+        #[cfg(windows)]
+        let mutation_directory = self.open_directory_for_mutation(source, expected)?;
         rename_open_directory_no_replace_platform(
             &self.directory,
             self.relative_file(source)?,
+            #[cfg(not(windows))]
             &expected.directory,
+            #[cfg(windows)]
+            &mutation_directory,
             self.relative_file(destination)?,
         )
         .map_err(|error| {
@@ -630,11 +1151,138 @@ impl StableDirectory {
         self.verify_visible()
     }
 
+    pub(crate) fn rename_child_directory_until(
+        &self,
+        source: &Path,
+        expected: &Self,
+        destination: &Path,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.rename_child_directory_until_with_hook(source, expected, destination, deadline, || {
+            Ok(())
+        })
+    }
+
+    fn rename_child_directory_until_with_hook(
+        &self,
+        source: &Path,
+        expected: &Self,
+        destination: &Path,
+        deadline: Instant,
+        before_publication: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.rename_child_directory_until_with_hooks(
+            source,
+            expected,
+            destination,
+            deadline,
+            before_publication,
+            || Ok(()),
+        )
+    }
+
+    fn rename_child_directory_until_with_hooks(
+        &self,
+        source: &Path,
+        expected: &Self,
+        destination: &Path,
+        deadline: Instant,
+        mut before_publication: impl FnMut() -> Result<(), String>,
+        after_capability_acquisition: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        ensure_directory_namespace_deadline(deadline, source)?;
+        #[cfg(windows)]
+        if !expected.delete_capable {
+            return Err(format!(
+                "state directory lacks the retained DELETE capability required for rename: {}",
+                source.display()
+            ));
+        }
+        if self.entry_kind(source)? != Some(StableEntryKind::Directory) {
+            return Err(format!(
+                "state directory does not exist or is not local: {}",
+                source.display()
+            ));
+        }
+        ensure_directory_namespace_deadline(deadline, source)?;
+        if self.entry_kind(destination)?.is_some() {
+            return Err(format!(
+                "state directory quarantine already exists: {}",
+                destination.display()
+            ));
+        }
+        ensure_directory_namespace_deadline(deadline, destination)?;
+        self.verify_visible()?;
+        ensure_directory_namespace_deadline(deadline, source)?;
+        expected.verify_visible_at(source)?;
+        ensure_directory_namespace_deadline(deadline, source)?;
+        let source_relative = self.relative_file(source)?;
+        let destination_relative = self.relative_file(destination)?;
+        ensure_directory_namespace_deadline(deadline, source)?;
+        before_publication()?;
+        ensure_directory_namespace_deadline(deadline, source)?;
+        #[cfg(windows)]
+        let mutation_directory = self.open_directory_for_mutation(source, expected)?;
+        after_capability_acquisition()?;
+        ensure_directory_namespace_deadline(deadline, source)?;
+
+        // Publication and its parent-directory sync are one indivisible boundary:
+        // there is intentionally no pausable/user callback after the rename. If
+        // the syscall itself crosses the deadline, the post-sync check rejects
+        // success while the exact, identity-bound directory remains recoverable.
+        rename_open_directory_no_replace_platform(
+            &self.directory,
+            source_relative,
+            #[cfg(not(windows))]
+            &expected.directory,
+            #[cfg(windows)]
+            &mutation_directory,
+            destination_relative,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to publish state directory {}: {error}",
+                source.display()
+            )
+        })?;
+        self.sync_directory()?;
+        ensure_directory_namespace_deadline(deadline, destination)?;
+        expected.verify_visible_at(destination)?;
+        ensure_directory_namespace_deadline(deadline, destination)?;
+        self.verify_visible()?;
+        ensure_directory_namespace_deadline(deadline, destination)
+    }
+
     pub(crate) fn remove_empty_child_directory_if_matches(
         &self,
         path: &Path,
         expected: Self,
     ) -> Result<(), String> {
+        self.remove_empty_child_directory_if_matches_with_guard(path, expected, || Ok(()))
+    }
+
+    pub(crate) fn remove_empty_child_directory_if_matches_with_guard(
+        &self,
+        path: &Path,
+        expected: Self,
+        guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.remove_empty_child_directory_if_matches_with_guard_and_hook(
+            path,
+            expected,
+            guard,
+            || Ok(()),
+        )
+    }
+
+    fn remove_empty_child_directory_if_matches_with_guard_and_hook(
+        &self,
+        path: &Path,
+        expected: Self,
+        mut guard: impl FnMut() -> Result<(), String>,
+        after_capability_acquisition: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        guard()?;
         #[cfg(windows)]
         if !expected.delete_capable {
             return Err(format!(
@@ -643,18 +1291,17 @@ impl StableDirectory {
             ));
         }
         self.verify_visible()?;
+        guard()?;
         self.relative_file(path)?;
         expected.verify_visible_at(path)?;
+        guard()?;
         #[cfg(windows)]
         {
-            let Self {
-                directory,
-                identity,
-                path: _,
-                delete_capable: _,
-            } = expected;
-            drop(identity);
-            let path_bound = directory.into_std_file();
+            let path_bound = self.open_directory_for_mutation(path, &expected)?;
+            after_capability_acquisition()?;
+            drop(expected);
+            let path_bound = path_bound.into_std_file();
+            guard()?;
             delete_open_file_platform(&path_bound).map_err(|error| {
                 format!(
                     "failed to remove the expected open state directory {}: {error}",
@@ -664,21 +1311,54 @@ impl StableDirectory {
             drop(path_bound);
         }
         #[cfg(not(windows))]
-        drop(expected);
-        #[cfg(not(windows))]
-        let relative = self.relative_file(path)?;
-        #[cfg(not(windows))]
-        self.directory
-            .remove_dir(relative)
-            .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        {
+            after_capability_acquisition()?;
+            drop(expected);
+            let relative = self.relative_file(path)?;
+            guard()?;
+            self.directory
+                .remove_dir(relative)
+                .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        }
         self.sync_directory()?;
+        guard()?;
         if self.entry_kind(path)?.is_some() {
             return Err(format!(
                 "state directory reappeared during removal; replacement preserved: {}",
                 path.display()
             ));
         }
-        self.verify_visible()
+        self.verify_visible()?;
+        guard()
+    }
+
+    #[cfg(windows)]
+    fn open_directory_for_mutation(
+        &self,
+        path: &Path,
+        expected: &Self,
+    ) -> Result<cap_std::fs::Dir, String> {
+        let relative = self.relative_file(path)?;
+        let file =
+            crate::fs_security::open_directory_child_windows(&self.directory, relative, true)
+                .map_err(|error| {
+                    format!(
+                        "failed to acquire directory mutation capability {}: {error}",
+                        path.display()
+                    )
+                })?;
+        let identity =
+            crate::fs_security::FileIdentity::from_file(file.try_clone().map_err(|error| {
+                format!("failed to clone directory mutation capability: {error}")
+            })?)
+            .map_err(|error| format!("failed to identify directory {}: {error}", path.display()))?;
+        if identity != expected.identity {
+            return Err(format!(
+                "state directory identity changed before mutation: {}",
+                path.display()
+            ));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(file))
     }
 
     pub(crate) fn rename_file_if_matches(
@@ -815,6 +1495,110 @@ impl StableDirectory {
         }
     }
 
+    fn move_open_file_no_replace_bound_guarded(
+        &self,
+        source: &Path,
+        expected: &File,
+        destination: &Path,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            self.verify_file_identity(source, expected)?;
+            namespace_guard()?;
+            rename_file_no_replace_platform(
+                &self.directory,
+                self.relative_file(source)?,
+                self.relative_file(destination)?,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to move state file {} without replacing {}: {error}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+
+            let moved = match self.open_read(destination) {
+                Ok(moved) => moved,
+                Err(error) => {
+                    let rescue =
+                        self.rescue_moved_file_guarded(destination, source, namespace_guard);
+                    return Err(match rescue {
+                        Ok(()) => format!(
+                            "moved state file could not be verified and was restored to {}: {error}",
+                            source.display()
+                        ),
+                        Err(rescue_error) => format!(
+                            "moved state file could not be verified; all visible entries were preserved: {error}; rescue failed: {rescue_error}"
+                        ),
+                    });
+                }
+            };
+            let identity_failure = match same_open_file_identity(&moved, expected) {
+                Ok(true) => None,
+                Ok(false) => Some("state source changed while it was moved".to_string()),
+                Err(error) => Some(format!(
+                    "moved state file identity could not be verified: {error}"
+                )),
+            };
+            if let Some(identity_failure) = identity_failure {
+                let rescue = self.rescue_moved_file_guarded(destination, source, namespace_guard);
+                return Err(match rescue {
+                    Ok(()) => format!(
+                        "{identity_failure} and the unverified file was restored to {}",
+                        source.display()
+                    ),
+                    Err(rescue_error) => format!(
+                        "{identity_failure}; all visible entries were preserved because rescue failed: {rescue_error}"
+                    ),
+                });
+            }
+            if self.path_exists(source)? {
+                return Err(format!(
+                    "state source path reappeared after its expected file was moved; both entries were preserved: {}",
+                    source.display()
+                ));
+            }
+            namespace_guard()?;
+            self.sync_directory()
+        }
+
+        #[cfg(windows)]
+        {
+            self.verify_file_identity(source, expected)?;
+            let source_bound = self.open_read(source)?;
+            if !same_open_file_identity(&source_bound, expected)? {
+                return Err(format!(
+                    "state source changed before its path-bound handle was retained: {}",
+                    source.display()
+                ));
+            }
+            namespace_guard()?;
+            let publication = self.publish_open_file_no_replace_guarded(
+                source,
+                &source_bound,
+                destination,
+                namespace_guard,
+            )?;
+            self.verify_published_file(destination, &source_bound, publication)?;
+            if self.path_exists(source)? {
+                return Err(format!(
+                    "state source path reappeared while its open file was moved: {}",
+                    source.display()
+                ));
+            }
+            namespace_guard()?;
+            self.sync_directory()
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (source, expected, destination, namespace_guard);
+            Err("this platform has no safe state-file relocation primitive".to_string())
+        }
+    }
+
     #[cfg(unix)]
     fn rescue_moved_file(&self, source: &Path, destination: &Path) -> Result<(), String> {
         rename_file_no_replace_platform(
@@ -832,6 +1616,30 @@ impl StableDirectory {
         self.sync_directory()
     }
 
+    #[cfg(unix)]
+    fn rescue_moved_file_guarded(
+        &self,
+        source: &Path,
+        destination: &Path,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        namespace_guard()?;
+        rename_file_no_replace_platform(
+            &self.directory,
+            self.relative_file(source)?,
+            self.relative_file(destination)?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to restore moved state file {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        namespace_guard()?;
+        self.sync_directory()
+    }
+
     fn verify_published_file(
         &self,
         destination: &Path,
@@ -842,6 +1650,7 @@ impl StableDirectory {
         self.verify_file_identity(destination, expected)
     }
 
+    #[cfg(windows)]
     fn publish_open_file_no_replace(
         &self,
         source: &Path,
@@ -867,6 +1676,53 @@ impl StableDirectory {
         if let Err(identity_error) = self.verify_file_identity(destination, expected) {
             let rescue = self.open_read(destination).and_then(|published| {
                 self.move_open_file_no_replace_bound(destination, &published, source)
+            });
+            return Err(match rescue {
+                Ok(()) => format!(
+                    "published state source changed before pathname-bound publication and the unverified file was restored to {}: {identity_error}",
+                    source.display()
+                ),
+                Err(rescue_error) => format!(
+                    "published state source changed before pathname-bound publication; all visible entries were preserved: {identity_error}; rescue failed: {rescue_error}"
+                ),
+            });
+        }
+
+        Ok(publication)
+    }
+
+    fn publish_open_file_no_replace_guarded(
+        &self,
+        source: &Path,
+        expected: &File,
+        destination: &Path,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<HandlePublication, String> {
+        let destination_relative = self.relative_file(destination)?;
+        let source_relative = self.relative_file(source)?;
+        namespace_guard()?;
+        let publication = publish_open_file_no_replace_platform(
+            &self.directory,
+            source_relative,
+            expected,
+            destination_relative,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to publish the open state file without replacing {}: {error}",
+                destination.display()
+            )
+        })?;
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let Err(identity_error) = self.verify_file_identity(destination, expected) {
+            let rescue = self.open_read(destination).and_then(|published| {
+                self.move_open_file_no_replace_bound_guarded(
+                    destination,
+                    &published,
+                    source,
+                    namespace_guard,
+                )
             });
             return Err(match rescue {
                 Ok(()) => format!(
@@ -940,6 +1796,54 @@ impl StableDirectory {
         #[cfg(not(windows))]
         self.remove_file_bound_without_sync(path)?;
         self.sync_directory()
+    }
+
+    fn remove_bound_file_if_matches_guarded(
+        &self,
+        path: &Path,
+        expected: &File,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+        before_delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.verify_file_identity(path, expected)?;
+        before_delete()?;
+        #[cfg(windows)]
+        let path_bound = {
+            let path_bound = self.open_read(path)?;
+            if !same_open_file_identity(&path_bound, expected)? {
+                return Err(format!(
+                    "state file changed before its path-bound deletion handle was retained: {}",
+                    path.display()
+                ));
+            }
+            path_bound
+        };
+        #[cfg(not(windows))]
+        self.verify_file_identity(path, expected)?;
+        namespace_guard()?;
+        #[cfg(windows)]
+        delete_open_file_platform(&path_bound).map_err(|error| {
+            format!(
+                "failed to remove the expected open state file {}: {error}",
+                path.display()
+            )
+        })?;
+        #[cfg(not(windows))]
+        self.remove_file_bound_without_sync(path)?;
+        namespace_guard()?;
+        self.sync_directory()
+    }
+
+    fn remove_visible_file_if_matches_guarded(
+        &self,
+        path: &Path,
+        expected: &File,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+        before_delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.verify_visible()?;
+        self.remove_bound_file_if_matches_guarded(path, expected, namespace_guard, before_delete)?;
+        self.verify_visible()
     }
 
     pub(crate) fn for_each_entry_bounded(
@@ -1016,7 +1920,24 @@ impl StableDirectory {
         temporary_prefix: &str,
         expected: FileExpectation<'_>,
     ) -> Result<FilePublicationReceipt, FilePublicationError> {
-        self.save_bytes_atomically_expected_with_hooks(
+        self.save_bytes_atomically_expected_with_receipt_and_guard(
+            path,
+            encoded,
+            temporary_prefix,
+            expected,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn save_bytes_atomically_expected_with_receipt_and_guard(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        expected: FileExpectation<'_>,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<FilePublicationReceipt, FilePublicationError> {
+        self.save_bytes_atomically_expected_with_all_hooks_guarded(
             path,
             encoded,
             temporary_prefix,
@@ -1025,8 +1946,12 @@ impl StableDirectory {
                 file: expected,
                 retain_publication_lock: false,
             },
-            || Ok(()),
-            || {},
+            AtomicSaveHooks {
+                before_commit: || Ok(()),
+                after_evacuation: || {},
+                before_receipt: || {},
+            },
+            &mut namespace_guard,
         )
     }
 
@@ -1154,6 +2079,37 @@ impl StableDirectory {
         .map_err(|error| error.message)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_bytes_atomically_expected_with_guard_and_hook(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        require_attached_before_commit: bool,
+        expected: FileExpectation<'_>,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+        before_commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.save_bytes_atomically_expected_with_all_hooks_guarded(
+            path,
+            encoded,
+            temporary_prefix,
+            AtomicSaveExpectation {
+                require_attached_before_commit,
+                file: expected,
+                retain_publication_lock: false,
+            },
+            AtomicSaveHooks {
+                before_commit,
+                after_evacuation: || {},
+                before_receipt: || {},
+            },
+            &mut namespace_guard,
+        )
+        .map(drop)
+        .map_err(|error| error.message)
+    }
+
     #[cfg(all(test, unix))]
     fn save_bytes_atomically_expected_with_recovery_hooks(
         &self,
@@ -1231,6 +2187,25 @@ impl StableDirectory {
         expectation: AtomicSaveExpectation<'_>,
         hooks: AtomicSaveHooks<impl FnOnce() -> Result<(), String>, impl FnOnce(), impl FnOnce()>,
     ) -> Result<FilePublicationReceipt, FilePublicationError> {
+        self.save_bytes_atomically_expected_with_all_hooks_guarded(
+            path,
+            encoded,
+            temporary_prefix,
+            expectation,
+            hooks,
+            &mut || Ok(()),
+        )
+    }
+
+    fn save_bytes_atomically_expected_with_all_hooks_guarded(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        temporary_prefix: &str,
+        expectation: AtomicSaveExpectation<'_>,
+        hooks: AtomicSaveHooks<impl FnOnce() -> Result<(), String>, impl FnOnce(), impl FnOnce()>,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<FilePublicationReceipt, FilePublicationError> {
         let AtomicSaveExpectation {
             require_attached_before_commit,
             file: expected,
@@ -1251,7 +2226,15 @@ impl StableDirectory {
         let previous =
             deterministic_previous_artifact_name(temporary_prefix, destination.as_os_str())?;
         let previous_path = self.path.join(&previous);
-        self.recover_atomic_transaction(path, &temporary_path, &previous_path, false, false)?;
+        namespace_guard()?;
+        self.recover_atomic_transaction_guarded(
+            path,
+            &temporary_path,
+            &previous_path,
+            false,
+            false,
+            namespace_guard,
+        )?;
 
         #[cfg(test)]
         let any_expected_file = match expected {
@@ -1274,6 +2257,8 @@ impl StableDirectory {
         configure_capability_owner_only(&mut options);
         configure_capability_no_follow(&mut options);
         configure_capability_delete_access(&mut options, true, true);
+        namespace_guard()?;
+        pause_atomic_publication_phase(path, encoded, "temporary_create")?;
         let mut file = self
             .directory
             .open_with(&temporary, &options)
@@ -1284,7 +2269,9 @@ impl StableDirectory {
         let mut evacuated_previous = None;
         let mut exact_publication_committed = false;
         let write_result = (|| {
+            namespace_guard()?;
             file.write_all(encoded).map_err(|error| error.to_string())?;
+            namespace_guard()?;
             file.sync_all().map_err(|error| error.to_string())?;
             let before_commit_attachment_error = self.verify_visible().err();
             if require_attached_before_commit {
@@ -1293,15 +2280,26 @@ impl StableDirectory {
                 }
             }
             self.verify_file_expectation(path, expected)?;
+            namespace_guard()?;
             before_commit()?;
+            namespace_guard()?;
             self.verify_file_identity(&temporary_path, &file)?;
 
             if let FileExpectation::Present(previous_file) = expected {
-                if let Err(error) =
-                    self.move_open_file_no_replace_bound(path, previous_file, &previous_path)
-                {
+                namespace_guard()?;
+                if let Err(error) = self.move_open_file_no_replace_bound_guarded(
+                    path,
+                    previous_file,
+                    &previous_path,
+                    namespace_guard,
+                ) {
                     if let Ok(opened_previous) = self.open_read(&previous_path) {
-                        let _ = self.rollback_previous_file(path, &previous_path, &opened_previous);
+                        let _ = self.rollback_previous_file_guarded(
+                            path,
+                            &previous_path,
+                            &opened_previous,
+                            namespace_guard,
+                        );
                     }
                     return Err(error);
                 }
@@ -1310,14 +2308,24 @@ impl StableDirectory {
                 self.verify_file_expectation(path, FileExpectation::Missing)?;
             }
             after_evacuation();
+            pause_atomic_publication_phase(path, encoded, "after_evacuation")?;
 
-            let publication = match self.publish_open_file_no_replace(&temporary_path, &file, path)
-            {
+            namespace_guard()?;
+            let publication = match self.publish_open_file_no_replace_guarded(
+                &temporary_path,
+                &file,
+                path,
+                namespace_guard,
+            ) {
                 Ok(publication) => publication,
                 Err(error) => {
                     if let Some(previous_file) = evacuated_previous.as_ref() {
-                        let rollback =
-                            self.rollback_previous_file(path, &previous_path, previous_file);
+                        let rollback = self.rollback_previous_file_guarded(
+                            path,
+                            &previous_path,
+                            previous_file,
+                            namespace_guard,
+                        );
                         return match rollback {
                             Ok(()) => Err(error),
                             Err(rollback_error) => Err(format!(
@@ -1329,6 +2337,7 @@ impl StableDirectory {
                 }
             };
             exact_publication_committed = true;
+            pause_atomic_publication_phase(path, encoded, "canonical_publish")?;
             self.verify_published_file(path, &file, publication)?;
             let published = read_open_file_prefix(&file, encoded.len().saturating_add(1))
                 .map_err(|error| format!("failed to verify published state: {error}"))?;
@@ -1339,11 +2348,16 @@ impl StableDirectory {
                 ));
             }
             let post_publication = (|| {
+                namespace_guard()?;
+                pause_atomic_publication_phase(path, encoded, "directory_sync")?;
                 self.sync_directory()?;
                 if let Some(previous_file) = evacuated_previous.as_ref() {
-                    self.remove_bound_file_if_matches(&previous_path, previous_file, || {
-                        self.verify_publication_bytes(path, &file, encoded)
-                    })?;
+                    self.remove_visible_file_if_matches_guarded(
+                        &previous_path,
+                        previous_file,
+                        namespace_guard,
+                        || self.verify_publication_bytes(path, &file, encoded),
+                    )?;
                 }
                 self.verify_publication_bytes(path, &file, encoded)?;
                 let after_commit_attachment_error = self.verify_visible().err();
@@ -1361,7 +2375,7 @@ impl StableDirectory {
             }
         })();
         let temporary_cleanup = self
-            .cleanup_open_temporary_file(&temporary_path, &file, || {
+            .cleanup_open_temporary_file_guarded(&temporary_path, &file, namespace_guard, || {
                 if exact_publication_committed {
                     self.verify_publication_bytes(path, &file, encoded)
                 } else {
@@ -1382,12 +2396,18 @@ impl StableDirectory {
                 .map_err(|error| format!("failed to unlock published state file: {error}"))
         };
         before_receipt();
-        let temporary_cleanup = match (temporary_cleanup, unlock_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(cleanup_error), Err(unlock_error)) => {
-                Err(format!("{cleanup_error}; {unlock_error}"))
-            }
+        let receipt_guard = pause_atomic_publication_phase(path, encoded, "receipt_return")
+            .and_then(|()| namespace_guard());
+        let temporary_cleanup = match (temporary_cleanup, unlock_result, receipt_guard) {
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(()), Ok(()))
+            | (Ok(()), Err(error), Ok(()))
+            | (Ok(()), Ok(()), Err(error)) => Err(error),
+            (cleanup, unlock, guard) => Err([cleanup.err(), unlock.err(), guard.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ")),
         };
         match (write_result, temporary_cleanup) {
             (Ok(()), Ok(())) => Ok(FilePublicationReceipt {
@@ -1449,6 +2469,78 @@ impl StableDirectory {
             max_name_bytes,
             true,
         )
+    }
+
+    pub(crate) fn recover_stale_temporary_files_strict_with_guard(
+        &self,
+        temporary_prefix: &str,
+        max_entries: usize,
+        max_name_bytes: usize,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<usize, String> {
+        namespace_guard()?;
+        let mut previous_targets = Vec::new();
+        let mut temporary_names = Vec::new();
+        self.for_each_entry_bounded(max_entries, max_name_bytes, |name| {
+            if let Some(target) = parse_previous_artifact_name(&name, temporary_prefix) {
+                previous_targets.push(target);
+            } else if is_deterministic_artifact_name(&name, temporary_prefix, ".tmp") {
+                temporary_names.push(name);
+            }
+            Ok(())
+        })?;
+        let mut removed = 0_usize;
+        for target_name in previous_targets {
+            namespace_guard()?;
+            let target = self.path.join(&target_name);
+            let temporary = self.path.join(deterministic_artifact_name(
+                temporary_prefix,
+                target_name.as_encoded_bytes(),
+                ".tmp",
+            ));
+            let previous = self.path.join(deterministic_previous_artifact_name(
+                temporary_prefix,
+                &target_name,
+            )?);
+            if self.recover_atomic_transaction_guarded(
+                &target,
+                &temporary,
+                &previous,
+                true,
+                true,
+                &mut namespace_guard,
+            )? {
+                removed = removed.saturating_add(1);
+            }
+        }
+        for name in temporary_names {
+            namespace_guard()?;
+            let path = self.path.join(&name);
+            if !self.path_exists(&path)? {
+                continue;
+            }
+            let file = self.open_read_write(&path)?;
+            match file.try_lock() {
+                Ok(()) => {
+                    self.remove_visible_file_if_matches_guarded(
+                        &path,
+                        &file,
+                        &mut namespace_guard,
+                        || Ok(()),
+                    )?;
+                    removed = removed.saturating_add(1);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(format!(
+                        "live atomic transaction artifact was preserved: {}",
+                        path.display()
+                    ));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
+            }
+        }
+        namespace_guard()?;
+        Ok(removed)
     }
 
     fn recover_stale_temporary_files_with_policy(
@@ -1534,6 +2626,133 @@ impl StableDirectory {
         parse_previous_artifact_name(name, temporary_prefix)
     }
 
+    pub(crate) fn restore_exact_previous_artifact_with_guard(
+        &self,
+        target: &Path,
+        previous: &Path,
+        expected_bytes: &[u8],
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        namespace_guard()?;
+        if self.path_exists(target)? {
+            return Err(format!(
+                "cannot restore prior atomic state over an existing target: {}",
+                target.display()
+            ));
+        }
+        let previous_file = self.open_read_write(previous)?;
+        let observed = read_open_file_prefix(&previous_file, expected_bytes.len() + 1)
+            .map_err(|error| error.to_string())?;
+        if observed != expected_bytes {
+            return Err(format!(
+                "prior atomic state bytes changed and were preserved: {}",
+                previous.display()
+            ));
+        }
+        self.move_open_file_no_replace_bound_guarded(
+            previous,
+            &previous_file,
+            target,
+            &mut namespace_guard,
+        )?;
+        namespace_guard()?;
+        self.sync_directory()?;
+        namespace_guard()
+    }
+
+    /// Recovers artifacts from an atomic publication whose destination was
+    /// required to be missing. The caller supplies the exact planned bytes and
+    /// retains the surrounding transaction authority. Any prior artifact,
+    /// live writer, byte mismatch, or canonical/temporary ambiguity is
+    /// preserved and rejected.
+    pub(crate) fn recover_exact_missing_publication_with_guard(
+        &self,
+        target: &Path,
+        temporary_prefix: &str,
+        expected_bytes: &[u8],
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let relative = self.relative_file(target)?;
+        let temporary = self.path.join(deterministic_artifact_name(
+            temporary_prefix,
+            relative.as_os_str().as_encoded_bytes(),
+            ".tmp",
+        ));
+        let previous = self.path.join(deterministic_previous_artifact_name(
+            temporary_prefix,
+            relative.as_os_str(),
+        )?);
+        namespace_guard()?;
+        if self.path_exists(&previous)? {
+            return Err(format!(
+                "missing-only atomic publication has an ambiguous prior artifact; it was preserved: {}",
+                previous.display()
+            ));
+        }
+        let target_exists = self.path_exists(target)?;
+        let temporary_exists = self.path_exists(&temporary)?;
+        if temporary_exists {
+            let temporary_file = self.open_read_write(&temporary)?;
+            match temporary_file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(format!(
+                        "temporary state file is still owned by a live writer: {}",
+                        temporary.display()
+                    ));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(format!(
+                        "failed to inspect temporary state ownership {}: {error}",
+                        temporary.display()
+                    ));
+                }
+            }
+            let observed = read_open_file_prefix(&temporary_file, expected_bytes.len() + 1)
+                .map_err(|error| error.to_string())?;
+            if observed != expected_bytes {
+                return Err(format!(
+                    "temporary atomic publication bytes are ambiguous and were preserved: {}",
+                    temporary.display()
+                ));
+            }
+            if target_exists {
+                let target_file = self.open_read_write(target)?;
+                let target_bytes = read_open_file_prefix(&target_file, expected_bytes.len() + 1)
+                    .map_err(|error| error.to_string())?;
+                if target_bytes != expected_bytes
+                    || !same_open_file_identity(&target_file, &temporary_file)?
+                {
+                    return Err(format!(
+                        "atomic publication target and temporary artifact do not identify the same exact publication; both were preserved: {}",
+                        target.display()
+                    ));
+                }
+                self.verify_file_identity(target, &target_file)?;
+            }
+            namespace_guard()?;
+            self.remove_visible_file_if_matches_direct_with_guard(
+                &temporary,
+                &temporary_file,
+                &mut namespace_guard,
+            )?;
+        }
+        namespace_guard()?;
+        if self.path_exists(target)? {
+            let target_file = self.open_read_write(target)?;
+            let observed = read_open_file_prefix(&target_file, expected_bytes.len() + 1)
+                .map_err(|error| error.to_string())?;
+            if observed != expected_bytes {
+                return Err(format!(
+                    "atomic publication target bytes are ambiguous and were preserved: {}",
+                    target.display()
+                ));
+            }
+            self.verify_file_identity(target, &target_file)?;
+        }
+        namespace_guard()
+    }
+
     fn recover_atomic_transaction(
         &self,
         target: &Path,
@@ -1542,16 +2761,42 @@ impl StableDirectory {
         skip_live_writer: bool,
         reject_obscured_live_writer: bool,
     ) -> Result<bool, String> {
-        self.recover_atomic_transaction_with_live_target_hook(
+        self.recover_atomic_transaction_guarded(
             target,
             temporary,
             previous,
             skip_live_writer,
             reject_obscured_live_writer,
-            &mut || {},
+            &mut || Ok(()),
         )
     }
 
+    fn recover_atomic_transaction_guarded(
+        &self,
+        target: &Path,
+        temporary: &Path,
+        previous: &Path,
+        skip_live_writer: bool,
+        reject_obscured_live_writer: bool,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let mut previous_open_hook = || Ok(());
+        let mut live_target_hook = || {};
+        self.recover_atomic_transaction_with_hooks_guarded(
+            target,
+            temporary,
+            previous,
+            skip_live_writer,
+            reject_obscured_live_writer,
+            AtomicRecoveryHooks {
+                previous_open: &mut previous_open_hook,
+                live_target: &mut live_target_hook,
+            },
+            namespace_guard,
+        )
+    }
+
+    #[cfg(test)]
     fn recover_atomic_transaction_with_live_target_hook(
         &self,
         target: &Path,
@@ -1575,6 +2820,7 @@ impl StableDirectory {
         )
     }
 
+    #[cfg(test)]
     fn recover_atomic_transaction_with_hooks(
         &self,
         target: &Path,
@@ -1582,7 +2828,29 @@ impl StableDirectory {
         previous: &Path,
         skip_live_writer: bool,
         reject_obscured_live_writer: bool,
+        hooks: AtomicRecoveryHooks<'_>,
+    ) -> Result<bool, String> {
+        self.recover_atomic_transaction_with_hooks_guarded(
+            target,
+            temporary,
+            previous,
+            skip_live_writer,
+            reject_obscured_live_writer,
+            hooks,
+            &mut || Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_atomic_transaction_with_hooks_guarded(
+        &self,
+        target: &Path,
+        temporary: &Path,
+        previous: &Path,
+        skip_live_writer: bool,
+        reject_obscured_live_writer: bool,
         mut hooks: AtomicRecoveryHooks<'_>,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<bool, String> {
         const MAX_NAMESPACE_RETRIES: usize = 8;
 
@@ -1598,9 +2866,14 @@ impl StableDirectory {
                 self.path_exists(temporary)?,
                 self.path_exists(previous)?,
             );
-            match self
-                .recover_atomic_transaction_once(target, temporary, previous, policy, &mut hooks)
-            {
+            match self.recover_atomic_transaction_once(
+                target,
+                temporary,
+                previous,
+                policy,
+                &mut hooks,
+                namespace_guard,
+            ) {
                 Ok(recovered) => return Ok(recovered),
                 Err(error) => {
                     let current = (
@@ -1630,7 +2903,9 @@ impl StableDirectory {
         previous: &Path,
         policy: AtomicRecoveryPolicy,
         hooks: &mut AtomicRecoveryHooks<'_>,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<bool, String> {
+        namespace_guard()?;
         let AtomicRecoveryPolicy {
             skip_live_writer,
             reject_obscured_live_writer,
@@ -1694,7 +2969,12 @@ impl StableDirectory {
             if self.path_exists(target)? {
                 let target_file = self.open_read_write(target)?;
                 if same_open_file_identity(&target_file, &previous_file)? {
-                    self.remove_visible_file_if_matches(previous, &previous_file, || Ok(()))?;
+                    self.remove_visible_file_if_matches_guarded(
+                        previous,
+                        &previous_file,
+                        namespace_guard,
+                        || Ok(()),
+                    )?;
                     recovered = true;
                 } else {
                     match target_file.try_lock() {
@@ -1770,7 +3050,12 @@ impl StableDirectory {
             if self.path_exists(temporary)? {
                 match self.verify_file_identity(temporary, &file) {
                     Ok(()) => {
-                        self.remove_visible_file_if_matches(temporary, &file, || Ok(()))?;
+                        self.remove_visible_file_if_matches_guarded(
+                            temporary,
+                            &file,
+                            namespace_guard,
+                            || Ok(()),
+                        )?;
                         recovered = true;
                     }
                     Err(error) => {
@@ -1784,11 +3069,12 @@ impl StableDirectory {
         Ok(recovered)
     }
 
-    fn rollback_previous_file(
+    fn rollback_previous_file_guarded(
         &self,
         target: &Path,
         previous: &Path,
         expected: &File,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
         if !self.path_exists(previous)? {
             return Ok(());
@@ -1797,7 +3083,12 @@ impl StableDirectory {
         if self.path_exists(target)? {
             let visible_target = self.open_read(target)?;
             match same_open_file_identity(&visible_target, expected) {
-                Ok(true) => self.remove_bound_file_if_matches(previous, expected, || Ok(())),
+                Ok(true) => self.remove_bound_file_if_matches_guarded(
+                    previous,
+                    expected,
+                    namespace_guard,
+                    || Ok(()),
+                ),
                 Ok(false) => Err(format!(
                     "atomic state target and evacuated prior state are identity-distinct; both were preserved as ambiguous: {} and {}",
                     target.display(),
@@ -1808,10 +3099,17 @@ impl StableDirectory {
                 )),
             }
         } else {
-            self.move_open_file_no_replace_bound(previous, expected, target)
+            namespace_guard()?;
+            self.move_open_file_no_replace_bound_guarded(
+                previous,
+                expected,
+                target,
+                namespace_guard,
+            )
         }
     }
 
+    #[cfg(test)]
     fn cleanup_open_temporary_file(
         &self,
         path: &Path,
@@ -1823,6 +3121,29 @@ impl StableDirectory {
         }
         match self.verify_file_identity(path, expected) {
             Ok(()) => self.remove_bound_file_if_matches(path, expected, before_delete),
+            Err(error) => Err(format!(
+                "temporary state path was substituted and was preserved: {error}"
+            )),
+        }
+    }
+
+    fn cleanup_open_temporary_file_guarded(
+        &self,
+        path: &Path,
+        expected: &File,
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+        before_delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !self.path_exists(path)? {
+            return Ok(());
+        }
+        match self.verify_file_identity(path, expected) {
+            Ok(()) => self.remove_bound_file_if_matches_guarded(
+                path,
+                expected,
+                namespace_guard,
+                before_delete,
+            ),
             Err(error) => Err(format!(
                 "temporary state path was substituted and was preserved: {error}"
             )),
@@ -1854,6 +3175,26 @@ impl StableDirectory {
         temporary_prefix: &str,
         expected_bytes: &[u8],
     ) -> Result<(), String> {
+        self.finalize_failed_exact_publication_with_guard(
+            path,
+            previous_expected,
+            receipt,
+            temporary_prefix,
+            expected_bytes,
+            &mut || Ok(()),
+        )
+    }
+
+    pub(crate) fn finalize_failed_exact_publication_with_guard(
+        &self,
+        path: &Path,
+        previous_expected: Option<&File>,
+        receipt: &FilePublicationReceipt,
+        temporary_prefix: &str,
+        expected_bytes: &[u8],
+        namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        namespace_guard()?;
         if !receipt.exact_identity {
             return Err("state publication does not carry an exact identity receipt".to_string());
         }
@@ -1869,7 +3210,9 @@ impl StableDirectory {
         )?);
 
         self.verify_visible()?;
+        namespace_guard()?;
         self.verify_exact_publication_bytes(path, receipt, expected_bytes)?;
+        namespace_guard()?;
         self.sync_directory()?;
         if self.path_exists(&previous)? {
             let previous_expected = previous_expected.ok_or_else(|| {
@@ -1879,18 +3222,27 @@ impl StableDirectory {
                 )
             })?;
             self.verify_file_identity(&previous, previous_expected)?;
-            self.remove_bound_file_if_matches(&previous, previous_expected, || {
-                self.verify_exact_publication_bytes(path, receipt, expected_bytes)
-            })?;
+            self.remove_bound_file_if_matches_guarded(
+                &previous,
+                previous_expected,
+                namespace_guard,
+                || self.verify_exact_publication_bytes(path, receipt, expected_bytes),
+            )?;
         }
         if self.path_exists(&temporary)? {
             self.verify_file_identity(&temporary, &receipt.file)?;
-            self.remove_bound_file_if_matches(&temporary, &receipt.file, || {
-                self.verify_exact_publication_bytes(path, receipt, expected_bytes)
-            })?;
+            self.remove_bound_file_if_matches_guarded(
+                &temporary,
+                &receipt.file,
+                namespace_guard,
+                || self.verify_exact_publication_bytes(path, receipt, expected_bytes),
+            )?;
         }
+        namespace_guard()?;
         self.sync_directory()?;
+        namespace_guard()?;
         self.verify_exact_publication_bytes(path, receipt, expected_bytes)?;
+        namespace_guard()?;
         self.verify_visible()
     }
 
@@ -1993,14 +3345,75 @@ impl StableDirectory {
         self.move_open_file_no_replace_bound(source, expected, destination)
     }
 
+    pub(crate) fn restore_visible_file_no_replace_if_matches_with_guard(
+        &self,
+        source: &Path,
+        expected: &File,
+        destination: &Path,
+        mut namespace_guard: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.move_open_file_no_replace_bound_guarded(
+            source,
+            expected,
+            destination,
+            &mut namespace_guard,
+        )
+    }
+
     fn relative_file<'a>(&self, path: &'a Path) -> Result<&'a Path, String> {
-        if path.parent() != Some(self.path.as_path()) || path.file_name().is_none() {
+        let Some(parent) = path.parent() else {
             return Err(format!(
                 "state path is not a direct child of the opened directory: {}",
                 path.display()
             ));
+        };
+        let Some(file_name) = path.file_name() else {
+            return Err(format!(
+                "state path is not a direct child of the opened directory: {}",
+                path.display()
+            ));
+        };
+        if parent != self.path {
+            #[cfg(not(windows))]
+            return Err(format!(
+                "state path is not a direct child of the opened directory: {}",
+                path.display()
+            ));
+            #[cfg(windows)]
+            {
+                let requested =
+                    crate::fs_security::canonicalize_existing_directory_without_symlinks(parent)
+                        .map_err(|_| {
+                            format!(
+                                "state path is not a direct child of the opened directory: {}",
+                                path.display()
+                            )
+                        })?;
+                let retained =
+                    crate::fs_security::canonicalize_existing_directory_without_symlinks(
+                        &self.path,
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "state path is not a direct child of the opened directory: {}",
+                            path.display()
+                        )
+                    })?;
+                if requested != retained {
+                    return Err(format!(
+                        "state path is not a direct child of the opened directory: {}",
+                        path.display()
+                    ));
+                }
+                self.verify_visible().map_err(|_| {
+                    format!(
+                        "state path is not a direct child of the opened directory: {}",
+                        path.display()
+                    )
+                })?;
+            }
         }
-        Ok(Path::new(path.file_name().expect("checked file name")))
+        Ok(Path::new(file_name))
     }
 }
 
@@ -2665,6 +4078,108 @@ impl HeldFileLock {
         )?;
         self.protected_directory.verify_visible()
     }
+
+    pub(crate) fn verify_until(&self, deadline: Instant) -> Result<(), String> {
+        ensure_daemon_lock_deadline(Some(deadline), &self.lock_path)?;
+        self.verify()?;
+        ensure_daemon_lock_deadline(Some(deadline), &self.lock_path)
+    }
+}
+
+/// Acquires a persistent file lock while retaining the caller's exact
+/// protected-directory capability. The returned guard keeps the lock held and
+/// re-verifies both the lock domain and protected directory on demand.
+pub(crate) fn acquire_file_lock_in_until_bound(
+    lock_path: &Path,
+    protected_directory: &StableDirectory,
+    deadline: Instant,
+) -> Result<HeldFileLock, String> {
+    ensure_daemon_lock_deadline(Some(deadline), lock_path)?;
+    protected_directory.verify_visible()?;
+    let parent = lock_path
+        .parent()
+        .ok_or_else(|| format!("lock path has no parent: {}", lock_path.display()))?;
+    let file_name = lock_path
+        .file_name()
+        .ok_or_else(|| format!("daemon lock path has no file name: {}", lock_path.display()))?;
+    let anchor_path = daemon_lock_anchor_path(lock_path)?;
+    let anchor_parent = anchor_path.parent().ok_or_else(|| {
+        format!(
+            "daemon lock anchor has no parent: {}",
+            anchor_path.display()
+        )
+    })?;
+    let retained_root =
+        common_directory_ancestor(&[parent, anchor_parent, protected_directory.path()])?;
+    let root_directory = open_lock_capability_root(&retained_root)?;
+    let mut namespace_guard = || {
+        ensure_daemon_lock_deadline(Some(deadline), lock_path)?;
+        protected_directory.verify_visible()?;
+        ensure_daemon_lock_deadline(Some(deadline), lock_path)
+    };
+    let lock_directory = root_directory.open_or_create_descendant_directory_with_guard(
+        parent,
+        &mut namespace_guard,
+        |_| Ok(()),
+    )?;
+    let anchor_directory = root_directory.open_or_create_descendant_directory_with_guard(
+        anchor_parent,
+        &mut namespace_guard,
+        |_| Ok(()),
+    )?;
+    let opened_protected = root_directory.open_or_create_descendant_directory_with_guard(
+        protected_directory.path(),
+        &mut namespace_guard,
+        |missing| {
+            Err(format!(
+                "protected state directory does not exist: {}",
+                missing.display()
+            ))
+        },
+    )?;
+    if !opened_protected.same_identity(protected_directory) {
+        return Err(format!(
+            "protected state directory identity changed before lock acquisition: {}",
+            protected_directory.path().display()
+        ));
+    }
+    let lock_path = lock_directory.path().join(file_name);
+    let anchor_file = open_daemon_lock_anchor_bound_with_guard(
+        &lock_directory,
+        &lock_path,
+        &anchor_directory,
+        &anchor_path,
+        &mut namespace_guard,
+    )?;
+    let locked_identity = daemon_lock_identity(&anchor_file, &anchor_path)?;
+    lock_daemon_anchor(&anchor_file, &lock_path, Some(deadline))?;
+    namespace_guard()?;
+    repair_daemon_lock_anchor_with_guard(
+        &lock_directory,
+        &lock_path,
+        &anchor_directory,
+        &anchor_path,
+        &locked_identity,
+        &mut namespace_guard,
+    )?;
+    verify_daemon_lock_paths_bound(
+        &lock_directory,
+        &lock_path,
+        &anchor_directory,
+        &anchor_path,
+        &locked_identity,
+    )?;
+    protected_directory.verify_visible()?;
+    ensure_daemon_lock_deadline(Some(deadline), &lock_path)?;
+    Ok(HeldFileLock {
+        _anchor_file: anchor_file,
+        lock_directory,
+        lock_path,
+        anchor_directory,
+        anchor_path,
+        locked_identity,
+        protected_directory: protected_directory.try_clone()?,
+    })
 }
 
 pub(crate) fn try_acquire_file_lock_in(
@@ -2762,17 +4277,48 @@ pub(crate) fn with_file_lock_in_until<T>(
     with_file_lock_in_with_deadline(lock_path, protected_directory, Some(deadline), operation)
 }
 
+pub(crate) fn with_file_lock_in_until_with_setup_hook<T>(
+    lock_path: &Path,
+    protected_directory: &Path,
+    deadline: Instant,
+    operation: impl FnOnce(&StableDirectory) -> Result<T, String>,
+    before_setup_step: impl FnMut() -> Result<(), String>,
+) -> Result<T, String> {
+    with_file_lock_in_with_deadline_and_setup_hook(
+        lock_path,
+        protected_directory,
+        Some(deadline),
+        operation,
+        before_setup_step,
+    )
+}
+
 fn with_file_lock_in_with_deadline<T>(
     lock_path: &Path,
     protected_directory: &Path,
     deadline: Option<Instant>,
     operation: impl FnOnce(&StableDirectory) -> Result<T, String>,
 ) -> Result<T, String> {
+    with_file_lock_in_with_deadline_and_setup_hook(
+        lock_path,
+        protected_directory,
+        deadline,
+        operation,
+        || Ok(()),
+    )
+}
+
+fn with_file_lock_in_with_deadline_and_setup_hook<T>(
+    lock_path: &Path,
+    protected_directory: &Path,
+    deadline: Option<Instant>,
+    operation: impl FnOnce(&StableDirectory) -> Result<T, String>,
+    mut before_setup_step: impl FnMut() -> Result<(), String>,
+) -> Result<T, String> {
+    ensure_daemon_lock_deadline(deadline, lock_path)?;
     let parent = lock_path
         .parent()
         .ok_or_else(|| format!("lock path has no parent: {}", lock_path.display()))?;
-    let parent = crate::fs_security::ensure_directory_without_symlinks(parent)
-        .map_err(|error| error.to_string())?;
     let file_name = lock_path
         .file_name()
         .ok_or_else(|| format!("daemon lock path has no file name: {}", lock_path.display()))?;
@@ -2784,30 +4330,92 @@ fn with_file_lock_in_with_deadline<T>(
             anchor_path.display()
         )
     })?;
-    crate::fs_security::ensure_directory_without_symlinks(anchor_parent)
-        .map_err(|error| format!("daemon lock anchor directory is unsafe: {error}"))?;
-    let lock_directory = StableDirectory::open(&parent)?;
-    let anchor_directory = StableDirectory::open(anchor_parent)?;
-    let protected_directory = StableDirectory::open(protected_directory)?;
-
-    let anchor_file = open_daemon_lock_anchor_bound(
-        &lock_directory,
-        &lock_path,
-        &anchor_directory,
-        &anchor_path,
-    )?;
+    let (lock_directory, anchor_directory, protected_directory, anchor_file) = if deadline.is_some()
+    {
+        let retained_root =
+            common_directory_ancestor(&[parent, anchor_parent, protected_directory])?;
+        let root_directory = open_lock_capability_root(&retained_root)?;
+        let mut namespace_guard = || {
+            before_setup_step()?;
+            ensure_daemon_lock_deadline(deadline, &lock_path)
+        };
+        namespace_guard()?;
+        let lock_directory = root_directory.open_or_create_descendant_directory_with_guard(
+            parent,
+            &mut namespace_guard,
+            |_| Ok(()),
+        )?;
+        namespace_guard()?;
+        let anchor_directory = root_directory.open_or_create_descendant_directory_with_guard(
+            anchor_parent,
+            &mut namespace_guard,
+            |_| Ok(()),
+        )?;
+        namespace_guard()?;
+        let protected = root_directory.open_or_create_descendant_directory_with_guard(
+            protected_directory,
+            &mut namespace_guard,
+            |missing| {
+                Err(format!(
+                    "protected state directory does not exist: {}",
+                    missing.display()
+                ))
+            },
+        )?;
+        namespace_guard()?;
+        let anchor_file = open_daemon_lock_anchor_bound_with_guard(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            &mut namespace_guard,
+        )?;
+        namespace_guard()?;
+        (lock_directory, anchor_directory, protected, anchor_file)
+    } else {
+        let parent = crate::fs_security::ensure_directory_without_symlinks(parent)
+            .map_err(|error| error.to_string())?;
+        crate::fs_security::ensure_directory_without_symlinks(anchor_parent)
+            .map_err(|error| format!("daemon lock anchor directory is unsafe: {error}"))?;
+        let lock_directory = StableDirectory::open(&parent)?;
+        let anchor_directory = StableDirectory::open(anchor_parent)?;
+        let protected = StableDirectory::open(protected_directory)?;
+        let anchor_file = open_daemon_lock_anchor_bound(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+        )?;
+        (lock_directory, anchor_directory, protected, anchor_file)
+    };
     let locked_identity = daemon_lock_identity(&anchor_file, &anchor_path)?;
     lock_daemon_anchor(&anchor_file, &lock_path, deadline)?;
 
     lock_directory.verify_visible()?;
     anchor_directory.verify_visible()?;
-    repair_daemon_lock_anchor(
-        &lock_directory,
-        &lock_path,
-        &anchor_directory,
-        &anchor_path,
-        &locked_identity,
-    )?;
+    ensure_daemon_lock_deadline(deadline, &lock_path)?;
+    if deadline.is_some() {
+        let mut namespace_guard = || {
+            before_setup_step()?;
+            ensure_daemon_lock_deadline(deadline, &lock_path)
+        };
+        repair_daemon_lock_anchor_with_guard(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            &locked_identity,
+            &mut namespace_guard,
+        )?;
+    } else {
+        repair_daemon_lock_anchor(
+            &lock_directory,
+            &lock_path,
+            &anchor_directory,
+            &anchor_path,
+            &locked_identity,
+        )?;
+    }
     verify_daemon_lock_paths_bound(
         &lock_directory,
         &lock_path,
@@ -2816,7 +4424,9 @@ fn with_file_lock_in_with_deadline<T>(
         &locked_identity,
     )?;
     protected_directory.verify_visible()?;
+    ensure_daemon_lock_deadline(deadline, &lock_path)?;
     let result = operation(&protected_directory);
+    let operation_deadline = ensure_daemon_lock_deadline(deadline, &lock_path);
     let attachment_result = (|| {
         lock_directory.verify_visible()?;
         anchor_directory.verify_visible()?;
@@ -2829,18 +4439,21 @@ fn with_file_lock_in_with_deadline<T>(
         )?;
         protected_directory.verify_visible()
     })();
-    let outcome = match (result, attachment_result) {
-        (_, Err(error)) => Err(error),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(value), Ok(())) => Ok(value),
+    let outcome = match (result, operation_deadline, attachment_result) {
+        (_, _, Err(error)) => Err(error),
+        (_, Err(error), Ok(())) => Err(error),
+        (Err(error), Ok(()), Ok(())) => Err(error),
+        (Ok(value), Ok(()), Ok(())) => Ok(value),
     };
     if outcome.is_ok() {
+        ensure_daemon_lock_deadline(deadline, &lock_path)?;
         cleanup_daemon_lock_anchor(
             &lock_directory,
             &lock_path,
             &anchor_directory,
             &anchor_path,
             &locked_identity,
+            deadline,
         )?;
     }
     outcome
@@ -2861,8 +4474,12 @@ fn lock_daemon_anchor(
     };
 
     loop {
+        ensure_daemon_lock_deadline(Some(deadline), lock_path)?;
         match anchor_file.try_lock() {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                ensure_daemon_lock_deadline(Some(deadline), lock_path)?;
+                return Ok(());
+            }
             Err(std::fs::TryLockError::WouldBlock) => {
                 let now = Instant::now();
                 if now >= deadline {
@@ -2881,6 +4498,51 @@ fn lock_daemon_anchor(
             }
         }
     }
+}
+
+fn ensure_daemon_lock_deadline(deadline: Option<Instant>, lock_path: &Path) -> Result<(), String> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(format!(
+            "timed out acquiring daemon state lock: {}",
+            lock_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn common_directory_ancestor(paths: &[&Path]) -> Result<PathBuf, String> {
+    let Some(first) = paths.first() else {
+        return Err("cannot derive a retained state-directory ancestor from no paths".to_string());
+    };
+    first
+        .ancestors()
+        .find(|ancestor| paths.iter().all(|path| path.starts_with(ancestor)))
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "state lock paths do not share a retained directory ancestor: {}",
+                first.display()
+            )
+        })
+}
+
+#[cfg(not(windows))]
+fn open_lock_capability_root(retained_root: &Path) -> Result<StableDirectory, String> {
+    StableDirectory::open(retained_root)
+}
+
+#[cfg(windows)]
+fn open_lock_capability_root(retained_root: &Path) -> Result<StableDirectory, String> {
+    // A retained Windows directory capability may include DELETE access. Reopening
+    // that exact directory through an ambient spelling is not share-compatible on
+    // every filesystem/runner combination, even when the handle itself permits
+    // sharing. Open its parent ambiently, then retain the already-existing common
+    // root handle-relatively before any callback or create-capable descendant walk.
+    let Some(parent) = retained_root.parent() else {
+        return StableDirectory::open(retained_root);
+    };
+    let parent_directory = StableDirectory::open(parent)?;
+    parent_directory.open_child(retained_root)
 }
 
 pub(crate) fn daemon_lock_anchor_path(lock_path: &Path) -> Result<PathBuf, String> {
@@ -2933,22 +4595,41 @@ fn git_lock_anchor_directory(project_root: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(any(unix, windows))]
-pub(crate) fn cleanup_legacy_lock_pair(
+pub(crate) fn cleanup_legacy_lock_pair_with_guard(
     visible_directory: &StableDirectory,
     visible_path: &Path,
     anchor_directory: &StableDirectory,
     anchor_path: &Path,
+    mut namespace_guard: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
-    cleanup_legacy_lock_pair_with_hook(
-        visible_directory,
+    cleanup_legacy_lock_pair_optional_with_guard(
+        Some(visible_directory),
         visible_path,
         anchor_directory,
         anchor_path,
-        || Ok(()),
+        &mut namespace_guard,
     )
 }
 
 #[cfg(any(unix, windows))]
+pub(crate) fn cleanup_legacy_lock_pair_optional_with_guard(
+    visible_directory: Option<&StableDirectory>,
+    visible_path: &Path,
+    anchor_directory: &StableDirectory,
+    anchor_path: &Path,
+    mut namespace_guard: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    cleanup_legacy_lock_pair_with_hooks(
+        visible_directory,
+        visible_path,
+        anchor_directory,
+        anchor_path,
+        &mut namespace_guard,
+        || Ok(()),
+    )
+}
+
+#[cfg(all(test, any(unix, windows)))]
 fn cleanup_legacy_lock_pair_with_hook(
     visible_directory: &StableDirectory,
     visible_path: &Path,
@@ -2956,32 +4637,91 @@ fn cleanup_legacy_lock_pair_with_hook(
     anchor_path: &Path,
     before_delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    let visible_exists = visible_directory.path_exists(visible_path)?;
-    let anchor_exists = anchor_directory.path_exists(anchor_path)?;
-    if !visible_exists && !anchor_exists {
-        return Ok(());
+    cleanup_legacy_lock_pair_with_hooks(
+        Some(visible_directory),
+        visible_path,
+        anchor_directory,
+        anchor_path,
+        &mut || Ok(()),
+        before_delete,
+    )
+}
+
+#[cfg(any(unix, windows))]
+fn cleanup_legacy_lock_pair_with_hooks(
+    visible_directory: Option<&StableDirectory>,
+    visible_path: &Path,
+    anchor_directory: &StableDirectory,
+    anchor_path: &Path,
+    namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    before_delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    namespace_guard()?;
+    struct Artifact {
+        canonical: Option<File>,
+        quarantine: Option<File>,
+        quarantine_path: PathBuf,
     }
-    let (source_directory, source_path) = if anchor_exists {
-        (anchor_directory, anchor_path)
-    } else {
-        (visible_directory, visible_path)
+    let open_artifact = |directory: &StableDirectory, path: &Path| -> Result<Artifact, String> {
+        let quarantine_path = directory.deterministic_artifact_path(
+            path,
+            ".nib-legacy-lock-delete-",
+            ".quarantine",
+        )?;
+        let canonical = directory
+            .path_exists(path)?
+            .then(|| directory.open_read_write(path))
+            .transpose()?;
+        let quarantine = directory
+            .path_exists(&quarantine_path)?
+            .then(|| directory.open_read_write(&quarantine_path))
+            .transpose()?;
+        if let (Some(canonical), Some(quarantine)) = (&canonical, &quarantine) {
+            if !same_open_file_identity(canonical, quarantine)? {
+                return Err(format!(
+                    "legacy lock and its deletion quarantine have different identities; both were preserved: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(Artifact {
+            canonical,
+            quarantine,
+            quarantine_path,
+        })
     };
-    let file = source_directory.open_read_write(source_path)?;
+    let visible = match visible_directory {
+        Some(directory) => open_artifact(directory, visible_path)?,
+        None => Artifact {
+            canonical: None,
+            quarantine: None,
+            quarantine_path: visible_path.to_path_buf(),
+        },
+    };
+    let anchor = open_artifact(anchor_directory, anchor_path)?;
+    let mut files = [
+        anchor.canonical.as_ref(),
+        anchor.quarantine.as_ref(),
+        visible.canonical.as_ref(),
+        visible.quarantine.as_ref(),
+    ]
+    .into_iter()
+    .flatten();
+    let Some(file) = files.next() else {
+        return namespace_guard();
+    };
     let identity = crate::fs_security::FileIdentity::from_file(
         file.try_clone()
             .map_err(|error| format!("failed to clone legacy lock: {error}"))?,
     )
     .map_err(|error| format!("failed to identify legacy lock: {error}"))?;
-    for (exists, directory, path) in [
-        (visible_exists, visible_directory, visible_path),
-        (anchor_exists, anchor_directory, anchor_path),
-    ] {
-        if !exists {
-            continue;
-        }
-        let probe = directory.open_read_write(path)?;
-        let probe_identity = crate::fs_security::FileIdentity::from_file(probe)
-            .map_err(|error| format!("failed to identify legacy lock: {error}"))?;
+    for probe in files {
+        let probe_identity = crate::fs_security::FileIdentity::from_file(
+            probe
+                .try_clone()
+                .map_err(|error| format!("failed to clone legacy lock: {error}"))?,
+        )
+        .map_err(|error| format!("failed to identify legacy lock: {error}"))?;
         if probe_identity != identity {
             return Err(format!(
                 "legacy lock and anchor have different identities: {}",
@@ -3005,24 +4745,54 @@ fn cleanup_legacy_lock_pair_with_hook(
         }
     }
     before_delete()?;
-    for (exists, directory, path) in [
-        (visible_exists, visible_directory, visible_path),
-        (anchor_exists, anchor_directory, anchor_path),
-    ] {
-        if exists {
-            directory.remove_file_if_matches(path, &file, ".nib-legacy-lock-delete-")?;
+    for (directory, path, artifact) in visible_directory
+        .map(|directory| (directory, visible_path, &visible))
+        .into_iter()
+        .chain(std::iter::once((anchor_directory, anchor_path, &anchor)))
+    {
+        if let Some(canonical) = &artifact.canonical {
+            directory.remove_file_if_matches_with_guard(
+                path,
+                canonical,
+                ".nib-legacy-lock-delete-",
+                &mut *namespace_guard,
+            )?;
+        } else if let Some(quarantine) = &artifact.quarantine {
+            directory.remove_visible_file_if_matches_direct_with_guard(
+                &artifact.quarantine_path,
+                quarantine,
+                &mut *namespace_guard,
+            )?;
         }
     }
-    visible_directory.verify_visible()?;
-    anchor_directory.verify_visible()
+    if let Some(visible_directory) = visible_directory {
+        visible_directory.verify_visible()?;
+    }
+    anchor_directory.verify_visible()?;
+    namespace_guard()
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn cleanup_legacy_lock_pair(
+pub(crate) fn cleanup_legacy_lock_pair_with_guard(
     _visible_directory: &StableDirectory,
     visible_path: &Path,
     _anchor_directory: &StableDirectory,
     _anchor_path: &Path,
+    _namespace_guard: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    Err(format!(
+        "legacy lock migration is unsupported on this platform: {}",
+        visible_path.display()
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn cleanup_legacy_lock_pair_optional_with_guard(
+    _visible_directory: Option<&StableDirectory>,
+    visible_path: &Path,
+    _anchor_directory: &StableDirectory,
+    _anchor_path: &Path,
+    _namespace_guard: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     Err(format!(
         "legacy lock migration is unsupported on this platform: {}",
@@ -3037,16 +4807,36 @@ fn open_daemon_lock_anchor_bound(
     anchor_directory: &StableDirectory,
     anchor_path: &Path,
 ) -> Result<File, String> {
-    open_daemon_lock_anchor_bound_with_hook(
+    open_daemon_lock_anchor_bound_with_guard_and_hook(
         lock_directory,
         lock_path,
         anchor_directory,
         anchor_path,
+        &mut || Ok(()),
         || Ok(()),
     )
 }
 
 #[cfg(any(unix, windows))]
+pub(crate) fn open_daemon_lock_anchor_bound_with_guard(
+    lock_directory: &StableDirectory,
+    lock_path: &Path,
+    anchor_directory: &StableDirectory,
+    anchor_path: &Path,
+    mut namespace_guard: impl FnMut() -> Result<(), String>,
+) -> Result<File, String> {
+    open_daemon_lock_anchor_bound_with_guard_and_hook(
+        lock_directory,
+        lock_path,
+        anchor_directory,
+        anchor_path,
+        &mut namespace_guard,
+        || Ok(()),
+    )
+}
+
+#[cfg(any(unix, windows))]
+#[cfg(test)]
 fn open_daemon_lock_anchor_bound_with_hook(
     lock_directory: &StableDirectory,
     lock_path: &Path,
@@ -3054,27 +4844,54 @@ fn open_daemon_lock_anchor_bound_with_hook(
     anchor_path: &Path,
     mut before_open: impl FnMut() -> Result<(), String>,
 ) -> Result<File, String> {
+    open_daemon_lock_anchor_bound_with_guard_and_hook(
+        lock_directory,
+        lock_path,
+        anchor_directory,
+        anchor_path,
+        &mut || Ok(()),
+        &mut before_open,
+    )
+}
+
+#[cfg(any(unix, windows))]
+fn open_daemon_lock_anchor_bound_with_guard_and_hook(
+    lock_directory: &StableDirectory,
+    lock_path: &Path,
+    anchor_directory: &StableDirectory,
+    anchor_path: &Path,
+    namespace_guard: &mut impl FnMut() -> Result<(), String>,
+    mut before_open: impl FnMut() -> Result<(), String>,
+) -> Result<File, String> {
     const MAX_NAMESPACE_RETRIES: usize = 8;
 
     for attempt in 0..MAX_NAMESPACE_RETRIES {
+        namespace_guard()?;
         let observed = (
             lock_directory.path_exists(lock_path)?,
             anchor_directory.path_exists(anchor_path)?,
         );
+        namespace_guard()?;
         let opened = (|| {
             let (lock_exists, anchor_exists) = observed;
             if !anchor_exists {
                 return if lock_exists {
-                    lock_directory.open_read_write(lock_path)
+                    let file = lock_directory.open_read_write(lock_path)?;
+                    namespace_guard()?;
+                    Ok(file)
                 } else {
-                    lock_directory.open_read_write_create(lock_path)
+                    lock_directory
+                        .open_read_write_create_with_guard(lock_path, &mut *namespace_guard)
                 };
             }
 
             before_open()?;
+            namespace_guard()?;
             let anchor_file = anchor_directory.open_read_write(anchor_path)?;
+            namespace_guard()?;
             if lock_exists {
                 let visible = lock_directory.open_read_write(lock_path)?;
+                namespace_guard()?;
                 let anchor_identity = daemon_lock_identity(&anchor_file, anchor_path)?;
                 if daemon_lock_identity(&visible, lock_path)? != anchor_identity {
                     return Err(format!(
@@ -3083,15 +4900,21 @@ fn open_daemon_lock_anchor_bound_with_hook(
                     ));
                 }
             }
+            namespace_guard()?;
             Ok(anchor_file)
         })();
         match opened {
-            Ok(file) => return Ok(file),
+            Ok(file) => {
+                namespace_guard()?;
+                return Ok(file);
+            }
             Err(error) => {
+                namespace_guard()?;
                 let current = (
                     lock_directory.path_exists(lock_path)?,
                     anchor_directory.path_exists(anchor_path)?,
                 );
+                namespace_guard()?;
                 if current == observed {
                     return Err(error);
                 }
@@ -3113,6 +4936,20 @@ fn open_daemon_lock_anchor_bound(
     lock_path: &Path,
     _anchor_directory: &StableDirectory,
     _anchor_path: &Path,
+) -> Result<File, String> {
+    Err(format!(
+        "persistent daemon lock anchors are unsupported on this platform: {}",
+        lock_path.display()
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn open_daemon_lock_anchor_bound_with_guard(
+    _lock_directory: &StableDirectory,
+    lock_path: &Path,
+    _anchor_directory: &StableDirectory,
+    _anchor_path: &Path,
+    _namespace_guard: impl FnMut() -> Result<(), String>,
 ) -> Result<File, String> {
     Err(format!(
         "persistent daemon lock anchors are unsupported on this platform: {}",
@@ -3251,7 +5088,7 @@ fn daemon_lock_identity(_file: &File, path: &Path) -> Result<(), String> {
 }
 
 #[cfg(any(unix, windows))]
-fn verify_daemon_lock_paths_bound(
+pub(crate) fn verify_daemon_lock_paths_bound(
     lock_directory: &StableDirectory,
     lock_path: &Path,
     anchor_directory: &StableDirectory,
@@ -3278,24 +5115,78 @@ fn repair_daemon_lock_anchor(
     anchor_path: &Path,
     expected: &crate::fs_security::FileIdentity,
 ) -> Result<(), String> {
+    repair_daemon_lock_anchor_with_guard(
+        lock_directory,
+        lock_path,
+        anchor_directory,
+        anchor_path,
+        expected,
+        || Ok(()),
+    )
+}
+
+#[cfg(any(unix, windows))]
+pub(crate) fn repair_daemon_lock_anchor_with_guard(
+    lock_directory: &StableDirectory,
+    lock_path: &Path,
+    anchor_directory: &StableDirectory,
+    anchor_path: &Path,
+    expected: &crate::fs_security::FileIdentity,
+    mut namespace_guard: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    namespace_guard()?;
+    if !lock_directory.path_exists(lock_path)? {
+        let anchor = anchor_directory.open_read_write(anchor_path)?;
+        namespace_guard()?;
+        if daemon_lock_identity(&anchor, anchor_path)? != *expected {
+            return Err(format!(
+                "daemon lock anchor changed before visible-path repair: {}",
+                anchor_path.display()
+            ));
+        }
+        anchor_directory.hard_link_to_with_guard(
+            anchor_path,
+            lock_directory,
+            lock_path,
+            &mut namespace_guard,
+        )?;
+    }
+    namespace_guard()?;
     let visible = lock_directory.open_read_write(lock_path)?;
+    namespace_guard()?;
     if daemon_lock_identity(&visible, lock_path)? != *expected {
         return Err(format!(
             "daemon lock visible path changed before anchor repair: {}",
             lock_path.display()
         ));
     }
+    namespace_guard()?;
     if !anchor_directory.path_exists(anchor_path)? {
-        lock_directory.hard_link_to(lock_path, anchor_directory, anchor_path)?;
-        anchor_directory.sync_directory()?;
+        namespace_guard()?;
+        lock_directory.hard_link_to_with_guard(
+            lock_path,
+            anchor_directory,
+            anchor_path,
+            &mut namespace_guard,
+        )?;
     }
+    namespace_guard()?;
+    lock_directory.sync_directory()?;
+    namespace_guard()?;
+    anchor_directory.sync_directory()?;
+    namespace_guard()?;
     verify_daemon_lock_paths_bound(
         lock_directory,
         lock_path,
         anchor_directory,
         anchor_path,
         expected,
-    )
+    )?;
+    namespace_guard()?;
+    lock_directory.verify_visible()?;
+    namespace_guard()?;
+    anchor_directory.verify_visible()?;
+    namespace_guard()
 }
 
 #[cfg(any(unix, windows))]
@@ -3305,7 +5196,10 @@ fn cleanup_daemon_lock_anchor(
     anchor_directory: &StableDirectory,
     anchor_path: &Path,
     expected: &crate::fs_security::FileIdentity,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
+    let mut deadline_guard = || ensure_daemon_lock_deadline(deadline, lock_path);
+    deadline_guard()?;
     let visible = lock_directory.open_read_write(lock_path)?;
     if daemon_lock_identity(&visible, lock_path)? != *expected {
         return Err(format!(
@@ -3313,6 +5207,7 @@ fn cleanup_daemon_lock_anchor(
             lock_path.display()
         ));
     }
+    deadline_guard()?;
     if anchor_directory.path_exists(anchor_path)? {
         let anchor = anchor_directory.open_read_write(anchor_path)?;
         if daemon_lock_identity(&anchor, anchor_path)? != *expected {
@@ -3321,18 +5216,21 @@ fn cleanup_daemon_lock_anchor(
                 anchor_path.display()
             ));
         }
-        anchor_directory.remove_file_if_matches(
+        anchor_directory.remove_file_if_matches_with_guard(
             anchor_path,
             &anchor,
             ".nib-daemon-lock-anchor-delete-",
+            &mut deadline_guard,
         )?;
     }
+    deadline_guard()?;
     lock_directory.verify_visible()?;
-    anchor_directory.verify_visible()
+    anchor_directory.verify_visible()?;
+    deadline_guard()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn verify_daemon_lock_paths_bound(
+pub(crate) fn verify_daemon_lock_paths_bound(
     _lock_directory: &StableDirectory,
     lock_path: &Path,
     _anchor_directory: &StableDirectory,
@@ -3360,12 +5258,28 @@ fn repair_daemon_lock_anchor(
 }
 
 #[cfg(not(any(unix, windows)))]
+pub(crate) fn repair_daemon_lock_anchor_with_guard(
+    _lock_directory: &StableDirectory,
+    lock_path: &Path,
+    _anchor_directory: &StableDirectory,
+    _anchor_path: &Path,
+    _expected: &(),
+    _namespace_guard: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    Err(format!(
+        "stable daemon lock anchor repair is unsupported on this platform: {}",
+        lock_path.display()
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn cleanup_daemon_lock_anchor(
     _lock_directory: &StableDirectory,
     lock_path: &Path,
     _anchor_directory: &StableDirectory,
     _anchor_path: &Path,
     _expected: &(),
+    _deadline: Option<Instant>,
 ) -> Result<(), String> {
     Err(format!(
         "stable daemon lock anchor cleanup is unsupported on this platform: {}",
@@ -3392,6 +5306,20 @@ mod tests {
     #[cfg(unix)]
     const ATOMIC_CRASH_CHILD_READY: &str = "NIB_ATOMIC_CRASH_CHILD_READY";
 
+    fn namespace_snapshot(path: &Path) -> Vec<(OsString, Vec<u8>)> {
+        let mut snapshot = fs::read_dir(path)
+            .expect("read namespace")
+            .map(|entry| {
+                let entry = entry.expect("namespace entry");
+                let name = entry.file_name();
+                let bytes = fs::read(entry.path()).expect("namespace file bytes");
+                (name, bytes)
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
     #[test]
     fn atomic_transaction_artifact_names_are_recognized_exactly() {
         let prefix = ".nib-session-";
@@ -3416,6 +5344,394 @@ mod tests {
             ),
             prefix,
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_read_write_treats_exact_disappearance_during_identity_check_as_absent() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("cleanup-quarantine.json");
+        fs::write(&target, b"owned cleanup state").expect("fixture state");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+
+        let opened = directory
+            .open_read_write_if_exists_with_hook(&target, || {
+                fs::remove_file(&target)
+                    .map_err(|error| format!("remove fixture after open: {error}"))
+            })
+            .expect("disappearance is an observed absence");
+
+        assert!(opened.is_none());
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_read_write_rejects_replacement_during_identity_check() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("cleanup-quarantine.json");
+        let retired = root.path().join("retired-cleanup-quarantine.json");
+        fs::write(&target, b"owned cleanup state").expect("fixture state");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+
+        let error = directory
+            .open_read_write_if_exists_with_hook(&target, || {
+                fs::rename(&target, &retired)
+                    .map_err(|error| format!("retire fixture after open: {error}"))?;
+                fs::write(&target, b"replacement cleanup state")
+                    .map_err(|error| format!("publish replacement fixture: {error}"))
+            })
+            .expect_err("replacement must fail the identity check");
+
+        assert!(error.contains("state file identity changed while it was in use"));
+        assert_eq!(
+            fs::read(&target).expect("replacement remains visible"),
+            b"replacement cleanup state"
+        );
+        assert_eq!(
+            fs::read(&retired).expect("opened identity remains preserved"),
+            b"owned cleanup state"
+        );
+    }
+
+    #[test]
+    fn child_directory_creation_expiry_before_mutation_preserves_namespace() {
+        let root = tempdir().expect("tempdir");
+        let child = root.path().join("native.staging");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let mut paused = false;
+        let error = directory
+            .create_owned_child_directory_until_with_hook(&child, deadline, || {
+                paused = true;
+                while Instant::now() < deadline {
+                    thread::yield_now();
+                }
+                Ok(())
+            })
+            .expect_err("expiry at the final create boundary must win");
+        assert!(paused, "test reached the final create boundary");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(
+            !child.exists(),
+            "expired creation must not mutate namespace"
+        );
+
+        let error = directory
+            .create_owned_child_directory_until(&child, Instant::now())
+            .expect_err("pre-expired free namespace must fail");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(!child.exists());
+    }
+
+    #[test]
+    fn existing_exact_child_is_resynced_after_expiry_before_parent_fsync() {
+        for relative in [
+            ".nib",
+            ".nib/subagent-owners",
+            ".git/nib/locks",
+            ".nib/process-scopes",
+        ] {
+            let root = tempdir().expect("tempdir");
+            let child = root.path().join(relative);
+            fs::create_dir_all(child.parent().expect("child parent")).expect("fixture parent");
+            let directory = StableDirectory::open(root.path()).expect("stable directory");
+            // Leave enough setup time for loaded CI workers to reach the
+            // post-create hook; the hook itself deterministically expires the
+            // same deadline before the parent-sync guard is rechecked.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut paused_after_create = false;
+            let error = directory
+                .open_or_create_descendant_directory_with_guard_and_hooks(
+                    &child,
+                    || ensure_directory_namespace_deadline(deadline, &child),
+                    |_| Ok(()),
+                    |sync_child| {
+                        if sync_child == child && !paused_after_create {
+                            paused_after_create = true;
+                            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                        }
+                        Ok(())
+                    },
+                )
+                .expect_err("expiry after create and before parent fsync must win");
+            assert!(paused_after_create, "paused after creating {relative}");
+            assert!(error.contains("namespace deadline elapsed"), "{error}");
+            assert!(child.is_dir(), "created child must remain recoverable");
+
+            let retry_deadline = Instant::now() + Duration::from_secs(2);
+            let mut observed_retry_parent_sync = false;
+            let reopened = directory
+                .open_or_create_descendant_directory_with_guard_and_hooks(
+                    &child,
+                    || ensure_directory_namespace_deadline(retry_deadline, &child),
+                    |_| Ok(()),
+                    |sync_child| {
+                        if sync_child == child {
+                            observed_retry_parent_sync = true;
+                        }
+                        Ok(())
+                    },
+                )
+                .expect("fresh deadline finalizes the exact existing child");
+            assert!(
+                observed_retry_parent_sync,
+                "retry did not fsync the parent of {relative}"
+            );
+            reopened.verify_visible().expect("reopened exact child");
+        }
+    }
+
+    #[test]
+    fn child_directory_publication_expiry_preserves_exact_staging() {
+        let root = tempdir().expect("tempdir");
+        let staging = root.path().join("native.staging");
+        let canonical = root.path().join("subagents");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::write(staging.join("receipt.json"), b"exact receipt").expect("staging receipt");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let staged = directory
+            .open_owned_child(&staging)
+            .expect("owned staging capability");
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let mut paused = false;
+        let error = directory
+            .rename_child_directory_until_with_hook(&staging, &staged, &canonical, deadline, || {
+                paused = true;
+                while Instant::now() < deadline {
+                    thread::yield_now();
+                }
+                Ok(())
+            })
+            .expect_err("expiry at the publication/sync boundary must win");
+        assert!(paused, "test reached the publication/sync boundary");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(!canonical.exists(), "expired publication must not redirect");
+        assert_eq!(
+            fs::read(staging.join("receipt.json")).expect("recoverable staging receipt"),
+            b"exact receipt"
+        );
+
+        let error = directory
+            .rename_child_directory_until(&staging, &staged, &canonical, Instant::now())
+            .expect_err("pre-expired publication must fail");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(staging.exists());
+        assert!(!canonical.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_directory_publication_rechecks_expiry_after_mutation_capability() {
+        let root = tempdir().expect("tempdir");
+        let staging = root.path().join("native.staging");
+        let canonical = root.path().join("subagents");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::write(staging.join("receipt.json"), b"exact receipt").expect("staging receipt");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let staged = directory
+            .open_owned_child(&staging)
+            .expect("owned staging capability");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut acquired = false;
+        let error = directory
+            .rename_child_directory_until_with_hooks(
+                &staging,
+                &staged,
+                &canonical,
+                deadline,
+                || Ok(()),
+                || {
+                    acquired = true;
+                    while Instant::now() < deadline {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("expiry after mutation capability acquisition must prevent publication");
+        assert!(acquired, "test acquired the exact mutation capability");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        assert!(!canonical.exists(), "expired publication must not redirect");
+        assert_eq!(
+            fs::read(staging.join("receipt.json")).expect("recoverable staging receipt"),
+            b"exact receipt"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_removal_rechecks_authority_after_mutation_capability() {
+        let root = tempdir().expect("tempdir");
+        let child_path = root.path().join("child");
+        fs::create_dir(&child_path).expect("child directory");
+        let parent = StableDirectory::open(root.path()).expect("stable parent");
+        let child = parent
+            .open_owned_child(&child_path)
+            .expect("owned child capability");
+        let acquired = std::cell::Cell::new(false);
+        let error = parent
+            .remove_empty_child_directory_if_matches_with_guard_and_hook(
+                &child_path,
+                child,
+                || {
+                    if acquired.get() {
+                        Err("directory mutation authority expired".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    acquired.set(true);
+                    Ok(())
+                },
+            )
+            .expect_err("expired post-acquisition authority must prevent removal");
+        assert!(
+            acquired.get(),
+            "test acquired the exact mutation capability"
+        );
+        assert!(error.contains("authority expired"), "{error}");
+        assert!(
+            child_path.is_dir(),
+            "expired removal must preserve the child"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn daemon_anchor_publication_expiry_preserves_exact_pair_for_fresh_retry() {
+        let root = tempdir().expect("tempdir");
+        let visible_root = root.path().join("visible");
+        let anchor_root = root.path().join("anchors");
+        fs::create_dir(&visible_root).expect("visible root");
+        fs::create_dir(&anchor_root).expect("anchor root");
+        let visible_path = visible_root.join("setup.lock");
+        let anchor_path = anchor_root.join("setup.lock.anchor");
+        fs::write(&visible_path, b"owned setup lock").expect("visible lock");
+        let visible_directory = StableDirectory::open(&visible_root).expect("visible capability");
+        let anchor_directory = StableDirectory::open(&anchor_root).expect("anchor capability");
+        let visible = visible_directory
+            .open_read_write(&visible_path)
+            .expect("visible lock handle");
+        let identity = daemon_lock_identity(&visible, &visible_path).expect("lock identity");
+        // The hard-link publication is the phase under test. Give loaded CI
+        // workers enough time to reach it, then expire the same deadline in
+        // the guard before final synchronization.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut paused = false;
+        let error = repair_daemon_lock_anchor_with_guard(
+            &visible_directory,
+            &visible_path,
+            &anchor_directory,
+            &anchor_path,
+            &identity,
+            || {
+                if !paused && anchor_path.exists() {
+                    paused = true;
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                }
+                ensure_directory_namespace_deadline(deadline, &anchor_path)
+            },
+        )
+        .expect_err("expiry after hard-link publication must win before final sync");
+        assert!(paused, "test crossed the hard-link publication boundary");
+        assert!(error.contains("namespace deadline elapsed"), "{error}");
+        let anchor = anchor_directory
+            .open_read_write(&anchor_path)
+            .expect("recoverable exact anchor");
+        assert!(same_open_file_identity(&visible, &anchor).expect("exact linked identity"));
+        assert_eq!(
+            fs::read(&visible_path).expect("visible bytes"),
+            b"owned setup lock"
+        );
+        assert_eq!(
+            fs::read(&anchor_path).expect("anchor bytes"),
+            b"owned setup lock"
+        );
+
+        let retry_deadline = Instant::now() + Duration::from_secs(2);
+        repair_daemon_lock_anchor_with_guard(
+            &visible_directory,
+            &visible_path,
+            &anchor_directory,
+            &anchor_path,
+            &identity,
+            || ensure_directory_namespace_deadline(retry_deadline, &anchor_path),
+        )
+        .expect("fresh deadline syncs and verifies retained pair");
+        verify_daemon_lock_paths_bound(
+            &visible_directory,
+            &visible_path,
+            &anchor_directory,
+            &anchor_path,
+            &identity,
+        )
+        .expect("retried pair remains exact");
+    }
+
+    #[test]
+    fn guarded_atomic_recovery_preserves_the_complete_namespace_after_expiry() {
+        let root = tempdir().expect("tempdir");
+        let target = root.path().join("record.json");
+        fs::write(&target, b"authoritative").expect("target fixture");
+        let directory = StableDirectory::open(root.path()).expect("stable directory");
+        let temporary = directory
+            .deterministic_artifact_path(&target, ".guarded-save-", ".tmp")
+            .expect("temporary path");
+        fs::write(&temporary, b"stale transaction fixture").expect("temporary fixture");
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_root = root.path().to_path_buf();
+        let worker_target = target.clone();
+        let worker = thread::spawn(move || {
+            let directory = StableDirectory::open(&worker_root).expect("worker directory");
+            let expected = directory
+                .open_read(&worker_target)
+                .expect("expected target");
+            let mut first_guard = true;
+            let error = directory
+                .save_bytes_atomically_expected_with_receipt_and_guard(
+                    &worker_target,
+                    b"must not publish",
+                    ".guarded-save-",
+                    FileExpectation::Present(&expected),
+                    || {
+                        if first_guard {
+                            first_guard = false;
+                            ready_tx.send(()).expect("signal recovery barrier");
+                            resume_rx
+                                .recv_timeout(Duration::from_secs(5))
+                                .expect("release recovery barrier");
+                        }
+                        if Instant::now() >= deadline {
+                            Err("guarded atomic deadline elapsed".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("expired recovery guard must fail");
+            assert!(error.message.contains("guarded atomic deadline elapsed"));
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("atomic recovery reached its guard");
+        let paused = namespace_snapshot(root.path());
+        while Instant::now() < deadline {
+            thread::yield_now();
+        }
+        resume_tx.send(()).expect("resume atomic recovery");
+        worker.join().expect("guarded atomic worker");
+
+        assert_eq!(namespace_snapshot(root.path()), paused);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            namespace_snapshot(root.path()),
+            paused,
+            "expired atomic recovery mutated its transaction namespace later"
+        );
     }
 
     #[cfg(windows)]
@@ -3523,6 +5839,116 @@ mod tests {
                 "failed lock child entered operation"
             );
         }
+    }
+
+    #[test]
+    fn expired_deadline_rejects_a_free_daemon_lock_before_operation() {
+        let root = tempdir().expect("tempdir");
+        let state_dir = root.path().join("state");
+        fs::create_dir(&state_dir).expect("state directory");
+        let lock_path = state_dir.join("expired-free.lock");
+        let mut operation_ran = false;
+
+        let error = with_file_lock_in_until(
+            &lock_path,
+            &state_dir,
+            Instant::now() - Duration::from_millis(1),
+            |_| {
+                operation_ran = true;
+                Ok(())
+            },
+        )
+        .expect_err("an expired deadline must reject an uncontended lock");
+
+        assert!(error.contains("timed out acquiring daemon state lock"));
+        assert!(!operation_ran, "expired lock entered its operation");
+        assert!(
+            !lock_path.exists(),
+            "expired lock setup mutated the namespace"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bounded_session_lock_setup_retries_parent_and_anchor_finalization() {
+        let root = tempdir().expect("tempdir");
+        let sessions = root.path().join(".nib/sessions");
+        fs::create_dir_all(&sessions).expect("sessions directory");
+
+        let nested_lock = sessions.join(".locks/session.lock");
+        let nested_parent = nested_lock.parent().expect("nested lock parent");
+        // Leave enough setup headroom for a loaded hosted filesystem; the hook
+        // deterministically expires the same absolute deadline once this phase exists.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut paused_after_parent_create = false;
+        let mut operation_ran = false;
+        let error = with_file_lock_in_with_deadline_and_setup_hook(
+            &nested_lock,
+            &sessions,
+            Some(deadline),
+            |_| {
+                operation_ran = true;
+                Ok(())
+            },
+            || {
+                if nested_parent.is_dir() && !nested_lock.exists() && !paused_after_parent_create {
+                    paused_after_parent_create = true;
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("expiry after lock-parent create must win");
+        assert!(paused_after_parent_create);
+        assert!(error.contains("timed out acquiring daemon state lock"));
+        assert!(!operation_ran);
+        assert!(nested_parent.is_dir(), "exact parent remains recoverable");
+
+        with_file_lock_in_until(
+            &nested_lock,
+            &sessions,
+            Instant::now() + Duration::from_secs(2),
+            |_| Ok(()),
+        )
+        .expect("fresh deadline finalizes the retained parent");
+
+        let lock_path = sessions.join("session.lock");
+        let anchor_path = daemon_lock_anchor_path(&lock_path).expect("session anchor");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut paused_after_anchor_link = false;
+        let error = with_file_lock_in_with_deadline_and_setup_hook(
+            &lock_path,
+            &sessions,
+            Some(deadline),
+            |_| Err::<(), _>("operation must not run after setup expiry".to_string()),
+            || {
+                if lock_path.exists() && anchor_path.exists() && !paused_after_anchor_link {
+                    paused_after_anchor_link = true;
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("expiry after anchor publication must win");
+        assert!(paused_after_anchor_link);
+        assert!(error.contains("timed out acquiring daemon state lock"));
+        let visible = File::open(&lock_path).expect("recoverable visible lock");
+        let anchor = File::open(&anchor_path).expect("recoverable exact anchor");
+        assert!(same_open_file_identity(&visible, &anchor).expect("same lock inode"));
+
+        let mut retry_operation_ran = false;
+        with_file_lock_in_until(
+            &lock_path,
+            &sessions,
+            Instant::now() + Duration::from_secs(2),
+            |_| {
+                retry_operation_ran = true;
+                Ok(())
+            },
+        )
+        .expect("fresh deadline repairs, syncs, and enters the operation");
+        assert!(retry_operation_ran);
+        assert!(!anchor_path.exists(), "successful retry cleans its anchor");
     }
 
     #[cfg(unix)]
@@ -3868,6 +6294,38 @@ mod tests {
         assert_eq!(fs::read(&anchor_path).expect("legacy anchor"), b"legacy");
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn absent_optional_legacy_lock_pair_still_executes_final_namespace_guard() {
+        let root = tempdir().expect("tempdir");
+        let anchor_root = root.path().join("anchor");
+        fs::create_dir(&anchor_root).expect("anchor directory");
+        let anchor = StableDirectory::open(&anchor_root).expect("anchor capability");
+        let visible_path = root.path().join("missing").join("legacy.lock");
+        let anchor_path = anchor_root.join("missing.anchor");
+        let mut guard_calls = 0;
+
+        let error = cleanup_legacy_lock_pair_optional_with_guard(
+            None,
+            &visible_path,
+            &anchor,
+            &anchor_path,
+            || {
+                guard_calls += 1;
+                if guard_calls == 2 {
+                    Err("final namespace guard observed".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("an absent pair must not bypass its final namespace guard");
+
+        assert_eq!(error, "final namespace guard observed");
+        assert_eq!(guard_calls, 2);
+        assert!(!anchor_path.exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn open_directory_capability_blocks_daemon_lock_parent_replacement() {
@@ -3889,6 +6347,70 @@ mod tests {
             lock_path.is_file(),
             "original lock remains in the pinned domain"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lock_common_root_replacement_is_rejected_before_namespace_mutation() {
+        let root = tempdir().expect("tempdir");
+        let project = root.path().join("project");
+        let state_dir = project.join("state");
+        let displaced_project = root.path().join("project.displaced");
+        let lock_path = state_dir.join("shared.json.lock");
+        let anchor_path = daemon_lock_anchor_path(&lock_path).expect("lock anchor");
+        let displaced_anchor = displaced_project.join(
+            anchor_path
+                .strip_prefix(&project)
+                .expect("anchor below common root"),
+        );
+        fs::create_dir_all(&state_dir).expect("state directory");
+        fs::write(state_dir.join("original"), b"original").expect("original sentinel");
+        let mut replaced = false;
+        let mut operation_ran = false;
+
+        let error = with_file_lock_in_until_with_setup_hook(
+            &lock_path,
+            &state_dir,
+            Instant::now() + Duration::from_secs(2),
+            |_| {
+                operation_ran = true;
+                Ok(())
+            },
+            || {
+                if replaced {
+                    return Ok(());
+                }
+                fs::rename(&project, &displaced_project).map_err(|error| error.to_string())?;
+                fs::create_dir_all(&state_dir).map_err(|error| error.to_string())?;
+                fs::write(state_dir.join("replacement"), b"replacement")
+                    .map_err(|error| error.to_string())?;
+                replaced = true;
+                Ok(())
+            },
+        )
+        .expect_err("a replaced common lock root must fail closed");
+
+        assert!(
+            replaced,
+            "test did not replace the common lock root: {error}"
+        );
+        assert!(
+            !operation_ran,
+            "replacement entered the protected operation"
+        );
+        assert!(error.contains("identity changed"), "{error}");
+        assert_eq!(
+            fs::read(displaced_project.join("state/original")).expect("original sentinel"),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(state_dir.join("replacement")).expect("replacement sentinel"),
+            b"replacement"
+        );
+        assert!(!displaced_project.join("state/shared.json.lock").exists());
+        assert!(!displaced_anchor.exists());
+        assert!(!lock_path.exists());
+        assert!(!anchor_path.exists());
     }
 
     #[cfg(unix)]
@@ -4094,6 +6616,62 @@ mod tests {
 
         assert_eq!(fs::read(existing).expect("updated state"), b"new");
         assert_eq!(fs::read(missing).expect("created state"), b"created");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_capable_child_accepts_an_equivalent_dos_short_parent() {
+        let root = tempdir().expect("tempdir");
+        let canonical = root.path().canonicalize().expect("canonical tempdir");
+        let state = canonical.join(".nib");
+        fs::create_dir(&state).expect("state directory");
+        let short_state = crate::fs_security::windows_dos_short_path_for_test(&state)
+            .expect("DOS short state directory");
+        let root_directory = StableDirectory::open(&canonical).expect("stable canonical directory");
+        let directory = root_directory
+            .open_owned_child(&state)
+            .expect("delete-capable state directory");
+        let short_target = short_state.join("short-parent.json");
+
+        directory
+            .save_bytes_atomically_expected(
+                &short_target,
+                b"short-parent",
+                ".short-parent-publication-",
+                FileExpectation::Missing,
+            )
+            .expect("publish through equivalent DOS short parent");
+
+        assert_eq!(
+            fs::read(state.join("short-parent.json")).expect("canonical publication"),
+            b"short-parent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_descendant_walk_does_not_retain_delete_access_on_namespaces() {
+        let root = tempdir().expect("tempdir");
+        let canonical = root.path().canonicalize().expect("canonical tempdir");
+        let state = canonical.join(".nib");
+        let records = state.join("process-scopes");
+        fs::create_dir(&state).expect("state directory");
+        let root_directory = StableDirectory::open(&canonical).expect("stable canonical directory");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let retained_records = root_directory
+            .open_or_create_descendant_directory_with_guard(
+                &records,
+                || ensure_directory_namespace_deadline(deadline, &records),
+                |_| Ok(()),
+            )
+            .expect("retained stable namespace");
+
+        let reopened_state = StableDirectory::open(&state)
+            .expect("stable descendant capability must not block its ancestor");
+        let reopened_records = reopened_state
+            .open_child(&records)
+            .expect("reopen retained namespace from its ancestor");
+        assert!(retained_records.same_identity(&reopened_records));
     }
 
     #[cfg(windows)]
@@ -4662,32 +7240,32 @@ mod tests {
             .expect("retained prior state");
         let previous_for_hook = previous.clone();
         let mut pending_cleanup = Some((writer_directory, previous_file));
-        let mut remove_before_open = || {
-            let (writer_directory, previous_file) =
-                pending_cleanup.take().expect("prior-open hook runs once");
-            writer_directory.remove_visible_file_if_matches(
-                &previous_for_hook,
-                &previous_file,
-                || Ok(()),
-            )
+        let recovered = {
+            let mut remove_before_open = || {
+                let (writer_directory, previous_file) =
+                    pending_cleanup.take().expect("prior-open hook runs once");
+                writer_directory.remove_visible_file_if_matches(
+                    &previous_for_hook,
+                    &previous_file,
+                    || Ok(()),
+                )
+            };
+            let mut live_target_hook = || {};
+            directory
+                .recover_atomic_transaction_with_hooks(
+                    &target,
+                    &temporary,
+                    &previous,
+                    true,
+                    false,
+                    AtomicRecoveryHooks {
+                        previous_open: &mut remove_before_open,
+                        live_target: &mut live_target_hook,
+                    },
+                )
+                .expect("changed namespace must be re-evaluated")
         };
-        let mut live_target_hook = || {};
 
-        let recovered = directory
-            .recover_atomic_transaction_with_hooks(
-                &target,
-                &temporary,
-                &previous,
-                true,
-                false,
-                AtomicRecoveryHooks {
-                    previous_open: &mut remove_before_open,
-                    live_target: &mut live_target_hook,
-                },
-            )
-            .expect("changed namespace must be re-evaluated");
-
-        drop(remove_before_open);
         assert!(!recovered);
         assert!(pending_cleanup.is_none());
         assert_eq!(

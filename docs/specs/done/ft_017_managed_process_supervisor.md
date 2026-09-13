@@ -1,6 +1,6 @@
 # FT-017: Managed Process Supervisor for Abrupt Owner Loss
 
-**Status:** Development
+**Status:** Done
 
 ## Summary
 
@@ -226,9 +226,9 @@ design are both proven.
   is absent.
 - [x] Linux tests launch a real descendant that calls `setsid`, kill the owner, and prove
   the PID-namespace or cgroup scope terminates and reaps it before terminal publication.
-- [ ] Windows tests prove abrupt owner exit closes the Job Object and terminates the full
+- [x] Windows tests prove abrupt owner exit closes the Job Object and terminates the full
   descendant tree before terminal publication.
-- [ ] macOS behavior is tested against the documented group-contained contract and never
+- [x] macOS behavior is tested against the documented group-contained contract and never
   claims arbitrary detached-descendant cleanup.
 - [x] Foreground terminal, MCP, raw Git, managed-worktree Git, skill, and agent-loop
   children execute beneath the same registered scope root. Durable background workers
@@ -246,7 +246,7 @@ design are both proven.
 - [x] Process-scope storage is aggregate-bounded, restart-recovers deterministic scratch,
   and retires Complete records only from exact cleanup or launch-abort authority embedded
   in terminal workload state.
-- [ ] `task test`, `task check`, `task coverage`, Linux/macOS/Windows CI, and abrupt-owner
+- [x] `task test`, `task check`, `task coverage`, Linux/macOS/Windows CI, and abrupt-owner
   release-binary smoke all pass.
 
 ## Risks And Tradeoffs
@@ -316,12 +316,14 @@ design are both proven.
   namespace is reaped and the cleanup lease is absent.
 - `cargo test --test managed_process_supervisor_recovery -- --test-threads=1` passes
   4/4 supervisor-loss cases. Running recovery reacquires the exact cleanup lease and
-  forces the recorded namespace PID 1 to remain live until the recovery path
-  exact-signals it. Prepared recovery kills the supervisor before bwrap spawn, after
-  bwrap spawn but before PID-1 discovery, and after the PID-1 gate is ready but before
-  Running. Every Prepared case proves user code never started and publishes only
-  launch-abort authority; the recorded-root case additionally proves exact pidfd
-  termination before completion.
+  proves the recorded namespace PID 1 is absent before completion under either valid
+  parent-death ordering. A separate deterministic process-store regression keeps a
+  direct child live after its recorded supervisor exits and proves recovery exact-signals
+  it with `SIGKILL`, waits for reap, and publishes cleanup proof only afterward. Prepared
+  recovery kills the supervisor before bwrap spawn, after bwrap spawn but before PID-1
+  discovery, and after the PID-1 gate is ready but before Running. Every Prepared case
+  proves user code never started and publishes only launch-abort authority; the
+  recorded-root case additionally proves exact pidfd termination before completion.
 - `cargo test --test managed_process_launch_fencing -- --test-threads=1` passes 2/2.
   The launch-fencing matrix covers partial request delivery, a complete flushed request,
   proof-free recovery evidence, and eventual proof-backed terminal publication. The
@@ -396,7 +398,7 @@ it without non-portable multi-digit descriptor redirections.
   before the exact probe and proves the dynamic info handoff works with `/bin/sh`.
 - [x] A focused supervisor regression proves the internal launch frame cannot consume or
   alter payload stdin bytes sent after durable Running publication.
-- [ ] The exact PR revision passes the hosted Validate job with required bwrap tests.
+- [x] The exact PR revision passes the hosted Validate job with required bwrap tests.
 
 ### Affected Areas
 
@@ -440,7 +442,7 @@ validation or exact crash recovery.
 - [x] An active Windows cleanup lease does not prevent bounded directory accounting,
   scope mutation, lease-state inspection, or exact atomic recovery from reading the
   durable lease record.
-- [ ] The exact PR revision passes required bwrap validation and the hosted Linux,
+- [x] The exact PR revision passes required bwrap validation and the hosted Linux,
   macOS, and Windows matrix.
 
 ### Affected Areas
@@ -487,7 +489,7 @@ coverage.
 - [x] MCP integration tests execute production delegation only on Linux; macOS and
   Windows assert the platform rejection contract while native containment tests remain
   enabled.
-- [ ] The exact PR revision passes the hosted Validate and macOS jobs.
+- [x] The exact PR revision passes the hosted Validate and macOS jobs.
 
 ### Affected Areas
 
@@ -530,11 +532,11 @@ namespace proof unchanged, and do not enable production subagent delegation on W
   process generation.
 - [x] Windows cleanup proof does not depend on reopening a terminated PID failing while
   the supervisor retains stronger direct-child and Job Object authorities.
-- [ ] The native Windows owner-loss regression publishes its terminal result only after
+- [x] The native Windows owner-loss regression publishes its terminal result only after
   the Job-contained descendant is gone; the explicit production rejection remains.
 - [x] A native supervisor error is reported directly by the fixture instead of being
   masked as a terminal-publication timeout.
-- [ ] The exact PR revision passes the hosted Windows job and full CI matrix.
+- [x] The exact PR revision passes the hosted Windows job and full CI matrix.
 
 ### Affected Areas
 
@@ -565,10 +567,111 @@ The final implementation tree passed `task fix`, `task test`, `task check`,
 `task check:all-targets TARGET=x86_64-pc-windows-msvc`. Native Windows execution and
 the exact hosted CI matrix remain open until the pushed revision completes on GitHub.
 
-## Remaining Implementation Plan
+## FT-019 Session Background Command Reconciliation (T032, 2026-08-26)
 
-1. Execute the native Windows Job Object and macOS group-contained tests on hosted
-   runners and design cleanup authority inaccessible to managed workers before enabling
-   either production backend.
+T032 exposes durable background work to `/ps` and `/stop <task-id>` through a dedicated
+session-owned projection containing only task ID, kind, status, and timestamps. Exact
+cancellation checks the persisted job owner under the same record lock as the mutation;
+foreign and missing IDs share one unavailable result. `/stop` without an ID is a
+bounded read-only listing. These commands do not move durable workers into the
+foreground supervisor protocol or change this feature's platform containment contract.
+
+## Superseded Historical Implementation Plan
+
+1. Execute the native Windows Job Object and macOS group-contained mechanism tests on
+   hosted runners while retaining the documented production rejection on both
+   platforms. Isolating cleanup authority well enough to enable production delegation
+   there is an explicit future boundary, not remaining FT-017 scope.
 2. Inspect the exact committed CI revision and reconcile FT-015/FT-016/T020 platform
    evidence, then move this spec to `done/` only after every criterion is proven.
+
+## Linux Recovery-Fixture Stabilization (2026-08-23)
+
+The abrupt-supervisor recovery fixture previously tried to keep the namespace root alive
+by stopping it before killing the supervisor. That assumption was invalid: bubblewrap's
+parent-death `SIGKILL` can terminate a stopped namespace root before recovery observes it.
+The fixture now proves the exact namespace identity is live before the supervisor crash,
+then accepts either valid ordering after the crash: kernel parent-death cleanup may win,
+or recovery may exact-signal the still-live identity. In both cases recovery must hold the
+recoverable cleanup lease, publish the same cleanup proof, verify namespace exit, and prove
+that the escaped-session descendant never survives. The production recovery path is
+unchanged. A distinct deterministic regression records separate supervisor and direct-child
+process generations, reaps the supervisor while the child remains live, and verifies that
+recovery delivers `SIGKILL` to that exact child generation and waits for its reap before
+completion. Together the tests cover both the real bubblewrap ordering and the
+security-critical recovery-signalling branch without relying on scheduler timing.
+
+## Cleanup-Lease Finalization Read Reconciliation (2026-09-02)
+
+### Scope
+
+Make cleanup-lease deletion recovery tolerate the exact successful-finalization race in
+which a reader opens the deterministic quarantine immediately before its owner removes
+that quarantine. Preserve strict identity rejection for replacement state and retain the
+existing cleanup proof, lease lock, scope lock, deadline, and fail-closed boundaries.
+
+### Acceptance Criteria
+
+- [x] A capability-relative optional read/write open distinguishes exact disappearance
+  during the visible-identity check from replacement, link, metadata, and other I/O
+  failures.
+- [x] Cleanup-lease recovery treats a quarantine that is absent after that exact race as
+  successfully finalized, while a still-visible but unopenable quarantine remains an
+  explicit preserved-state error.
+- [x] A deterministic regression removes the exact file between the retained open and
+  visibility check and proves the operation reports absence; a companion regression
+  publishes a replacement at that boundary and proves identity rejection while both
+  identities remain preserved.
+- [x] The focused managed-process and delegation gate passes, including the previously
+  failing `spawned_subagents_approve_their_plan_but_deny_destructive_actions` workflow.
+- [x] `task verify`, coverage, release smokes, and exact-revision hosted Linux, macOS,
+  and Windows CI are green after this repair; no validation gate in this item remains
+  open.
+
+### Affected Areas
+
+`src/daemons/state.rs`, `src/sandbox/process.rs`, the managed-process and delegation
+tests, `Taskfile.yml`, and this spec.
+
+### Validation Evidence
+
+The first 2026-09-02 `task verify` attempt passed 1,059 library and 86 CLI tests, then
+failed in the delegation integration suite when a cleanup reader tried to re-open a
+quarantine that its exact live owner had just removed. After the repair,
+`task test:delegation` passed the deterministic disappearance and replacement
+regressions, all 36
+managed-process unit tests, and all 22 delegation integration tests. The complete
+aggregate then passed 1,061 library, 86 CLI, and 254 integration tests. Host and Windows
+MSVC all-target checks passed, runtime line coverage was 85.87 percent
+(101,945/118,726), and both the optimized Linux interactive and abrupt-owner
+managed-process smokes passed. The exact hosted Linux, macOS, and Windows evidence
+remains open.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.
+
+Completion does not enable production delegation on Windows or macOS. The shipped v1
+production boundary remains Linux with usable bwrap PID-namespace containment; the
+native non-Linux mechanism and fail-closed rejection gates are complete. Backlog
+FT-020 owns any future protected non-Linux production authority.

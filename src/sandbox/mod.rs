@@ -369,6 +369,64 @@ pub struct SandboxCapabilities {
     pub git_available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxExecutionRoute {
+    Direct,
+    Bwrap,
+    FailClosed(String),
+}
+
+/// Resolve the platform-dependent execution route used by the sandbox runner.
+///
+/// Status surfaces call this same resolver so they cannot describe a stronger
+/// sandbox than the runner will actually use on the current platform.
+pub fn resolve_sandbox_execution_route(
+    provider: &str,
+    profile: &str,
+    boundaries: &BoundaryConfig,
+) -> SandboxExecutionRoute {
+    resolve_sandbox_execution_route_with_capabilities(
+        provider,
+        profile,
+        boundaries,
+        &detect_capabilities(),
+    )
+}
+
+fn resolve_sandbox_execution_route_with_capabilities(
+    provider: &str,
+    profile: &str,
+    boundaries: &BoundaryConfig,
+    capabilities: &SandboxCapabilities,
+) -> SandboxExecutionRoute {
+    if provider == "internal" || profile == "internal" {
+        return match ensure_direct_execution_allowed(boundaries) {
+            Ok(()) => SandboxExecutionRoute::Direct,
+            Err(error) => SandboxExecutionRoute::FailClosed(error),
+        };
+    }
+    if !matches!(provider, "hybrid" | "bwrap") {
+        return SandboxExecutionRoute::FailClosed(format!(
+            "unsupported sandbox provider: {provider}"
+        ));
+    }
+    if capabilities.bwrap_available {
+        return SandboxExecutionRoute::Bwrap;
+    }
+    if provider == "bwrap" {
+        return SandboxExecutionRoute::FailClosed(
+            capabilities
+                .bwrap_error
+                .clone()
+                .unwrap_or_else(|| "bwrap is unavailable".to_string()),
+        );
+    }
+    match ensure_hybrid_fallback_allowed(boundaries, capabilities) {
+        Ok(()) => SandboxExecutionRoute::Direct,
+        Err(error) => SandboxExecutionRoute::FailClosed(error),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStream {
     Stdout,
@@ -527,30 +585,15 @@ pub async fn run_sandboxed_with_environment(
     environment: &HashMap<String, String>,
 ) -> Result<(std::process::Output, Option<Vec<String>>), String> {
     let cwd = canonical_directory(cwd)?;
-    let capabilities = detect_capabilities();
-    if provider == "internal" || profile == "internal" {
-        ensure_direct_execution_allowed(boundaries)?;
-        return run_direct(command, &cwd, environment)
+    match resolve_sandbox_execution_route(provider, profile, boundaries) {
+        SandboxExecutionRoute::Direct => run_direct(command, &cwd, environment)
             .await
-            .map(|output| (output, None));
-    }
-    if !matches!(provider, "hybrid" | "bwrap") {
-        return Err(format!("unsupported sandbox provider: {provider}"));
-    }
-    if capabilities.bwrap_available {
-        return run_bwrap(command, &cwd, boundaries, profile, environment)
+            .map(|output| (output, None)),
+        SandboxExecutionRoute::Bwrap => run_bwrap(command, &cwd, boundaries, profile, environment)
             .await
-            .map(|(output, args)| (output, Some(args)));
+            .map(|(output, args)| (output, Some(args))),
+        SandboxExecutionRoute::FailClosed(error) => Err(error),
     }
-    if provider == "bwrap" {
-        return Err(capabilities
-            .bwrap_error
-            .unwrap_or_else(|| "bwrap is unavailable".to_string()));
-    }
-    ensure_hybrid_fallback_allowed(boundaries, &capabilities)?;
-    run_direct(command, &cwd, environment)
-        .await
-        .map(|output| (output, None))
 }
 
 /// Run a sandboxed command while retaining only the final `max_output_bytes`
@@ -1178,6 +1221,53 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn sandbox_route_resolution_matches_fallback_and_fail_closed_rules() {
+        let unavailable = SandboxCapabilities {
+            bwrap_installed: false,
+            bwrap_available: false,
+            bwrap_error: Some("fixture unavailable".to_string()),
+            managed_process_available: false,
+            managed_process_error: Some("fixture unavailable".to_string()),
+            git_available: true,
+        };
+        let restricted = BoundaryConfig {
+            allow_write: Vec::new(),
+            network: "restricted".to_string(),
+        };
+        assert_eq!(
+            resolve_sandbox_execution_route_with_capabilities(
+                "hybrid",
+                "restricted",
+                &restricted,
+                &unavailable,
+            ),
+            SandboxExecutionRoute::Direct
+        );
+        let disabled = BoundaryConfig {
+            network: "disabled".to_string(),
+            ..restricted
+        };
+        assert!(matches!(
+            resolve_sandbox_execution_route_with_capabilities(
+                "hybrid",
+                "restricted",
+                &disabled,
+                &unavailable,
+            ),
+            SandboxExecutionRoute::FailClosed(_)
+        ));
+        assert!(matches!(
+            resolve_sandbox_execution_route_with_capabilities(
+                "bwrap",
+                "restricted",
+                &BoundaryConfig::default(),
+                &unavailable,
+            ),
+            SandboxExecutionRoute::FailClosed(_)
+        ));
+    }
 
     struct EnvironmentVariableGuard {
         key: &'static str,

@@ -1,6 +1,6 @@
 # T006: Enhanced Skills Framework and MCP Gateway Alignment
 
-**Status:** Development
+**Status:** Done
 
 **Related Feature:** T002: Agent Framework Runtime and Orchestration Engine for nib
 
@@ -129,7 +129,7 @@ external adapters; nib owns only the normalized gateway dispatch contract.
 - [x] Selected skill usage is persisted in each originating session.
 - [x] Cross-session skill-usage aggregation is proven as a durable curator input.
 - [x] Fresh local repository gates are green on the reconciled tree.
-- [ ] Windows runtime gates are green on the reconciled tree.
+- [x] Windows runtime gates are green on the reconciled tree.
 
 ### Affected Areas
 
@@ -228,7 +228,7 @@ and Linux
 release/PTY smoke passed on 2026-07-16; Windows CI execution remains an outstanding
 runtime validation gate.
 
-## Remaining Implementation Plan
+## Superseded Historical Implementation Plan
 
 1. Execute the configured Windows gateway lock, cancellation, replacement, and full
    runtime suites.
@@ -236,9 +236,33 @@ runtime validation gate.
    anchor, absolute deadline, and polling guarantees.
 3. Rerun the canonical Task gates and two-stage review before moving T006 to `done/`.
 
-## Current Risks
+## Historical Risks at This Stage
 
 - The process-visible gateway lock and replacement defense have not been executed on
   Windows.
 - A platform-specific lock change could split the authoritative lock domain or weaken
   cancellation/deadline behavior unless the existing process regressions remain mandatory.
+
+
+## Final Closure Evidence (2026-09-02)
+
+This section supersedes earlier remaining-plan, current-risk, completion-state, and
+native-evidence notes only where they described validation gates now executed. PR
+[#25](https://github.com/skills-yaml/nib/pull/25) exact implementation run
+[33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
+passed the Validate, macOS Tests, and Windows Tests jobs for head
+`c3b88564da4f6f654a8618e4fa544b353ece86f5` at clean merge checkout
+`0479b72ad3d11fd7221632f042736b8489b6443b`. The matrix passed the complete
+serial suites, Linux coverage at 85.87 percent (102,061/118,862), all native
+all-target gates, exact release-binary qualification, and the Linux, macOS, and
+Windows platform smokes.
+
+The exact optimized binary hashes were
+`e9b56b4c2b527ab04bd4e40932c83a632ae5bd5931010dee6152012b421e4276`
+(Linux), `e7bbf6ea23d87a3e00b1447fc7880f2c93e6c67a27239f0068bcb599d18fb739`
+(macOS), and
+`e9250200aa0b06188e3e05d062ccd39115eb98311d0dc9b691cfdc5e9a324423`
+(Windows). Local `task verify` also passed 1,062 library tests, 86 CLI tests,
+every integration suite, and doctests during this reconciliation. All previously
+open acceptance and validation items in this file are satisfied for its shipped
+scope by this final matrix and the prior evidence recorded above.

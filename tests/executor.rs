@@ -268,6 +268,73 @@ fn execution_without_plan_gate() -> ExecutionConfig {
     }
 }
 
+#[tokio::test]
+async fn terminal_audit_redacts_before_retained_tail_truncation() {
+    let root = git_repository();
+    let store = SessionStore::for_project(root.path()).expect("profile session store");
+    store.create_session_with_id("terminal-redaction-boundary");
+    let secret = "active/credential";
+    let percent_secret = "active%2Fcredential";
+    let environment = HashMap::from([("DEPLOY_TOKEN".to_string(), secret.to_string())]);
+    let mut executor = ToolExecutor::new(root.path().to_path_buf(), execution_without_plan_gate())
+        .with_auto_approve(true)
+        .with_session_store(store.clone())
+        .with_environment(&environment);
+
+    let stdout_result = executor
+        .execute(
+            call(
+                "run_terminal",
+                json!({
+                    "command": "printf %s \"$DEPLOY_TOKEN\"",
+                    "max_output_bytes": 8
+                }),
+                root.path(),
+            ),
+            Some("terminal-redaction-boundary"),
+        )
+        .await;
+    assert!(stdout_result.success, "{:?}", stdout_result.error);
+    assert_eq!(stdout_result.output.as_ref().unwrap()["stdout"], "[REDACTE");
+
+    let stderr_result = executor
+        .execute(
+            call(
+                "run_terminal",
+                json!({
+                    "command": format!("printf %s '{percent_secret}' >&2; exit 7"),
+                    "max_output_bytes": 8
+                }),
+                root.path(),
+            ),
+            Some("terminal-redaction-boundary"),
+        )
+        .await;
+    assert!(!stderr_result.success);
+    assert_eq!(stderr_result.output.as_ref().unwrap()["stderr"], "[REDACTE");
+    assert!(stderr_result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("command exited with 7")));
+
+    let persisted = store
+        .load("terminal-redaction-boundary")
+        .expect("terminal audit session");
+    let public = serde_json::to_string(&json!({
+        "stdout_result": stdout_result,
+        "stderr_result": stderr_result,
+        "session": persisted,
+    }))
+    .expect("serialize public terminal surfaces");
+    for forbidden in [secret, percent_secret, "edential"] {
+        assert!(
+            !public.contains(forbidden),
+            "terminal surface retained credential fragment {forbidden:?}: {public}"
+        );
+    }
+    assert!(public.contains("[REDACT"), "{public}");
+}
+
 struct GrantAndCount {
     approvals: Arc<AtomicUsize>,
 }

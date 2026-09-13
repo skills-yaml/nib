@@ -38,18 +38,22 @@ pub struct DoctorArgs {
     /// Apply narrowly scoped, deterministic configuration repairs before validation
     #[arg(long)]
     pub fix: bool,
+
+    /// Attest that every prior nib binary is stopped and disabled, then migrate legacy subagent locks
+    #[arg(long, requires = "fix")]
+    pub confirm_no_legacy_processes: bool,
 }
 
 #[cfg(test)]
 pub fn run_doctor(project: &Path) -> bool {
-    run_doctor_inner(project, false)
+    run_doctor_inner(project, false, false)
 }
 
 pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
-    run_doctor_inner(project, args.fix)
+    run_doctor_inner(project, args.fix, args.confirm_no_legacy_processes)
 }
 
-fn run_doctor_inner(project: &Path, fix: bool) -> bool {
+fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool) -> bool {
     println!("nib doctor");
     println!("==========");
     println!("Build: {}", crate::version::version_display());
@@ -60,6 +64,21 @@ fn run_doctor_inner(project: &Path, fix: bool) -> bool {
         match repair_openai_transport(project) {
             Ok(true) => println!("FIXED (OpenAI now uses Responses)"),
             Ok(false) => println!("OK (no eligible fixes needed)"),
+            Err(error) => {
+                println!("FAILED ({error})");
+                println!("==========");
+                println!("Doctor summary: Some checks FAILED.");
+                return false;
+            }
+        }
+    }
+
+    if confirm_no_legacy_processes {
+        print!("Migrating offline legacy subagent locks... ");
+        match nib::tools::delegation::confirm_no_legacy_subagent_processes(project) {
+            Ok(artifacts) => println!(
+                "FIXED ({artifacts} legacy artifacts reconciled; fixed-stripe locking active)"
+            ),
             Err(error) => {
                 println!("FAILED ({error})");
                 println!("==========");
@@ -195,8 +214,11 @@ fn run_doctor_inner(project: &Path, fix: bool) -> bool {
             }
         }
         if commands_available {
-            match check_mcp_reachability(project, &nib_cfg.mcp.servers, &nib_cfg.sensitive_values())
-            {
+            match check_mcp_reachability(
+                project,
+                &nib_cfg.mcp.servers,
+                &nib_cfg.public_session_sensitive_values(),
+            ) {
                 Ok(tool_count) => println!("  Protocol initialize/list OK ({tool_count} tools)"),
                 Err(error) => {
                     println!("  MCP protocol FAILED: {error}");
@@ -588,7 +610,7 @@ fn check_permission_layer(
         .with_terminal_config(&config.terminal)
         .with_approval_handler(handler)
         .with_environment(profile.custom_env())
-        .with_sensitive_values(config.sensitive_values());
+        .with_sensitive_values(config.public_session_sensitive_values());
     let root = profile.root_path().to_path_buf();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -862,6 +884,11 @@ mod tests {
             .join("\n");
         assert!(lines.contains("Provider: openai"));
         assert!(lines.contains("Model: gpt-5.6-luna"));
+        assert!(lines.contains("Implementation: openai"));
+        assert!(lines.contains("Transport: responses"));
+        assert!(lines.contains(
+            "Adapter capabilities: complete=true, stream=true, tools=true, tool_continuation=true, parallel_tools=true, reasoning=configurable_effort, endpoint_shape=api_root_or_transport_endpoint, terminal_form=responses_status, refusal_form=responses_output_item, in_band_error_form=responses_error_event, retry_statuses=408/425/429/500/502/503/504, retry_after_statuses=429/503, credential_rotation_statuses=429"
+        ));
         assert!(lines.contains("API mode: responses"));
         assert!(lines.contains("Endpoint path: /v1/responses"));
         assert!(lines.contains("Reasoning effort: medium"));
