@@ -495,10 +495,11 @@ The TUI opens as a conversation-first ledger: two compact header/status rows, a 
 activity transcript (you, nib, plan, tool, approval, question, compression, reconcile,
 failure), and a wrapped multi-line composer. nib presents itself as the AI agent for
 the current project; it does not split the interface into separate coding and workload
-personas. Historical sessions are not a permanent pane. The fixed rows abbreviate the
-session, preserve its actual new/resumed/fork origin, and fit the execution posture to
-the current terminal width; `/status` retains the full session, transport, worktree,
-context, and effective-permission diagnostics. If a requested session is missing, the
+personas. Historical sessions are not a permanent pane. The fixed rows show the current
+folder, git branch, worktree, model, and approval mode, and fit them to the current
+terminal width. While an approval card is open the status still keeps the model and
+approval mode next to `WAITING APPROVAL`. `/status` retains the full session, transport,
+worktree path, context, and effective-permission diagnostics. If a requested session is missing, the
 ledger shows a shortened recovery notice instead of silently presenting its replacement.
 `--run` submits an initial goal; `--session` hydrates an existing session before input
 is accepted, and `--auth` runs authentication before raw mode starts.
@@ -548,8 +549,9 @@ block; expanded output is indented under a left accent. `Tab` moves focus betwee
 the composer and the transcript. With the transcript focused, `Up`/`Down` select a
 block and `Ctrl+Y` copies it. Printable keys return to the composer and insert.
 
-The transcript follows new activity by default. `PageUp` and `PageDown` move by the
-current visible rendered rows without relying on raw terminal scrollback. Manual
+The transcript follows new activity by default. Scroll the conversation with the
+mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
+also work). Those keys still scroll while an approval card is open. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
 the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
 follow-tail. The footer otherwise shows only the relevant idle, transcript, or

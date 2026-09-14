@@ -11,7 +11,8 @@ use crate::tools::executor::{
 use crate::{mcp_cmd, skill_cmd};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
@@ -858,6 +859,7 @@ pub enum TranscriptViewportAction {
     PageUp,
     PageDown,
     JumpToEnd,
+    Lines(i32),
 }
 
 /// Presentation-only transcript viewport measured in the same rendered rows used
@@ -896,27 +898,39 @@ impl TranscriptViewport {
     pub fn apply(&mut self, action: TranscriptViewportAction) {
         match action {
             TranscriptViewportAction::PageUp => {
-                let current = if self.pinned_to_tail {
-                    self.bottom_row()
-                } else {
-                    self.top_row
-                };
-                let next = current.saturating_sub(self.page_rows);
-                if next < current {
-                    self.top_row = next;
-                    self.pinned_to_tail = false;
-                }
+                self.scroll_lines(-i32::try_from(self.page_rows).unwrap_or(i32::MAX));
             }
             TranscriptViewportAction::PageDown => {
-                if !self.pinned_to_tail {
-                    self.top_row = self
-                        .top_row
-                        .saturating_add(self.page_rows)
-                        .min(self.bottom_row());
-                }
+                self.scroll_lines(i32::try_from(self.page_rows).unwrap_or(i32::MAX));
             }
             TranscriptViewportAction::JumpToEnd => self.pin_to_tail(),
+            TranscriptViewportAction::Lines(delta) => self.scroll_lines(delta),
         }
+    }
+
+    fn scroll_lines(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        if delta < 0 {
+            let current = if self.pinned_to_tail {
+                self.bottom_row()
+            } else {
+                self.top_row
+            };
+            let step = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+            let next = current.saturating_sub(step);
+            if next < current {
+                self.top_row = next;
+                self.pinned_to_tail = false;
+            }
+            return;
+        }
+        if self.pinned_to_tail {
+            return;
+        }
+        let step = usize::try_from(delta).unwrap_or(usize::MAX);
+        self.top_row = self.top_row.saturating_add(step).min(self.bottom_row());
     }
 
     pub fn pin_to_tail(&mut self) {
@@ -1337,12 +1351,8 @@ pub fn reduce_interaction(
         InteractionInput::OpenHistorySearch if consumer == InteractionConsumer::Composer => {
             InteractionReduction::OpenHistorySearch { query: None }
         }
-        InteractionInput::Transcript(action) if consumer == InteractionConsumer::Composer => {
-            InteractionReduction::Transcript(action)
-        }
-        InteractionInput::OpenHistorySearch | InteractionInput::Transcript(_) => {
-            InteractionReduction::Consumed(consumer)
-        }
+        InteractionInput::Transcript(action) => InteractionReduction::Transcript(action),
+        InteractionInput::OpenHistorySearch => InteractionReduction::Consumed(consumer),
         InteractionInput::UserAction => InteractionReduction::Consumed(consumer),
         InteractionInput::ApprovalAnswer(_) if consumer != InteractionConsumer::Approval => {
             InteractionReduction::Consumed(consumer)
@@ -3018,6 +3028,40 @@ fn fit_tui_chrome_line(verbose: String, compact: String, width: u16) -> String {
     }
 }
 
+fn folder_label(path: &Path) -> String {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(home) = home.as_ref() {
+        if let Ok(rest) = path.strip_prefix(home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn git_head_branch(cwd: &Path) -> String {
+    let output = crate::sandbox::worktree::run_git_bounded_sync_with_timeout(
+        cwd,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        Duration::from_millis(400),
+    );
+    match output {
+        Ok(output) if output.status.success() => {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if name.is_empty() {
+                "-".to_string()
+            } else {
+                name
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
 /// Formats the two terse rows used by the full-screen TUI. The complete diagnostic
 /// contract intentionally remains in [`format_interaction_chrome`] for `/status`.
 #[allow(clippy::too_many_arguments)]
@@ -3045,13 +3089,7 @@ pub fn format_tui_interaction_chrome(
         config.execution.clone(),
         &config.approvals,
     );
-    let project = bounded_sensitive_status_value(
-        project_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("project"),
-        &sensitive_values,
-    );
+    let folder = bounded_sensitive_status_value(&folder_label(project_root), &sensitive_values);
     let session_value = session
         .and_then(|session| session.display_name.as_deref())
         .filter(|name| !name.is_empty())
@@ -3067,26 +3105,27 @@ pub fn format_tui_interaction_chrome(
     } else {
         session_origin
     };
-    let worktree = crate::integrations::worktree::with_validated_session_worktree(
+    let managed_worktree = crate::integrations::worktree::with_validated_session_worktree(
         project_root,
         session_id,
-        |_path| Ok("managed".to_string()),
-    )?
-    .unwrap_or_else(|| "root".to_string());
-    let worktree = bounded_sensitive_status_value(&worktree, &sensitive_values);
-    let profile = bounded_sensitive_status_value(runtime_profile_id, &sensitive_values);
+        |path| Ok(path.to_path_buf()),
+    )?;
+    let (worktree, git_cwd) = match managed_worktree {
+        Some(path) => ("managed", path),
+        None => ("root", project_root.to_path_buf()),
+    };
+    let branch = bounded_sensitive_status_value(&git_head_branch(&git_cwd), &sensitive_values);
     let origin = bounded_sensitive_status_value(origin, &sensitive_values);
+    let profile = bounded_sensitive_status_value(runtime_profile_id, &sensitive_values);
     let header = fit_tui_chrome_line(
         format!(
-            "nib · {project} · session {session_value} · {origin} · profile {profile} · wt {worktree}"
+            "nib · {folder} · {branch} · wt {worktree} · session {session_value} · {origin} · profile {profile}"
         ),
         format!(
-            "nib · p:{} · s:{} · {} · prof:{} · wt:{}",
-            truncate_display_cells(&project, 10),
-            truncate_display_cells(&session_value, 14),
-            truncate_display_cells(&origin, 7),
-            truncate_display_cells(&profile, 8),
-            truncate_display_cells(&worktree, 8),
+            "nib · {} · {} · {}",
+            truncate_display_cells(&folder, 22),
+            truncate_display_cells(&branch, 18),
+            worktree,
         ),
         terminal_width,
     );
@@ -3109,23 +3148,15 @@ pub fn format_tui_interaction_chrome(
     let approval = posture.effective_approval_mode.to_string();
     let sandbox = compact_sandbox_label(&posture);
     let provider_model = format!("{provider}/{model}");
-    let compact_sandbox = match sandbox {
-        "sandboxed" => "sbx",
-        other => other,
-    };
     let status = fit_tui_chrome_line(
         format!(
             "{lifecycle} · {provider_model} · approval {approval} · {sandbox} · queue {queued} · plan {plan} · ctx {context}"
         ),
         format!(
-            "{} · {} · appr:{} · {} · q:{} · p:{} · ctx:{}",
-            truncate_display_cells(&lifecycle, 7),
-            truncate_display_cells(&provider_model, 17),
-            truncate_display_cells(&approval, 6),
-            truncate_display_cells(compact_sandbox, 7),
-            truncate_display_cells(&queued.to_string(), 3),
-            truncate_display_cells(&plan, 5),
-            truncate_display_cells(&context, 4),
+            "{} · {} · {}",
+            truncate_display_cells(&lifecycle, 16),
+            truncate_display_cells(&provider_model, 24),
+            truncate_display_cells(&approval, 10),
         ),
         terminal_width,
     );
@@ -4835,6 +4866,24 @@ mod tests {
             ),
             InteractionReduction::Consumed(InteractionConsumer::Completion)
         );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    approval_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::Transcript(TranscriptViewportAction::PageUp),
+            ),
+            InteractionReduction::Transcript(TranscriptViewportAction::PageUp)
+        );
+
+        let mut viewport = TranscriptViewport::default();
+        viewport.observe_layout(40, 5);
+        viewport.apply(TranscriptViewportAction::Lines(-1));
+        assert!(!viewport.is_pinned_to_tail());
+        assert_eq!(viewport.top_row(), 34);
+        viewport.apply(TranscriptViewportAction::Lines(3));
+        assert_eq!(viewport.top_row(), 35);
     }
 
     #[test]
@@ -6113,31 +6162,18 @@ mod tests {
         )
         .expect("compact chrome");
         assert!(header.starts_with("nib · "), "{header}");
+        assert!(header.contains(&folder_label(project.path())), "{header}");
         assert!(
-            header.contains(&abbreviated_session_id(&session.id)),
+            header.contains("wt root") || header.contains("root"),
+            "{header}"
+        );
+        assert!(
+            header.contains('-') || header.contains("master") || header.contains("main"),
             "{header}"
         );
         assert!(!header.contains(&session.id), "{header}");
-        assert!(
-            header.contains("wt root") || header.contains("wt:root"),
-            "{header}"
-        );
         assert!(status.contains("mock/mock-model"), "{status}");
         assert!(status.contains("manual"), "{status}");
-        assert!(status.contains("direct"), "{status}");
-        assert!(
-            status.contains("ctx <1%") || status.contains("ctx:<1%"),
-            "{status}"
-        );
-        assert!(
-            status.contains("queue 0") || status.contains("q:0"),
-            "{status}"
-        );
-        assert!(
-            status.contains("plan -") || status.contains("p:-"),
-            "{status}"
-        );
-        assert!(header.contains("new"), "{header}");
         assert!(unicode_display_width(&header) <= 80, "{header}");
         assert!(unicode_display_width(&status) <= 80, "{status}");
         assert!(!status.contains("transport"), "{status}");
@@ -6160,7 +6196,11 @@ mod tests {
             80,
         )
         .expect("width-aware chrome");
-        assert!(resumed_header.contains("resumed"), "{resumed_header}");
+        assert!(
+            resumed_header.contains("root")
+                || resumed_header.contains(&folder_label(project.path())),
+            "{resumed_header}"
+        );
         assert!(
             unicode_display_width(&resumed_header) <= 80,
             "{resumed_header}"
@@ -6169,9 +6209,14 @@ mod tests {
             unicode_display_width(&constrained_status) <= 80,
             "{constrained_status}"
         );
-        for summary in ["appr:", "q:", "p:", "ctx:"] {
-            assert!(constrained_status.contains(summary), "{constrained_status}");
-        }
+        assert!(
+            constrained_status.contains("manual"),
+            "{constrained_status}"
+        );
+        assert!(
+            constrained_status.contains("mock/") || constrained_status.contains("model"),
+            "{constrained_status}"
+        );
 
         let detailed =
             format_session_status(project.path(), "default", &store, &session.id, "idle")
@@ -6235,9 +6280,74 @@ mod tests {
             120,
         )
         .expect("managed-worktree chrome");
-        assert!(header.contains("wt managed"), "{header}");
+        assert!(
+            header.contains("wt managed") || header.contains("managed"),
+            "{header}"
+        );
         assert!(!header.contains(&session.id), "{header}");
         assert!(unicode_display_width(&header) <= 120, "{header}");
+    }
+
+    #[test]
+    fn tui_chrome_shows_model_approval_branch_worktree_and_folder() {
+        let repository = git_repository();
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(repository.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(repository.path()).expect("store");
+        let session = store.try_create_session().expect("session");
+        let persisted = store.load(&session.id).expect("persisted session");
+        let (header, status) = format_tui_interaction_chrome(
+            repository.path(),
+            "default",
+            Some(&persisted),
+            &session.id,
+            "idle",
+            "idle",
+            0,
+            100,
+        )
+        .expect("chrome");
+        assert!(
+            header.contains(&folder_label(repository.path())),
+            "{header}"
+        );
+        assert!(
+            header.contains("master") || header.contains("main"),
+            "{header}"
+        );
+        assert!(
+            header.contains("wt root") || header.contains("root"),
+            "{header}"
+        );
+        assert!(status.contains("mock-model"), "{status}");
+        assert!(status.contains("manual"), "{status}");
+        let (narrow_header, narrow_status) = format_tui_interaction_chrome(
+            repository.path(),
+            "default",
+            Some(&persisted),
+            &session.id,
+            "idle",
+            "idle",
+            0,
+            40,
+        )
+        .expect("narrow chrome");
+        assert!(
+            unicode_display_width(&narrow_header) <= 40,
+            "{narrow_header}"
+        );
+        assert!(
+            unicode_display_width(&narrow_status) <= 40,
+            "{narrow_status}"
+        );
+        assert!(
+            narrow_status.contains("mock-model") || narrow_status.contains("mock/"),
+            "{narrow_status}"
+        );
+        assert!(narrow_status.contains("manual"), "{narrow_status}");
     }
 
     #[test]

@@ -51,6 +51,12 @@ says `awaiting you`.
 - A waiting meter appears between the transcript and the composer while a run is active
   or an approval/question is pending. It shows spinner, current job, plan step, elapsed
   time, a token estimate, and status.
+- The conversation stays scrollable while an approval card is open. Wheel, PageUp,
+  PageDown, and Shift/Ctrl+Up/Down move the transcript; Y/N still answer the card.
+  Unmodified Up/Down in the composer remain draft history.
+- The two chrome rows keep model, approval mode, git branch, worktree kind, and
+  current folder visible, including on a narrow terminal and while waiting for
+  approval. Session/profile details stay in `/status`.
 
 ## Scope
 
@@ -89,12 +95,16 @@ says `awaiting you`.
       input remains visible and is not cleared.
 - [ ] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
       while a run is active or the TUI is waiting.
+- [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
+      an approval card is open; unmodified composer Up/Down still recall draft history.
+- [ ] TUI chrome shows model, approval mode, git branch, worktree kind, and current
+      folder. `WAITING APPROVAL` replaces only the lifecycle token, not those fields.
 
 ## Affected Areas
 
 - `src/interactive.rs` — tool argument hints, title composition, display_text.
 - `src/tui/mod.rs` — tool row styling, approval card, footer/status override, keys,
-  below-composer completion layout, waiting meter.
+  below-composer completion layout, waiting meter, transcript wheel/key scroll.
 - `docs/user/guide.md` — approval, tool-block, completion placement, and waiting-meter copy.
 - `docs/specs/README.md` — lifecycle inventory.
 
