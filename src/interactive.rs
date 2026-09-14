@@ -1564,6 +1564,9 @@ impl ActivityEntry {
     }
 
     pub fn display_text(&self) -> String {
+        if self.kind == ActivityKind::Tool {
+            return self.tool_display_text();
+        }
         let label = self.kind.role_label();
         let header = if self.title.is_empty() {
             if self.body.is_empty() {
@@ -1581,6 +1584,25 @@ impl ActivityEntry {
         } else {
             header
         }
+    }
+
+    fn tool_display_text(&self) -> String {
+        let fold = if self.folded && !self.body.is_empty() {
+            "› "
+        } else {
+            ""
+        };
+        let header = format!("{fold}◆ tool  {}", self.title);
+        if self.folded || self.body.is_empty() {
+            return header;
+        }
+        let body = self
+            .body
+            .lines()
+            .map(|line| format!("│ {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{header}\n{body}")
     }
 
     pub fn copy_text(&self) -> String {
@@ -2465,9 +2487,12 @@ pub fn apply_stream_event(
             ));
         }
         StreamEvent::ToolCallChunk {
-            name: Some(name), ..
+            name: Some(name),
+            arguments,
+            ..
         } if !name.is_empty() => {
-            upsert_tool_activity(activities, &name, "requested", String::new())
+            let hint = tool_argument_summary(&name, arguments.as_deref());
+            upsert_tool_activity(activities, &name, "requested", String::new(), &hint)
         }
         StreamEvent::ToolCallChunk { .. } => {}
         StreamEvent::PlanGenerated { step_count } => {
@@ -2483,7 +2508,7 @@ pub fn apply_stream_event(
             activities.push(ActivityEntry::new(
                 ActivityKind::Approval,
                 format!("{tool_name} needs approval"),
-                "Open the approval dock for bounded action context.",
+                "Waiting for Y to approve once or N to deny.",
             ));
         }
         StreamEvent::QuestionRequired { question, options } => {
@@ -2500,7 +2525,7 @@ pub fn apply_stream_event(
         }
         StreamEvent::ToolStarted { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
-            upsert_tool_activity(activities, &tool_name, "running", String::new());
+            upsert_tool_activity(activities, &tool_name, "running", String::new(), "");
         }
         StreamEvent::TerminalOutput {
             tool_name, chunk, ..
@@ -2520,17 +2545,25 @@ pub fn apply_stream_event(
             output,
             error,
         } => {
-            let (title, detail) =
+            let (status, summary, detail) =
                 summarize_tool_result(&tool_name, success, output.as_ref(), error.as_deref());
             let body = bounded_activity_body(&detail, sensitive_values);
             if let Some(existing) = find_tool_activity_mut(activities, &tool_name, true) {
-                existing.title = title;
+                let hint = tool_arg_hint_from_title(&existing.title);
+                existing.title = compose_tool_title(&tool_name, &status, &hint, &summary);
                 if !body.is_empty() {
                     existing.body = body;
                 }
                 existing.folded = !existing.body.is_empty();
             } else {
-                activities.push(ActivityEntry::new(ActivityKind::Tool, title, body).folded());
+                activities.push(
+                    ActivityEntry::new(
+                        ActivityKind::Tool,
+                        compose_tool_title(&tool_name, &status, "", &summary),
+                        body,
+                    )
+                    .folded(),
+                );
             }
         }
         StreamEvent::Compression {
@@ -2612,14 +2645,94 @@ fn find_tool_activity_mut<'a>(
     })
 }
 
+fn tool_arg_hint_from_title(title: &str) -> String {
+    title
+        .split(" · ")
+        .skip(1)
+        .filter(|part| !is_tool_result_summary(part))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn is_tool_result_summary(part: &str) -> bool {
+    part.starts_with("exit ")
+        || part.ends_with(" entries")
+        || part.ends_with(" entries, truncated")
+        || part.ends_with(" lines")
+        || part.ends_with(" matches")
+}
+
+fn compose_tool_title(name: &str, phase: &str, hint: &str, result: &str) -> String {
+    let mut title = format!("{name} {phase}");
+    if !hint.is_empty() {
+        title.push_str(" · ");
+        title.push_str(hint);
+    }
+    if !result.is_empty() {
+        title.push_str(" · ");
+        title.push_str(result);
+    }
+    title
+}
+
+pub fn tool_argument_summary(tool_name: &str, arguments: Option<&str>) -> String {
+    let Some(raw) = arguments.filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return String::new();
+    };
+    let pick = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|key| {
+                value.get(*key).and_then(|item| {
+                    item.as_str()
+                        .map(ToString::to_string)
+                        .or_else(|| (!item.is_null()).then(|| item.to_string()))
+                })
+            })
+            .unwrap_or_default()
+    };
+    let hint = match tool_name {
+        "read_file" | "list_directory" | "search_replace" => {
+            pick(&["path", "target_file", "file_path"])
+        }
+        "run_terminal" => pick(&["command"]),
+        "grep" => {
+            let pattern = pick(&["pattern", "query"]);
+            let path = pick(&["path"]);
+            [pattern, path]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        "apply_patch" => "patch".to_string(),
+        _ => pick(&["path", "command", "query", "pattern", "url"]),
+    };
+    if hint.is_empty() {
+        return String::new();
+    }
+    truncate_display_cells(
+        &bounded_status_value(&crate::tools::executor::redact_text(&hint)),
+        40,
+    )
+}
+
 fn upsert_tool_activity(
     activities: &mut Vec<ActivityEntry>,
     tool_name: &str,
     phase: &str,
     body: String,
+    arg_hint: &str,
 ) {
     if let Some(existing) = find_tool_activity_mut(activities, tool_name, false) {
-        existing.title = format!("{tool_name} {phase}");
+        let hint = if arg_hint.is_empty() {
+            tool_arg_hint_from_title(&existing.title)
+        } else {
+            arg_hint.to_string()
+        };
+        existing.title = compose_tool_title(tool_name, phase, &hint, "");
         if !body.is_empty() {
             existing.body = body;
             existing.folded = true;
@@ -2628,7 +2741,7 @@ fn upsert_tool_activity(
     }
     activities.push(ActivityEntry::new(
         ActivityKind::Tool,
-        format!("{tool_name} {phase}"),
+        compose_tool_title(tool_name, phase, arg_hint, ""),
         body,
     ));
 }
@@ -2638,7 +2751,7 @@ pub fn summarize_tool_result(
     success: bool,
     output: Option<&serde_json::Value>,
     error: Option<&str>,
-) -> (String, String) {
+) -> (String, String, String) {
     let status = if success { "ok" } else { "failed" };
     let (summary, mut detail) = match (tool_name, output) {
         ("list_directory", Some(value)) => {
@@ -2718,12 +2831,7 @@ pub fn summarize_tool_result(
             }
         }
     }
-    let title = if summary.is_empty() {
-        format!("{tool_name} {status}")
-    } else {
-        format!("{tool_name} {status} · {summary}")
-    };
-    (title, detail)
+    (status.to_string(), summary, detail)
 }
 
 fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> ActivityEntry {
@@ -6357,6 +6465,7 @@ mod tests {
         assert_eq!(activities.len(), 1);
         assert_eq!(activities[0].kind, ActivityKind::Tool);
         assert_eq!(activities[0].title, "list_directory ok · 1 entries");
+        assert!(activities[0].render_line().contains("◆ tool"));
         assert!(!activities[0].render_line().contains("README.md"));
         assert!(!activities[0].render_line().contains("{\"entries\""));
         assert!(
@@ -6364,6 +6473,49 @@ mod tests {
             "{}",
             activities[0].body
         );
+    }
+
+    #[test]
+    fn tool_titles_keep_argument_hints_across_lifecycle() {
+        let mut activities = Vec::new();
+        let mut state = None;
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCallChunk {
+                index: 0,
+                name: Some("read_file".to_string()),
+                arguments: Some(r#"{"path":"src/tui/mod.rs"}"#.to_string()),
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(activities[0].title, "read_file requested · src/tui/mod.rs");
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolStarted {
+                tool_name: "read_file".to_string(),
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].title, "read_file running · src/tui/mod.rs");
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCompleted {
+                tool_name: "read_file".to_string(),
+                success: true,
+                output: Some(serde_json::json!({"content": "a\nb\nc\n"})),
+                error: None,
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(
+            activities[0].title,
+            "read_file ok · src/tui/mod.rs · 3 lines"
+        );
+        assert!(activities[0].display_text().starts_with("◆ tool"));
     }
 
     #[test]

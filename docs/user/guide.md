@@ -509,22 +509,29 @@ adding transcript noise; their exact records remain in the persisted session aud
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
 The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
-that still require interactive approval or a question appear as a dock on the current
-entry so the transcript stays visible. Press `Y` to approve, `N` or `Esc` to deny.
+that still require interactive approval appear as a bordered `Approval required`
+card that names the action, permission/risk, and two explicit choices. The
+transcript above the card stays visible. Press `Y`, `Enter`, or `1` to approve once;
+`N`, `Esc`, or `2` to deny. While the card is open the status reads `WAITING APPROVAL`
+and the footer shows only those keys. Questions still use their existing dock.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 
 The composer has focus initially, a top border, and a `> ` prompt. An empty session
 keeps the prompt and a muted `/` · `@` hint. A
-slash-command prefix opens bounded completion immediately above the composer from the
-same command registry used by parsing and help. Each row shows one command signature
+slash-command prefix opens bounded completion immediately under the composer from the
+same command registry used by parsing and help. The option list does not cover the
+conversation. Each row shows one command signature
 and one description. Use `Up`/`Down` to select, `Tab` to insert, `Enter` to run a
 complete command, and `Esc` to close completion without clearing the draft. When completion is closed, `Up`/`Down` restore
 bounded in-process draft history. Typing `@` offers
-project-scoped path completion; submitted `@path` mentions become structured
+project-scoped path completion in the same reserved band under the composer; submitted `@path` mentions become structured
 attachments (bounded file context) rather than expanding the file into the prompt
 string. Unknown and incomplete slash commands remain in the composer and show an error
 instead of becoming agent goals.
+While a turn is running or the TUI is waiting, a one-row meter sits between the
+transcript and the composer and shows a spinner, the current job, plan step, elapsed
+time, a token estimate, and status.
 
 Draft history is process-local, retains at most 50 submitted entries, and is never
 persisted or added to model context before a restored draft is submitted again. Press
@@ -533,11 +540,12 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript is a list of typed blocks. A tool call is one block that mutates from
-requested to running to a collapsed summary; `Left`/`Right` expand or fold the
-selected block. `Tab` moves focus between the composer and the transcript. With the
-transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it. Printable
-keys return to the composer and insert.
+The transcript is a list of typed blocks. A tool call is one `◆ tool` block that
+mutates from requested to running to a collapsed summary and includes the path or
+command when the stream provided it. `Left`/`Right` expand or fold the selected
+block; expanded output is indented under a left accent. `Tab` moves focus between
+the composer and the transcript. With the transcript focused, `Up`/`Down` select a
+block and `Ctrl+Y` copies it. Printable keys return to the composer and insert.
 
 The transcript follows new activity by default. `PageUp` and `PageDown` move by the
 current visible rendered rows without relying on raw terminal scrollback. Manual

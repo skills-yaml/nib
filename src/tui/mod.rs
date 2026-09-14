@@ -69,6 +69,37 @@ enum TuiFocus {
     Transcript,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WaitingKind {
+    #[default]
+    None,
+    Approval,
+    Question,
+}
+
+#[derive(Debug, Clone)]
+struct WaitingMeter {
+    job: String,
+    step: String,
+    elapsed: Duration,
+    tokens: String,
+    status: String,
+    tick: u128,
+}
+
+struct SessionLayout {
+    header: Rect,
+    status: Rect,
+    transcript: Rect,
+    meter: Rect,
+    composer: Rect,
+    completion: Rect,
+    footer: Rect,
+}
+
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_ASCII: &[char] = &['|', '/', '-', '\\'];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompletionKeyResult {
     Ignored,
@@ -296,6 +327,7 @@ struct ActiveTimeline {
     activities: Vec<ActivityEntry>,
     live: LiveOutput,
     sensitive_values: Vec<String>,
+    run_started_at: Option<Instant>,
 }
 
 impl ActiveTimeline {
@@ -327,6 +359,7 @@ impl ActiveTimeline {
             activities,
             live: LiveOutput::default(),
             sensitive_values,
+            run_started_at: None,
         }
     }
 
@@ -398,6 +431,11 @@ impl ActiveTimeline {
         if run_id.is_some() {
             self.reconciled_terminal = None;
             self.reconciled_outcome = None;
+            if self.active_run_id != run_id || self.run_started_at.is_none() {
+                self.run_started_at = Some(Instant::now());
+            }
+        } else {
+            self.run_started_at = None;
         }
         self.active_run_id = run_id;
     }
@@ -1285,8 +1323,8 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
 
 fn approval_decision_for_key(code: KeyCode) -> Option<ApprovalDecision> {
     let answer = match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => "y",
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => "n",
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') | KeyCode::Enter => "y",
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => "n",
         _ => return None,
     };
     let state = InteractionState {
@@ -1650,28 +1688,105 @@ fn render_session_switcher(
     }
 }
 
-fn completion_rect(area: Rect, row_count: usize, composer_height: u16) -> Rect {
+fn completion_reserved_height(
+    area_height: u16,
+    row_count: usize,
+    composer_height: u16,
+    meter_height: u16,
+) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
+    let desired =
+        u16::try_from(row_count.min(MAX_VISIBLE_COMPLETIONS).saturating_add(1)).unwrap_or(u16::MAX);
+    let chrome = 1u16
+        .saturating_add(1)
+        .saturating_add(3)
+        .saturating_add(composer_height)
+        .saturating_add(meter_height)
+        .saturating_add(1);
+    desired.min(area_height.saturating_sub(chrome))
+}
+
+fn split_session_layout(
+    area: Rect,
+    composer_height: u16,
+    meter_height: u16,
+    completion_height: u16,
+) -> SessionLayout {
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
+    ];
+    if meter_height > 0 {
+        constraints.push(Constraint::Length(meter_height));
+    }
+    constraints.push(Constraint::Length(composer_height));
+    if completion_height > 0 {
+        constraints.push(Constraint::Length(completion_height));
+    }
+    constraints.push(Constraint::Length(1));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    let mut index = 0;
+    let header = chunks[index];
+    index += 1;
+    let status = chunks[index];
+    index += 1;
+    let transcript = chunks[index];
+    index += 1;
+    let meter = if meter_height > 0 {
+        let rect = chunks[index];
+        index += 1;
+        rect
+    } else {
+        Rect::default()
+    };
+    let composer = chunks[index];
+    index += 1;
+    let completion = if completion_height > 0 {
+        let rect = chunks[index];
+        index += 1;
+        rect
+    } else {
+        Rect::default()
+    };
+    SessionLayout {
+        header,
+        status,
+        transcript,
+        meter,
+        composer,
+        completion,
+        footer: chunks[index],
+    }
+}
+
+fn completion_inner_rect(area: Rect) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return area;
+    }
     let horizontal_margin: u16 = if area.width >= 12 { 2 } else { 0 };
     let width = area
         .width
         .saturating_sub(horizontal_margin.saturating_mul(2))
         .clamp(1, 92);
-    let composer_top = area
-        .y
-        .saturating_add(area.height)
-        .saturating_sub(1)
-        .saturating_sub(composer_height);
-    let transcript_top = area.y.saturating_add(2);
-    let transcript_height = composer_top.saturating_sub(transcript_top);
-    let max_height = (transcript_height / 2).clamp(1, 10);
-    let desired_height = u16::try_from(row_count.saturating_add(3)).unwrap_or(u16::MAX);
-    let height = desired_height.min(max_height).max(1);
     Rect {
         x: area.x.saturating_add(horizontal_margin),
-        y: composer_top.saturating_sub(height),
+        y: area.y,
         width,
-        height,
+        height: area.height,
     }
+}
+
+#[cfg(test)]
+fn completion_rect(area: Rect, row_count: usize, composer_height: u16) -> Rect {
+    let height = completion_reserved_height(area.height, row_count, composer_height, 0);
+    let layout = split_session_layout(area, composer_height, 0, height);
+    completion_inner_rect(layout.completion)
 }
 
 fn completion_signature(suggestion: &InteractiveCompletion) -> &str {
@@ -1734,28 +1849,22 @@ fn completion_line(suggestion: &InteractiveCompletion, selected: bool, width: u1
     )
 }
 
-fn render_completion(
-    frame: &mut ratatui::Frame<'_>,
-    completion: &CompletionMenu,
-    composer: &Composer,
-) {
-    if !completion.is_open() {
+fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &CompletionMenu) {
+    if !completion.is_open() || area.width == 0 || area.height == 0 {
         return;
     }
-    let composer_height =
-        composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
-    let modal_area = completion_rect(
-        frame.area(),
-        completion.suggestions.len().min(MAX_VISIBLE_COMPLETIONS),
-        composer_height,
-    );
-    let visible_capacity = usize::from(modal_area.height.saturating_sub(3)).max(1);
+    let modal_area = completion_inner_rect(area);
+    if modal_area.width == 0 || modal_area.height == 0 {
+        return;
+    }
+    let hint_rows = u16::from(modal_area.height > 1);
+    let visible_capacity = usize::from(modal_area.height.saturating_sub(hint_rows)).max(1);
     let start = completion
         .selected
         .saturating_sub(visible_capacity.saturating_sub(1));
     let end = (start + visible_capacity).min(completion.suggestions.len());
     let no_color = std::env::var_os("NO_COLOR").is_some();
-    let inner_width = modal_area.width.saturating_sub(2);
+    let inner_width = modal_area.width;
     let mut lines = completion.suggestions[start..end]
         .iter()
         .enumerate()
@@ -1777,14 +1886,15 @@ fn render_completion(
             ))
         })
         .collect::<Vec<_>>();
-    lines.push(Line::from(Span::styled(
-        truncate_completion_text(
-            "  Up/Down select · Tab insert · Enter run · Esc close",
-            usize::from(inner_width),
-        ),
-        muted_style(no_color),
-    )));
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
+    if hint_rows > 0 {
+        lines.push(Line::from(Span::styled(
+            truncate_completion_text(
+                "  Up/Down select · Tab insert · Enter run · Esc close",
+                usize::from(inner_width),
+            ),
+            muted_style(no_color),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), modal_area);
 }
 
@@ -1867,8 +1977,6 @@ fn render_interaction_overlay(
     pending_switcher: Option<&SessionSwitcher>,
     pending_history_search: Option<&PendingHistorySearch>,
     active_session_id: &str,
-    completion: &CompletionMenu,
-    composer: &Composer,
 ) {
     match layer {
         InteractionLayer::Model => {
@@ -1901,12 +2009,14 @@ fn render_interaction_overlay(
                 );
             }
         }
-        InteractionLayer::Completion => render_completion(frame, completion, composer),
         InteractionLayer::RecoverableError => render_modal_state_error(
             frame,
             "Interaction state is unavailable; press Esc to continue.",
         ),
-        InteractionLayer::Approval | InteractionLayer::Question | InteractionLayer::Composer => {}
+        InteractionLayer::Approval
+        | InteractionLayer::Question
+        | InteractionLayer::Composer
+        | InteractionLayer::Completion => {}
     }
 }
 
@@ -2589,6 +2699,23 @@ fn role_style(kind: ActivityKind, no_color: bool) -> Style {
 }
 
 fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
+    let (fold, rest) = row
+        .strip_prefix("› ")
+        .map(|rest| ("› ", rest))
+        .unwrap_or(("", row));
+    if let Some(body) = rest.strip_prefix("│ ") {
+        let mut spans = Vec::new();
+        if !fold.is_empty() {
+            spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
+        }
+        spans.push(Span::styled("│ ".to_string(), muted_style(no_color)));
+        spans.push(Span::styled(body.to_string(), muted_style(no_color)));
+        return Line::from(spans);
+    }
+    let (diamond, rest) = rest
+        .strip_prefix("◆ ")
+        .map(|rest| ("◆ ", rest))
+        .unwrap_or(("", rest));
     for kind in [
         ActivityKind::User,
         ActivityKind::Assistant,
@@ -2604,14 +2731,50 @@ fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
     ] {
         let label = kind.role_label();
         let prefix = format!("{label}  ");
-        if let Some(rest) = row.strip_prefix(&prefix) {
-            return Line::from(vec![
-                Span::styled(label.to_string(), role_style(kind, no_color)),
-                Span::raw(format!("  {rest}")),
-            ]);
+        if let Some(rest) = rest.strip_prefix(&prefix) {
+            let mut spans = Vec::new();
+            if !fold.is_empty() {
+                spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
+            }
+            if !diamond.is_empty() {
+                spans.push(Span::styled(
+                    diamond.to_string(),
+                    role_style(kind, no_color),
+                ));
+            }
+            spans.push(Span::styled(label.to_string(), role_style(kind, no_color)));
+            spans.push(Span::styled(
+                format!("  {rest}"),
+                tool_status_style(kind, rest, no_color),
+            ));
+            return Line::from(spans);
         }
     }
     Line::from(row.to_string())
+}
+
+fn tool_status_style(kind: ActivityKind, rest: &str, no_color: bool) -> Style {
+    if no_color {
+        return if rest.contains(" failed") {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+    }
+    if kind != ActivityKind::Tool {
+        return Style::default();
+    }
+    if rest.contains(" failed") {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if rest.contains(" running") || rest.contains(" requested") {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if rest.contains(" ok") {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default()
+    }
 }
 
 fn header_line(header: &str, no_color: bool) -> Line<'static> {
@@ -2625,8 +2788,25 @@ fn header_line(header: &str, no_color: bool) -> Line<'static> {
     }
 }
 
-fn status_line(status: &str, viewport: &TranscriptViewport, no_color: bool) -> Line<'static> {
-    let combined = if viewport.is_pinned_to_tail() {
+fn status_line(
+    status: &str,
+    viewport: &TranscriptViewport,
+    no_color: bool,
+    waiting: WaitingKind,
+) -> Line<'static> {
+    let combined = if waiting == WaitingKind::Approval {
+        if viewport.is_pinned_to_tail() {
+            "WAITING APPROVAL".to_string()
+        } else {
+            "WAITING APPROVAL  ·  paused".to_string()
+        }
+    } else if waiting == WaitingKind::Question {
+        if viewport.is_pinned_to_tail() {
+            "WAITING QUESTION".to_string()
+        } else {
+            "WAITING QUESTION  ·  paused".to_string()
+        }
+    } else if viewport.is_pinned_to_tail() {
         status.to_string()
     } else {
         format!("{status}  ·  paused")
@@ -2634,10 +2814,21 @@ fn status_line(status: &str, viewport: &TranscriptViewport, no_color: bool) -> L
     let (lifecycle, rest) = combined
         .split_once("  ·  ")
         .unwrap_or((combined.as_str(), ""));
-    let mut spans = vec![Span::styled(
-        lifecycle.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+    let lifecycle_style = if waiting == WaitingKind::Approval {
+        if no_color {
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        }
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let mut spans = vec![Span::styled(lifecycle.to_string(), lifecycle_style)];
     if !rest.is_empty() {
         spans.push(Span::styled(format!("  ·  {rest}"), muted_style(no_color)));
     }
@@ -2656,8 +2847,13 @@ fn footer_line(
     viewport: &TranscriptViewport,
     focus: TuiFocus,
     queued: usize,
+    waiting: WaitingKind,
 ) -> String {
-    let mut hint = if focus == TuiFocus::Transcript {
+    let mut hint = if waiting == WaitingKind::Approval {
+        "Y/Enter approve once · N deny · Esc deny".to_string()
+    } else if waiting == WaitingKind::Question {
+        "Enter submit  Esc cancel".to_string()
+    } else if focus == TuiFocus::Transcript {
         "↑↓ select · ←/→ fold · Ctrl+Y copy · Tab prompt".to_string()
     } else if run_active {
         "Enter queue · Ctrl+S steer · Ctrl+C stop".to_string()
@@ -2671,6 +2867,122 @@ fn footer_line(
         hint.push_str(" · Ctrl+End follow");
     }
     hint
+}
+
+fn spinner_glyph(tick: u128, no_color: bool) -> char {
+    if no_color {
+        SPINNER_ASCII[tick as usize % SPINNER_ASCII.len()]
+    } else {
+        SPINNER_FRAMES[tick as usize % SPINNER_FRAMES.len()]
+    }
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let remain = secs % 60;
+    if hours > 0 {
+        format!("{hours}h{mins:02}m")
+    } else if mins > 0 {
+        format!("{mins}m{remain:02}s")
+    } else {
+        format!("{remain}s")
+    }
+}
+
+fn live_job_label(activities: &[ActivityEntry], live_state: Option<&str>) -> String {
+    for entry in activities.iter().rev() {
+        if entry.kind != ActivityKind::Tool {
+            continue;
+        }
+        let (name_phase, hint) = entry
+            .title
+            .split_once(" · ")
+            .unwrap_or((entry.title.as_str(), ""));
+        let Some(name) = name_phase
+            .strip_suffix(" running")
+            .or_else(|| name_phase.strip_suffix(" requested"))
+        else {
+            continue;
+        };
+        if hint.is_empty() {
+            return name.to_string();
+        }
+        return format!("{name} · {hint}");
+    }
+    match live_state {
+        Some(state) if !state.is_empty() => state.to_string(),
+        _ => "working".to_string(),
+    }
+}
+
+fn plan_step_label(session: Option<&crate::session::Session>) -> String {
+    session
+        .and_then(|session| session.plan.as_ref())
+        .map(|plan| {
+            format!(
+                "{}/{}",
+                plan.current_step_index.min(plan.steps.len()),
+                plan.steps.len()
+            )
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn approximate_visible_tokens(session: Option<&crate::session::Session>) -> String {
+    let Some(session) = session else {
+        return "tok -".to_string();
+    };
+    let bytes = session
+        .messages
+        .iter()
+        .map(|message| message.content.len())
+        .sum::<usize>()
+        .saturating_add(session.summary.as_deref().map(str::len).unwrap_or(0));
+    let tokens = bytes / 4;
+    if tokens >= 1000 {
+        format!("tok {}k", tokens / 1000)
+    } else {
+        format!("tok {tokens}")
+    }
+}
+
+fn meter_status_label(waiting: WaitingKind, lifecycle: &str) -> String {
+    match waiting {
+        WaitingKind::Approval => "WAITING APPROVAL".to_string(),
+        WaitingKind::Question => "WAITING QUESTION".to_string(),
+        WaitingKind::None => lifecycle.to_string(),
+    }
+}
+
+fn render_waiting_meter(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    meter: &WaitingMeter,
+    no_color: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let spin = spinner_glyph(meter.tick, no_color);
+    let text = format!(
+        "{spin}  {}  ·  step {}  ·  {}  ·  {}  ·  {}",
+        meter.job,
+        meter.step,
+        format_elapsed(meter.elapsed),
+        meter.tokens,
+        meter.status
+    );
+    let text = truncate_completion_text(&text, usize::from(area.width));
+    let style = if no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(Paragraph::new(Span::styled(text, style)), area);
 }
 
 fn copy_text_osc52(text: &str) {
@@ -2704,6 +3016,62 @@ fn encode_base64(bytes: &[u8]) -> String {
         index += 3;
     }
     output
+}
+
+fn render_approval_card(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    req: &TuiApprovalRequest,
+    no_color: bool,
+) {
+    let border = approval_dock_style(no_color);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Approval required ")
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let action = req.context.action.as_str();
+    let risk = req.context.permission_and_risk.as_str();
+    let scope = req.context.target_scope.as_str();
+    let network = req.context.network.as_str();
+    let worktree = req.context.worktree.as_str();
+    let reason = req.context.reason.as_str();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{} · {risk}", req.call.tool_name),
+            approval_dock_style(no_color),
+        )),
+        Line::from(format!("Action: {action}")),
+        Line::from(format!("Scope: {scope}")),
+        Line::from(format!("Network: {network} · {worktree}")),
+        Line::from(format!("Reason: {reason}")),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Y / Enter / 1   Approve this action once",
+            if no_color {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            },
+        )),
+        Line::from(Span::styled(
+            "  N / Esc / 2     Deny and stop this step",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let max_lines = usize::from(inner.height).max(1);
+    lines.truncate(max_lines);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn approval_dock_style(no_color: bool) -> Style {
@@ -2962,6 +3330,40 @@ fn render_current_session_view_with_viewport(
         TuiFocus::Composer,
         None,
         0,
+        None,
+        None,
+    );
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn render_session_view_with_completion(
+    frame: &mut ratatui::Frame<'_>,
+    header: &str,
+    status: &str,
+    timeline_text: &str,
+    composer: &Composer,
+    completion: Option<&CompletionMenu>,
+    meter: Option<&WaitingMeter>,
+    run_active: bool,
+) {
+    let mut viewport = TranscriptViewport::default();
+    let activities = activities_from_timeline_text(timeline_text);
+    render_session_activities(
+        frame,
+        header,
+        status,
+        &activities,
+        composer,
+        None,
+        None,
+        run_active,
+        &mut viewport,
+        TuiFocus::Composer,
+        None,
+        0,
+        completion,
+        meter,
     );
 }
 
@@ -2979,41 +3381,61 @@ fn render_session_activities(
     focus: TuiFocus,
     selected: Option<usize>,
     queued: usize,
+    completion: Option<&CompletionMenu>,
+    meter: Option<&WaitingMeter>,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
+    let waiting = if pending_approval.is_some() {
+        WaitingKind::Approval
+    } else if pending_question.is_some() {
+        WaitingKind::Question
+    } else {
+        WaitingKind::None
+    };
     let composer_h =
         composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
-    let dock = pending_approval.is_some() || pending_question.is_some();
-    let dock_h = if pending_question.is_some_and(|question| question.error.is_some()) {
+    let meter_h = u16::from(meter.is_some());
+    let completion = completion.filter(|menu| menu.is_open());
+    let completion_h = completion
+        .map(|menu| {
+            completion_reserved_height(
+                frame.area().height,
+                menu.suggestions.len(),
+                composer_h,
+                meter_h,
+            )
+        })
+        .unwrap_or(0);
+    let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
+    let dock = waiting != WaitingKind::None;
+    let desired_dock = if pending_question.is_some_and(|question| question.error.is_some()) {
         9
     } else if pending_question.is_some() {
         8
-    } else if dock {
-        7
+    } else if pending_approval.is_some() {
+        12
     } else {
         0
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(composer_h),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-    frame.render_widget(Paragraph::new(header_line(header, no_color)), chunks[0]);
+    frame.render_widget(Paragraph::new(header_line(header, no_color)), layout.header);
+    let dock_h = if dock {
+        let keep_transcript = 3u16.min(layout.transcript.height.saturating_sub(1));
+        desired_dock
+            .min(layout.transcript.height.saturating_sub(keep_transcript))
+            .max(1)
+    } else {
+        0
+    };
     let body = if dock {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(dock_h)])
-            .split(chunks[2])
+            .split(layout.transcript)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1)])
-            .split(chunks[2])
+            .split(layout.transcript)
     };
     let empty = activities.is_empty();
     let (rendered_rows, owners) = if empty {
@@ -3029,8 +3451,8 @@ fn render_session_activities(
         ensure_selected_visible(viewport, &owners, selected);
     }
     frame.render_widget(
-        Paragraph::new(status_line(status, viewport, no_color)),
-        chunks[1],
+        Paragraph::new(status_line(status, viewport, no_color, waiting)),
+        layout.status,
     );
     if empty {
         let welcome_height = u16::try_from(empty_state_lines(no_color).len()).unwrap_or(1);
@@ -3068,18 +3490,7 @@ fn render_session_activities(
         frame.render_widget(Paragraph::new(lines), body[0]);
     }
     if let Some(req) = pending_approval {
-        let mut lines = req.context.lines();
-        let first = lines.remove(0);
-        let mut text = vec![Line::from(Span::styled(
-            format!("approval  {first}"),
-            approval_dock_style(std::env::var_os("NO_COLOR").is_some()),
-        ))];
-        text.extend(lines.into_iter().map(Line::from));
-        text.push(Line::from("Keys: Y approve once; N/Esc deny"));
-        frame.render_widget(
-            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: true }),
-            body[1],
-        );
+        render_approval_card(frame, body[1], req, no_color);
     } else if let Some(question) = pending_question {
         let mut text = vec![Line::from(Span::styled(
             format!("question  {}", question.request.question),
@@ -3103,7 +3514,10 @@ fn render_session_activities(
             body[1],
         );
     }
-    let composer_area = chunks[3];
+    if let Some(meter) = meter {
+        render_waiting_meter(frame, layout.meter, meter, no_color);
+    }
+    let composer_area = layout.composer;
     if composer_area.width > 0 && composer_area.height > 0 {
         let border_style = if focus == TuiFocus::Composer {
             role_style(ActivityKind::User, no_color)
@@ -3166,10 +3580,13 @@ fn render_session_activities(
             }
         }
     }
+    if let Some(completion) = completion {
+        render_completion(frame, layout.completion, completion);
+    }
     frame.render_widget(
-        Paragraph::new(footer_line(run_active, viewport, focus, queued))
+        Paragraph::new(footer_line(run_active, viewport, focus, queued, waiting))
             .style(muted_style(no_color)),
-        chunks[4],
+        layout.footer,
     );
 }
 
@@ -3223,6 +3640,7 @@ fn draw_loop(
     let mut selected_activity: Option<usize> = None;
     let mut clear_armed_at: Option<Instant> = None;
     let mut quit_armed_at: Option<Instant> = None;
+    let spinner_origin = Instant::now();
     let mut chrome_generation: u64 = 0;
     let mut chrome_cache: Option<ChromeCache> = None;
     let mut exit_requested = false;
@@ -3363,6 +3781,28 @@ fn draw_loop(
         if selected_activity.is_some_and(|index| index >= timeline.activities.len()) {
             selected_activity = timeline.activities.len().checked_sub(1);
         }
+        let waiting = if pending_approval.is_some() {
+            WaitingKind::Approval
+        } else if pending_question.is_some() {
+            WaitingKind::Question
+        } else {
+            WaitingKind::None
+        };
+        let meter = if worker.is_some() || waiting != WaitingKind::None {
+            Some(WaitingMeter {
+                job: live_job_label(&timeline.activities, timeline.live.state.as_deref()),
+                step: plan_step_label(session.as_ref()),
+                elapsed: timeline
+                    .run_started_at
+                    .map(|started| started.elapsed())
+                    .unwrap_or_default(),
+                tokens: approximate_visible_tokens(session.as_ref()),
+                status: meter_status_label(waiting, worker_status),
+                tick: spinner_origin.elapsed().as_millis(),
+            })
+        } else {
+            None
+        };
         if let Err(error) = terminal.draw(|f| {
             render_session_activities(
                 f,
@@ -3377,6 +3817,8 @@ fn draw_loop(
                 tui_focus,
                 selected_activity,
                 queued,
+                Some(&completion).filter(|menu| menu.is_open()),
+                meter.as_ref(),
             );
             render_interaction_overlay(
                 f,
@@ -3385,8 +3827,6 @@ fn draw_loop(
                 pending_switcher.as_ref(),
                 pending_history_search.as_ref(),
                 &active_session_id,
-                &completion,
-                &composer,
             );
         }) {
             break Err(error);
@@ -4077,6 +4517,23 @@ mod tests {
         Ok(())
     }
 
+    fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..buffer.area.width {
+                    row.push_str(buffer[(x, y)].symbol());
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn row_index_containing(rows: &[String], needle: &str) -> Option<usize> {
+        rows.iter().position(|row| row.contains(needle))
+    }
+
     fn approval_request(
         call: ToolCall,
         level: PermissionLevel,
@@ -4335,35 +4792,62 @@ mod tests {
     fn footer_and_completion_follow_the_current_interaction() {
         let mut viewport = TranscriptViewport::default();
         assert_eq!(
-            footer_line(false, &viewport, TuiFocus::Composer, 0),
+            footer_line(false, &viewport, TuiFocus::Composer, 0, WaitingKind::None),
             "Enter send · Shift+Enter newline · / commands · @ files"
         );
         assert_eq!(
-            footer_line(true, &viewport, TuiFocus::Composer, 0),
+            footer_line(true, &viewport, TuiFocus::Composer, 0, WaitingKind::None),
             "Enter queue · Ctrl+S steer · Ctrl+C stop"
         );
         assert_eq!(
-            footer_line(true, &viewport, TuiFocus::Composer, 2),
+            footer_line(true, &viewport, TuiFocus::Composer, 2, WaitingKind::None),
             "queue 2 · Enter queue · Ctrl+S steer · Ctrl+C stop"
         );
-        assert!(footer_line(false, &viewport, TuiFocus::Transcript, 0).contains("↑↓ select"));
+        assert!(
+            footer_line(false, &viewport, TuiFocus::Transcript, 0, WaitingKind::None)
+                .contains("↑↓ select")
+        );
+        assert_eq!(
+            footer_line(
+                true,
+                &viewport,
+                TuiFocus::Composer,
+                0,
+                WaitingKind::Approval
+            ),
+            "Y/Enter approve once · N deny · Esc deny"
+        );
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
-        assert!(footer_line(true, &viewport, TuiFocus::Composer, 0).contains("Ctrl+End follow"));
+        assert!(
+            footer_line(true, &viewport, TuiFocus::Composer, 0, WaitingKind::None)
+                .contains("Ctrl+End follow")
+        );
 
         let area = Rect::new(0, 0, 100, 30);
-        let completion = completion_rect(area, MAX_VISIBLE_COMPLETIONS, 2);
+        let composer_height = 2;
+        let completion = completion_rect(area, MAX_VISIBLE_COMPLETIONS, composer_height);
         assert_eq!(completion.width, 92);
-        assert!(completion.y >= 16, "{completion:?}");
-        assert!(completion.y + completion.height <= 27, "{completion:?}");
+        let composer_bottom = completion.y;
+        assert!(completion.height >= 2, "{completion:?}");
+        assert_eq!(
+            completion.y + completion.height,
+            area.height.saturating_sub(1),
+            "{completion:?}"
+        );
+        assert!(
+            composer_bottom >= composer_height,
+            "completion {completion:?} must sit under the composer"
+        );
 
         let multiline = completion_rect(Rect::new(0, 0, 80, 24), MAX_VISIBLE_COMPLETIONS, 6);
-        let composer_top = 24 - 1 - 6;
+        let composer_bottom = 24u16.saturating_sub(1).saturating_sub(multiline.height);
+        assert_eq!(multiline.y, composer_bottom, "{multiline:?}");
         assert!(
-            multiline.y + multiline.height <= composer_top,
-            "{multiline:?}"
+            multiline.y >= 6,
+            "completion must start at or below the composer bottom: {multiline:?}"
         );
-        assert!(multiline.height <= (composer_top - 2) / 2, "{multiline:?}");
+        assert_eq!(multiline.y + multiline.height, 23, "{multiline:?}");
 
         let permissions = interactive_completions("/permissions ");
         let rows = permissions
@@ -4383,6 +4867,104 @@ mod tests {
             assert_eq!(truncate_completion_text(&text, 4), format!("a{grapheme}…"));
         }
         assert_eq!(truncate_completion_text("e\u{301}xyz", 2), "e\u{301}…");
+    }
+
+    #[test]
+    fn slash_completion_renders_under_the_composer_without_covering_conversation() {
+        let mut completion = CompletionMenu::default();
+        completion.sync("/");
+        assert!(completion.is_open());
+        let composer = Composer::from_text("/");
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_session_view_with_completion(
+                    frame,
+                    "nib · project · session abc",
+                    "idle · mock/mock-model",
+                    "you  hello conversation\n\nnib  keep this visible",
+                    &composer,
+                    Some(&completion),
+                    None,
+                    false,
+                )
+            })
+            .expect("render slash completion");
+        let rows = buffer_rows(&terminal);
+        let conversation =
+            row_index_containing(&rows, "hello conversation").expect("conversation row");
+        let reply = row_index_containing(&rows, "keep this visible").expect("reply row");
+        let prompt = row_index_containing(&rows, "> /").expect("composer row");
+        let suggestion = row_index_containing(&rows, "/status").expect("completion row");
+        assert!(
+            conversation < prompt,
+            "conversation must stay above the input: {rows:?}"
+        );
+        assert!(
+            reply < prompt,
+            "assistant text must stay above the input: {rows:?}"
+        );
+        assert!(
+            prompt < suggestion,
+            "slash options must render under the text input: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn waiting_meter_shows_job_step_time_tokens_and_status() {
+        let meter = WaitingMeter {
+            job: "read_file · src/lib.rs".to_string(),
+            step: "2/5".to_string(),
+            elapsed: Duration::from_secs(12),
+            tokens: "tok 8k".to_string(),
+            status: "running".to_string(),
+            tick: 0,
+        };
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_session_view_with_completion(
+                    frame,
+                    "nib · project · session abc",
+                    "running · mock/mock-model",
+                    "you  inspect wrap",
+                    &Composer::default(),
+                    None,
+                    Some(&meter),
+                    true,
+                )
+            })
+            .expect("render waiting meter");
+        let rows = buffer_rows(&terminal);
+        let joined = rows.concat();
+        assert!(joined.contains("read_file · src/lib.rs"), "{joined}");
+        assert!(joined.contains("step 2/5"), "{joined}");
+        assert!(joined.contains("12s"), "{joined}");
+        assert!(joined.contains("tok 8k"), "{joined}");
+        assert!(joined.contains("running"), "{joined}");
+        let meter_row = row_index_containing(&rows, "step 2/5").expect("meter row");
+        let prompt = rows
+            .iter()
+            .position(|row| row.contains("> Ask nib anything"))
+            .expect("composer row");
+        assert!(
+            meter_row < prompt,
+            "waiting meter must sit above the text input: {rows:?}"
+        );
+        assert_eq!(
+            live_job_label(
+                &[ActivityEntry::new(
+                    ActivityKind::Tool,
+                    "read_file running · src/lib.rs",
+                    String::new(),
+                )],
+                Some("planning"),
+            ),
+            "read_file · src/lib.rs"
+        );
+        assert_eq!(format_elapsed(Duration::from_secs(75)), "1m15s");
     }
 
     #[test]
@@ -4814,16 +5396,16 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("small test terminal");
             terminal
                 .draw(|frame| {
-                    render_current_session_view(
+                    render_session_view_with_completion(
                         frame,
                         "sess small-session",
                         "idle",
                         "Session: small-session",
                         &Composer::default(),
+                        Some(&completion),
                         None,
-                        None,
+                        false,
                     );
-                    render_completion(frame, &completion, &Composer::default());
                 })
                 .expect("render completion on small terminal");
             terminal
@@ -5162,6 +5744,39 @@ mod tests {
         let decision = reply_rx.try_recv().unwrap();
         assert!(decision.granted);
         assert_eq!(decision.source, "user");
+    }
+
+    #[test]
+    fn approval_enter_and_number_keys_are_explicit_choices() {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task test"}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
+        assert!(reply_rx.try_recv().unwrap().granted);
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task test"}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
+        assert!(handle_approval_key(&mut pending, KeyCode::Char('2')));
+        assert!(!reply_rx.try_recv().unwrap().granted);
     }
 
     #[test]
@@ -6269,9 +6884,11 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("sess dock-session"));
         assert!(rendered.contains("inspect wrap"));
-        assert!(rendered.contains("approval"));
+        assert!(rendered.contains("Approval required"));
+        assert!(rendered.contains("WAITING APPROVAL"));
         assert!(rendered.contains("run_terminal"));
-        assert!(rendered.contains("Y approve once"));
+        assert!(rendered.contains("Approve this action once"));
+        assert!(rendered.contains("Deny and stop this step"));
         assert!(rendered.contains("task test"));
         assert!(!rendered.contains("{\"command\""));
     }
@@ -6462,8 +7079,6 @@ mod tests {
                     None,
                     None,
                     "session-a",
-                    &CompletionMenu::default(),
-                    &Composer::default(),
                 )
             })
             .expect("recoverable modal render");
@@ -6618,8 +7233,6 @@ mod tests {
                     None,
                     Some(&search),
                     "session-a",
-                    &CompletionMenu::default(),
-                    &composer,
                 );
             })
             .expect("render history overlay");
