@@ -19,7 +19,10 @@ use crate::interactive::{
 use crate::interactive::{bounded_public_text, control_safe_text};
 use crate::llm::types::StreamEvent;
 use crate::session::SessionStore;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
@@ -2491,6 +2494,7 @@ pub fn run_tui(
             )),
         });
     }
+    let _ = enable_mouse_capture();
 
     // Terminal ownership is established before session resolution. A terminal startup
     // failure therefore cannot create a session or submit the optional initial goal.
@@ -2573,14 +2577,61 @@ fn enable_bracketed_paste() -> io::Result<()> {
     enable_bracketed_paste_to(&mut io::stdout())
 }
 
+fn enable_mouse_capture_to(output: &mut impl io::Write) -> io::Result<()> {
+    execute!(output, EnableMouseCapture)
+}
+
+fn enable_mouse_capture() -> io::Result<()> {
+    enable_mouse_capture_to(&mut io::stdout())
+}
+
+fn transcript_action_for_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<TranscriptViewportAction> {
+    match code {
+        KeyCode::PageUp => Some(TranscriptViewportAction::PageUp),
+        KeyCode::PageDown => Some(TranscriptViewportAction::PageDown),
+        KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewportAction::JumpToEnd)
+        }
+        KeyCode::Up
+            if modifiers.contains(KeyModifiers::SHIFT)
+                || modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(TranscriptViewportAction::Lines(-1))
+        }
+        KeyCode::Down
+            if modifiers.contains(KeyModifiers::SHIFT)
+                || modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(TranscriptViewportAction::Lines(1))
+        }
+        _ => None,
+    }
+}
+
+fn transcript_action_for_mouse(kind: MouseEventKind) -> Option<TranscriptViewportAction> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(TranscriptViewportAction::Lines(-3)),
+        MouseEventKind::ScrollDown => Some(TranscriptViewportAction::Lines(3)),
+        _ => None,
+    }
+}
+
 fn restore_terminal_to(output: &mut impl io::Write, raw_result: io::Result<()>) -> io::Result<()> {
-    // Attempt all three restorations even if an earlier one fails. In particular,
-    // bracketed paste must not remain enabled on a raw-mode or alternate-screen error.
+    // Attempt all restorations even if an earlier one fails. In particular,
+    // mouse capture and bracketed paste must not remain enabled on a raw-mode
+    // or alternate-screen error.
+    let mouse_result = execute!(output, DisableMouseCapture);
     let paste_result = execute!(output, DisableBracketedPaste);
     let alternate_result = execute!(output, LeaveAlternateScreen);
     let mut errors = Vec::new();
     if let Err(error) = raw_result {
         errors.push(format!("failed to disable raw mode: {error}"));
+    }
+    if let Err(error) = mouse_result {
+        errors.push(format!("failed to disable mouse capture: {error}"));
     }
     if let Err(error) = paste_result {
         errors.push(format!("failed to disable bracketed paste: {error}"));
@@ -2788,32 +2839,33 @@ fn header_line(header: &str, no_color: bool) -> Line<'static> {
     }
 }
 
+fn chrome_lifecycle_and_rest(status: &str) -> (&str, &str) {
+    match status.split_once(" · ") {
+        Some((lifecycle, rest)) => (lifecycle.trim_end(), rest.trim_start()),
+        None => (status, ""),
+    }
+}
+
 fn status_line(
     status: &str,
     viewport: &TranscriptViewport,
     no_color: bool,
     waiting: WaitingKind,
 ) -> Line<'static> {
-    let combined = if waiting == WaitingKind::Approval {
-        if viewport.is_pinned_to_tail() {
-            "WAITING APPROVAL".to_string()
-        } else {
-            "WAITING APPROVAL  ·  paused".to_string()
-        }
-    } else if waiting == WaitingKind::Question {
-        if viewport.is_pinned_to_tail() {
-            "WAITING QUESTION".to_string()
-        } else {
-            "WAITING QUESTION  ·  paused".to_string()
-        }
-    } else if viewport.is_pinned_to_tail() {
-        status.to_string()
-    } else {
-        format!("{status}  ·  paused")
+    let (lifecycle, rest) = chrome_lifecycle_and_rest(status);
+    let lifecycle = match waiting {
+        WaitingKind::Approval => "WAITING APPROVAL",
+        WaitingKind::Question => "WAITING QUESTION",
+        WaitingKind::None => lifecycle,
     };
-    let (lifecycle, rest) = combined
-        .split_once("  ·  ")
-        .unwrap_or((combined.as_str(), ""));
+    let mut combined = lifecycle.to_string();
+    if !rest.is_empty() {
+        combined = format!("{combined} · {rest}");
+    }
+    if !viewport.is_pinned_to_tail() {
+        combined = format!("{combined} · paused");
+    }
+    let (lifecycle, rest) = chrome_lifecycle_and_rest(&combined);
     let lifecycle_style = if waiting == WaitingKind::Approval {
         if no_color {
             Style::default()
@@ -2830,7 +2882,7 @@ fn status_line(
     };
     let mut spans = vec![Span::styled(lifecycle.to_string(), lifecycle_style)];
     if !rest.is_empty() {
-        spans.push(Span::styled(format!("  ·  {rest}"), muted_style(no_color)));
+        spans.push(Span::styled(format!(" · {rest}"), muted_style(no_color)));
     }
     Line::from(spans)
 }
@@ -4062,6 +4114,12 @@ fn draw_loop(
                 }
                 continue;
             }
+            if let Event::Mouse(mouse) = input {
+                if let Some(action) = transcript_action_for_mouse(mouse.kind) {
+                    transcript_viewport.apply(action);
+                }
+                continue;
+            }
             if let Event::Key(key) = input {
                 if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                     continue;
@@ -4142,21 +4200,11 @@ fn draw_loop(
                     }
                     continue;
                 }
+                if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
+                    transcript_viewport.apply(action);
+                    continue;
+                }
                 let semantic_reduction = match key.code {
-                    KeyCode::PageUp => Some(reduce_interaction(
-                        &interaction_state,
-                        InteractionInput::Transcript(TranscriptViewportAction::PageUp),
-                    )),
-                    KeyCode::PageDown => Some(reduce_interaction(
-                        &interaction_state,
-                        InteractionInput::Transcript(TranscriptViewportAction::PageDown),
-                    )),
-                    KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(reduce_interaction(
-                            &interaction_state,
-                            InteractionInput::Transcript(TranscriptViewportAction::JumpToEnd),
-                        ))
-                    }
                     KeyCode::Char('r') | KeyCode::Char('R')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
@@ -4167,10 +4215,6 @@ fn draw_loop(
                     }
                     _ => None,
                 };
-                if let Some(InteractionReduction::Transcript(action)) = semantic_reduction {
-                    transcript_viewport.apply(action);
-                    continue;
-                }
                 if let Some(InteractionReduction::OpenHistorySearch { query }) = semantic_reduction
                 {
                     pending_history_search =
@@ -7102,6 +7146,7 @@ mod tests {
         assert!(rendered.contains("inspect wrap"));
         assert!(rendered.contains("Approval required"));
         assert!(rendered.contains("WAITING APPROVAL"));
+        assert!(rendered.contains("mock/mock-model"));
         assert!(rendered.contains("Run this command"));
         assert!(rendered.contains("task test"));
         assert!(rendered.contains("Approve once"));
@@ -7313,6 +7358,44 @@ mod tests {
     }
 
     #[test]
+    fn transcript_scroll_keys_and_wheel_move_content() {
+        assert_eq!(
+            transcript_action_for_key(KeyCode::PageUp, KeyModifiers::NONE),
+            Some(TranscriptViewportAction::PageUp)
+        );
+        assert_eq!(
+            transcript_action_for_key(KeyCode::Up, KeyModifiers::SHIFT),
+            Some(TranscriptViewportAction::Lines(-1))
+        );
+        assert_eq!(
+            transcript_action_for_key(KeyCode::Down, KeyModifiers::CONTROL),
+            Some(TranscriptViewportAction::Lines(1))
+        );
+        assert_eq!(
+            transcript_action_for_key(KeyCode::Up, KeyModifiers::NONE),
+            None,
+            "unmodified Up remains draft history"
+        );
+        assert_eq!(
+            transcript_action_for_mouse(MouseEventKind::ScrollUp),
+            Some(TranscriptViewportAction::Lines(-3))
+        );
+        assert_eq!(
+            transcript_action_for_mouse(MouseEventKind::ScrollDown),
+            Some(TranscriptViewportAction::Lines(3))
+        );
+
+        let mut viewport = TranscriptViewport::default();
+        viewport.observe_layout(40, 5);
+        assert_eq!(viewport.top_row(), 35);
+        viewport.apply(transcript_action_for_mouse(MouseEventKind::ScrollUp).expect("wheel"));
+        assert!(!viewport.is_pinned_to_tail());
+        assert_eq!(viewport.top_row(), 32);
+        viewport.apply(TranscriptViewportAction::PageUp);
+        assert_eq!(viewport.top_row(), 27);
+    }
+
+    #[test]
     fn bracketed_paste_sequences_and_restore_guard_are_deterministic() {
         let mut enabled = Vec::new();
         enable_bracketed_paste_to(&mut enabled).expect("enable paste sequence");
@@ -7321,10 +7404,12 @@ mod tests {
         let mut restored = Vec::new();
         restore_terminal_to(&mut restored, Ok(())).expect("restore sequences");
         let restored = String::from_utf8(restored).expect("terminal control UTF-8");
+        let mouse = restored.find("\x1b[?1000l").expect("disable mouse capture");
         let paste = restored.find("\x1b[?2004l").expect("disable paste");
         let alternate = restored
             .find("\x1b[?1049l")
             .expect("leave alternate screen");
+        assert!(mouse < paste);
         assert!(paste < alternate);
 
         TEST_TERMINAL_RESTORE_CALLS.store(0, Ordering::SeqCst);
