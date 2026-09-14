@@ -3018,6 +3018,154 @@ fn encode_base64(bytes: &[u8]) -> String {
     output
 }
 
+struct ApprovalPrompt {
+    statement: String,
+    subject: String,
+    location: Option<String>,
+}
+
+fn approval_arg(call: &ToolCall, key: &str) -> Option<String> {
+    call.arguments
+        .get(key)
+        .and_then(|value| {
+            value.as_str().map(ToString::to_string).or_else(|| {
+                (!value.is_null() && !value.is_object() && !value.is_array())
+                    .then(|| value.to_string())
+            })
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn safe_approval_text(value: &str) -> String {
+    control_safe_text(&crate::tools::executor::redact_text(value), true)
+}
+
+fn compact_approval_risk(value: &str) -> String {
+    value
+        .split(" / ")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn approval_prompt(call: &ToolCall) -> ApprovalPrompt {
+    let path = || {
+        ["path", "target_file", "file_path"]
+            .into_iter()
+            .find_map(|key| approval_arg(call, key))
+    };
+    match call.tool_name.as_str() {
+        "run_terminal" => ApprovalPrompt {
+            statement: "Run this command".to_string(),
+            subject: approval_arg(call, "command")
+                .map(|command| safe_approval_text(&command))
+                .filter(|command| !command.is_empty())
+                .unwrap_or_else(|| "(missing command)".to_string()),
+            location: approval_arg(call, "cwd").map(|cwd| safe_approval_text(&cwd)),
+        },
+        "read_file" => ApprovalPrompt {
+            statement: "Read this file".to_string(),
+            subject: path()
+                .map(|path| safe_approval_text(&path))
+                .unwrap_or_else(|| "(missing path)".to_string()),
+            location: None,
+        },
+        "list_directory" => ApprovalPrompt {
+            statement: "List this directory".to_string(),
+            subject: path()
+                .map(|path| safe_approval_text(&path))
+                .unwrap_or_else(|| "(missing path)".to_string()),
+            location: None,
+        },
+        "search_replace" => ApprovalPrompt {
+            statement: "Edit this file".to_string(),
+            subject: path()
+                .map(|path| safe_approval_text(&path))
+                .unwrap_or_else(|| "(missing path)".to_string()),
+            location: None,
+        },
+        "apply_patch" => ApprovalPrompt {
+            statement: "Apply a patch".to_string(),
+            subject: path()
+                .map(|path| safe_approval_text(&path))
+                .unwrap_or_else(|| "workspace files".to_string()),
+            location: None,
+        },
+        "grep" => {
+            let pattern = approval_arg(call, "pattern").or_else(|| approval_arg(call, "query"));
+            let path = path();
+            let subject = [pattern, path]
+                .into_iter()
+                .flatten()
+                .map(|part| safe_approval_text(&part))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" in ");
+            ApprovalPrompt {
+                statement: "Search files".to_string(),
+                subject: if subject.is_empty() {
+                    "(missing pattern)".to_string()
+                } else {
+                    subject
+                },
+                location: None,
+            }
+        }
+        "approve_plan" => ApprovalPrompt {
+            statement: "Approve this plan".to_string(),
+            subject: approval_arg(call, "goal")
+                .or_else(|| approval_arg(call, "plan_id"))
+                .map(|goal| safe_approval_text(&goal))
+                .unwrap_or_else(|| "(missing plan)".to_string()),
+            location: None,
+        },
+        "merge_subagent_worktree" => ApprovalPrompt {
+            statement: "Merge a subagent worktree".to_string(),
+            subject: approval_arg(call, "subagent_id")
+                .map(|id| safe_approval_text(&id))
+                .unwrap_or_else(|| "(missing subagent)".to_string()),
+            location: None,
+        },
+        other => ApprovalPrompt {
+            statement: format!("Use {other}"),
+            subject: [
+                "command",
+                "path",
+                "query",
+                "pattern",
+                "url",
+                "action",
+                "target_file",
+            ]
+            .into_iter()
+            .find_map(|key| approval_arg(call, key))
+            .map(|value| safe_approval_text(&value))
+            .unwrap_or_else(|| other.to_string()),
+            location: None,
+        },
+    }
+}
+
+fn usable_approval_location(value: Option<String>, scope: &str) -> Option<String> {
+    let skip = |value: &str| {
+        value.is_empty()
+            || value == "."
+            || value.contains("not available")
+            || value.contains("not classified")
+    };
+    if let Some(location) = value.filter(|location| !skip(location)) {
+        return Some(location);
+    }
+    if skip(scope) {
+        None
+    } else if scope.starts_with('/') || scope.starts_with('.') {
+        Some(safe_approval_text(scope))
+    } else {
+        None
+    }
+}
+
 fn render_approval_card(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -3034,44 +3182,86 @@ fn render_approval_card(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let action = req.context.action.as_str();
-    let risk = req.context.permission_and_risk.as_str();
-    let scope = req.context.target_scope.as_str();
-    let network = req.context.network.as_str();
-    let worktree = req.context.worktree.as_str();
-    let reason = req.context.reason.as_str();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("{} · {risk}", req.call.tool_name),
+    let prompt = approval_prompt(&req.call);
+    let risk = compact_approval_risk(&req.context.permission_and_risk);
+    let location = usable_approval_location(prompt.location.clone(), &req.context.target_scope);
+    let choice_h = 2u16.min(inner.height);
+    let (body_area, choice_area) = if choice_h == inner.height {
+        (Rect::default(), inner)
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
+            .split(inner);
+        (chunks[0], chunks[1])
+    };
+    if body_area.height > 0 && body_area.width > 0 {
+        let indent = "  ";
+        let subject_width = body_area.width.saturating_sub(2).max(1);
+        let mut lines = vec![Line::from(Span::styled(
+            truncate_completion_text(&prompt.statement, usize::from(body_area.width)),
             approval_dock_style(no_color),
-        )),
-        Line::from(format!("Action: {action}")),
-        Line::from(format!("Scope: {scope}")),
-        Line::from(format!("Network: {network} · {worktree}")),
-        Line::from(format!("Reason: {reason}")),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Y / Enter / 1   Approve this action once",
-            if no_color {
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            } else {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            },
-        )),
-        Line::from(Span::styled(
-            "  N / Esc / 2     Deny and stop this step",
+        ))];
+        if body_area.height > 1 {
+            let mut remaining = usize::from(body_area.height.saturating_sub(1));
+            let subject_rows = wrapped_display_rows(&prompt.subject, subject_width);
+            if remaining > subject_rows.len() {
+                lines.push(Line::from(""));
+                remaining -= 1;
+            }
+            for row in subject_rows.into_iter().take(remaining) {
+                lines.push(Line::from(Span::styled(
+                    format!("{indent}{row}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                remaining = remaining.saturating_sub(1);
+            }
+            if remaining > 0 {
+                if let Some(location) = location {
+                    lines.push(Line::from(Span::styled(
+                        truncate_completion_text(
+                            &format!("in {location}"),
+                            usize::from(body_area.width),
+                        ),
+                        muted_style(no_color),
+                    )));
+                    remaining -= 1;
+                }
+            }
+            if remaining > 0 && !risk.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    truncate_completion_text(
+                        &format!("Risk: {risk}"),
+                        usize::from(body_area.width),
+                    ),
+                    muted_style(no_color),
+                )));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), body_area);
+    }
+    let approve_style = if no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    };
+    let mut choices = vec![Line::from(Span::styled(
+        truncate_completion_text(
+            "  Y / Enter / 1   Approve once",
+            usize::from(choice_area.width),
+        ),
+        approve_style,
+    ))];
+    if choice_area.height > 1 {
+        choices.push(Line::from(Span::styled(
+            truncate_completion_text("  N / Esc / 2     Deny", usize::from(choice_area.width)),
             Style::default().add_modifier(Modifier::BOLD),
-        )),
-    ];
-    let max_lines = usize::from(inner.height).max(1);
-    lines.truncate(max_lines);
-    frame.render_widget(
-        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
-        inner,
-    );
+        )));
+    }
+    frame.render_widget(Paragraph::new(choices), choice_area);
 }
 
 fn approval_dock_style(no_color: bool) -> Style {
@@ -6846,6 +7036,32 @@ mod tests {
     }
 
     #[test]
+    fn approval_prompt_states_the_command_without_a_metadata_dump() {
+        let prompt = approval_prompt(&ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({
+                "command": "git status --short --branch && task check",
+                "cwd": "/home/e/work/projects/nib",
+                "background": false
+            }),
+            session_id: None,
+            project_root: None,
+        });
+        assert_eq!(prompt.statement, "Run this command");
+        assert_eq!(prompt.subject, "git status --short --branch && task check");
+        assert_eq!(
+            prompt.location.as_deref(),
+            Some("/home/e/work/projects/nib")
+        );
+        assert!(!prompt.subject.contains("command="));
+        assert_eq!(
+            compact_approval_risk("destructive / requires_approval"),
+            "destructive"
+        );
+    }
+
+    #[test]
     fn ledger_keeps_transcript_visible_under_approval_and_question_docks() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -6886,11 +7102,70 @@ mod tests {
         assert!(rendered.contains("inspect wrap"));
         assert!(rendered.contains("Approval required"));
         assert!(rendered.contains("WAITING APPROVAL"));
-        assert!(rendered.contains("run_terminal"));
-        assert!(rendered.contains("Approve this action once"));
-        assert!(rendered.contains("Deny and stop this step"));
+        assert!(rendered.contains("Run this command"));
         assert!(rendered.contains("task test"));
+        assert!(rendered.contains("Approve once"));
+        assert!(rendered.contains("Deny"));
+        assert!(!rendered.contains("command="));
         assert!(!rendered.contains("{\"command\""));
+    }
+
+    #[test]
+    fn approval_card_states_the_command_and_keeps_choices_on_a_narrow_terminal() {
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let composer = Composer::default();
+        let (approval_tx, _approval_rx) = oneshot::channel();
+        let approval = approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({
+                    "command": "git status --short --branch && task check",
+                    "cwd": "/home/e/work/projects/nib",
+                    "background": false
+                }),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            approval_tx,
+        );
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace  ·  sess dock-session  ·  local  ·  -",
+                    "awaiting you  ·  mock/mock-model  ·  queue 0",
+                    "you  inspect wrap\n\nnib  keep this visible",
+                    &composer,
+                    Some(&approval),
+                    None,
+                )
+            })
+            .expect("render narrow approval");
+        let rows = buffer_rows(&terminal);
+        let joined = rows.concat();
+        assert!(joined.contains("Run this command"), "{joined}");
+        assert!(joined.contains("git status --short --branch"), "{joined}");
+        assert!(
+            rows.iter().any(|row| row.contains("task"))
+                && rows.iter().any(|row| row.contains("check")),
+            "{rows:?}"
+        );
+        assert!(joined.contains("Approve once"), "{joined}");
+        assert!(joined.contains("Deny"), "{joined}");
+        assert!(joined.contains("keep this visible"), "{joined}");
+        assert!(!joined.contains("command="), "{joined}");
+        assert!(!joined.contains("background=false"), "{joined}");
+        let command = row_index_containing(&rows, "git status").expect("command row");
+        let approve = row_index_containing(&rows, "Approve once").expect("approve row");
+        let deny = row_index_containing(&rows, "Deny").expect("deny row");
+        assert!(
+            command < approve,
+            "command must sit above the choices: {rows:?}"
+        );
+        assert!(approve < deny, "approve must sit above deny: {rows:?}");
     }
 
     #[test]
