@@ -87,6 +87,7 @@ work or narrower guarantees.
 - [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
 - [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
 - [T038: TUI Block Transcript and Key Contract](development/T038_tui_block_transcript_and_key_contract.md)
+- [T039: Visible Tool Blocks and Explicit Approval Card](development/T039_visible_tool_blocks_and_explicit_approval.md)
 
 ### Feature specs
 
