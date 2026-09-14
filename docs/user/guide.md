@@ -510,10 +510,11 @@ Failures remain visible after reopening a session, while matching successful ter
 and reconciliation records appear as one outcome.
 The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
 that still require interactive approval appear as a bordered `Approval required`
-card that names the action, permission/risk, and two explicit choices. The
-transcript above the card stays visible. Press `Y`, `Enter`, or `1` to approve once;
-`N`, `Esc`, or `2` to deny. While the card is open the status reads `WAITING APPROVAL`
-and the footer shows only those keys. Questions still use their existing dock.
+card. The card states what nib wants to do, shows the command or path on its own
+lines, and pins two choices: `Y`/`Enter`/`1` approve once, or `N`/`Esc`/`2` deny.
+The transcript above the card stays visible. While the card is open the status
+reads `WAITING APPROVAL` and the footer shows only those keys. Questions still use
+their existing dock.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 

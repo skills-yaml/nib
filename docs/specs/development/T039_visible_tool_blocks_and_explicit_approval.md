@@ -36,8 +36,10 @@ says `awaiting you`.
 - Expanded tool bodies are indented with a left accent. Folded tools remain one line
   with `›` when detail exists.
 - Approval is still a dock, not a covering modal. The dock is a bordered card titled
-  `Approval required` that shows action, permission/risk, scope, and two labeled
-  choices: approve once, or deny.
+  `Approval required`. It states the intent in plain language (`Run this command`),
+  shows the command or target on its own indented lines, and pins two labeled
+  choices as the last rows: approve once, or deny. It does not dump `command=`
+  metadata, network essays, or classifier reasons.
 - `Y`, `Enter`, and `1` approve once. `N`, `Esc`, and `2` deny. Policy is unchanged:
   one-shot grant or deny; no always-allow in this slice.
 - While an approval is pending, the TUI status reads `WAITING APPROVAL` and the
@@ -73,9 +75,10 @@ says `awaiting you`.
 - [ ] Expanded tool bodies are indented with a left accent and remain bounded.
 - [ ] Failed tools are visually distinct without color (`failed` in the title) and red
       when color is available.
-- [ ] The approval dock is a bordered card titled `Approval required` that names the
-      action and permission/risk and shows `Y Approve once` and `N Deny` as separate
-      labeled rows.
+- [ ] The approval dock is a bordered card titled `Approval required` that states
+      the intent (`Run this command` / `Read this file` / …), shows the command or
+      path on its own lines, and pins `Y Approve once` and `N Deny` as the last rows
+      even on a 40-column terminal. It does not render `command=` dumps.
 - [ ] Transcript text above the dock remains visible at ordinary terminal sizes.
 - [ ] `Y`, `Enter`, and `1` grant once; `N`, `Esc`, and `2` deny.
 - [ ] Status shows `WAITING APPROVAL` and the footer lists only approval keys while
