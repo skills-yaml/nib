@@ -1521,6 +1521,7 @@ fn reduce_composer_submission(state: &InteractionState, line: &str) -> Interacti
 pub enum ActivityKind {
     User,
     Assistant,
+    Thinking,
     Plan,
     Tool,
     Approval,
@@ -1545,6 +1546,7 @@ impl ActivityKind {
         match self {
             Self::User => "you",
             Self::Assistant => "nib",
+            Self::Thinking => "thought",
             Self::Plan => "plan",
             Self::Tool => "tool",
             Self::Approval => "approval",
@@ -1574,10 +1576,58 @@ impl ActivityEntry {
     }
 
     pub fn display_text(&self) -> String {
-        if self.kind == ActivityKind::Tool {
-            return self.tool_display_text();
+        match self.kind {
+            ActivityKind::Tool => self.tool_display_text(),
+            ActivityKind::Thinking | ActivityKind::Plan => self.thought_display_text(),
+            ActivityKind::Assistant | ActivityKind::User => self.speech_display_text(),
+            _ => self.log_display_text(),
         }
-        let label = self.kind.role_label();
+    }
+
+    fn channel_label(&self) -> &'static str {
+        match self.kind {
+            ActivityKind::Thinking | ActivityKind::Plan => "thought",
+            other => other.role_label(),
+        }
+    }
+
+    fn speech_display_text(&self) -> String {
+        let speaker = self.kind.role_label();
+        let content = if self.title.is_empty() || self.title == "live" {
+            self.body.as_str()
+        } else if self.body.is_empty() || self.folded {
+            self.title.as_str()
+        } else {
+            return format!(
+                "{speaker}\n{}",
+                indent_activity_lines(&format!("{}\n{}", self.title, self.body), "  ")
+            );
+        };
+        if content.is_empty() {
+            return speaker.to_string();
+        }
+        format!("{speaker}\n{}", indent_activity_lines(content, "  "))
+    }
+
+    fn thought_display_text(&self) -> String {
+        let fold = if self.folded && !self.body.is_empty() {
+            "› "
+        } else {
+            ""
+        };
+        let header = if self.title.is_empty() {
+            format!("{fold}thought")
+        } else {
+            format!("{fold}thought  {}", self.title)
+        };
+        if self.folded || self.body.is_empty() {
+            return header;
+        }
+        format!("{header}\n{}", indent_activity_lines(&self.body, "┊ "))
+    }
+
+    fn log_display_text(&self) -> String {
+        let label = self.channel_label();
         let header = if self.title.is_empty() {
             if self.body.is_empty() {
                 label.to_string()
@@ -1632,6 +1682,34 @@ impl ActivityEntry {
     pub fn render_line(&self) -> String {
         self.display_text()
     }
+}
+
+fn indent_activity_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_thought_state(state: &str) -> bool {
+    matches!(state, "planning" | "inspect_llm" | "build_context")
+}
+
+fn upsert_thought_activity(activities: &mut Vec<ActivityEntry>, state: &str) {
+    let title = state.replace('_', " ");
+    if let Some(existing) = activities
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.kind == ActivityKind::Thinking)
+    {
+        existing.title = title;
+        return;
+    }
+    activities.push(ActivityEntry::new(
+        ActivityKind::Thinking,
+        title,
+        String::new(),
+    ));
 }
 
 pub fn classify_composer_submit(worker_active: bool) -> ComposerSubmitKind {
@@ -2479,7 +2557,10 @@ pub fn apply_stream_event(
     }
     match event {
         StreamEvent::StateTransition { state } => {
-            *live_state = Some(state);
+            *live_state = Some(state.clone());
+            if is_thought_state(&state) {
+                upsert_thought_activity(activities, &state);
+            }
         }
         StreamEvent::Content(content) => {
             if let Some(last) = activities.last_mut() {
@@ -6629,6 +6710,27 @@ mod tests {
     }
 
     #[test]
+    fn speech_thought_and_tool_blocks_use_distinct_presentation() {
+        let speech = ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer");
+        assert_eq!(speech.display_text(), "nib\n  Here is the answer");
+        let user = ActivityEntry::new(ActivityKind::User, "", "inspect wrap");
+        assert_eq!(user.display_text(), "you\n  inspect wrap");
+        let thought = ActivityEntry::new(ActivityKind::Thinking, "planning", "next files");
+        assert_eq!(thought.display_text(), "thought  planning\n┊ next files");
+        let plan = ActivityEntry::new(ActivityKind::Plan, "0/1 write tests", String::new());
+        assert!(plan.display_text().starts_with("thought  0/1 write tests"));
+        let tool = ActivityEntry::new(
+            ActivityKind::Tool,
+            "read_file running · src/lib.rs",
+            "line one",
+        );
+        assert!(tool.display_text().starts_with("◆ tool  read_file"));
+        assert!(tool.display_text().contains("│ line one"));
+        assert!(!speech.display_text().contains("◆ tool"));
+        assert!(!speech.display_text().starts_with("thought"));
+    }
+
+    #[test]
     fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
         let directory = tempdir().expect("dir");
         let mut session = SessionStore::at_dir(directory.path().join("s"))
@@ -6693,7 +6795,10 @@ mod tests {
             &[],
         );
         assert_eq!(state.as_deref(), Some("planning"));
-        assert!(live.is_empty());
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].kind, ActivityKind::Thinking);
+        assert_eq!(live[0].title, "planning");
+        assert!(live[0].display_text().starts_with("thought"));
         apply_stream_event(
             &mut live,
             StreamEvent::Content("hello".to_string()),
@@ -6724,9 +6829,10 @@ mod tests {
             &mut state,
             &[],
         );
-        assert_eq!(live[0].kind, ActivityKind::Assistant);
-        assert_eq!(live[1].kind, ActivityKind::Tool);
-        assert_eq!(live[2].kind, ActivityKind::Reconcile);
+        assert_eq!(live[0].kind, ActivityKind::Thinking);
+        assert_eq!(live[1].kind, ActivityKind::Assistant);
+        assert_eq!(live[2].kind, ActivityKind::Tool);
+        assert_eq!(live[3].kind, ActivityKind::Reconcile);
         assert_eq!(
             live.iter()
                 .filter(|entry| entry.kind == ActivityKind::Reconcile)
