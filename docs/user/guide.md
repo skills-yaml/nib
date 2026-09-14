@@ -542,12 +542,15 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript is a list of typed blocks. A tool call is one `◆ tool` block that
-mutates from requested to running to a collapsed summary and includes the path or
-command when the stream provided it. `Left`/`Right` expand or fold the selected
-block; expanded output is indented under a left accent. `Tab` moves focus between
-the composer and the transcript. With the transcript focused, `Up`/`Down` select a
-block and `Ctrl+Y` copies it. Printable keys return to the composer and insert.
+The transcript is a list of typed blocks with three distinct channels. Internal
+thinking is a dim `thought` block (planning and plan progress). Tool work is a
+`◆ tool` block that mutates from requested to running to a collapsed summary and
+includes the path or command when the stream provided it. Replies to you are a
+`nib` speech block with indented body text, separate from tools and thinking.
+`Left`/`Right` expand or fold the selected block; expanded tool output is indented
+under a left accent. `Tab` moves focus between the composer and the transcript.
+With the transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it.
+Printable keys return to the composer and insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`

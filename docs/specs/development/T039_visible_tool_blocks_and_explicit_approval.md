@@ -57,10 +57,14 @@ says `awaiting you`.
 - The two chrome rows keep model, approval mode, git branch, worktree kind, and
   current folder visible, including on a narrow terminal and while waiting for
   approval. Session/profile details stay in `/status`.
+- The transcript has three visually distinct channels: dim italic `thought` for
+  internal planning, `◆ tool` work blocks, and a `nib` speech block for replies
+  to the user. User turns stay `you`. Channels are separated by a blank row.
 
 ## Scope
 
 - Tool title composition with argument hints and diamond/accent rendering.
+- Distinct thought / tool / speech transcript channels.
 - Approval card layout, explicit choice rows, status/footer override, Enter/1/2 aliases.
 - Layout reservation for completion under the composer and the waiting meter row.
 - Tests and user-guide copy.
@@ -99,6 +103,8 @@ says `awaiting you`.
       an approval card is open; unmodified composer Up/Down still recall draft history.
 - [ ] TUI chrome shows model, approval mode, git branch, worktree kind, and current
       folder. `WAITING APPROVAL` replaces only the lifecycle token, not those fields.
+- [ ] Internal thinking renders as `thought` (dim/italic), tool calls as `◆ tool`,
+      and user-facing replies as a `nib` speech block with indented body text.
 
 ## Affected Areas
 

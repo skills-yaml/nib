@@ -2733,20 +2733,55 @@ fn muted_style(no_color: bool) -> Style {
 fn role_style(kind: ActivityKind, no_color: bool) -> Style {
     let style = Style::default().add_modifier(Modifier::BOLD);
     if no_color {
-        return style;
+        return match kind {
+            ActivityKind::Thinking | ActivityKind::Plan => {
+                Style::default().add_modifier(Modifier::ITALIC)
+            }
+            _ => style,
+        };
     }
-    style.fg(match kind {
-        ActivityKind::User => Color::Cyan,
-        ActivityKind::Assistant => Color::Green,
-        ActivityKind::Plan
-        | ActivityKind::Tool
-        | ActivityKind::Approval
-        | ActivityKind::Question => Color::Yellow,
-        ActivityKind::Failure | ActivityKind::Cancellation => Color::Red,
-        ActivityKind::Compression | ActivityKind::Reconcile | ActivityKind::System => {
-            Color::DarkGray
+    match kind {
+        ActivityKind::User => style.fg(Color::Cyan),
+        ActivityKind::Assistant => style.fg(Color::Green),
+        ActivityKind::Thinking | ActivityKind::Plan => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+        ActivityKind::Tool | ActivityKind::Approval | ActivityKind::Question => {
+            style.fg(Color::Yellow)
         }
-    })
+        ActivityKind::Failure | ActivityKind::Cancellation => style.fg(Color::Red),
+        ActivityKind::Compression | ActivityKind::Reconcile | ActivityKind::System => {
+            Style::default().fg(Color::DarkGray)
+        }
+    }
+}
+
+fn speech_body_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default()
+    } else {
+        Style::default().fg(Color::White)
+    }
+}
+
+fn thought_body_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default().add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC)
+    }
+}
+
+fn visual_channel(kind: ActivityKind) -> u8 {
+    match kind {
+        ActivityKind::User => 0,
+        ActivityKind::Assistant => 1,
+        ActivityKind::Thinking | ActivityKind::Plan => 2,
+        ActivityKind::Tool | ActivityKind::Approval => 3,
+        _ => 4,
+    }
 }
 
 fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
@@ -2763,6 +2798,18 @@ fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
         spans.push(Span::styled(body.to_string(), muted_style(no_color)));
         return Line::from(spans);
     }
+    if let Some(body) = rest.strip_prefix("┊ ") {
+        return Line::from(vec![
+            Span::styled("┊ ".to_string(), thought_body_style(no_color)),
+            Span::styled(body.to_string(), thought_body_style(no_color)),
+        ]);
+    }
+    if let Some(body) = rest.strip_prefix("  ") {
+        return Line::from(Span::styled(
+            format!("  {body}"),
+            speech_body_style(no_color),
+        ));
+    }
     let (diamond, rest) = rest
         .strip_prefix("◆ ")
         .map(|rest| ("◆ ", rest))
@@ -2770,6 +2817,7 @@ fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
     for kind in [
         ActivityKind::User,
         ActivityKind::Assistant,
+        ActivityKind::Thinking,
         ActivityKind::Plan,
         ActivityKind::Tool,
         ActivityKind::Approval,
@@ -2780,9 +2828,14 @@ fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
         ActivityKind::Failure,
         ActivityKind::System,
     ] {
-        let label = kind.role_label();
+        let label = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
+            "thought"
+        } else {
+            kind.role_label()
+        };
         let prefix = format!("{label}  ");
-        if let Some(rest) = rest.strip_prefix(&prefix) {
+        if rest == label || rest.starts_with(&prefix) {
+            let rest = rest.strip_prefix(&prefix).unwrap_or("");
             let mut spans = Vec::new();
             if !fold.is_empty() {
                 spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
@@ -2794,10 +2847,16 @@ fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
                 ));
             }
             spans.push(Span::styled(label.to_string(), role_style(kind, no_color)));
-            spans.push(Span::styled(
-                format!("  {rest}"),
-                tool_status_style(kind, rest, no_color),
-            ));
+            if !rest.is_empty() {
+                let body_style = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
+                    thought_body_style(no_color)
+                } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
+                    speech_body_style(no_color)
+                } else {
+                    tool_status_style(kind, rest, no_color)
+                };
+                spans.push(Span::styled(format!("  {rest}"), body_style));
+            }
             return Line::from(spans);
         }
     }
@@ -3416,6 +3475,7 @@ fn parse_role_line(line: &str) -> Option<(ActivityKind, &str)> {
     for kind in [
         ActivityKind::User,
         ActivityKind::Assistant,
+        ActivityKind::Thinking,
         ActivityKind::Plan,
         ActivityKind::Tool,
         ActivityKind::Approval,
@@ -3426,9 +3486,18 @@ fn parse_role_line(line: &str) -> Option<(ActivityKind, &str)> {
         ActivityKind::Failure,
         ActivityKind::System,
     ] {
-        let prefix = format!("{}  ", kind.role_label());
-        if let Some(rest) = line.strip_prefix(&prefix) {
-            return Some((kind, rest));
+        let label = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
+            "thought"
+        } else {
+            kind.role_label()
+        };
+        if line == label || line == kind.role_label() {
+            return Some((kind, ""));
+        }
+        for prefix in [format!("{label}  "), format!("{}  ", kind.role_label())] {
+            if let Some(rest) = line.strip_prefix(&prefix) {
+                return Some((kind, rest));
+            }
         }
     }
     None
@@ -3488,7 +3557,14 @@ fn wrapped_activity_rows(entry: &ActivityEntry, width: u16) -> Vec<String> {
 fn flatten_activity_rows(activities: &[ActivityEntry], width: u16) -> (Vec<String>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut owners = Vec::new();
+    let mut previous_channel = None;
     for (index, entry) in activities.iter().enumerate() {
+        let channel = visual_channel(entry.kind);
+        if previous_channel.is_some_and(|previous| previous != channel) {
+            rows.push(String::new());
+            owners.push(index);
+        }
+        previous_channel = Some(channel);
         let wrapped = wrapped_activity_rows(entry, width);
         if wrapped.is_empty() {
             rows.push(String::new());
@@ -5011,6 +5087,71 @@ mod tests {
         assert!(rendered.contains("> Ask nib anything…"));
         assert!(rendered.contains("Enter send"));
         assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
+    }
+
+    #[test]
+    fn transcript_separates_thought_tools_and_user_facing_speech() {
+        let activities = vec![
+            ActivityEntry::new(ActivityKind::User, "", "inspect wrap"),
+            ActivityEntry::new(ActivityKind::Thinking, "planning", String::new()),
+            ActivityEntry::new(
+                ActivityKind::Tool,
+                "read_file running · src/lib.rs",
+                String::new(),
+            ),
+            ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer"),
+        ];
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut viewport = TranscriptViewport::default();
+        terminal
+            .draw(|frame| {
+                render_session_activities(
+                    frame,
+                    "nib · project",
+                    "idle · mock/mock-model · manual",
+                    &activities,
+                    &Composer::default(),
+                    None,
+                    None,
+                    false,
+                    &mut viewport,
+                    TuiFocus::Composer,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+            })
+            .expect("render channels");
+        let rows = buffer_rows(&terminal);
+        let joined = rows.concat();
+        assert!(joined.contains("inspect wrap"), "{joined}");
+        assert!(joined.contains("thought"), "{joined}");
+        assert!(joined.contains("planning"), "{joined}");
+        assert!(joined.contains("◆ tool"), "{joined}");
+        assert!(joined.contains("read_file"), "{joined}");
+        assert!(joined.contains("Here is the answer"), "{joined}");
+        let you = row_index_containing(&rows, "you").expect("you");
+        let thought = row_index_containing(&rows, "thought").expect("thought");
+        let tool = row_index_containing(&rows, "◆ tool").expect("tool");
+        let speech = rows
+            .iter()
+            .position(|row| row.contains("Here is the answer"))
+            .expect("speech");
+        assert!(you < thought, "{rows:?}");
+        assert!(thought < tool, "{rows:?}");
+        assert!(tool < speech, "{rows:?}");
+        assert!(
+            rows[speech].contains("  Here is the answer"),
+            "speech body is indented, not a log label: {}",
+            rows[speech]
+        );
+        assert!(
+            !rows[speech].contains("◆"),
+            "user-facing speech is not a tool row: {}",
+            rows[speech]
+        );
     }
 
     #[test]
