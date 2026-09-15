@@ -42,12 +42,13 @@ says `awaiting you`.
   metadata, network essays, or classifier reasons.
 - `Y`, `Enter`, and `1` approve once. `N`, `Esc`, and `2` deny. Policy is unchanged:
   one-shot grant or deny; no always-allow in this slice.
-- While an approval is pending, the TUI status reads `WAITING APPROVAL` and the
-  footer shows only the approval keys.
+- While an approval is pending, the TUI footer reads `WAITING APPROVAL` and
+  shows the approval keys next to the approval mode.
 - Questions use a bordered `Question` card. It states `nib is asking`, shows the
   question text, numbers the choices, and pins `Enter / 1-9` and `Esc skip`.
   Number keys submit the matching option. Free-form questions show a labeled
-  answer field. The transcript stays visible.
+  answer field. The transcript stays visible. While a question is pending the
+  footer reads `WAITING QUESTION`.
 - `/` and `@` completion is a reserved band under the composer, not a `Clear` overlay
   over the transcript. The conversation stays visible and the composer stays above the
   option list. Slash option signatures start on the same column as the composer `/`
@@ -63,9 +64,15 @@ says `awaiting you`.
 - The conversation stays scrollable while an approval card is open. Wheel, PageUp,
   PageDown, and Shift/Ctrl+Up/Down move the transcript; Y/N still answer the card.
   Unmodified Up/Down in the composer remain draft history.
-- The two chrome rows keep model, approval mode, git branch, worktree kind, and
-  current folder visible, including on a narrow terminal and while waiting for
-  approval. Session/profile details stay in `/status`.
+- The first chrome row shows the working directory and git branch on the left
+  (branch colored when color is available) and the current model plus context
+  usage on the right. The last row shows the command approval mode and the
+  agent mode (`idle` / `execute` / `plan` / `compact`, or `WAITING APPROVAL` /
+  `WAITING QUESTION` / `WAITING PERMISSION`). Session, worktree, sandbox, queue,
+  and profile details stay in `/status`.
+- User and nib speech blocks render markdown: headings, emphasis, lists, links,
+  inline code, and fenced code with lightweight language coloring. Tool and
+  thought blocks stay as structured transcript channels, not markdown.
 - The transcript has three visually distinct channels: dim italic `thought` for
   internal planning, `◆ tool` work blocks, and a `nib` speech block for replies
   to the user. User turns stay `you`. Channels are separated by a blank row.
@@ -84,20 +91,26 @@ says `awaiting you`.
 
 - Tool title composition with argument hints and diamond/accent rendering.
 - Distinct thought / tool / speech transcript channels.
-- Approval card layout, explicit choice rows, status/footer override, Enter/1/2 aliases.
-- Question card layout, numbered choices, Enter/1-9/Esc, WAITING QUESTION status.
+- Approval card layout, explicit choice rows, footer override, Enter/1/2 aliases.
+- Question card layout, numbered choices, Enter/1-9/Esc, WAITING QUESTION footer.
+- Compact header (folder/branch, model/context) and footer (approval mode, agent mode).
+- Markdown rendering for user/nib speech, including fenced code.
 - Layout reservation for completion under the composer and the waiting meter row.
 - Tests and user-guide copy.
 - Empty-session startup welcome and idle empty Ctrl+C quit confirm.
 - Startup workspace permission card and persisted `workspace.allowed` grant.
+- Compact header/footer chrome and markdown speech rendering.
 - No change to `ApprovalDecision`, sandbox, or always-allow policy.
 
 ## Non-Goals
 
 - Always-allow, scope widening, or YOLO mode UI.
-- Markdown, diffs-as-hunks, mouse, animation FPS, or command palette.
+- Full syntax-highlighter grammars, diffs-as-hunks, mouse, animation FPS, or
+  command palette. Fenced code uses keyword/string/comment coloring only.
 - Changing Y/N authority or making Esc park without answering (Grok parks; nib still
   denies on Esc, matching T018/T031).
+- This slice supersedes T038's two-row chrome and the T038 markdown non-goal for
+  user/nib speech.
 
 ## Acceptance Criteria
 
@@ -113,8 +126,8 @@ says `awaiting you`.
       even on a 40-column terminal. It does not render `command=` dumps.
 - [ ] Transcript text above the dock remains visible at ordinary terminal sizes.
 - [ ] `Y`, `Enter`, and `1` grant once; `N`, `Esc`, and `2` deny.
-- [ ] Status shows `WAITING APPROVAL` and the footer lists only approval keys while
-      the card is open; `NO_COLOR` still has the same words.
+- [ ] The footer shows `WAITING APPROVAL` and the approval keys while the card is
+      open; `NO_COLOR` still has the same words.
 - [ ] Focused interactive tests, `task docs:check`, `task check`, and
       `task test:interactive` pass.
 - [ ] Slash completion options render under the composer; conversation text above the
@@ -126,12 +139,15 @@ says `awaiting you`.
       while a run is active or the TUI is waiting.
 - [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
       an approval card is open; unmodified composer Up/Down still recall draft history.
-- [ ] TUI chrome shows model, approval mode, git branch, worktree kind, and current
-      folder. `WAITING APPROVAL` replaces only the lifecycle token, not those fields.
+- [ ] The first row shows folder and branch on the left and model plus context
+      usage on the right. The last row shows approval mode and agent mode.
+      `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.
+- [ ] User and nib speech render markdown headings, lists, emphasis, inline code,
+      and fenced code; tool/thought channels are unchanged.
 - [ ] Internal thinking renders as `thought` (dim/italic), tool calls as `◆ tool`,
       and user-facing replies as a `nib` speech block with indented body text.
 - [ ] A question dock is a bordered `Question` card that states `nib is asking`,
-      shows the question, numbers options, and pins Enter/1-9 and Esc. Status
+      shows the question, numbers options, and pins Enter/1-9 and Esc. The footer
       reads `WAITING QUESTION`.
 - [ ] An empty session welcome shows `Nib <version>`, the working directory,
       `/new` and `/session` help, and the most-used keys. When an update is
@@ -146,10 +162,12 @@ says `awaiting you`.
 
 ## Affected Areas
 
-- `src/interactive.rs` — tool argument hints, title composition, display_text.
-- `src/tui/mod.rs` — tool row styling, approval card, footer/status override, keys,
+- `src/interactive.rs` — tool argument hints, title composition, display_text,
+  compact `TuiChrome`.
+- `src/tui/mod.rs` — tool row styling, approval card, header/footer chrome, keys,
   below-composer completion layout, waiting meter, transcript wheel/key scroll,
   startup welcome, idle Ctrl+C quit, workspace permission card.
+- `src/tui/markdown.rs` — speech markdown and fenced-code rendering.
 - `src/config/mod.rs` — `workspace.allowed` grant.
 - `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
   plain-mode TTY workspace consent.
@@ -168,12 +186,16 @@ says `awaiting you`.
 7. Add the empty-session startup welcome (version, cwd, update, session/worktree, keys).
 8. Let idle empty Ctrl+C share the Ctrl+Q 1000ms quit confirm.
 9. Ask workspace permission on first interactive start and persist `workspace.allowed`.
+10. Collapse chrome to one header row (folder + branch left, model + context right)
+    and a footer of approval mode plus agent mode.
+11. Render user/nib speech as markdown with fenced-code coloring.
 
 ## Validation Gates
 
 - Unit tests for argument hints and diamond display text.
 - Ratatui tests for the approval card title, choice rows, transcript visibility, and
-  WAITING APPROVAL status.
+  WAITING APPROVAL footer.
+- Tests for compact header/footer chrome and markdown speech (headings, lists, code).
 - Key tests for Enter/1 grant and 2 deny.
 - `task docs:check`, `task check`, `task test:interactive`.
 

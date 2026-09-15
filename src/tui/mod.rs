@@ -1,5 +1,7 @@
 //! Current-session-first Ratatui interface with live agent lifecycle rendering.
 
+mod markdown;
+
 #[cfg(test)]
 use crate::interactive::safe_event_fields;
 use crate::interactive::{
@@ -9,13 +11,13 @@ use crate::interactive::{
     interactive_session_selection, maybe_assign_session_display_name, path_completions,
     persist_queued_follow_up, project_session_activities, queue_disposition_message,
     reduce_interaction, resolve_session, restore_queued_follow_up_after_start_failure,
-    set_active_model, unicode_display_width, validate_interactive_session_target,
-    wrapped_display_rows, ActivityEntry, ActivityKind, DraftHistory, DraftHistorySearch,
-    InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
-    InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
-    InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
+    set_active_model, truncate_display_cells, unicode_display_width,
+    validate_interactive_session_target, wrapped_display_rows, ActivityEntry, ActivityKind,
+    DraftHistory, DraftHistorySearch, InteractionConsumer, InteractionDecision, InteractionInput,
+    InteractionReduction, InteractionRunState, InteractionState, InteractionTerminalOutcome,
+    InteractiveAgentMode, InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
     InteractiveSessionSelection, ModelSelection, SelectorDetailKind, StreamDisplay,
-    TranscriptViewport, TranscriptViewportAction, MAX_DRAFT_HISTORY_QUERY_BYTES,
+    TranscriptViewport, TranscriptViewportAction, TuiChrome, MAX_DRAFT_HISTORY_QUERY_BYTES,
 };
 use crate::interactive::{bounded_public_text, control_safe_text};
 use crate::llm::types::StreamEvent;
@@ -203,7 +205,6 @@ struct WaitingMeter {
 
 struct SessionLayout {
     header: Rect,
-    status: Rect,
     transcript: Rect,
     meter: Rect,
     composer: Rect,
@@ -226,29 +227,12 @@ struct ChromeCache {
     generation: u64,
     session_id: String,
     origin: String,
-    queued: usize,
-    width: u16,
-    lifecycle: String,
-    header: String,
-    status: String,
+    chrome: TuiChrome,
 }
 
 impl ChromeCache {
-    fn matches(
-        &self,
-        generation: u64,
-        session_id: &str,
-        origin: &str,
-        queued: usize,
-        width: u16,
-        lifecycle: &str,
-    ) -> bool {
-        self.generation == generation
-            && self.session_id == session_id
-            && self.origin == origin
-            && self.queued == queued
-            && self.width == width
-            && self.lifecycle == lifecycle
+    fn matches(&self, generation: u64, session_id: &str, origin: &str) -> bool {
+        self.generation == generation && self.session_id == session_id && self.origin == origin
     }
 }
 const MAX_SWITCHER_CANDIDATES: usize = 100;
@@ -1800,7 +1784,6 @@ fn completion_reserved_height(
     let desired =
         u16::try_from(row_count.min(MAX_VISIBLE_COMPLETIONS).saturating_add(1)).unwrap_or(u16::MAX);
     let chrome = 1u16
-        .saturating_add(1)
         .saturating_add(3)
         .saturating_add(composer_height)
         .saturating_add(meter_height)
@@ -1814,11 +1797,7 @@ fn split_session_layout(
     meter_height: u16,
     completion_height: u16,
 ) -> SessionLayout {
-    let mut constraints = vec![
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(3),
-    ];
+    let mut constraints = vec![Constraint::Length(1), Constraint::Min(3)];
     if meter_height > 0 {
         constraints.push(Constraint::Length(meter_height));
     }
@@ -1833,8 +1812,6 @@ fn split_session_layout(
         .split(area);
     let mut index = 0;
     let header = chunks[index];
-    index += 1;
-    let status = chunks[index];
     index += 1;
     let transcript = chunks[index];
     index += 1;
@@ -1856,7 +1833,6 @@ fn split_session_layout(
     };
     SessionLayout {
         header,
-        status,
         transcript,
         meter,
         composer,
@@ -2151,6 +2127,7 @@ fn render_interaction_overlay(
 
 struct TuiAgentWorker {
     run_id: String,
+    mode: InteractiveAgentMode,
     cancellation: CancellationSignal,
     steering: Option<crate::agent::ExactRunSteeringHandle>,
     handle: Option<JoinHandle<()>>,
@@ -2265,6 +2242,7 @@ impl PreparedTuiAgentWorker {
             .map_err(|_| io::Error::other("prepared TUI worker stopped before activation"))?;
         Ok(TuiAgentWorker {
             run_id,
+            mode,
             cancellation: self.cancellation.take().ok_or_else(|| {
                 io::Error::other("prepared TUI worker has no cancellation signal")
             })?,
@@ -3027,75 +3005,142 @@ fn tool_status_style(kind: ActivityKind, rest: &str, no_color: bool) -> Style {
     }
 }
 
-fn header_line(header: &str, no_color: bool) -> Line<'static> {
-    let accent = role_style(ActivityKind::User, no_color);
-    match header.strip_prefix("nib") {
-        Some(rest) => Line::from(vec![
-            Span::styled("nib", accent),
-            Span::styled(rest.to_string(), muted_style(no_color)),
-        ]),
-        None => Line::from(Span::styled(header.to_string(), muted_style(no_color))),
+fn branch_style(branch: &str, no_color: bool) -> Style {
+    if no_color {
+        return Style::default().add_modifier(Modifier::BOLD);
+    }
+    let detached = branch == "-"
+        || branch == "HEAD"
+        || (branch.len() >= 7 && branch.chars().all(|ch| ch.is_ascii_hexdigit()));
+    if detached {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
-fn chrome_lifecycle_and_rest(status: &str) -> (&str, &str) {
-    match status.split_once(" · ") {
-        Some((lifecycle, rest)) => (lifecycle.trim_end(), rest.trim_start()),
-        None => (status, ""),
+fn model_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
-fn status_line(
-    status: &str,
-    viewport: &TranscriptViewport,
-    no_color: bool,
+fn context_style(context: &str, no_color: bool) -> Style {
+    if no_color {
+        return Style::default();
+    }
+    let percent = context
+        .trim_end_matches('%')
+        .trim_start_matches('<')
+        .parse::<u16>()
+        .unwrap_or(0);
+    if percent >= 90 {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if percent >= 70 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        muted_style(false)
+    }
+}
+
+fn header_line(chrome: &TuiChrome, width: u16, no_color: bool) -> Line<'static> {
+    let width = usize::from(width.max(1));
+    let mut folder = chrome.folder.clone();
+    let mut branch = chrome.branch.clone();
+    let mut model = chrome.model.clone();
+    let context = chrome.context.clone();
+    let mut left_width = unicode_display_width(&folder)
+        .saturating_add(2)
+        .saturating_add(unicode_display_width(&branch));
+    let mut right_width = unicode_display_width(&model)
+        .saturating_add(2)
+        .saturating_add(unicode_display_width(&context));
+    if left_width.saturating_add(1).saturating_add(right_width) > width {
+        folder = truncate_display_cells(
+            &folder,
+            22.min(width.saturating_sub(right_width).saturating_sub(3)),
+        );
+        left_width = unicode_display_width(&folder)
+            .saturating_add(2)
+            .saturating_add(unicode_display_width(&branch));
+    }
+    if left_width.saturating_add(1).saturating_add(right_width) > width {
+        branch = truncate_display_cells(
+            &branch,
+            16.min(
+                width
+                    .saturating_sub(right_width)
+                    .saturating_sub(unicode_display_width(&folder).saturating_add(3)),
+            ),
+        );
+        left_width = unicode_display_width(&folder)
+            .saturating_add(2)
+            .saturating_add(unicode_display_width(&branch));
+    }
+    if left_width.saturating_add(1).saturating_add(right_width) > width {
+        model = truncate_display_cells(
+            &model,
+            width
+                .saturating_sub(left_width)
+                .saturating_sub(unicode_display_width(&context).saturating_add(3))
+                .max(4),
+        );
+        right_width = unicode_display_width(&model)
+            .saturating_add(2)
+            .saturating_add(unicode_display_width(&context));
+    }
+    let used = left_width.saturating_add(right_width);
+    let pad = width.saturating_sub(used);
+    let mut spans = vec![
+        Span::styled(folder, muted_style(no_color)),
+        Span::raw("  "),
+        Span::styled(branch, branch_style(&chrome.branch, no_color)),
+    ];
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    } else if width > left_width {
+        spans.push(Span::raw(" "));
+    }
+    if width > left_width {
+        spans.push(Span::styled(model, model_style(no_color)));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            context,
+            context_style(&chrome.context, no_color),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn waiting_keys(waiting: WaitingKind) -> &'static str {
+    match waiting {
+        WaitingKind::Approval => "Y/Enter approve once · N deny · Esc deny",
+        WaitingKind::Workspace => "Y/Enter allow this directory · N decline",
+        WaitingKind::Question => "Enter / 1-9 answer · Esc skip",
+        WaitingKind::None => "",
+    }
+}
+
+fn agent_mode_label(
     waiting: WaitingKind,
-) -> Line<'static> {
-    let (lifecycle, rest) = chrome_lifecycle_and_rest(status);
-    let lifecycle = match waiting {
+    worker_mode: Option<InteractiveAgentMode>,
+) -> &'static str {
+    match waiting {
         WaitingKind::Approval => "WAITING APPROVAL",
         WaitingKind::Question => "WAITING QUESTION",
         WaitingKind::Workspace => "WAITING PERMISSION",
-        WaitingKind::None => lifecycle,
-    };
-    let mut combined = lifecycle.to_string();
-    if !rest.is_empty() {
-        combined = format!("{combined} · {rest}");
+        WaitingKind::None => worker_mode
+            .map(InteractiveAgentMode::as_str)
+            .unwrap_or("idle"),
     }
-    if !viewport.is_pinned_to_tail() {
-        combined = format!("{combined} · paused");
-    }
-    let (lifecycle, rest) = chrome_lifecycle_and_rest(&combined);
-    let lifecycle_style = if waiting == WaitingKind::Approval || waiting == WaitingKind::Workspace {
-        if no_color {
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        }
-    } else if waiting == WaitingKind::Question {
-        if no_color {
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        }
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
-    let mut spans = vec![Span::styled(lifecycle.to_string(), lifecycle_style)];
-    if !rest.is_empty() {
-        spans.push(Span::styled(format!(" · {rest}"), muted_style(no_color)));
-    }
-    Line::from(spans)
 }
 
 fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'static>> {
@@ -3153,26 +3198,19 @@ fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'stat
 }
 
 fn footer_line(
-    run_active: bool,
+    chrome: &TuiChrome,
     viewport: &TranscriptViewport,
-    focus: TuiFocus,
     queued: usize,
     waiting: WaitingKind,
+    band_hint: Option<&str>,
 ) -> String {
-    let mut hint = if waiting == WaitingKind::Approval {
-        "Y/Enter approve once · N deny · Esc deny".to_string()
-    } else if waiting == WaitingKind::Workspace {
-        "Y/Enter allow this directory · N decline".to_string()
-    } else if waiting == WaitingKind::Question {
-        "Enter / 1-9 answer · Esc skip".to_string()
-    } else if focus == TuiFocus::Transcript {
-        "↑↓ select · ←/→ fold · Ctrl+Y copy · Tab prompt".to_string()
-    } else if run_active {
-        "Enter queue · Ctrl+S steer · Ctrl+C stop".to_string()
-    } else {
-        "Enter send · Shift+Enter newline · / commands · @ files".to_string()
-    };
-    if queued > 0 && focus != TuiFocus::Transcript {
+    let mut hint = format!("approval {} · {}", chrome.approval, chrome.agent_mode);
+    if waiting != WaitingKind::None {
+        hint = format!("{hint} · {}", waiting_keys(waiting));
+    } else if let Some(band) = band_hint {
+        hint = format!("{hint} · {band}");
+    }
+    if queued > 0 {
         hint = format!("queue {queued} · {hint}");
     }
     if !viewport.is_pinned_to_tail() {
@@ -3948,8 +3986,7 @@ fn activities_from_timeline_text(text: &str) -> Vec<ActivityEntry> {
     entries
 }
 
-fn activity_row_style(row: &str, selected: bool, no_color: bool) -> Line<'static> {
-    let mut line = styled_transcript_row(row, no_color);
+fn apply_selection(mut line: Line<'static>, selected: bool, no_color: bool) -> Line<'static> {
     if selected {
         if no_color {
             line.spans
@@ -3964,24 +4001,62 @@ fn activity_row_style(row: &str, selected: bool, no_color: bool) -> Line<'static
     line
 }
 
-fn wrapped_activity_rows(entry: &ActivityEntry, width: u16) -> Vec<String> {
-    wrapped_display_rows(&entry.display_text(), width.max(1))
+fn speech_source(entry: &ActivityEntry) -> String {
+    if entry.title.is_empty() || entry.title == "live" {
+        entry.body.clone()
+    } else if entry.body.is_empty() || entry.folded {
+        entry.title.clone()
+    } else {
+        format!("{}\n{}", entry.title, entry.body)
+    }
 }
 
-fn flatten_activity_rows(activities: &[ActivityEntry], width: u16) -> (Vec<String>, Vec<usize>) {
+fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        entry.kind.role_label().to_string(),
+        role_style(entry.kind, no_color),
+    ))];
+    let source = speech_source(entry);
+    if source.is_empty() {
+        return lines;
+    }
+    lines.extend(markdown::render_markdown(
+        &source,
+        width,
+        markdown::speech_indent(),
+        no_color,
+    ));
+    lines
+}
+
+fn activity_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    match entry.kind {
+        ActivityKind::User | ActivityKind::Assistant => speech_lines(entry, width, no_color),
+        _ => wrapped_display_rows(&entry.display_text(), width.max(1))
+            .into_iter()
+            .map(|row| styled_transcript_row(&row, no_color))
+            .collect(),
+    }
+}
+
+fn flatten_activity_lines(
+    activities: &[ActivityEntry],
+    width: u16,
+    no_color: bool,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut owners = Vec::new();
     let mut previous_channel = None;
     for (index, entry) in activities.iter().enumerate() {
         let channel = visual_channel(entry.kind);
         if previous_channel.is_some_and(|previous| previous != channel) {
-            rows.push(String::new());
+            rows.push(Line::from(""));
             owners.push(index);
         }
         previous_channel = Some(channel);
-        let wrapped = wrapped_activity_rows(entry, width);
+        let wrapped = activity_lines(entry, width, no_color);
         if wrapped.is_empty() {
-            rows.push(String::new());
+            rows.push(Line::from(""));
             owners.push(index);
         } else {
             for row in wrapped {
@@ -4014,8 +4089,8 @@ fn ensure_selected_visible(viewport: &mut TranscriptViewport, owners: &[usize], 
 #[cfg(test)]
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
-    header: &str,
-    status: &str,
+    _header: &str,
+    _status: &str,
     timeline_text: &str,
     composer: &Composer,
     pending_approval: Option<&TuiApprovalRequest>,
@@ -4024,8 +4099,8 @@ fn render_current_session_view(
     let mut viewport = TranscriptViewport::default();
     render_current_session_view_with_viewport(
         frame,
-        header,
-        status,
+        _header,
+        _status,
         timeline_text,
         composer,
         pending_approval,
@@ -4039,8 +4114,8 @@ fn render_current_session_view(
 #[allow(clippy::too_many_arguments)]
 fn render_current_session_view_with_viewport(
     frame: &mut ratatui::Frame<'_>,
-    header: &str,
-    status: &str,
+    _header: &str,
+    _status: &str,
     timeline_text: &str,
     composer: &Composer,
     pending_approval: Option<&TuiApprovalRequest>,
@@ -4052,8 +4127,7 @@ fn render_current_session_view_with_viewport(
     let welcome = StartupWelcome::fixture();
     render_session_activities(
         frame,
-        header,
-        status,
+        &TuiChrome::fixture(),
         &activities,
         composer,
         pending_approval,
@@ -4074,8 +4148,8 @@ fn render_current_session_view_with_viewport(
 #[allow(clippy::too_many_arguments)]
 fn render_session_view_with_completion(
     frame: &mut ratatui::Frame<'_>,
-    header: &str,
-    status: &str,
+    _header: &str,
+    _status: &str,
     timeline_text: &str,
     composer: &Composer,
     completion: Option<&CompletionMenu>,
@@ -4087,8 +4161,7 @@ fn render_session_view_with_completion(
     let welcome = StartupWelcome::fixture();
     render_session_activities(
         frame,
-        header,
-        status,
+        &TuiChrome::fixture(),
         &activities,
         composer,
         None,
@@ -4108,13 +4181,12 @@ fn render_session_view_with_completion(
 #[allow(clippy::too_many_arguments)]
 fn render_session_activities(
     frame: &mut ratatui::Frame<'_>,
-    header: &str,
-    status: &str,
+    chrome: &TuiChrome,
     activities: &[ActivityEntry],
     composer: &Composer,
     pending_approval: Option<&TuiApprovalRequest>,
     pending_question: Option<&PendingQuestion>,
-    run_active: bool,
+    _run_active: bool,
     viewport: &mut TranscriptViewport,
     focus: TuiFocus,
     selected: Option<usize>,
@@ -4155,7 +4227,14 @@ fn render_session_activities(
     } else {
         0
     };
-    frame.render_widget(Paragraph::new(header_line(header, no_color)), layout.header);
+    let mut chrome = chrome.clone();
+    if waiting != WaitingKind::None {
+        chrome.agent_mode = agent_mode_label(waiting, None).to_string();
+    }
+    frame.render_widget(
+        Paragraph::new(header_line(&chrome, layout.header.width, no_color)),
+        layout.header,
+    );
     let dock_h = if dock {
         let keep_transcript = 3u16.min(layout.transcript.height.saturating_sub(1));
         desired_dock
@@ -4178,20 +4257,16 @@ fn render_session_activities(
     let empty = activities.is_empty();
     let (rendered_rows, owners) = if empty {
         (
-            vec![String::new(); empty_state_lines(welcome, no_color).len()],
+            vec![Line::from(""); empty_state_lines(welcome, no_color).len()],
             Vec::new(),
         )
     } else {
-        flatten_activity_rows(activities, body[0].width.max(1))
+        flatten_activity_lines(activities, body[0].width.max(1), no_color)
     };
     viewport.observe_layout(rendered_rows.len(), usize::from(body[0].height.max(1)));
     if let Some(selected) = selected {
         ensure_selected_visible(viewport, &owners, selected);
     }
-    frame.render_widget(
-        Paragraph::new(status_line(status, viewport, no_color, waiting)),
-        layout.status,
-    );
     if empty {
         let welcome_lines = empty_state_lines(welcome, no_color);
         let welcome_height = u16::try_from(welcome_lines.len()).unwrap_or(1);
@@ -4215,8 +4290,8 @@ fn render_session_activities(
             .enumerate()
             .map(|(offset, row)| {
                 let activity_index = owners.get(visible_start + offset).copied();
-                activity_row_style(
-                    row,
+                apply_selection(
+                    row.clone(),
                     selected.is_some()
                         && activity_index == selected
                         && focus == TuiFocus::Transcript,
@@ -4314,18 +4389,13 @@ fn render_session_activities(
         }
         None => {}
     }
-    let mut footer = footer_line(run_active, viewport, focus, queued, waiting);
-    if let Some(band) = band {
-        if waiting == WaitingKind::None {
-            footer = band.footer_hint().to_string();
-            if queued > 0 {
-                footer = format!("queue {queued} · {footer}");
-            }
-            if !viewport.is_pinned_to_tail() {
-                footer.push_str(" · Ctrl+End follow");
-            }
-        }
-    }
+    let footer = footer_line(
+        &chrome,
+        viewport,
+        queued,
+        waiting,
+        band.map(InteractionBand::footer_hint),
+    );
     frame.render_widget(
         Paragraph::new(footer).style(muted_style(no_color)),
         layout.footer,
@@ -4494,46 +4564,38 @@ fn draw_loop(
             .as_ref()
             .map(|session| session.queued_follow_ups.len())
             .unwrap_or(0);
-        let terminal_width = match terminal.size() {
-            Ok(area) => area.width,
-            Err(error) => break Err(error),
-        };
-        let (header, status_line) = if chrome_cache.as_ref().is_some_and(|cache| {
-            cache.matches(
-                chrome_generation,
-                &timeline.session_id,
-                &session_origin,
-                queued,
-                terminal_width,
-                worker_status,
-            )
+        if let Err(error) = terminal.size() {
+            break Err(error);
+        }
+        let mut chrome = if chrome_cache.as_ref().is_some_and(|cache| {
+            cache.matches(chrome_generation, &timeline.session_id, &session_origin)
         }) {
-            let cache = chrome_cache.as_ref().expect("checked");
-            (cache.header.clone(), cache.status.clone())
+            chrome_cache.as_ref().expect("checked").chrome.clone()
         } else {
-            let (header, status) = format_tui_interaction_chrome(
-                project_root,
-                &profile_id,
-                session.as_ref(),
-                &timeline.session_id,
-                &session_origin,
-                worker_status,
-                queued,
-                terminal_width,
-            )
-            .unwrap_or_else(|error| (error.clone(), error));
+            let chrome =
+                format_tui_interaction_chrome(project_root, session.as_ref(), &timeline.session_id)
+                    .unwrap_or_else(TuiChrome::error);
             chrome_cache = Some(ChromeCache {
                 generation: chrome_generation,
                 session_id: timeline.session_id.clone(),
                 origin: session_origin.clone(),
-                queued,
-                width: terminal_width,
-                lifecycle: worker_status.to_string(),
-                header: header.clone(),
-                status: status.clone(),
+                chrome: chrome.clone(),
             });
-            (header, status)
+            chrome
         };
+        chrome.agent_mode = agent_mode_label(
+            if pending_approval.is_some() {
+                WaitingKind::Approval
+            } else if pending_question.is_some() {
+                WaitingKind::Question
+            } else if welcome.consent_directory.is_some() {
+                WaitingKind::Workspace
+            } else {
+                WaitingKind::None
+            },
+            worker.as_ref().map(|worker| worker.mode),
+        )
+        .to_string();
         if selected_activity.is_some_and(|index| index >= timeline.activities.len()) {
             selected_activity = timeline.activities.len().checked_sub(1);
         }
@@ -4576,8 +4638,7 @@ fn draw_loop(
         if let Err(error) = terminal.draw(|f| {
             render_session_activities(
                 f,
-                &header,
-                &status_line,
+                &chrome,
                 &timeline.activities,
                 &composer,
                 pending_approval.as_ref(),
@@ -5576,16 +5637,12 @@ mod tests {
             generation: 1,
             session_id: "abc".to_string(),
             origin: "new".to_string(),
-            queued: 0,
-            width: 80,
-            lifecycle: "idle".to_string(),
-            header: "h".to_string(),
-            status: "s".to_string(),
+            chrome: TuiChrome::fixture(),
         };
-        assert!(cache.matches(1, "abc", "new", 0, 80, "idle"));
-        assert!(!cache.matches(1, "abc", "new", 1, 80, "idle"));
-        assert!(!cache.matches(2, "abc", "new", 0, 80, "idle"));
-        assert!(!cache.matches(1, "abc", "new", 0, 80, "running"));
+        assert!(cache.matches(1, "abc", "new"));
+        assert!(!cache.matches(1, "other", "new"));
+        assert!(!cache.matches(2, "abc", "new"));
+        assert!(!cache.matches(1, "abc", "resumed"));
     }
 
     #[test]
@@ -5636,7 +5693,8 @@ mod tests {
         assert!(rendered.contains("Ctrl+C"));
         assert!(rendered.contains("twice to quit"));
         assert!(rendered.contains("> Ask nib anything…"));
-        assert!(rendered.contains("Enter send"));
+        assert!(rendered.contains("approval manual"));
+        assert!(rendered.contains("idle"));
         assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
     }
 
@@ -5655,8 +5713,7 @@ mod tests {
             .draw(|frame| {
                 render_session_activities(
                     frame,
-                    "nib · ~/work/nib · main · wt root",
-                    "idle · mock/mock-model · approval manual",
+                    &TuiChrome::fixture(),
                     &[],
                     &Composer::default(),
                     None,
@@ -5790,8 +5847,7 @@ mod tests {
             .draw(|frame| {
                 render_session_activities(
                     frame,
-                    "nib · project",
-                    "idle · mock/mock-model · manual",
+                    &TuiChrome::fixture(),
                     &activities,
                     &Composer::default(),
                     None,
@@ -5839,6 +5895,83 @@ mod tests {
     }
 
     #[test]
+    fn header_shows_folder_and_branch_left_and_model_right() {
+        let chrome = TuiChrome {
+            folder: "~/work/nib".to_string(),
+            branch: "feat/t039".to_string(),
+            model: "mock-model".to_string(),
+            context: "12%".to_string(),
+            approval: "manual".to_string(),
+            agent_mode: "idle".to_string(),
+        };
+        let line = header_line(&chrome, 80, true);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.starts_with("~/work/nib"), "{text}");
+        assert!(text.contains("feat/t039"), "{text}");
+        assert!(
+            text.find("~/work/nib").expect("folder") < text.find("mock-model").expect("model"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with("12%"), "{text}");
+        let folder_end = text.find("feat/t039").expect("branch") + "feat/t039".len();
+        let model_start = text.find("mock-model").expect("model");
+        assert!(
+            text[folder_end..model_start].chars().all(|ch| ch == ' '),
+            "model must sit on the right of the header: {text:?}"
+        );
+    }
+
+    #[test]
+    fn speech_renders_markdown_headings_lists_and_fenced_code() {
+        let activities = vec![ActivityEntry::new(
+            ActivityKind::Assistant,
+            "",
+            "# Fix\n\nUse `task check` then:\n\n```rust\nfn main() {}\n```\n\n- one\n- two\n",
+        )];
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut viewport = TranscriptViewport::default();
+        let welcome = StartupWelcome::fixture();
+        terminal
+            .draw(|frame| {
+                render_session_activities(
+                    frame,
+                    &TuiChrome::fixture(),
+                    &activities,
+                    &Composer::default(),
+                    None,
+                    None,
+                    false,
+                    &mut viewport,
+                    TuiFocus::Composer,
+                    None,
+                    0,
+                    None,
+                    None,
+                    &welcome,
+                    None,
+                )
+            })
+            .expect("render markdown speech");
+        let rows = buffer_rows(&terminal);
+        let joined = rows.concat();
+        assert!(joined.contains("nib"), "{joined}");
+        assert!(joined.contains("# Fix"), "{joined}");
+        assert!(joined.contains("task check"), "{joined}");
+        assert!(joined.contains("fn main()"), "{joined}");
+        assert!(joined.contains("• one"), "{joined}");
+        assert!(joined.contains("• two"), "{joined}");
+        assert!(
+            !joined.contains("```"),
+            "fenced markers should be rendered away: {joined}"
+        );
+    }
+
+    #[test]
     fn activity_styles_keep_text_labels_without_color() {
         let line = styled_transcript_row("nib  concise answer", true);
         assert_eq!(line.spans[0].content, "nib");
@@ -5850,58 +5983,51 @@ mod tests {
     #[test]
     fn footer_and_completion_follow_the_current_interaction() {
         let mut viewport = TranscriptViewport::default();
+        let chrome = TuiChrome::fixture();
         assert_eq!(
-            footer_line(false, &viewport, TuiFocus::Composer, 0, WaitingKind::None),
-            "Enter send · Shift+Enter newline · / commands · @ files"
+            footer_line(&chrome, &viewport, 0, WaitingKind::None, None),
+            "approval manual · idle"
         );
+        let mut running = chrome.clone();
+        running.agent_mode = "execute".to_string();
         assert_eq!(
-            footer_line(true, &viewport, TuiFocus::Composer, 0, WaitingKind::None),
-            "Enter queue · Ctrl+S steer · Ctrl+C stop"
-        );
-        assert_eq!(
-            footer_line(true, &viewport, TuiFocus::Composer, 2, WaitingKind::None),
-            "queue 2 · Enter queue · Ctrl+S steer · Ctrl+C stop"
-        );
-        assert!(
-            footer_line(false, &viewport, TuiFocus::Transcript, 0, WaitingKind::None)
-                .contains("↑↓ select")
+            footer_line(&running, &viewport, 0, WaitingKind::None, None),
+            "approval manual · execute"
         );
         assert_eq!(
-            footer_line(
-                true,
-                &viewport,
-                TuiFocus::Composer,
-                0,
-                WaitingKind::Approval
-            ),
-            "Y/Enter approve once · N deny · Esc deny"
+            footer_line(&running, &viewport, 2, WaitingKind::None, None),
+            "queue 2 · approval manual · execute"
         );
+        let mut waiting = chrome.clone();
+        waiting.agent_mode = "WAITING APPROVAL".to_string();
         assert_eq!(
-            footer_line(
-                true,
-                &viewport,
-                TuiFocus::Composer,
-                0,
-                WaitingKind::Question
-            ),
-            "Enter / 1-9 answer · Esc skip"
+            footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None),
+            "approval manual · WAITING APPROVAL · Y/Enter approve once · N deny · Esc deny"
         );
+        let mut question = chrome.clone();
+        question.agent_mode = "WAITING QUESTION".to_string();
         assert_eq!(
-            footer_line(
-                false,
-                &viewport,
-                TuiFocus::Composer,
-                0,
-                WaitingKind::Workspace
-            ),
-            "Y/Enter allow this directory · N decline"
+            footer_line(&question, &viewport, 0, WaitingKind::Question, None),
+            "approval manual · WAITING QUESTION · Enter / 1-9 answer · Esc skip"
         );
+        let mut workspace = chrome.clone();
+        workspace.agent_mode = "WAITING PERMISSION".to_string();
+        assert_eq!(
+            footer_line(&workspace, &viewport, 0, WaitingKind::Workspace, None),
+            "approval manual · WAITING PERMISSION · Y/Enter allow this directory · N decline"
+        );
+        assert!(footer_line(
+            &chrome,
+            &viewport,
+            0,
+            WaitingKind::None,
+            Some("Tab insert · Enter run · Esc close"),
+        )
+        .contains("Tab insert"));
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
-        assert!(
-            footer_line(true, &viewport, TuiFocus::Composer, 0, WaitingKind::None)
-                .contains("Ctrl+End follow")
-        );
+        assert!(footer_line(&running, &viewport, 0, WaitingKind::None, None)
+            .contains("Ctrl+End follow"));
 
         let area = Rect::new(0, 0, 100, 30);
         let composer_height = 2;
@@ -6086,7 +6212,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("sess active-one"));
+        assert!(rendered.contains("workspace"));
+        assert!(rendered.contains("main"));
+        assert!(rendered.contains("mock-model"));
         assert!(rendered.contains("idle"));
         assert!(rendered.contains("persisted request"));
         assert!(rendered.contains("persisted reply"));
@@ -6544,8 +6672,7 @@ mod tests {
             .draw(|frame| {
                 render_session_activities(
                     frame,
-                    "nib · project",
-                    "idle · mock/mock-model",
+                    &TuiChrome::fixture(),
                     &[ActivityEntry::new(
                         ActivityKind::User,
                         "",
@@ -7516,6 +7643,7 @@ mod tests {
         });
         let mut worker = Some(TuiAgentWorker {
             run_id: run_id.to_string(),
+            mode: InteractiveAgentMode::Execute,
             cancellation,
             steering: None,
             handle: Some(handle),
@@ -7625,6 +7753,7 @@ mod tests {
         });
         let mut worker = Some(TuiAgentWorker {
             run_id: run_id.to_string(),
+            mode: InteractiveAgentMode::Execute,
             cancellation,
             steering: Some(steering),
             handle: Some(handle),
@@ -7695,6 +7824,7 @@ mod tests {
         .expect("install exact receiver");
         let worker = TuiAgentWorker {
             run_id: run_id.to_string(),
+            mode: InteractiveAgentMode::Execute,
             cancellation: CancellationSignal::new(),
             steering: Some(steering),
             handle: None,
@@ -8132,11 +8262,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("sess dock-session"));
+        assert!(rendered.contains("workspace"));
         assert!(rendered.contains("inspect wrap"));
         assert!(rendered.contains("Approval required"));
         assert!(rendered.contains("WAITING APPROVAL"));
-        assert!(rendered.contains("mock/mock-model"));
+        assert!(rendered.contains("mock-model"));
         assert!(rendered.contains("Run this command"));
         assert!(rendered.contains("task test"));
         assert!(rendered.contains("Approve once"));
@@ -8613,8 +8743,7 @@ mod tests {
             .draw(|frame| {
                 render_session_activities(
                     frame,
-                    "header",
-                    "idle",
+                    &TuiChrome::fixture(),
                     &activities,
                     &composer,
                     None,
@@ -8717,7 +8846,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Enter send"));
+        assert!(rendered.contains("approval manual"));
         assert!(rendered.contains("row-31"));
     }
 

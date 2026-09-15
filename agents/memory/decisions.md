@@ -290,12 +290,14 @@ capable terminal and plain mode otherwise; `--plain` and `--tui` force a present
 Content:
 
 FT-019 remains the umbrella interaction contract. The TUI is a presentation of that
-contract, not a second product: two fixed header/status rows, typed activity
-transcript, wrapped composer, and approval/question docks that keep the transcript
-visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
-canonical command discovery. Enter never steers; the first user-visible slice is
-queue-only until the agent loop can bind exact-run steering. Implementation still
-requires child development specs before code.
+contract, not a second product: typed activity transcript, wrapped composer, and
+approval/question docks that keep the transcript visible. Conversation stays primary;
+a permanent plan spine is rejected. `/` is canonical command discovery. Enter never
+steers; the first user-visible slice is queue-only until the agent loop can bind
+exact-run steering. Implementation still requires child development specs before code.
+
+T039 later compacted chrome to one header row (folder + colored branch left, model +
+context right) and a footer of approval mode plus agent mode. Speech renders markdown.
 
 ## 2026-09-02 - Keep v1 production delegation Linux-only
 
