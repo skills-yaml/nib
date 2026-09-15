@@ -44,7 +44,10 @@ says `awaiting you`.
   one-shot grant or deny; no always-allow in this slice.
 - While an approval is pending, the TUI status reads `WAITING APPROVAL` and the
   footer shows only the approval keys.
-- Questions keep their existing dock; only approval chrome is redesigned.
+- Questions use a bordered `Question` card. It states `nib is asking`, shows the
+  question text, numbers the choices, and pins `Enter / 1-9` and `Esc skip`.
+  Number keys submit the matching option. Free-form questions show a labeled
+  answer field. The transcript stays visible.
 - `/` and `@` completion is a reserved band under the composer, not a `Clear` overlay
   over the transcript. The conversation stays visible and the composer stays above the
   option list.
@@ -66,6 +69,7 @@ says `awaiting you`.
 - Tool title composition with argument hints and diamond/accent rendering.
 - Distinct thought / tool / speech transcript channels.
 - Approval card layout, explicit choice rows, status/footer override, Enter/1/2 aliases.
+- Question card layout, numbered choices, Enter/1-9/Esc, WAITING QUESTION status.
 - Layout reservation for completion under the composer and the waiting meter row.
 - Tests and user-guide copy.
 - No change to `ApprovalDecision`, sandbox, or always-allow policy.
@@ -105,6 +109,9 @@ says `awaiting you`.
       folder. `WAITING APPROVAL` replaces only the lifecycle token, not those fields.
 - [ ] Internal thinking renders as `thought` (dim/italic), tool calls as `◆ tool`,
       and user-facing replies as a `nib` speech block with indented body text.
+- [ ] A question dock is a bordered `Question` card that states `nib is asking`,
+      shows the question, numbers options, and pins Enter/1-9 and Esc. Status
+      reads `WAITING QUESTION`.
 
 ## Affected Areas
 

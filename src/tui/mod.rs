@@ -1240,11 +1240,35 @@ enum QuestionAction {
     Error(String),
 }
 
+fn submit_question_answer(question: &PendingQuestion, answer: &str) -> QuestionAction {
+    let state = InteractionState {
+        question_pending: true,
+        ..InteractionState::default()
+    };
+    match reduce_interaction(
+        &state,
+        InteractionInput::QuestionAnswer {
+            answer,
+            options: &question.request.options,
+            selected_option: (!question.request.options.is_empty())
+                .then_some(question.selected_option),
+        },
+    ) {
+        InteractionReduction::QuestionAnswered(answer) => QuestionAction::Submit(answer),
+        InteractionReduction::Error { message, .. } => QuestionAction::Error(message),
+        _ => QuestionAction::Error("question input was rejected by the shared reducer".to_string()),
+    }
+}
+
 fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> QuestionAction {
     match code {
+        KeyCode::Char(digit) if digit.is_ascii_digit() && !question.request.options.is_empty() => {
+            submit_question_answer(question, &digit.to_string())
+        }
         KeyCode::Char(character)
-            if question.response.len().saturating_add(character.len_utf8())
-                <= MAX_COMPOSER_BYTES =>
+            if question.request.options.is_empty()
+                && question.response.len().saturating_add(character.len_utf8())
+                    <= MAX_COMPOSER_BYTES =>
         {
             question.response.push(character);
             question.error = None;
@@ -1267,27 +1291,7 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
             }
             QuestionAction::Pending
         }
-        KeyCode::Enter => {
-            let state = InteractionState {
-                question_pending: true,
-                ..InteractionState::default()
-            };
-            match reduce_interaction(
-                &state,
-                InteractionInput::QuestionAnswer {
-                    answer: &question.response,
-                    options: &question.request.options,
-                    selected_option: (!question.request.options.is_empty())
-                        .then_some(question.selected_option),
-                },
-            ) {
-                InteractionReduction::QuestionAnswered(answer) => QuestionAction::Submit(answer),
-                InteractionReduction::Error { message, .. } => QuestionAction::Error(message),
-                _ => QuestionAction::Error(
-                    "question input was rejected by the shared reducer".to_string(),
-                ),
-            }
-        }
+        KeyCode::Enter => submit_question_answer(question, &question.response),
         KeyCode::Esc => QuestionAction::Cancel,
         _ => QuestionAction::Pending,
     }
@@ -2936,6 +2940,17 @@ fn status_line(
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         }
+    } else if waiting == WaitingKind::Question {
+        if no_color {
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        }
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     };
@@ -2963,7 +2978,7 @@ fn footer_line(
     let mut hint = if waiting == WaitingKind::Approval {
         "Y/Enter approve once · N deny · Esc deny".to_string()
     } else if waiting == WaitingKind::Question {
-        "Enter submit  Esc cancel".to_string()
+        "Enter / 1-9 answer · Esc skip".to_string()
     } else if focus == TuiFocus::Transcript {
         "↑↓ select · ←/→ fold · Ctrl+Y copy · Tab prompt".to_string()
     } else if run_active {
@@ -3384,6 +3399,147 @@ fn approval_dock_style(no_color: bool) -> Style {
     }
 }
 
+fn question_dock_style(no_color: bool) -> Style {
+    let style = Style::default().add_modifier(Modifier::BOLD);
+    if no_color {
+        style
+    } else {
+        style.fg(Color::Cyan)
+    }
+}
+
+fn render_question_card(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    question: &PendingQuestion,
+    no_color: bool,
+) {
+    let border = question_dock_style(no_color);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Question ")
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let choice_h = 2u16.min(inner.height);
+    let (body_area, choice_area) = if choice_h == inner.height {
+        (Rect::default(), inner)
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
+            .split(inner);
+        (chunks[0], chunks[1])
+    };
+    let selected_style = if no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    if body_area.height > 0 && body_area.width > 0 {
+        let indent = "  ";
+        let subject_width = body_area.width.saturating_sub(2).max(1);
+        let mut lines = vec![Line::from(Span::styled(
+            truncate_completion_text("nib is asking", usize::from(body_area.width)),
+            question_dock_style(no_color),
+        ))];
+        if body_area.height > 1 {
+            let mut remaining = usize::from(body_area.height.saturating_sub(1));
+            let question_rows = wrapped_display_rows(&question.request.question, subject_width);
+            if remaining > question_rows.len() {
+                lines.push(Line::from(""));
+                remaining -= 1;
+            }
+            for row in question_rows.into_iter().take(remaining) {
+                lines.push(Line::from(Span::styled(
+                    format!("{indent}{row}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                remaining = remaining.saturating_sub(1);
+            }
+            if remaining > 0 && !question.request.options.is_empty() {
+                lines.push(Line::from(""));
+                remaining = remaining.saturating_sub(1);
+            }
+            for (index, option) in question.request.options.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                let number = index + 1;
+                let selected = index == question.selected_option;
+                let marker = if selected { "> " } else { "  " };
+                let row = truncate_completion_text(
+                    &format!("{marker}{number}  {option}"),
+                    usize::from(body_area.width),
+                );
+                let style = if selected {
+                    selected_style
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(row, style)));
+                remaining = remaining.saturating_sub(1);
+            }
+            if remaining > 0 && question.request.options.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    truncate_completion_text("Answer", usize::from(body_area.width)),
+                    muted_style(no_color),
+                )));
+                remaining = remaining.saturating_sub(1);
+                if remaining > 0 {
+                    let answer = if question.response.is_empty() {
+                        format!("{indent}> _")
+                    } else {
+                        format!("{indent}> {}", question.response)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        truncate_completion_text(&answer, usize::from(body_area.width)),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                    remaining = remaining.saturating_sub(1);
+                }
+            }
+            if remaining > 0 {
+                if let Some(error) = &question.error {
+                    lines.push(Line::from(Span::styled(
+                        truncate_completion_text(
+                            &format!("[question error] {error}"),
+                            usize::from(body_area.width),
+                        ),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), body_area);
+    }
+    let primary = if question.request.options.is_empty() {
+        "  Enter          Submit answer"
+    } else {
+        "  Enter / 1-9    Choose this option"
+    };
+    let mut choices = vec![Line::from(Span::styled(
+        truncate_completion_text(primary, usize::from(choice_area.width)),
+        selected_style,
+    ))];
+    if choice_area.height > 1 {
+        choices.push(Line::from(Span::styled(
+            truncate_completion_text(
+                "  Esc            Skip this question",
+                usize::from(choice_area.width),
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+    frame.render_widget(Paragraph::new(choices), choice_area);
+}
+
 fn tui_report_cancelled_run(
     store: &SessionStore,
     session_id: &str,
@@ -3726,11 +3882,7 @@ fn render_session_activities(
         .unwrap_or(0);
     let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
     let dock = waiting != WaitingKind::None;
-    let desired_dock = if pending_question.is_some_and(|question| question.error.is_some()) {
-        9
-    } else if pending_question.is_some() {
-        8
-    } else if pending_approval.is_some() {
+    let desired_dock = if pending_question.is_some() || pending_approval.is_some() {
         12
     } else {
         0
@@ -3810,27 +3962,7 @@ fn render_session_activities(
     if let Some(req) = pending_approval {
         render_approval_card(frame, body[1], req, no_color);
     } else if let Some(question) = pending_question {
-        let mut text = vec![Line::from(Span::styled(
-            format!("question  {}", question.request.question),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))];
-        for (index, option) in question.request.options.iter().enumerate() {
-            let marker = if index == question.selected_option {
-                "> "
-            } else {
-                "  "
-            };
-            text.push(Line::from(format!("{marker}{option}")));
-        }
-        text.push(Line::from(format!("Response: {}", question.response)));
-        if let Some(error) = &question.error {
-            text.push(Line::from(format!("[question error] {error}")));
-        }
-        text.push(Line::from("Enter submit  Esc cancel"));
-        frame.render_widget(
-            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: true }),
-            body[1],
-        );
+        render_question_card(frame, body[1], question, no_color);
     }
     if let Some(meter) = meter {
         render_waiting_meter(frame, layout.meter, meter, no_color);
@@ -5192,6 +5324,16 @@ mod tests {
             ),
             "Y/Enter approve once · N deny · Esc deny"
         );
+        assert_eq!(
+            footer_line(
+                true,
+                &viewport,
+                TuiFocus::Composer,
+                0,
+                WaitingKind::Question
+            ),
+            "Enter / 1-9 answer · Esc skip"
+        );
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
         assert!(
@@ -6472,6 +6614,19 @@ mod tests {
     }
 
     #[test]
+    fn question_number_keys_choose_a_labeled_option() {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Mode?".to_string(),
+            options: vec!["plan".to_string(), "execute".to_string()],
+            reply: reply_tx,
+        }));
+        assert!(handle_question_key(&mut pending, KeyCode::Char('1')));
+        assert_eq!(reply_rx.try_recv().unwrap(), Ok("plan".to_string()));
+        assert!(pending.is_none());
+    }
+
+    #[test]
     fn question_modal_reports_cancellation() {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
@@ -7294,6 +7449,49 @@ mod tests {
         assert!(rendered.contains("Deny"));
         assert!(!rendered.contains("command="));
         assert!(!rendered.contains("{\"command\""));
+    }
+
+    #[test]
+    fn question_card_states_the_ask_and_numbered_choices() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let question = PendingQuestion::new(TuiQuestionRequest {
+            question: "Choose a mode".to_string(),
+            options: vec!["plan".to_string(), "execute".to_string()],
+            reply: reply_tx,
+        });
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace  ·  sess dock-session  ·  local  ·  -",
+                    "awaiting you  ·  mock/mock-model  ·  queue 0",
+                    "you  inspect wrap\n\nnib  keep this visible",
+                    &Composer::default(),
+                    None,
+                    Some(&question),
+                )
+            })
+            .expect("render question card");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Question"), "{rendered}");
+        assert!(rendered.contains("nib is asking"), "{rendered}");
+        assert!(rendered.contains("Choose a mode"), "{rendered}");
+        assert!(rendered.contains("1  plan"), "{rendered}");
+        assert!(rendered.contains("execute"), "{rendered}");
+        assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
+        assert!(rendered.contains("Enter"), "{rendered}");
+        assert!(rendered.contains("Esc"), "{rendered}");
+        assert!(rendered.contains("inspect wrap"), "{rendered}");
+        assert!(rendered.contains("keep this visible"), "{rendered}");
+        assert!(!rendered.contains("question  Choose a mode"), "{rendered}");
     }
 
     #[test]

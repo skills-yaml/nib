@@ -514,8 +514,10 @@ that still require interactive approval appear as a bordered `Approval required`
 card. The card states what nib wants to do, shows the command or path on its own
 lines, and pins two choices: `Y`/`Enter`/`1` approve once, or `N`/`Esc`/`2` deny.
 The transcript above the card stays visible. While the card is open the status
-reads `WAITING APPROVAL` and the footer shows only those keys. Questions still use
-their existing dock.
+reads `WAITING APPROVAL` and the footer shows only those keys. When nib asks a
+question, a bordered `Question` card states `nib is asking`, shows the question,
+and numbers the choices. Press `Enter` or `1`-`9` to answer, or `Esc` to skip.
+While that card is open the status reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 
