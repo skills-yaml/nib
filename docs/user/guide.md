@@ -515,33 +515,36 @@ nib --tui --session <id>
 nib tui                            # compatibility alias
 ```
 
-The TUI opens as a conversation-first ledger: two compact header/status rows, a typed
-activity transcript (you, nib, plan, tool, approval, question, compression, reconcile,
+The TUI opens as a conversation-first ledger: one header row, a typed activity
+transcript (you, nib, plan, tool, approval, question, compression, reconcile,
 failure), and a wrapped multi-line composer. nib presents itself as the AI agent for
 the current project; it does not split the interface into separate coding and workload
-personas. Historical sessions are not a permanent pane. The fixed rows show the current
-folder, git branch, worktree, model, and approval mode, and fit them to the current
-terminal width. While an approval card is open the status still keeps the model and
-approval mode next to `WAITING APPROVAL`. `/status` retains the full session, transport,
-worktree path, context, and effective-permission diagnostics. If a requested session is missing, the
+personas. Historical sessions are not a permanent pane. The first row shows the
+working directory and git branch on the left and the current model plus context
+usage on the right. The last row shows the command approval mode and the agent
+mode (`idle`, `execute`, `plan`, or `compact`). While an approval card is open the
+footer still keeps those fields and reads `WAITING APPROVAL` with the Y/N keys.
+`/status` retains the full session, transport, worktree path, context, and
+effective-permission diagnostics. If a requested session is missing, the
 ledger shows a shortened recovery notice instead of silently presenting its replacement.
 `--run` submits an initial goal; `--session` hydrates an existing session before input
 is accepted, and `--auth` runs authentication before raw mode starts.
 
 Streamed model output and meaningful tool lifecycle events update typed activity
-entries. Routine run-start and state-transition events update the status row without
-adding transcript noise; their exact records remain in the persisted session audit.
+entries. Routine run-start and state-transition events update the waiting meter and
+footer without adding transcript noise; their exact records remain in the persisted
+session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
 The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
 that still require interactive approval appear as a bordered `Approval required`
 card. The card states what nib wants to do, shows the command or path on its own
 lines, and pins two choices: `Y`/`Enter`/`1` approve once, or `N`/`Esc`/`2` deny.
-The transcript above the card stays visible. While the card is open the status
-reads `WAITING APPROVAL` and the footer shows only those keys. When nib asks a
+The transcript above the card stays visible. While the card is open the footer
+reads `WAITING APPROVAL` and shows the approval keys. When nib asks a
 question, a bordered `Question` card states `nib is asking`, shows the question,
 and numbers the choices. Press `Enter` or `1`-`9` to answer, or `Esc` to skip.
-While that card is open the status reads `WAITING QUESTION`.
+While that card is open the footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 
@@ -579,7 +582,9 @@ The transcript is a list of typed blocks with three distinct channels. Internal
 thinking is a dim `thought` block (planning and plan progress). Tool work is a
 `◆ tool` block that mutates from requested to running to a collapsed summary and
 includes the path or command when the stream provided it. Replies to you are a
-`nib` speech block with indented body text, separate from tools and thinking.
+`nib` speech block. User and nib speech render markdown, including headings,
+lists, emphasis, inline code, and fenced code with lightweight syntax coloring.
+Tool and thought blocks stay as structured channels, not markdown.
 `Left`/`Right` expand or fold the selected block; expanded tool output is indented
 under a left accent. `Tab` moves focus between the composer and the transcript.
 With the transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it.
@@ -589,9 +594,8 @@ The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
 also work). Those keys still scroll while an approval card is open. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
-the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
-follow-tail. The footer otherwise shows only the relevant idle, transcript, or
-active-run actions.
+the footer labels that state. Submitting input or pressing `Ctrl+End` resumes
+follow-tail. The footer otherwise keeps approval mode and agent mode visible.
 Resizes and narrow terminals clamp the row viewport safely.
 
 `/session`, `/model`, `/history`, and question options use the same under-composer
