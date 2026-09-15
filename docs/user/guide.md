@@ -534,7 +534,8 @@ with the path; `Y`/`Enter` allow and persist `workspace.allowed`, and `N`/`Esc`
 quit. Later starts skip the card. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
-conversation. Each row shows one command signature
+conversation. Command signatures start on the same column as the `/` in the
+composer and are not prefixed with a caret. Each row shows one command signature
 and one description. Use `Up`/`Down` to select, `Tab` to insert, `Enter` to run a
 complete command, and `Esc` to close completion without clearing the draft. When completion is closed, `Up`/`Down` restore
 bounded in-process draft history. Typing `@` offers

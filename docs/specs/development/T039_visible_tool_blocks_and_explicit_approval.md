@@ -50,7 +50,8 @@ says `awaiting you`.
   answer field. The transcript stays visible.
 - `/` and `@` completion is a reserved band under the composer, not a `Clear` overlay
   over the transcript. The conversation stays visible and the composer stays above the
-  option list.
+  option list. Slash option signatures start on the same column as the composer `/`
+  and do not use a `>` caret; the selected row is emphasized in place.
 - A waiting meter appears between the transcript and the composer while a run is active
   or an approval/question is pending. It shows spinner, current job, plan step, elapsed
   time, a token estimate, and status.
@@ -112,7 +113,8 @@ says `awaiting you`.
 - [ ] Focused interactive tests, `task docs:check`, `task check`, and
       `task test:interactive` pass.
 - [ ] Slash completion options render under the composer; conversation text above the
-      input remains visible and is not cleared.
+      input remains visible and is not cleared. Option signatures start on the
+      same column as the composer `/` and have no `>` caret.
 - [ ] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
       while a run is active or the TUI is waiting.
 - [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
