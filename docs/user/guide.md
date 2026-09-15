@@ -398,7 +398,8 @@ Both presentation modes expose these commands:
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
-  display name.
+  display name. The first user message also names an unnamed session; `/rename`
+  is not overwritten.
 - `/copy` prints the latest completed assistant output.
 - `/compact` requests bounded compression for the active session through the configured
   provider. It may bypass the automatic usage threshold, but still respects the
@@ -573,7 +574,9 @@ follow-tail. The footer otherwise shows only the relevant idle, transcript, or
 active-run actions.
 Resizes and narrow terminals clamp the row viewport safely.
 
-Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
+`/session`, `/model`, `/history`, and question options use the same under-composer
+list as `/` and `@` completion: no covering overlay, no caret, emphasized selection.
+Run `/session` to list sessions under the prompt. `Up`/`Down` changes the selection,
 and typing an exact session ID can preview an older session omitted from the bounded
 list. `Enter` first loads that exact preview when present, then opens a separate
 confirmation naming the current and target sessions; `Esc` cancels without changing
