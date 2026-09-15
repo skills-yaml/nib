@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **46 done, 1 development, and 1 backlog**.
+The current lifecycle is **46 done, 4 development, and 1 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -88,6 +88,7 @@ work or narrower guarantees.
 - [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
 - [T038: TUI Block Transcript and Key Contract](development/T038_tui_block_transcript_and_key_contract.md)
 - [T039: Visible Tool Blocks and Explicit Approval Card](development/T039_visible_tool_blocks_and_explicit_approval.md)
+- [T041: Task-Aware Context and Verified Completion](development/T041_task_aware_context_and_verified_completion.md)
 
 ### Feature specs
 
