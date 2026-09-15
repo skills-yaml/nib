@@ -81,6 +81,15 @@ impl RuntimeContextSections {
 
 const MAX_ATTACHMENT_FILE_BYTES: usize = 8 * 1024;
 
+/// Initial history allocation shared by request projection and automatic compression.
+pub(crate) fn runtime_history_budget(context_length: usize) -> usize {
+    (context_length.saturating_mul(25) / 100).max(8)
+}
+
+fn session_summary_budget(history_tokens: usize) -> usize {
+    (history_tokens / 3).max(1)
+}
+
 pub fn attachment_context_sections(
     project_root: &Path,
     attachments: &[crate::session::PathAttachment],
@@ -91,34 +100,14 @@ pub fn attachment_context_sections(
     let mut sections = Vec::new();
     for attachment in attachments {
         let candidate = root.join(&attachment.path);
-        let Ok(metadata) = candidate.symlink_metadata() else {
+        let Some(content) =
+            project_docs::read_bounded_regular_file(&root, &candidate, MAX_ATTACHMENT_FILE_BYTES)
+        else {
             continue;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        let Ok(canonical) = candidate.canonicalize() else {
-            continue;
-        };
-        if !canonical.starts_with(&root) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&canonical) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let truncated = if text.len() > MAX_ATTACHMENT_FILE_BYTES {
-            let mut end = MAX_ATTACHMENT_FILE_BYTES.min(text.len());
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}{}", &text[..end], "\n\n...[attached file bounded]...")
-        } else {
-            text.into_owned()
         };
         sections.push(RuntimeContextSection {
             label: attachment.path.clone(),
-            content: truncated,
+            content,
         });
     }
     sections
@@ -127,7 +116,7 @@ pub fn attachment_context_sections(
 pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedSessionContext {
     let max_tokens = max_tokens.max(1);
     let summary_budget = if session.summary.is_some() {
-        (max_tokens / 3).max(1)
+        session_summary_budget(max_tokens)
     } else {
         0
     };
@@ -143,18 +132,40 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
     let message_budget = max_tokens.saturating_sub(summary_tokens);
 
     let start = session.summary_index.min(session.messages.len());
+    // Keep the latest explicit user instruction visible even after a large tool
+    // observation. Older history still yields to recent evidence; no raw audit
+    // message is changed by this projection.
+    let latest_user = session.messages[start..]
+        .iter()
+        .rposition(|message| message.role == "user")
+        .map(|index| start + index);
+    let user_reserve = latest_user
+        .map(|index| {
+            compression::approximate_tokens(&session.messages[index].content)
+                .min((message_budget / 3).max(1))
+                .min(message_budget)
+        })
+        .unwrap_or(0);
     let mut remaining = message_budget;
     let mut selected = Vec::new();
-    for message in session.messages[start..].iter().rev() {
+    for (offset, message) in session.messages[start..].iter().enumerate().rev() {
         if remaining == 0 {
             break;
+        }
+        let available = if latest_user.is_some_and(|index| start + offset > index) {
+            remaining.saturating_sub(user_reserve)
+        } else {
+            remaining
+        };
+        if available == 0 {
+            continue;
         }
         let normalized = if message.role == "tool" {
             format!("Tool observation: {}", message.content)
         } else {
             message.content.clone()
         };
-        let bounded = compression::truncate_to_tokens(&normalized, remaining);
+        let bounded = compression::truncate_to_tokens(&normalized, available);
         if bounded.is_empty() {
             break;
         }
@@ -504,6 +515,150 @@ mod tests {
         assert!(rendered.contains("RUNTIME_BOUNDARY_STANDARD"));
         assert!(rendered.contains("libs/payments/README.md"));
         assert!(rendered.contains("PAYMENTS_DOMAIN_BOUNDARY"));
+    }
+
+    #[test]
+    fn bounded_requests_include_attachment_evidence() {
+        use budget::{
+            build_bounded_planning_input, build_bounded_runtime_input, PlanningPromptRequest,
+            RuntimePromptRequest,
+        };
+
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("evidence.md"),
+            format!("ATTACHED_EVIDENCE\n{}", "source detail ".repeat(2_000)),
+        )
+        .expect("attachment");
+        let mut context = assemble_runtime_context_sections(
+            directory.path(),
+            "Inspect the attachment",
+            &[],
+            &crate::session::memory::MemoryStoreData::default(),
+        );
+        context.attachments = attachment_context_sections(
+            directory.path(),
+            &[crate::session::PathAttachment {
+                path: "evidence.md".into(),
+            }],
+        );
+        assert_eq!(context.attachments.len(), 1);
+        assert!(context.attachments[0].content.len() <= MAX_ATTACHMENT_FILE_BYTES);
+        let session: Session = serde_json::from_value(json!({
+            "id": "attachment-request",
+            "messages": [{"index": 0, "role": "user", "content": "Inspect the attachment"}]
+        }))
+        .expect("session");
+        let planning = build_bounded_planning_input(PlanningPromptRequest {
+            context: &context,
+            session: Some(&session),
+            goal: "Inspect the attachment",
+            tools: &[],
+            context_length: 4_096,
+        })
+        .expect("planning request");
+        let runtime = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: Some("Inspect the attachment"),
+            tools: None,
+            mode: "execute",
+            project_root: directory.path(),
+            tool_use_enforcement: false,
+            context_length: 4_096,
+        })
+        .expect("runtime request");
+        for request in [planning, runtime] {
+            let prompt = request.messages[0]["content"]
+                .as_str()
+                .expect("system content");
+            assert!(prompt.contains("Attached Project Paths"));
+            assert!(prompt.contains("evidence.md"));
+            assert!(prompt.contains("ATTACHED_EVIDENCE"));
+            assert!(request.approximate_tokens <= 4_096);
+        }
+    }
+
+    #[test]
+    fn attachments_bound_sparse_reads_and_reject_outside_paths() {
+        use std::io::Write;
+
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("large.md");
+        let mut file = std::fs::File::create(&path).expect("attachment");
+        file.write_all(format!("SPARSE_HEAD{}", "é".repeat(8_192)).as_bytes())
+            .expect("prefix");
+        file.set_len(256 * 1024 * 1024).expect("sparse length");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("outside.md"), "OUTSIDE_CONTENT").expect("outside file");
+        let sections = attachment_context_sections(
+            directory.path(),
+            &[
+                crate::session::PathAttachment {
+                    path: "large.md".into(),
+                },
+                crate::session::PathAttachment {
+                    path: outside
+                        .path()
+                        .join("outside.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+            ],
+        );
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].content.starts_with("SPARSE_HEAD"));
+        assert!(sections[0].content.contains("bounded"));
+        assert!(sections[0].content.len() <= MAX_ATTACHMENT_FILE_BYTES);
+        assert!(!sections[0].content.contains('\u{fffd}'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachments_reject_symlinked_directory_ancestors() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::create_dir(directory.path().join("real")).expect("real directory");
+        std::fs::write(directory.path().join("real/evidence.md"), "EVIDENCE").expect("file");
+        std::os::unix::fs::symlink(
+            directory.path().join("real"),
+            directory.path().join("linked"),
+        )
+        .expect("directory link");
+        assert!(attachment_context_sections(
+            directory.path(),
+            &[crate::session::PathAttachment {
+                path: "linked/evidence.md".into()
+            },]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn large_tool_observation_retains_latest_user_instruction_within_history_budget() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "user-context-reserve",
+            "messages": [
+                {"index": 0, "role": "user", "content": "older request"},
+                {"index": 1, "role": "assistant", "content": "prior answer"},
+                {"index": 2, "role": "user", "content": "Keep the public API unchanged."},
+                {"index": 3, "role": "assistant", "content": "Inspecting call sites"},
+                {"index": 4, "role": "tool", "content": format!("OBSERVATION_HEAD {} OBSERVATION_TAIL", "output ".repeat(500))}
+            ]
+        })).expect("session");
+        let original = session.clone();
+        let projected = bounded_session_context(&session, 80);
+        let text = projected
+            .messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Keep the public API unchanged."));
+        assert!(text.contains("OBSERVATION_HEAD"));
+        assert!(text.contains("OBSERVATION_TAIL"));
+        assert!(text.find("public API").unwrap() < text.find("OBSERVATION_HEAD").unwrap());
+        assert!(projected.approximate_tokens <= 80);
+        assert_eq!(session, original);
     }
 
     #[test]

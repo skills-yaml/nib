@@ -215,7 +215,7 @@ pub fn build_bounded_runtime_input(
     } else {
         (request.context_length * 30 / 100).max(minimum_tool_budget)
     };
-    let mut history_budget = (request.context_length * 25 / 100).max(MIN_HISTORY_TOKENS);
+    let mut history_budget = crate::context::runtime_history_budget(request.context_length);
 
     loop {
         let bounded_history = bounded_session_context(request.session, history_budget);
@@ -295,7 +295,9 @@ fn build_runtime_system_prompt(
         format!("\n\n{context}")
     };
     format!(
-        "You are nib, a trustworthy local-first AI agent.\nProject root: {root}\nCurrent mode: {mode}{context}\n\nFollow only the persisted, approved plan. {tool_instruction}\nReport tool outcomes accurately and finish each step with a concise verification result."
+        "{}\n\n{}\n{tool_instruction}\nProject root: {root}\nCurrent mode: {mode}{context}",
+        crate::agent::instructions::SHARED,
+        crate::agent::instructions::EXECUTION,
     )
 }
 
@@ -311,7 +313,9 @@ fn build_planning_system_prompt(runtime_context: &str, session_context: &str) ->
         format!("\n\n{session_context}")
     };
     format!(
-        "You are a senior planner agent. Generate a step-by-step plan for the current goal. Follow the loaded project instructions and selected skills, account for profile memory and authoritative workload state, and use relevant session context. Use the `submit_plan` tool to submit the plan.{runtime_context}{session_context}"
+        "{}\n\n{}{runtime_context}{session_context}",
+        crate::agent::instructions::SHARED,
+        crate::agent::instructions::PLANNING,
     )
 }
 
@@ -383,6 +387,14 @@ fn render_runtime_context(
         groups.push((
             "Project Standards and Library Documentation",
             context.project_docs.as_slice(),
+            15,
+            MIN_PROJECT_DOC_SECTION_CHARS,
+        ));
+    }
+    if !context.attachments.is_empty() {
+        groups.push((
+            "Attached Project Paths",
+            context.attachments.as_slice(),
             15,
             MIN_PROJECT_DOC_SECTION_CHARS,
         ));
@@ -774,11 +786,11 @@ mod tests {
             mode: "execute",
             project_root: Path::new("/workspace/project"),
             tool_use_enforcement: true,
-            context_length: 1_200,
+            context_length: 2_400,
         })
         .expect("bounded input");
 
-        assert!(bounded.approximate_tokens <= 1_200);
+        assert!(bounded.approximate_tokens <= 2_400);
         assert_eq!(
             bounded.approximate_tokens,
             approximate_llm_input_tokens(&bounded.messages, bounded.tools.as_deref())
@@ -857,6 +869,60 @@ mod tests {
         )
         .expect_err("critical envelope must fail closed");
         assert!(error.contains("cannot fit the critical single-turn prompt"));
+    }
+
+    #[test]
+    fn behavior_contract_survives_context_pressure_in_both_request_types() {
+        let context = hostile_context();
+        let session = hostile_session();
+        let tools = hostile_tools();
+        let runtime = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: Some("Inspect and implement the requested fix, then verify it"),
+            tools: Some(&tools),
+            mode: "execute",
+            project_root: Path::new("/workspace/nib"),
+            tool_use_enforcement: true,
+            context_length: 2_400,
+        })
+        .expect("bounded runtime");
+        let planner = build_bounded_planning_input(PlanningPromptRequest {
+            context: &context,
+            session: Some(&session),
+            goal: &context.task,
+            tools: &tools[..1],
+            context_length: 2_400,
+        })
+        .expect("bounded planning");
+        for input in [&runtime, &planner] {
+            let system = input.messages[0]["content"].as_str().unwrap();
+            assert!(system.starts_with(crate::agent::instructions::SHARED));
+            assert!(system.contains("...[bounded]..."));
+            assert!(input.approximate_tokens <= 2_400);
+        }
+        let execution = runtime.messages[0]["content"].as_str().unwrap();
+        assert!(execution.contains(crate::agent::instructions::EXECUTION));
+        assert!(execution.contains("ground the result in its returned artifact"));
+        let planning = planner.messages[0]["content"].as_str().unwrap();
+        assert!(planning.contains(crate::agent::instructions::PLANNING));
+        assert!(!planning.contains(crate::agent::instructions::EXECUTION));
+    }
+
+    #[test]
+    fn tiny_runtime_window_rejects_instead_of_truncating_behavior_contract() {
+        let error = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &hostile_context(),
+            session: &hostile_session(),
+            current_step: None,
+            tools: None,
+            mode: "execute",
+            project_root: Path::new("/workspace/nib"),
+            tool_use_enforcement: false,
+            context_length: 256,
+        })
+        .expect_err("critical runtime contract cannot fit");
+        assert!(error.contains("cannot fit the critical runtime prompt"));
     }
 
     #[test]

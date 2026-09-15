@@ -2065,6 +2065,7 @@ fn is_failure_outcome(outcome: &str) -> bool {
         || outcome.contains("refusal")
         || outcome.contains("interrupted")
         || outcome == "invalid_plan"
+        || outcome == "blocked_step_unresolved"
 }
 
 fn project_session_event(
@@ -6897,6 +6898,26 @@ mod tests {
             assert_eq!(activities[1].body, "Second response.");
             assert!(activities[1].title.is_empty());
             assert_eq!(activities[2].title, "completed");
+        }
+    }
+
+    #[test]
+    fn blocked_and_repeated_tool_outcomes_reload_as_failures() {
+        for outcome in ["blocked_step_unresolved", "repeated_tool_failure"] {
+            for kind in ["reconciliation", "run_terminal"] {
+                let activity = project_session_event(
+                    &SessionEvent {
+                        index: 0,
+                        kind: kind.to_string(),
+                        details: serde_json::json!({"outcome": outcome}),
+                        timestamp: None,
+                    },
+                    &[],
+                )
+                .expect("failed run remains visible after reload");
+                assert_eq!(activity.kind, ActivityKind::Failure);
+                assert!(activity.title.contains(outcome));
+            }
         }
     }
 

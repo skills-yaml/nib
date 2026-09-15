@@ -22,6 +22,7 @@ use crate::tools::models::{AfterToolHook, PermissionLevel, PolicyEffect, PolicyR
 use crate::tools::ToolExecutor;
 use chrono::Utc;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,6 +37,68 @@ const MAX_PERSISTED_PROVIDER_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_STEERING_INPUT_BYTES: usize = 8 * 1024;
 const MAX_STEERING_INPUTS_PER_RUN: usize = 32;
 const MAX_STEERING_TOTAL_BYTES_PER_RUN: usize = 32 * 1024;
+const MAX_IDENTICAL_FAILED_TOOL_BATCHES: u8 = 3;
+
+/// Retains bounded comparison state, never raw requests or tool output. Invocation IDs
+/// identify executions rather than progress, so they are deliberately excluded.
+#[derive(Default)]
+struct FailedToolBatchGuard {
+    previous: Option<[u8; 32]>,
+    consecutive_failures: u8,
+}
+
+impl FailedToolBatchGuard {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn observe(
+        &mut self,
+        requests: &[ToolCallRequest],
+        observations: &[Value],
+        batch_success: bool,
+    ) -> bool {
+        if batch_success
+            || observations.is_empty()
+            || observations.iter().any(|item| item["success"] == true)
+        {
+            self.reset();
+            return false;
+        }
+        // Executor observations are already sanitized. Compare their complete semantic
+        // result without truncating changes late in a large output or error string.
+        let batch = json!({
+            "requests": requests.iter().map(|request| json!({
+                "name": request.name,
+                "arguments": request.arguments,
+            })).collect::<Vec<_>>(),
+            "observations": observations.iter().map(|observation| {
+                let mut output = observation["output"].clone();
+                // Foreground terminal duration varies even when the command makes no
+                // progress. Preserve all command output and other semantic metadata.
+                if observation["tool"] == "run_terminal" {
+                    if let Some(output) = output.as_object_mut() {
+                        output.remove("duration");
+                    }
+                }
+                json!({
+                    "tool": observation["tool"],
+                    "success": observation["success"],
+                    "output": output,
+                    "error": observation["error"],
+                })
+            }).collect::<Vec<_>>(),
+        });
+        let fingerprint: [u8; 32] = Sha256::digest(batch.to_string().as_bytes()).into();
+        self.consecutive_failures = if self.previous == Some(fingerprint) {
+            self.consecutive_failures.saturating_add(1)
+        } else {
+            1
+        };
+        self.previous = Some(fingerprint);
+        self.consecutive_failures >= MAX_IDENTICAL_FAILED_TOOL_BATCHES
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SteeringInstruction {
@@ -1655,6 +1718,7 @@ async fn run_agent_loop_inner(
     let mut bound_reached = false;
     let mut active_plan_id: Option<String> = None;
     let mut provider_continuation: Option<ProviderContinuation> = None;
+    let mut failed_tool_batches = FailedToolBatchGuard::default();
 
     store
         .record_event(
@@ -1705,6 +1769,7 @@ async fn run_agent_loop_inner(
                     .ok_or_else(|| "steering intake has no installed receiver".to_string())?;
                 record_steering_intake(&store, session_id, &run_id, channel_id, &steering)?;
                 append_steering_context(&mut context_sections, &steering);
+                failed_tool_batches.reset();
                 if provider_continuation.take().is_some() {
                     record_provider_continuation_lifecycle(
                         &store,
@@ -2768,9 +2833,22 @@ async fn run_agent_loop_inner(
                             &json!({"observations": observations}).to_string(),
                         )
                         .map_err(|error| error.to_string())?;
+                    let stalled = failed_tool_batches.observe(&tool_calls, &observations, false);
+                    let plan_updated = update_plan_tool_outcome(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                        &normalized_goal,
+                        false,
+                        error,
+                    )?;
                     tool_calls.clear();
                     response_content = None;
-                    if continuation_failure.is_none() && llm_turns < max_turns {
+                    if continuation_failure.is_none()
+                        && plan_updated
+                        && !stalled
+                        && llm_turns < max_turns
+                    {
                         open_steering_admission(
                             steering_enabled,
                             &store,
@@ -2783,7 +2861,7 @@ async fn run_agent_loop_inner(
                         &store,
                         session_id,
                         state,
-                        if continuation_failure.is_some() {
+                        if continuation_failure.is_some() || !plan_updated || stalled {
                             AgentState::Reconciliation
                         } else {
                             AgentState::BuildContext
@@ -2803,6 +2881,11 @@ async fn run_agent_loop_inner(
                             ),
                         ));
                         reconciliation_reason = Some("provider_continuation_failed".to_string());
+                    } else if !plan_updated {
+                        reconciliation_reason = Some("plan_binding_changed".to_string());
+                    } else if stalled {
+                        record_repeated_tool_failure(&store, session_id, &run_id)?;
+                        reconciliation_reason = Some("repeated_tool_failure".to_string());
                     }
                     continue;
                 }
@@ -2810,7 +2893,7 @@ async fn run_agent_loop_inner(
                 let mut observations = Vec::new();
                 let mut classifications = Vec::new();
                 let mut batch_success = true;
-                let mut batch_user_denied = false;
+                let mut batch_denied = false;
                 let mut prepared_tasks = PreparedTaskBatch::default();
                 for request in &tool_calls {
                     if request.name != "ask_question" {
@@ -2861,8 +2944,10 @@ async fn run_agent_loop_inner(
                         .await;
                     tool_call_count += 1;
                     batch_success &= result.success;
-                    batch_user_denied |= !result.approval_granted
-                        && result.approval_source.as_deref() == Some("denied");
+                    batch_denied |= !result.approval_granted
+                        && (result.approval_source.as_deref() == Some("denied")
+                            || (result.approval_source.as_deref() == Some("policy")
+                                && result.error.as_deref() == Some("Approval denied")));
                     let prepared_work = request.name == "schedule"
                         || (request.name == "run_terminal"
                             && request
@@ -3004,6 +3089,8 @@ async fn run_agent_loop_inner(
                         batch_success,
                         tool_outcome,
                     )?;
+                    let stalled =
+                        failed_tool_batches.observe(&tool_calls, &observations, batch_success);
                     tool_calls.clear();
                     response_content = None;
                     if !plan_updated {
@@ -3018,8 +3105,18 @@ async fn run_agent_loop_inner(
                             &cfg.stream_tx,
                         )
                         .await?
-                    } else if batch_user_denied {
-                        reconciliation_reason = Some("tool_execution_failed".to_string());
+                    } else if batch_denied || stalled {
+                        if stalled && !batch_denied {
+                            record_repeated_tool_failure(&store, session_id, &run_id)?;
+                        }
+                        reconciliation_reason = Some(
+                            if batch_denied {
+                                "tool_execution_failed"
+                            } else {
+                                "repeated_tool_failure"
+                            }
+                            .to_string(),
+                        );
                         transition_state(
                             &store,
                             session_id,
@@ -3220,6 +3317,9 @@ async fn run_agent_loop_inner(
                 .err();
                 pending_observations.push(question_observation);
                 let batch_success = pending_batch_success && question_success;
+                if batch_success {
+                    failed_tool_batches.reset();
+                }
                 store
                     .try_append_message(
                         session_id,
@@ -3338,7 +3438,7 @@ async fn run_agent_loop_inner(
                             response_content.as_deref(),
                             &public_output_sensitive_values,
                         );
-                        let (binding_matches, should_continue, next_step) = store
+                        let (binding_matches, blocked, should_continue, next_step) = store
                             .update_session(session_id, |session| {
                                 let binding_matches = session.plan.as_ref().is_some_and(|plan| {
                                     active_plan_id.as_deref() == Some(plan.id.as_str())
@@ -3362,11 +3462,24 @@ async fn run_agent_loop_inner(
                                             "current_goal": current_goal,
                                         }),
                                     );
-                                    return Ok((false, false, None));
+                                    return Ok((false, false, false, None));
                                 }
                                 let mut next_step = None;
                                 let mut should_continue = false;
                                 if let Some(plan) = session.plan.as_mut() {
+                                    if plan
+                                        .steps
+                                        .get(plan.current_step_index)
+                                        .is_some_and(|step| step.status == "Blocked")
+                                    {
+                                        plan.outcome = Some("blocked_step_unresolved".to_string());
+                                        append_session_event(
+                                            session,
+                                            "step_completion_rejected",
+                                            json!({"reason": "blocked_step_unresolved"}),
+                                        );
+                                        return Ok((true, true, false, None));
+                                    }
                                     plan.complete_current_step(&safe_plan_outcome);
                                     should_continue = !plan.is_complete();
                                     next_step = plan
@@ -3374,12 +3487,15 @@ async fn run_agent_loop_inner(
                                         .get(plan.current_step_index)
                                         .map(|step| step.description.clone());
                                 }
-                                Ok((true, should_continue, next_step))
+                                Ok((true, false, should_continue, next_step))
                             })
                             .map_err(|error| error.to_string())?;
                         if !binding_matches {
                             continue_plan = false;
                             "plan_binding_changed".to_string()
+                        } else if blocked {
+                            continue_plan = false;
+                            "blocked_step_unresolved".to_string()
                         } else if should_continue {
                             continue_plan = true;
                             let next_step =
@@ -4028,6 +4144,8 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
             "model_refusal"
                 | "empty_model_response"
                 | "tool_execution_failed"
+                | "repeated_tool_failure"
+                | "blocked_step_unresolved"
                 | "transition_limit_reached"
                 | "turn_limit_reached"
                 | "provider_continuation_interrupted"
@@ -4332,6 +4450,25 @@ fn append_assistant_if_allowed(
     Ok(())
 }
 
+fn record_repeated_tool_failure(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    store
+        .record_event(
+            session_id,
+            "tool_failure_stalled",
+            json!({
+                "run_id": run_id,
+                "reason": "three_consecutive_identical_failed_batches",
+                "consecutive_failures": MAX_IDENTICAL_FAILED_TOOL_BATCHES,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn update_plan_tool_outcome(
     store: &SessionStore,
     session_id: &str,
@@ -4548,6 +4685,72 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    fn failed_batch_fixture() -> (Vec<ToolCallRequest>, Vec<Value>) {
+        let request = ToolCallRequest::new("read_file", json!({"path": "missing.txt"}));
+        let observation = json!({
+            "invocation_id": request.invocation_id,
+            "tool": request.name,
+            "success": false,
+            "output": Value::Null,
+            "error": "file is missing",
+        });
+        (vec![request], vec![observation])
+    }
+
+    #[test]
+    fn unchanged_failure_batches_ignore_new_invocation_ids() {
+        let mut guard = FailedToolBatchGuard::default();
+        for expected in [false, false, true] {
+            let (requests, observations) = failed_batch_fixture();
+            assert_eq!(guard.observe(&requests, &observations, false), expected);
+        }
+    }
+
+    #[test]
+    fn changed_failure_requests_or_results_reset_the_streak() {
+        for changed_field in ["name", "arguments", "output", "error"] {
+            let mut guard = FailedToolBatchGuard::default();
+            let (mut requests, mut observations) = failed_batch_fixture();
+            assert!(!guard.observe(&requests, &observations, false));
+            assert!(!guard.observe(&requests, &observations, false));
+            match changed_field {
+                "name" => requests[0].name = "list_directory".to_string(),
+                "arguments" => requests[0].arguments = json!({"path": "different.txt"}),
+                "output" => observations[0]["output"] = json!({"progress": "new evidence"}),
+                "error" => observations[0]["error"] = json!("different error"),
+                _ => unreachable!(),
+            }
+            assert!(
+                !guard.observe(&requests, &observations, false),
+                "{changed_field}"
+            );
+            assert!(
+                !guard.observe(&requests, &observations, false),
+                "{changed_field}"
+            );
+            assert!(
+                guard.observe(&requests, &observations, false),
+                "{changed_field}"
+            );
+        }
+    }
+
+    #[test]
+    fn successful_work_even_in_a_partly_failed_batch_resets_the_streak() {
+        for whole_batch_success in [true, false] {
+            let mut guard = FailedToolBatchGuard::default();
+            let (requests, observations) = failed_batch_fixture();
+            assert!(!guard.observe(&requests, &observations, false));
+            assert!(!guard.observe(&requests, &observations, false));
+            let mut progressed = observations.clone();
+            progressed.push(json!({"tool": "list_directory", "success": true}));
+            assert!(!guard.observe(&requests, &progressed, whole_batch_success));
+            assert!(!guard.observe(&requests, &observations, false));
+            assert!(!guard.observe(&requests, &observations, false));
+            assert!(guard.observe(&requests, &observations, false));
+        }
+    }
 
     #[test]
     fn provider_stream_projection_uses_only_the_validated_response() {
@@ -6872,6 +7075,7 @@ mod tests {
     async fn exact_run_steering_after_tool_start_applies_before_the_next_provider_request() {
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let goal = "exact run steering tool smoke";
@@ -6952,6 +7156,16 @@ mod tests {
                 .count(),
             1
         );
+        let terminal = persisted
+            .tool_calls
+            .iter()
+            .find(|record| record.tool_name.as_deref() == Some("run_terminal"))
+            .expect("terminal execution audit");
+        let result = terminal.result.as_ref().expect("terminal result");
+        assert_eq!(result["success"], true, "terminal result: {result}");
+        assert!(result["output"]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout.contains("completed before steering")));
         let event_index = |kind: &str| {
             persisted
                 .events
@@ -7481,7 +7695,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(summary.outcome, "completed");
+        assert_eq!(summary.outcome, "blocked_step_unresolved");
+        assert!(summary.is_failure());
         assert_eq!(summary.tool_call_count, 0);
         assert!(!dir.path().join("mixed-side-effect.txt").exists());
         let loaded = store.load(&session.id).unwrap();
@@ -7493,11 +7708,12 @@ mod tests {
             .tool_calls
             .iter()
             .all(|call| call.tool_name.as_deref() != Some("run_terminal")));
+        assert_eq!(loaded.plan.as_ref().unwrap().steps[0].status, "Blocked");
         loaded.validate_message_sequence().unwrap();
     }
 
     #[tokio::test]
-    async fn failed_terminal_observation_is_available_for_bounded_self_correction() {
+    async fn failed_terminal_observation_cannot_be_resolved_by_model_text_alone() {
         let dir = tempdir().unwrap();
         initialize_git_repository(dir.path());
         save_config(dir.path(), &mock_config()).unwrap();
@@ -7517,7 +7733,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(summary.outcome, "completed");
+        assert_eq!(summary.outcome, "blocked_step_unresolved");
+        assert!(summary.is_failure());
         assert_eq!(summary.tool_call_count, 1);
         assert!(summary
             .trace
@@ -7534,6 +7751,13 @@ mod tests {
             .expect("terminal audit");
         assert!(terminal.error.as_deref().is_some_and(|error| {
             error.contains("recoverable stderr") && error.contains("command exited with 7")
+        }));
+        let plan = loaded.plan.as_ref().expect("blocked plan");
+        assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+        assert_eq!(plan.outcome.as_deref(), Some("blocked_step_unresolved"));
+        assert!(loaded.events.iter().any(|event| {
+            event.kind == "step_completion_rejected"
+                && event.details["reason"] == "blocked_step_unresolved"
         }));
         loaded.validate_message_sequence().unwrap();
     }

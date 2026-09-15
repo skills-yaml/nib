@@ -61,6 +61,11 @@ tasks:
     cmds:
       - cargo test -- --test-threads=1
 
+  test:integration:
+    desc: Run every integration test target
+    cmds:
+      - "cargo test --test '*' -- --test-threads=1"
+
   verify:
     desc: Run the complete local static and test gates once
     cmds:
@@ -112,6 +117,13 @@ tasks:
     desc: Run the full agent runtime end-to-end integration tests
     cmds:
       - cargo test --test test_runtime_e2e -- --test-threads=1
+
+  test:agent-context:
+    desc: Run offline agent loop, planner, context, and compression tests
+    cmds:
+      - 'cargo test --lib context:: -- --test-threads=1'
+      - 'cargo test --lib agent:: -- --test-threads=1'
+      - cargo test --test build_metadata -- --test-threads=1
 
   test:managed-process-capability:
     desc: Verify the exact managed-process backend probe independently

@@ -16,10 +16,13 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
+- `task test:integration` — run all integration test targets serially
 - `task verify` — run `task check` and `task test` exactly once as the complete local gate
 - `task test:durable` — run detached background-task and scheduled-worker process tests
 - `task test:delegation` — run managed-process and subagent delegation tests
 - `task test:runtime-e2e` — run the full agent runtime end-to-end integration tests
+- `task test:agent-context` — run offline loop, planner, context-budget, attachment,
+  compression, and worktree build-metadata tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
 - `task test:updater` — run self-update and update-notification unit tests
 - `task test:doctor` — run doctor diagnosis, repair, and CLI persistence tests

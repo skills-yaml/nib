@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use nib::agent::r#loop::{run_agent_loop, AgentLoopConfig};
+use nib::agent::r#loop::{run_agent_loop, AgentLoopConfig, AgentRunSummary, QuestionHandler};
 use nib::agent::state::AgentState;
 use nib::config::{
     save_nib_config_full, DaemonsConfig, ExecutionConfig, LlmConfig, McpServerEntry, NibConfig,
@@ -16,7 +16,7 @@ use nib::llm::{
 };
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
-use nib::session::{Plan, PlanStep, SessionError, SessionStore};
+use nib::session::{Plan, PlanStep, Session, SessionError, SessionStore};
 #[cfg(target_os = "linux")]
 use nib::tools::delegation::get_subagent_record;
 use nib::tools::delegation::{write_subagent_record, SubagentRecord};
@@ -170,6 +170,344 @@ fn serve_responses_sequence(responses: Vec<Value>) -> (String, std::sync::mpsc::
         }
     });
     (format!("http://{address}/v1"), request_rx)
+}
+
+fn failure_fixture_tool_turn(id: &str, calls: Vec<(&str, Value)>) -> Value {
+    json!({
+        "id": format!("response-{id}"),
+        "status": "completed",
+        "output": calls.into_iter().enumerate().map(|(index, (name, arguments))| json!({
+            "type": "function_call",
+            "status": "completed",
+            "call_id": format!("private-{id}-{index}"),
+            "name": name,
+            "arguments": arguments.to_string(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn failure_fixture_text_turn() -> Value {
+    json!({
+        "id": "response-final",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "The approved step is complete."}],
+        }],
+    })
+}
+
+async fn run_failure_fixture(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+) -> (AgentRunSummary, Session, Vec<Value>) {
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.execution.provider = "internal".to_string();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers = HashMap::from([(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..Default::default()
+        },
+    )]);
+    save_nib_config_full(root, &mut config).expect("failure fixture config");
+    let store = SessionStore::for_project(root).expect("failure fixture store");
+    let mut session = store.create_session_with_id("resourceful-failure-fixture");
+    let goal = "resourceful failure fixture";
+    let mut plan = Plan::new(
+        goal,
+        vec![PlanStep {
+            description: "Inspect and resolve the requested issue".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("approved fixture plan");
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_agent_loop(
+            root.to_path_buf(),
+            &session.id,
+            goal,
+            AgentLoopConfig {
+                max_steps: 16,
+                auto_approve: true,
+                question_handler,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("bounded failure fixture")
+    .expect("failure fixture run");
+    let persisted = store.load(&session.id).expect("failure fixture evidence");
+    persisted
+        .validate_message_sequence()
+        .expect("valid fixture transcript");
+    let requests = request_rx
+        .try_iter()
+        .map(|request| captured_json_body(&request))
+        .collect();
+    (summary, persisted, requests)
+}
+
+#[tokio::test]
+async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_duration() {
+    let root = git_repository();
+    let responses = (0..3)
+        .map(|index| {
+            failure_fixture_tool_turn(
+                &format!("failed-{index}"),
+                vec![("run_terminal", json!({"command": "exit 7"}))],
+            )
+        })
+        .collect();
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "repeated_tool_failure");
+    assert!(summary.is_failure());
+    assert_eq!(summary.steps_taken, 3);
+    assert_eq!(summary.tool_call_count, 3);
+    assert!(!summary.bound_reached);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    assert_eq!(
+        persisted.plan.as_ref().unwrap().outcome.as_deref(),
+        Some("repeated_tool_failure")
+    );
+    let stalled = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "tool_failure_stalled")
+        .expect("bounded stall reason");
+    assert_eq!(
+        stalled.details,
+        json!({
+            "run_id": summary.run_id,
+            "reason": "three_consecutive_identical_failed_batches",
+            "consecutive_failures": 3,
+        })
+    );
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind.starts_with("provider_continuation_"))
+            .unwrap()
+            .kind,
+        "provider_continuation_abandoned"
+    );
+    let input = requests[2]["input"].as_array().unwrap();
+    assert!(input
+        .iter()
+        .any(|item| item["type"] == "function_call_output"
+            && item["call_id"] == "private-failed-1-0"));
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("private-failed-"));
+}
+
+#[tokio::test]
+async fn changed_failed_requests_reset_the_streak_and_a_corrective_tool_can_complete() {
+    let root = git_repository();
+    let mut responses: Vec<_> = [
+        "missing.txt",
+        "missing.txt",
+        "other.txt",
+        "missing.txt",
+        "missing.txt",
+        "note.txt",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, path)| {
+        failure_fixture_tool_turn(
+            &format!("attempt-{index}"),
+            vec![("read_file", json!({"path": path}))],
+        )
+    })
+    .collect();
+    responses.push(failure_fixture_text_turn());
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 6);
+    assert_eq!(requests.len(), 7);
+    assert!(persisted.plan.as_ref().unwrap().is_complete());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "tool_failure_stalled"));
+    assert_eq!(
+        persisted
+            .tool_calls
+            .iter()
+            .filter(|call| call.result.as_ref().unwrap()["success"] == false)
+            .count(),
+        5
+    );
+    assert_eq!(
+        persisted
+            .tool_calls
+            .last()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()["success"],
+        true
+    );
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind.starts_with("provider_continuation_"))
+            .unwrap()
+            .kind,
+        "provider_continuation_closed"
+    );
+}
+
+struct FailureFixtureAnswer;
+
+#[async_trait]
+impl QuestionHandler for FailureFixtureAnswer {
+    async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
+        assert_eq!(question, "Which file should I inspect?");
+        assert_eq!(options, ["note.txt"]);
+        Ok("note.txt".to_string())
+    }
+}
+
+#[tokio::test]
+async fn answered_question_resets_repeated_failure_streak() {
+    let root = git_repository();
+    let mut responses = Vec::new();
+    for index in 0..5 {
+        let call = if index == 2 {
+            (
+                "ask_question",
+                json!({"question": "Which file should I inspect?", "options": ["note.txt"]}),
+            )
+        } else {
+            ("read_file", json!({"path": "missing.txt"}))
+        };
+        responses.push(failure_fixture_tool_turn(
+            &format!("question-{index}"),
+            vec![call],
+        ));
+    }
+    responses.push(failure_fixture_tool_turn(
+        "corrected",
+        vec![("read_file", json!({"path": "note.txt"}))],
+    ));
+    responses.push(failure_fixture_text_turn());
+    let (summary, persisted, requests) =
+        run_failure_fixture(root.path(), responses, Some(Arc::new(FailureFixtureAnswer))).await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 6);
+    assert_eq!(requests.len(), 7);
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "question_required"));
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "tool_failure_stalled"));
+    assert!(persisted.plan.as_ref().unwrap().is_complete());
+}
+
+#[tokio::test]
+async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
+    let root = git_repository();
+    let responses = (0..3)
+        .map(|index| {
+            failure_fixture_tool_turn(
+                &format!("mixed-{index}"),
+                vec![
+                    ("ask_question", json!({"question": "Proceed?"})),
+                    (
+                        "run_terminal",
+                        json!({"command": "echo fixture-key > mixed-side-effect.txt"}),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "repeated_tool_failure");
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_batch_rejected")
+            .count(),
+        3
+    );
+    assert!(persisted.tool_calls.is_empty());
+    assert!(!root.path().join("mixed-side-effect.txt").exists());
+    assert!(!root.path().join(".nib/worktrees").exists());
+    assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("fixture-key"));
+}
+
+#[tokio::test]
+async fn explicit_policy_denial_stops_without_a_model_retry() {
+    let root = git_repository();
+    let skill_directory = root.path().join(".nib/skills/resourceful-denial");
+    std::fs::create_dir_all(&skill_directory).unwrap();
+    std::fs::write(skill_directory.join("SKILL.md"), "---\nname: resourceful-denial\ndescription: Restrict resourceful fixture reads\ntags: [resourceful]\nconstraints:\n  deny_tools: [read_file]\n---\nDo not read files.\n").unwrap();
+    let responses = vec![failure_fixture_tool_turn(
+        "denied",
+        vec![("read_file", json!({"path": "note.txt"}))],
+    )];
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "tool_execution_failed");
+    assert_eq!(summary.tool_call_count, 1);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        persisted.tool_calls[0].result.as_ref().unwrap()["approval"]["source"],
+        "policy"
+    );
+    assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+}
+
+#[tokio::test]
+async fn invalid_arguments_can_be_corrected_despite_policy_classification() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn("invalid", vec![("read_file", json!({"path": 123}))]),
+        failure_fixture_tool_turn(
+            "corrected",
+            vec![("read_file", json!({"path": "note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        persisted.tool_calls[0].result.as_ref().unwrap()["approval"]["source"],
+        "policy"
+    );
+    assert!(persisted.plan.as_ref().unwrap().is_complete());
 }
 
 fn serve_stream_sequence(bodies: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
