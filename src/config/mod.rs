@@ -140,6 +140,8 @@ pub struct NibConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub profiles: ProfilesConfig,
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
 }
 
 fn revision_is_zero(revision: &u64) -> bool {
@@ -441,6 +443,25 @@ impl Default for ProfilesConfig {
 
 fn default_profile_id() -> String {
     "default".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    /// Interactive grant to work in this project directory.
+    #[serde(default)]
+    pub allowed: bool,
+}
+
+pub fn workspace_access_is_granted(project_root: &Path) -> Result<bool, ConfigError> {
+    Ok(load_nib_config_full(project_root)?.workspace.allowed)
+}
+
+pub fn grant_workspace_access(project_root: &Path) -> Result<(), ConfigError> {
+    update_nib_config(project_root, |config| {
+        config.workspace.allowed = true;
+        Ok(())
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2812,6 +2833,23 @@ api_key = "fixture"
         assert_eq!(cfg.profiles.default, "default");
         assert!(cfg.mcp.client_enabled);
         assert!(cfg.mcp.server_enabled);
+        assert!(
+            !cfg.workspace.allowed,
+            "workspace access starts ungranted until startup consent"
+        );
+    }
+
+    #[test]
+    fn workspace_access_grant_persists_in_project_config() {
+        let root = tempfile::tempdir().expect("project root");
+        assert!(
+            !workspace_access_is_granted(root.path()).expect("default grant state"),
+            "first load must not imply consent"
+        );
+        grant_workspace_access(root.path()).expect("grant workspace");
+        assert!(workspace_access_is_granted(root.path()).expect("granted state"));
+        let reloaded = load_nib_config_full(root.path()).expect("reload");
+        assert!(reloaded.workspace.allowed);
     }
 
     #[test]

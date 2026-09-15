@@ -106,6 +106,7 @@ struct StartupWelcome {
     version: String,
     working_directory: String,
     update_notice: Option<String>,
+    consent_directory: Option<String>,
 }
 
 impl StartupWelcome {
@@ -115,6 +116,7 @@ impl StartupWelcome {
             working_directory: crate::interactive::folder_label(project_root),
             update_notice: update_notice
                 .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
+            consent_directory: None,
         }
     }
 
@@ -124,6 +126,7 @@ impl StartupWelcome {
             version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
             working_directory: "~/project".to_string(),
             update_notice: None,
+            consent_directory: None,
         }
     }
 }
@@ -141,6 +144,7 @@ enum WaitingKind {
     None,
     Approval,
     Question,
+    Workspace,
 }
 
 #[derive(Debug, Clone)]
@@ -2985,6 +2989,7 @@ fn status_line(
     let lifecycle = match waiting {
         WaitingKind::Approval => "WAITING APPROVAL",
         WaitingKind::Question => "WAITING QUESTION",
+        WaitingKind::Workspace => "WAITING PERMISSION",
         WaitingKind::None => lifecycle,
     };
     let mut combined = lifecycle.to_string();
@@ -2995,7 +3000,7 @@ fn status_line(
         combined = format!("{combined} · paused");
     }
     let (lifecycle, rest) = chrome_lifecycle_and_rest(&combined);
-    let lifecycle_style = if waiting == WaitingKind::Approval {
+    let lifecycle_style = if waiting == WaitingKind::Approval || waiting == WaitingKind::Workspace {
         if no_color {
             Style::default()
                 .add_modifier(Modifier::BOLD)
@@ -3090,6 +3095,8 @@ fn footer_line(
 ) -> String {
     let mut hint = if waiting == WaitingKind::Approval {
         "Y/Enter approve once · N deny · Esc deny".to_string()
+    } else if waiting == WaitingKind::Workspace {
+        "Y/Enter allow this directory · N decline".to_string()
     } else if waiting == WaitingKind::Question {
         "Enter / 1-9 answer · Esc skip".to_string()
     } else if focus == TuiFocus::Transcript {
@@ -3191,6 +3198,7 @@ fn meter_status_label(waiting: WaitingKind, lifecycle: &str) -> String {
     match waiting {
         WaitingKind::Approval => "WAITING APPROVAL".to_string(),
         WaitingKind::Question => "WAITING QUESTION".to_string(),
+        WaitingKind::Workspace => "WAITING PERMISSION".to_string(),
         WaitingKind::None => lifecycle.to_string(),
     }
 }
@@ -3497,6 +3505,91 @@ fn render_approval_card(
     if choice_area.height > 1 {
         choices.push(Line::from(Span::styled(
             truncate_completion_text("  N / Esc / 2     Deny", usize::from(choice_area.width)),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+    frame.render_widget(Paragraph::new(choices), choice_area);
+}
+
+fn render_workspace_card(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    directory: &str,
+    no_color: bool,
+) {
+    let border = approval_dock_style(no_color);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Permission required ")
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let choice_h = 2u16.min(inner.height);
+    let (body_area, choice_area) = if choice_h == inner.height {
+        (Rect::default(), inner)
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
+            .split(inner);
+        (chunks[0], chunks[1])
+    };
+    if body_area.height > 0 && body_area.width > 0 {
+        let indent = "  ";
+        let subject_width = body_area.width.saturating_sub(2).max(1);
+        let mut lines = vec![Line::from(Span::styled(
+            truncate_completion_text("Work in this directory", usize::from(body_area.width)),
+            approval_dock_style(no_color),
+        ))];
+        if body_area.height > 1 {
+            let mut remaining = usize::from(body_area.height.saturating_sub(1));
+            if remaining > 1 {
+                lines.push(Line::from(""));
+                remaining -= 1;
+            }
+            for row in wrapped_display_rows(directory, subject_width)
+                .into_iter()
+                .take(remaining)
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("{indent}{row}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                remaining = remaining.saturating_sub(1);
+            }
+            if remaining > 0 {
+                lines.push(Line::from(Span::styled(
+                    truncate_completion_text(
+                        "Creates .nib state and a session worktree here.",
+                        usize::from(body_area.width),
+                    ),
+                    muted_style(no_color),
+                )));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), body_area);
+    }
+    let allow_style = if no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    };
+    let mut choices = vec![Line::from(Span::styled(
+        truncate_completion_text("  Y / Enter / 1   Allow", usize::from(choice_area.width)),
+        allow_style,
+    ))];
+    if choice_area.height > 1 {
+        choices.push(Line::from(Span::styled(
+            truncate_completion_text(
+                "  N / Esc / 2     Decline and quit",
+                usize::from(choice_area.width),
+            ),
             Style::default().add_modifier(Modifier::BOLD),
         )));
     }
@@ -3981,6 +4074,8 @@ fn render_session_activities(
         WaitingKind::Approval
     } else if pending_question.is_some() {
         WaitingKind::Question
+    } else if welcome.consent_directory.is_some() {
+        WaitingKind::Workspace
     } else {
         WaitingKind::None
     };
@@ -4000,7 +4095,10 @@ fn render_session_activities(
         .unwrap_or(0);
     let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
     let dock = waiting != WaitingKind::None;
-    let desired_dock = if pending_question.is_some() || pending_approval.is_some() {
+    let desired_dock = if pending_question.is_some()
+        || pending_approval.is_some()
+        || welcome.consent_directory.is_some()
+    {
         12
     } else {
         0
@@ -4080,6 +4178,8 @@ fn render_session_activities(
         render_approval_card(frame, body[1], req, no_color);
     } else if let Some(question) = pending_question {
         render_question_card(frame, body[1], question, no_color);
+    } else if let Some(directory) = welcome.consent_directory.as_deref() {
+        render_workspace_card(frame, body[1], directory, no_color);
     }
     if let Some(meter) = meter {
         render_waiting_meter(frame, layout.meter, meter, no_color);
@@ -4167,7 +4267,7 @@ fn draw_loop(
     mut active_session_id: String,
     mut session_origin: String,
     session_notice: Option<String>,
-    welcome: StartupWelcome,
+    mut welcome: StartupWelcome,
 ) -> io::Result<Option<String>> {
     let agent_profile_scope = TuiAgentProfileScope {
         project_root: project_root.to_path_buf(),
@@ -4181,16 +4281,26 @@ fn draw_loop(
     if let Some(notice) = session_notice {
         timeline.push_status(notice);
     }
-    let mut worker = if let Some(goal) = run_goal {
-        Some(spawn_tui_agent_worker(
-            agent_profile_scope.clone(),
-            active_session_id.clone(),
-            goal,
-            InteractiveAgentMode::Execute,
-            approval_tx.clone(),
-            question_tx.clone(),
-            stream_tx.clone(),
-        )?)
+    if crate::config::workspace_access_is_granted(project_root).unwrap_or(false) {
+        welcome.consent_directory = None;
+    } else {
+        welcome.consent_directory = Some(crate::interactive::folder_label(project_root));
+    }
+    let mut pending_goal = run_goal;
+    let mut worker = if welcome.consent_directory.is_none() {
+        if let Some(goal) = pending_goal.take() {
+            Some(spawn_tui_agent_worker(
+                agent_profile_scope.clone(),
+                active_session_id.clone(),
+                goal,
+                InteractiveAgentMode::Execute,
+                approval_tx.clone(),
+                question_tx.clone(),
+                stream_tx.clone(),
+            )?)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -4353,6 +4463,8 @@ fn draw_loop(
             WaitingKind::Approval
         } else if pending_question.is_some() {
             WaitingKind::Question
+        } else if welcome.consent_directory.is_some() {
+            WaitingKind::Workspace
         } else {
             WaitingKind::None
         };
@@ -4425,6 +4537,9 @@ fn draw_loop(
                 completion.is_open(),
             );
             if let Event::Paste(pasted) = input {
+                if welcome.consent_directory.is_some() {
+                    continue;
+                }
                 if matches!(
                     interaction_layer,
                     InteractionLayer::Composer | InteractionLayer::Completion
@@ -4455,6 +4570,63 @@ fn draw_loop(
                     && key.modifiers.contains(KeyModifiers::CONTROL);
                 let control_q = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
                     && key.modifiers.contains(KeyModifiers::CONTROL);
+                if welcome.consent_directory.is_some() {
+                    if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
+                        transcript_viewport.apply(action);
+                        continue;
+                    }
+                    let allow = matches!(
+                        key.code,
+                        KeyCode::Enter
+                            | KeyCode::Char('y')
+                            | KeyCode::Char('Y')
+                            | KeyCode::Char('1')
+                    ) && (key.modifiers.is_empty()
+                        || key.modifiers == KeyModifiers::SHIFT);
+                    let decline = control_c
+                        || control_q
+                        || matches!(
+                            key.code,
+                            KeyCode::Esc
+                                | KeyCode::Char('n')
+                                | KeyCode::Char('N')
+                                | KeyCode::Char('2')
+                        );
+                    if allow {
+                        match crate::config::grant_workspace_access(project_root) {
+                            Ok(()) => {
+                                welcome.consent_directory = None;
+                                timeline.push_status("Allowed work in this directory.".to_string());
+                                if let Some(goal) = pending_goal.take() {
+                                    match spawn_tui_agent_worker(
+                                        agent_profile_scope.clone(),
+                                        active_session_id.clone(),
+                                        goal,
+                                        InteractiveAgentMode::Execute,
+                                        approval_tx.clone(),
+                                        question_tx.clone(),
+                                        stream_tx.clone(),
+                                    ) {
+                                        Ok(next) => {
+                                            timeline.bind_run(Some(next.run_id.clone()));
+                                            worker = Some(next);
+                                        }
+                                        Err(error) => break Err(error),
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                timeline.push_status(format!("[workspace error] {error}"))
+                            }
+                        }
+                        continue;
+                    }
+                    if decline {
+                        exit_requested = true;
+                        break Ok(());
+                    }
+                    continue;
+                }
                 let interaction_state = tui_interaction_state(
                     pending_approval.is_some(),
                     pending_question.is_some(),
@@ -5364,6 +5536,61 @@ mod tests {
     }
 
     #[test]
+    fn startup_asks_permission_to_work_in_the_working_directory() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut viewport = TranscriptViewport::default();
+        let welcome = StartupWelcome {
+            version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+            working_directory: "~/work/nib".to_string(),
+            update_notice: None,
+            consent_directory: Some("~/work/nib".to_string()),
+        };
+        terminal
+            .draw(|frame| {
+                render_session_activities(
+                    frame,
+                    "nib · ~/work/nib · main · wt root",
+                    "idle · mock/mock-model · approval manual",
+                    &[],
+                    &Composer::default(),
+                    None,
+                    None,
+                    false,
+                    &mut viewport,
+                    TuiFocus::Composer,
+                    None,
+                    0,
+                    None,
+                    None,
+                    &welcome,
+                )
+            })
+            .expect("render workspace consent");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Permission required"), "{rendered}");
+        assert!(rendered.contains("Work in this directory"), "{rendered}");
+        assert!(rendered.contains("~/work/nib"), "{rendered}");
+        assert!(rendered.contains("WAITING PERMISSION"), "{rendered}");
+        assert!(rendered.contains("Allow"), "{rendered}");
+        assert!(rendered.contains("Decline"), "{rendered}");
+        assert!(
+            rendered.contains("Y/Enter allow this directory"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn empty_state_includes_update_notice_and_install_instruction() {
         let welcome = StartupWelcome {
             version: "Nib 0.1.0".to_string(),
@@ -5372,6 +5599,7 @@ mod tests {
                 "Channel update available: 0.1.1 (development, abcdef0). Run `nib update`."
                     .to_string(),
             ),
+            consent_directory: None,
         };
         let rendered = empty_state_lines(&welcome, true)
             .into_iter()
@@ -5550,6 +5778,16 @@ mod tests {
                 WaitingKind::Question
             ),
             "Enter / 1-9 answer · Esc skip"
+        );
+        assert_eq!(
+            footer_line(
+                false,
+                &viewport,
+                TuiFocus::Composer,
+                0,
+                WaitingKind::Workspace
+            ),
+            "Y/Enter allow this directory · N decline"
         );
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);

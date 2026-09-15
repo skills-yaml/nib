@@ -159,6 +159,9 @@ network = "disabled"
 [approvals]
 mode = "manual"           # manual | smart | policy | off
 
+[workspace]
+allowed = false           # set true after the startup directory grant
+
 [compression]
 enabled = true
 threshold = 0.50
@@ -525,7 +528,10 @@ The composer has focus initially, a top border, and a `> ` prompt. An empty sess
 shows a startup welcome with `Nib <version>`, the working directory, an update
 notice and `nib update` when a newer build is available, `/new` to start a fresh
 session and worktree, `/session` to switch sessions, and the most-used keys, plus
-the prompt. A
+the prompt. The first interactive start in a project asks permission to work in
+that directory before any goal runs. The TUI shows a `Permission required` card
+with the path; `Y`/`Enter` allow and persist `workspace.allowed`, and `N`/`Esc`
+quit. Later starts skip the card. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
 conversation. Each row shows one command signature
