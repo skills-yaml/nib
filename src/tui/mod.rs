@@ -65,6 +65,69 @@ const COMPOSER_BORDER_ROWS: u16 = 1;
 const CLEAR_DRAFT_CONFIRM: Duration = Duration::from_millis(800);
 const QUIT_CONFIRM: Duration = Duration::from_millis(1000);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitConfirmAction {
+    Arm,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleCtrlCAction {
+    ClearDraft,
+    ArmQuit,
+    Quit,
+}
+
+fn quit_confirm_action(armed_at: Option<Instant>, now: Instant) -> QuitConfirmAction {
+    if armed_at.is_some_and(|armed| now.duration_since(armed) <= QUIT_CONFIRM) {
+        QuitConfirmAction::Confirm
+    } else {
+        QuitConfirmAction::Arm
+    }
+}
+
+fn idle_ctrl_c_action(
+    draft_empty: bool,
+    armed_at: Option<Instant>,
+    now: Instant,
+) -> IdleCtrlCAction {
+    if !draft_empty {
+        IdleCtrlCAction::ClearDraft
+    } else {
+        match quit_confirm_action(armed_at, now) {
+            QuitConfirmAction::Arm => IdleCtrlCAction::ArmQuit,
+            QuitConfirmAction::Confirm => IdleCtrlCAction::Quit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupWelcome {
+    version: String,
+    working_directory: String,
+    update_notice: Option<String>,
+}
+
+impl StartupWelcome {
+    fn new(project_root: &Path, update_notice: Option<String>) -> Self {
+        Self {
+            version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+            working_directory: crate::interactive::folder_label(project_root),
+            update_notice: update_notice
+                .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    fn fixture() -> Self {
+        Self {
+            version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+            working_directory: "~/project".to_string(),
+            update_notice: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum TuiFocus {
     #[default]
@@ -2467,6 +2530,7 @@ pub fn run_tui(
     project_root: &Path,
     run_goal: Option<String>,
     requested_session: Option<String>,
+    update_notice: Option<String>,
 ) -> io::Result<()> {
     if let Some(session_id) = requested_session.as_deref() {
         crate::config::load_nib_config_full(project_root)
@@ -2512,6 +2576,7 @@ pub fn run_tui(
         let active_session_id = resolution.session_id().to_string();
         let session_origin = resolution.tui_origin().to_string();
         let session_notice = resolution.tui_notice();
+        let welcome = StartupWelcome::new(project_root, update_notice);
         draw_loop(
             terminal,
             project_root,
@@ -2521,6 +2586,7 @@ pub fn run_tui(
             active_session_id,
             session_origin,
             session_notice,
+            welcome,
         )
     })();
     let restoration = restore_guard.restore();
@@ -2961,11 +3027,58 @@ fn status_line(
     Line::from(spans)
 }
 
-fn empty_state_lines(no_color: bool) -> Vec<Line<'static>> {
-    vec![Line::from(Span::styled(
-        "Type / for commands · @ to add project context",
-        muted_style(no_color),
-    ))]
+fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'static>> {
+    let muted = muted_style(no_color);
+    let title = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::from(Span::styled(welcome.version.clone(), title)),
+        Line::from(""),
+        Line::from(Span::styled("Working directory", muted)),
+        Line::from(welcome.working_directory.clone()),
+    ];
+    if let Some(notice) = &welcome.update_notice {
+        let update_style = if no_color {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(notice.clone(), update_style)));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled("Session", title)),
+        Line::from(Span::styled(
+            "/new            new session and worktree",
+            muted,
+        )),
+        Line::from(Span::styled(
+            "/session        switch or resume a session",
+            muted,
+        )),
+        Line::from(""),
+        Line::from(Span::styled("Keys", title)),
+        Line::from(Span::styled(
+            "Enter           send · Shift+Enter newline",
+            muted,
+        )),
+        Line::from(Span::styled(
+            "Ctrl+C          stop · clear draft · twice to quit",
+            muted,
+        )),
+        Line::from(Span::styled(
+            "Ctrl+Q          twice to quit · /q also quits",
+            muted,
+        )),
+        Line::from(Span::styled(
+            "/               commands · @ files · Tab transcript",
+            muted,
+        )),
+        Line::from(Span::styled("Y / N           approve or deny", muted)),
+    ]);
+    lines
 }
 
 fn footer_line(
@@ -3791,6 +3904,7 @@ fn render_current_session_view_with_viewport(
     viewport: &mut TranscriptViewport,
 ) {
     let activities = activities_from_timeline_text(timeline_text);
+    let welcome = StartupWelcome::fixture();
     render_session_activities(
         frame,
         header,
@@ -3806,6 +3920,7 @@ fn render_current_session_view_with_viewport(
         0,
         None,
         None,
+        &welcome,
     );
 }
 
@@ -3823,6 +3938,7 @@ fn render_session_view_with_completion(
 ) {
     let mut viewport = TranscriptViewport::default();
     let activities = activities_from_timeline_text(timeline_text);
+    let welcome = StartupWelcome::fixture();
     render_session_activities(
         frame,
         header,
@@ -3838,6 +3954,7 @@ fn render_session_view_with_completion(
         0,
         completion,
         meter,
+        &welcome,
     );
 }
 
@@ -3857,6 +3974,7 @@ fn render_session_activities(
     queued: usize,
     completion: Option<&CompletionMenu>,
     meter: Option<&WaitingMeter>,
+    welcome: &StartupWelcome,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let waiting = if pending_approval.is_some() {
@@ -3910,7 +4028,7 @@ fn render_session_activities(
     let empty = activities.is_empty();
     let (rendered_rows, owners) = if empty {
         (
-            vec![String::new(); empty_state_lines(no_color).len()],
+            vec![String::new(); empty_state_lines(welcome, no_color).len()],
             Vec::new(),
         )
     } else {
@@ -3925,17 +4043,16 @@ fn render_session_activities(
         layout.status,
     );
     if empty {
-        let welcome_height = u16::try_from(empty_state_lines(no_color).len()).unwrap_or(1);
+        let welcome_lines = empty_state_lines(welcome, no_color);
+        let welcome_height = u16::try_from(welcome_lines.len()).unwrap_or(1);
         let welcome_area = Rect {
-            x: body[0].x,
-            y: body[0]
-                .y
-                .saturating_add(body[0].height.saturating_sub(welcome_height) / 2),
-            width: body[0].width,
+            x: body[0].x.saturating_add(1),
+            y: body[0].y,
+            width: body[0].width.saturating_sub(1),
             height: welcome_height.min(body[0].height),
         };
         frame.render_widget(
-            Paragraph::new(empty_state_lines(no_color)).alignment(Alignment::Center),
+            Paragraph::new(welcome_lines).alignment(Alignment::Left),
             welcome_area,
         );
     } else {
@@ -4050,6 +4167,7 @@ fn draw_loop(
     mut active_session_id: String,
     mut session_origin: String,
     session_notice: Option<String>,
+    welcome: StartupWelcome,
 ) -> io::Result<Option<String>> {
     let agent_profile_scope = TuiAgentProfileScope {
         project_root: project_root.to_path_buf(),
@@ -4269,6 +4387,7 @@ fn draw_loop(
                 queued,
                 Some(&completion).filter(|menu| menu.is_open()),
                 meter.as_ref(),
+                &welcome,
             );
             render_interaction_overlay(
                 f,
@@ -4376,23 +4495,39 @@ fn draw_loop(
                     continue;
                 }
                 if control_c {
-                    if !composer.input.is_empty() {
-                        composer.set_text(String::new());
-                        completion.sync_for(&composer.input, Some(project_root));
-                        timeline.push_status("Draft cleared.".to_string());
+                    let now = Instant::now();
+                    match idle_ctrl_c_action(composer.input.is_empty(), quit_armed_at, now) {
+                        IdleCtrlCAction::ClearDraft => {
+                            composer.set_text(String::new());
+                            completion.sync_for(&composer.input, Some(project_root));
+                            quit_armed_at = None;
+                            timeline.push_status("Draft cleared.".to_string());
+                        }
+                        IdleCtrlCAction::ArmQuit => {
+                            quit_armed_at = Some(now);
+                            timeline.push_status("Press Ctrl+C again to quit.".to_string());
+                        }
+                        IdleCtrlCAction::Quit => {
+                            exit_requested_with_active_run = worker.is_some();
+                            exit_requested = true;
+                            break Ok(());
+                        }
                     }
                     continue;
                 }
                 if control_q {
                     let now = Instant::now();
-                    if quit_armed_at.is_some_and(|armed| now.duration_since(armed) <= QUIT_CONFIRM)
-                    {
-                        exit_requested_with_active_run = worker.is_some();
-                        exit_requested = true;
-                        break Ok(());
+                    match quit_confirm_action(quit_armed_at, now) {
+                        QuitConfirmAction::Confirm => {
+                            exit_requested_with_active_run = worker.is_some();
+                            exit_requested = true;
+                            break Ok(());
+                        }
+                        QuitConfirmAction::Arm => {
+                            quit_armed_at = Some(now);
+                            timeline.push_status("Press Ctrl+Q again to quit.".to_string());
+                        }
                     }
-                    quit_armed_at = Some(now);
-                    timeline.push_status("Press Ctrl+Q again to quit.".to_string());
                     continue;
                 }
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
@@ -5215,10 +5350,90 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(!rendered.contains("Your AI agent for this project."));
-        assert!(rendered.contains("Type / for commands"));
+        assert!(rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))));
+        assert!(rendered.contains("Working directory"));
+        assert!(rendered.contains("~/project"));
+        assert!(rendered.contains("/new"));
+        assert!(rendered.contains("new session and worktree"));
+        assert!(rendered.contains("/session"));
+        assert!(rendered.contains("Ctrl+C"));
+        assert!(rendered.contains("twice to quit"));
         assert!(rendered.contains("> Ask nib anything…"));
         assert!(rendered.contains("Enter send"));
         assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
+    }
+
+    #[test]
+    fn empty_state_includes_update_notice_and_install_instruction() {
+        let welcome = StartupWelcome {
+            version: "Nib 0.1.0".to_string(),
+            working_directory: "~/work/nib".to_string(),
+            update_notice: Some(
+                "Channel update available: 0.1.1 (development, abcdef0). Run `nib update`."
+                    .to_string(),
+            ),
+        };
+        let rendered = empty_state_lines(&welcome, true)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Nib 0.1.0"), "{rendered}");
+        assert!(rendered.contains("~/work/nib"), "{rendered}");
+        assert!(
+            rendered.contains("Channel update available: 0.1.1"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Run `nib update`"), "{rendered}");
+        assert!(rendered.contains("/new"), "{rendered}");
+        assert!(rendered.contains("Ctrl+C"), "{rendered}");
+    }
+
+    #[test]
+    fn idle_ctrl_c_clears_a_draft_and_double_press_quits() {
+        let now = Instant::now();
+        assert_eq!(
+            idle_ctrl_c_action(false, None, now),
+            IdleCtrlCAction::ClearDraft
+        );
+        assert_eq!(
+            idle_ctrl_c_action(true, None, now),
+            IdleCtrlCAction::ArmQuit
+        );
+        assert_eq!(
+            idle_ctrl_c_action(true, Some(now), now + Duration::from_millis(400)),
+            IdleCtrlCAction::Quit
+        );
+        assert_eq!(
+            idle_ctrl_c_action(true, Some(now), now + Duration::from_millis(1001)),
+            IdleCtrlCAction::ArmQuit
+        );
+        assert_eq!(
+            quit_confirm_action(Some(now), now + Duration::from_millis(400)),
+            QuitConfirmAction::Confirm
+        );
+        assert_eq!(quit_confirm_action(None, now), QuitConfirmAction::Arm);
+    }
+
+    #[test]
+    fn startup_welcome_strips_stderr_prefix_from_update_notice() {
+        let welcome = StartupWelcome::new(
+            Path::new("/tmp/project"),
+            Some("[nib] Channel update available: 0.1.1. Run `nib update`.".to_string()),
+        );
+        assert_eq!(
+            welcome.version,
+            format!("Nib {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            welcome.update_notice.as_deref(),
+            Some("Channel update available: 0.1.1. Run `nib update`.")
+        );
     }
 
     #[test]
@@ -5236,6 +5451,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut viewport = TranscriptViewport::default();
+        let welcome = StartupWelcome::fixture();
         terminal
             .draw(|frame| {
                 render_session_activities(
@@ -5253,6 +5469,7 @@ mod tests {
                     0,
                     None,
                     None,
+                    &welcome,
                 )
             })
             .expect("render channels");

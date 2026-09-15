@@ -3109,7 +3109,7 @@ fn fit_tui_chrome_line(verbose: String, compact: String, width: u16) -> String {
     }
 }
 
-fn folder_label(path: &Path) -> String {
+pub(crate) fn folder_label(path: &Path) -> String {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);

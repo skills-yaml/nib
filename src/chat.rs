@@ -419,8 +419,13 @@ pub fn run_interactive(args: &ChatArgs) -> Result<(), String> {
             config,
             ConsoleInput::new(io::BufReader::new(io::stdin())),
         ),
-        InteractiveMode::Tui => nib::tui::run_tui(&project, args.run.clone(), args.session.clone())
-            .map_err(|error| error.to_string()),
+        InteractiveMode::Tui => nib::tui::run_tui(
+            &project,
+            args.run.clone(),
+            args.session.clone(),
+            crate::updater::startup_update_notice(),
+        )
+        .map_err(|error| error.to_string()),
     }
 }
 

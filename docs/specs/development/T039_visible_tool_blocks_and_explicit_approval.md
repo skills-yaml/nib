@@ -63,6 +63,12 @@ says `awaiting you`.
 - The transcript has three visually distinct channels: dim italic `thought` for
   internal planning, `◆ tool` work blocks, and a `nib` speech block for replies
   to the user. User turns stay `you`. Channels are separated by a blank row.
+- An empty session starts with a left-aligned welcome: `Nib <version>`, the
+  working directory, an update notice with `nib update` when a channel update is
+  available, `/new` for a new session and worktree, `/session` to switch, and
+  the most-used keys including double `Ctrl+C` / `Ctrl+Q` to quit.
+- Idle empty `Ctrl+C` quits after a second press within 1000ms, matching
+  `Ctrl+Q`. A running turn still cancels. A non-empty idle draft still clears.
 
 ## Scope
 
@@ -72,6 +78,7 @@ says `awaiting you`.
 - Question card layout, numbered choices, Enter/1-9/Esc, WAITING QUESTION status.
 - Layout reservation for completion under the composer and the waiting meter row.
 - Tests and user-guide copy.
+- Empty-session startup welcome and idle empty Ctrl+C quit confirm.
 - No change to `ApprovalDecision`, sandbox, or always-allow policy.
 
 ## Non-Goals
@@ -112,13 +119,22 @@ says `awaiting you`.
 - [ ] A question dock is a bordered `Question` card that states `nib is asking`,
       shows the question, numbers options, and pins Enter/1-9 and Esc. Status
       reads `WAITING QUESTION`.
+- [ ] An empty session welcome shows `Nib <version>`, the working directory,
+      `/new` and `/session` help, and the most-used keys. When an update is
+      available it tells the user to run `nib update`.
+- [ ] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
+      cancels and a non-empty idle draft still clears. `/q` and `Ctrl+Q` still
+      quit.
 
 ## Affected Areas
 
 - `src/interactive.rs` — tool argument hints, title composition, display_text.
 - `src/tui/mod.rs` — tool row styling, approval card, footer/status override, keys,
-  below-composer completion layout, waiting meter, transcript wheel/key scroll.
-- `docs/user/guide.md` — approval, tool-block, completion placement, and waiting-meter copy.
+  below-composer completion layout, waiting meter, transcript wheel/key scroll,
+  startup welcome, idle Ctrl+C quit.
+- `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI.
+- `docs/user/guide.md` — approval, tool-block, completion placement, waiting-meter,
+  startup welcome, and Ctrl+C quit copy.
 - `docs/specs/README.md` — lifecycle inventory.
 
 ## Implementation Plan
@@ -129,6 +145,8 @@ says `awaiting you`.
 4. Add Enter/1/2 aliases; cover with TestBackend and key-dispatch tests.
 5. Reserve completion rows under the composer and stop overlaying the transcript.
 6. Add the waiting meter row for job, step, time, tokens, and status.
+7. Add the empty-session startup welcome (version, cwd, update, session/worktree, keys).
+8. Let idle empty Ctrl+C share the Ctrl+Q 1000ms quit confirm.
 
 ## Validation Gates
 
