@@ -10,8 +10,8 @@ use nib::config::load_nib_config_full;
 use nib::interactive::{
     claim_next_queued_follow_up_after_startup, execute_interactive_command_in_state,
     format_session_status, interactive_completions, interactive_session_candidate,
-    persist_queued_follow_up, queue_disposition_message, reduce_interaction,
-    resolve_interactive_profile_scope, resolve_session, set_active_model,
+    maybe_assign_session_display_name, persist_queued_follow_up, queue_disposition_message,
+    reduce_interaction, resolve_interactive_profile_scope, resolve_session, set_active_model,
     validate_interactive_session_target, DraftHistory, InteractionConsumer, InteractionDecision,
     InteractionInput, InteractionReduction, InteractionRunState, InteractionState,
     InteractionTerminalOutcome, InteractiveAgentMode, InteractiveEffect,
@@ -765,6 +765,9 @@ fn run_plain_with_input_and_modal_state(
                     }
                 }
                 Ok(InteractiveEffect::RunAgent { goal, mode }) => {
+                    if mode != InteractiveAgentMode::Compact {
+                        let _ = maybe_assign_session_display_name(&session_store, &sid, &goal);
+                    }
                     println!("Thinking...");
                     match execute_plain_turn_and_queued_follow_ups(
                         &agent_scope,
@@ -800,6 +803,7 @@ fn run_plain_with_input_and_modal_state(
             continue;
         };
 
+        let _ = maybe_assign_session_display_name(&session_store, &sid, &goal);
         println!("Thinking...");
 
         match execute_plain_turn_and_queued_follow_ups(

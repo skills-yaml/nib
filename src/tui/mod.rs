@@ -6,13 +6,14 @@ use crate::interactive::{
     apply_stream_event, claim_next_queued_follow_up_after_startup,
     display_stream_event_with_sensitive_values, execute_interactive_command_in_state,
     format_tui_interaction_chrome, interactive_completions, interactive_session_candidate,
-    interactive_session_selection, path_completions, persist_queued_follow_up,
-    project_session_activities, queue_disposition_message, reduce_interaction, resolve_session,
-    restore_queued_follow_up_after_start_failure, set_active_model, unicode_display_width,
-    validate_interactive_session_target, wrapped_display_rows, ActivityEntry, ActivityKind,
-    DraftHistory, DraftHistorySearch, InteractionConsumer, InteractionDecision, InteractionInput,
-    InteractionReduction, InteractionRunState, InteractionState, InteractionTerminalOutcome,
-    InteractiveAgentMode, InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
+    interactive_session_selection, maybe_assign_session_display_name, path_completions,
+    persist_queued_follow_up, project_session_activities, queue_disposition_message,
+    reduce_interaction, resolve_session, restore_queued_follow_up_after_start_failure,
+    set_active_model, unicode_display_width, validate_interactive_session_target,
+    wrapped_display_rows, ActivityEntry, ActivityKind, DraftHistory, DraftHistorySearch,
+    InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
+    InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
+    InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
     InteractiveSessionSelection, ModelSelection, SelectorDetailKind, StreamDisplay,
     TranscriptViewport, TranscriptViewportAction, MAX_DRAFT_HISTORY_QUERY_BYTES,
 };
@@ -29,7 +30,7 @@ use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::DefaultTerminal;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -146,6 +147,48 @@ enum WaitingKind {
     Approval,
     Question,
     Workspace,
+}
+
+enum InteractionBand<'a> {
+    Completion(&'a CompletionMenu),
+    Model(&'a PendingModelSelection),
+    Sessions {
+        switcher: &'a SessionSwitcher,
+        active: &'a str,
+    },
+    History(&'a PendingHistorySearch),
+}
+
+impl InteractionBand<'_> {
+    fn row_count(&self) -> usize {
+        match self {
+            Self::Completion(menu) => menu.suggestions.len(),
+            Self::Model(model) => model.selection.available.len().max(1),
+            Self::Sessions { switcher, .. } => {
+                let rows = switcher.candidates.len().max(1);
+                if switcher.confirming {
+                    rows.max(2)
+                } else if !switcher.exact_id.is_empty() {
+                    rows.saturating_add(1)
+                } else {
+                    rows
+                }
+            }
+            Self::History(search) => search.search.matches.len().max(1).saturating_add(1),
+        }
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        match self {
+            Self::Completion(_) => "Tab insert · Enter run · Esc close",
+            Self::Model(_) => "Enter select · Esc cancel",
+            Self::Sessions { switcher, .. } if switcher.confirming => {
+                "Y/Enter resume · N/Esc keep current"
+            }
+            Self::Sessions { .. } => "Enter resume · Esc close",
+            Self::History(_) => "Enter restore · Esc close",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1444,8 +1487,16 @@ fn handle_pending_interaction_key(
     false
 }
 
-fn render_model_selection(frame: &mut ratatui::Frame<'_>, pending: &PendingModelSelection) {
-    let modal_area = centered_rect(75, 60, frame.area());
+fn render_model_selection(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    pending: &PendingModelSelection,
+) {
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
     let safe_label = |value: &str| {
         bounded_public_text(
             value,
@@ -1454,54 +1505,50 @@ fn render_model_selection(frame: &mut ratatui::Frame<'_>, pending: &PendingModel
             false,
         )
     };
-    let mut text = vec![
-        Line::from(Span::styled(
-            format!(
-                "Select model for {}",
-                safe_label(&pending.selection.provider)
-            ),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
-    if pending.selection.available.is_empty() {
-        text.push(Line::from(
-            "No configured suggestions; enter an exact model ID.",
-        ));
+    let hint_rows = u16::from(inner.height > 1);
+    let capacity = usize::from(inner.height.saturating_sub(hint_rows)).max(1);
+    let (start, end) = visible_option_range(
+        pending.selected_option,
+        pending.selection.available.len(),
+        capacity,
+    );
+    let mut lines = if pending.selection.available.is_empty() {
+        vec![list_option_line(
+            "No configured suggestions; type an exact model ID.",
+            false,
+            inner.width,
+            no_color,
+        )]
     } else {
-        for (index, model) in pending.selection.available.iter().enumerate() {
-            let selected = if index == pending.selected_option {
-                "> "
-            } else {
-                "  "
-            };
-            let current = if model == &pending.selection.current {
-                " (current)"
-            } else {
-                ""
-            };
-            text.push(Line::from(format!(
-                "{selected}{}. {}{current}",
-                index + 1,
-                safe_label(model),
-            )));
-        }
+        pending.selection.available[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, model)| {
+                let current = if model == &pending.selection.current {
+                    "current"
+                } else {
+                    ""
+                };
+                two_column_option(
+                    &safe_label(model),
+                    current,
+                    start + offset == pending.selected_option,
+                    inner.width,
+                    no_color,
+                )
+            })
+            .collect()
+    };
+    if hint_rows > 0 {
+        let typed = safe_label(&pending.response);
+        let hint = if typed.is_empty() {
+            "Up/Down select · type exact ID · Enter select · Esc cancel".to_string()
+        } else {
+            format!("ID {typed} · Enter select · Esc cancel")
+        };
+        lines.push(band_hint_line(&hint, inner.width, no_color));
     }
-    text.push(Line::from(""));
-    text.push(Line::from(vec![
-        Span::styled("Model: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(safe_label(&pending.response)),
-    ]));
-    text.push(Line::from("Enter select  Esc cancel"));
-    let modal = Paragraph::new(text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Model Selection "),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(modal, modal_area);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1655,112 +1702,90 @@ fn replace_active_session(
 
 fn render_session_switcher(
     frame: &mut ratatui::Frame<'_>,
+    area: Rect,
     switcher: &SessionSwitcher,
     active_session_id: &str,
 ) {
-    let modal_area = centered_rect(92, 84, frame.area());
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .title(" Session Switcher | Up/Down or type exact ID | Enter preview/resume | Esc close ");
-    let inner = outer.inner(modal_area);
-    frame.render_widget(outer, modal_area);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(inner);
-    let visible_rows = usize::from(columns[0].height.saturating_sub(2)).max(1);
-    let start = switcher
-        .selected
-        .saturating_add(1)
-        .saturating_sub(visible_rows);
-    let end = (start + visible_rows).min(switcher.candidates.len());
-    let items = if switcher.candidates.is_empty() {
-        vec![ListItem::new("(no sessions)")]
-    } else {
-        switcher.candidates[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, candidate)| {
-                let index = start + offset;
-                let selected = if index == switcher.selected { ">" } else { " " };
-                let active = if candidate.id == active_session_id {
-                    "*"
-                } else {
-                    " "
-                };
-                ListItem::new(format!("{selected}{active} {}", candidate.label))
-            })
-            .collect()
-    };
-    let range = if switcher.candidates.is_empty() {
-        "0/0".to_string()
-    } else {
-        format!("{}-{}/{}", start + 1, end, switcher.candidates.len())
-    };
-    let list_title = if switcher.omitted == 0 {
-        format!(" Sessions {range} (* active) ")
-    } else {
-        format!(
-            " Sessions {range} (* active; {} omitted, type exact ID) ",
-            switcher.omitted
-        )
-    };
-    frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(list_title)),
-        columns[0],
-    );
-    let selected_preview = switcher
-        .candidates
-        .get(switcher.selected)
-        .map(|candidate| candidate.preview.as_str())
-        .unwrap_or("No session is available to preview.");
-    let error = switcher
-        .error
-        .as_deref()
-        .map(|error| format!("\n[switcher error] {error}\n"))
-        .unwrap_or_default();
-    let preview = format!(
-        "Exact session ID: {}{error}\n{selected_preview}",
-        switcher.exact_id
-    );
-    frame.render_widget(
-        Paragraph::new(preview)
-            .block(Block::default().borders(Borders::ALL).title(" Preview "))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        columns[1],
-    );
-
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let hint_rows = u16::from(inner.height > 1);
+    let mut lines = Vec::new();
     if switcher.confirming {
-        let target = switcher
+        let label = switcher
             .candidates
             .get(switcher.selected)
-            .map(|candidate| candidate.id.as_str())
-            .unwrap_or("(missing)");
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Confirm session switch",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(format!("Current: {active_session_id}")),
-            Line::from(format!("Target:  {target}")),
-        ];
-        lines.push(Line::from(""));
-        lines.push(Line::from("Enter/Y resume  Esc/N keep current session"));
-        let confirmation_area = centered_rect(70, 45, frame.area());
-        frame.render_widget(ratatui::widgets::Clear, confirmation_area);
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Resume Confirmation "),
-                )
-                .wrap(ratatui::widgets::Wrap { trim: false }),
-            confirmation_area,
-        );
+            .map(|candidate| candidate.label.as_str())
+            .unwrap_or("session");
+        lines.push(two_column_option(
+            &format!("Resume {label}"),
+            "replaces this session",
+            true,
+            inner.width,
+            no_color,
+        ));
+        if hint_rows > 0 {
+            lines.push(band_hint_line(
+                "Y / Enter resume · N / Esc keep current",
+                inner.width,
+                no_color,
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
     }
+    if !switcher.exact_id.is_empty() && inner.height > 2 {
+        lines.push(band_hint_line(
+            &format!("ID {}", switcher.exact_id),
+            inner.width,
+            no_color,
+        ));
+    }
+    let used = lines.len();
+    let capacity = usize::from(inner.height.saturating_sub(hint_rows))
+        .saturating_sub(used)
+        .max(1);
+    let (start, end) = visible_option_range(switcher.selected, switcher.candidates.len(), capacity);
+    if switcher.candidates.is_empty() {
+        lines.push(list_option_line(
+            "(no sessions)",
+            false,
+            inner.width,
+            no_color,
+        ));
+    } else {
+        for (offset, candidate) in switcher.candidates[start..end].iter().enumerate() {
+            let description = if candidate.id == active_session_id {
+                "active"
+            } else {
+                candidate.preview.lines().next().unwrap_or("")
+            };
+            lines.push(two_column_option(
+                &candidate.label,
+                description,
+                start + offset == switcher.selected,
+                inner.width,
+                no_color,
+            ));
+        }
+    }
+    if hint_rows > 0 {
+        let error_hint = switcher
+            .error
+            .as_ref()
+            .map(|error| format!("[switcher error] {error}"));
+        let hint = if let Some(error) = error_hint.as_deref() {
+            error
+        } else if switcher.omitted > 0 {
+            "Up/Down select · type exact ID · Enter resume · Esc close"
+        } else {
+            "Up/Down select · Enter resume · Esc close"
+        };
+        lines.push(band_hint_line(hint, inner.width, no_color));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn completion_reserved_height(
@@ -1870,6 +1895,30 @@ fn completion_signature(suggestion: &InteractiveCompletion) -> &str {
     }
 }
 
+fn selected_option_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+fn list_option_line(text: &str, selected: bool, width: u16, no_color: bool) -> Line<'static> {
+    let style = if selected {
+        selected_option_style(no_color)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(
+        truncate_completion_text(text, usize::from(width.max(1))),
+        style,
+    ))
+}
+
 fn truncate_completion_text(value: &str, max_cells: usize) -> String {
     if unicode_display_width(value) <= max_cells {
         return value.to_string();
@@ -1890,17 +1939,17 @@ fn truncate_completion_text(value: &str, max_cells: usize) -> String {
     output
 }
 
-fn completion_line(suggestion: &InteractiveCompletion, width: u16) -> String {
+fn two_column_text(signature: &str, description: &str, width: u16) -> String {
     let width = usize::from(width);
     if width == 0 {
         return String::new();
     }
     let signature_column = width.saturating_mul(2).checked_div(5).unwrap_or(0).max(1);
-    let signature = truncate_completion_text(completion_signature(suggestion), signature_column);
+    let signature = truncate_completion_text(signature, signature_column);
     let signature_width = unicode_display_width(&signature);
     let gap = if width > signature_column { 2 } else { 0 };
     let description_width = width.saturating_sub(signature_column.saturating_add(gap));
-    let description = truncate_completion_text(suggestion.summary, description_width);
+    let description = truncate_completion_text(description, description_width);
     format!(
         "{signature}{}{description}",
         " ".repeat(
@@ -1909,6 +1958,41 @@ fn completion_line(suggestion: &InteractiveCompletion, width: u16) -> String {
                 .saturating_add(gap)
         )
     )
+}
+
+fn two_column_option(
+    signature: &str,
+    description: &str,
+    selected: bool,
+    width: u16,
+    no_color: bool,
+) -> Line<'static> {
+    list_option_line(
+        &two_column_text(signature, description, width),
+        selected,
+        width,
+        no_color,
+    )
+}
+
+fn completion_line(suggestion: &InteractiveCompletion, width: u16) -> String {
+    two_column_text(completion_signature(suggestion), suggestion.summary, width)
+}
+
+fn visible_option_range(selected: usize, len: usize, capacity: usize) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let capacity = capacity.max(1);
+    let start = selected.saturating_sub(capacity.saturating_sub(1));
+    (start, (start + capacity).min(len))
+}
+
+fn band_hint_line(text: &str, width: u16, no_color: bool) -> Line<'static> {
+    Line::from(Span::styled(
+        truncate_completion_text(text, usize::from(width.max(1))),
+        muted_style(no_color),
+    ))
 }
 
 fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &CompletionMenu) {
@@ -1933,12 +2017,7 @@ fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &Co
         .map(|(offset, suggestion)| {
             let selected = start + offset == completion.selected;
             let style = if selected {
-                let style = Style::default().add_modifier(Modifier::BOLD);
-                if no_color {
-                    style.add_modifier(Modifier::REVERSED)
-                } else {
-                    style.fg(Color::Cyan)
-                }
+                selected_option_style(no_color)
             } else {
                 Style::default()
             };
@@ -1960,60 +2039,56 @@ fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &Co
     frame.render_widget(Paragraph::new(lines), modal_area);
 }
 
-fn render_history_search(frame: &mut ratatui::Frame<'_>, search: &PendingHistorySearch) {
-    let modal_area = centered_rect(88, 62, frame.area());
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Draft History | type to search | Up/Down select | Enter restore | Esc close ");
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-    frame.render_widget(
-        Paragraph::new(format!("Query: {}", search.query))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[0],
-    );
-
-    let visible_rows = usize::from(chunks[1].height).max(1);
-    let start = search
-        .selected
-        .saturating_add(1)
-        .saturating_sub(visible_rows);
-    let end = (start + visible_rows).min(search.search.matches.len());
-    let items = if search.search.matches.is_empty() {
-        vec![ListItem::new("(no matches)")]
+fn render_history_search(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    search: &PendingHistorySearch,
+) {
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let hint_rows = u16::from(inner.height > 1);
+    let mut lines = Vec::new();
+    if inner.height > 2 {
+        let query = if search.query.is_empty() {
+            "type to search drafts"
+        } else {
+            search.query.as_str()
+        };
+        lines.push(band_hint_line(query, inner.width, no_color));
+    }
+    let used = lines.len();
+    let capacity = usize::from(inner.height.saturating_sub(hint_rows))
+        .saturating_sub(used)
+        .max(1);
+    let (start, end) = visible_option_range(search.selected, search.search.matches.len(), capacity);
+    if search.search.matches.is_empty() {
+        lines.push(list_option_line(
+            "(no matches)",
+            false,
+            inner.width,
+            no_color,
+        ));
     } else {
-        search.search.matches[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, result)| {
-                let marker = if start + offset == search.selected {
-                    ">"
-                } else {
-                    " "
-                };
-                ListItem::new(format!("{marker} {}", result.display))
-            })
-            .collect()
-    };
-    frame.render_widget(List::new(items), chunks[1]);
-    frame.render_widget(
-        Paragraph::new(
-            search
-                .error
-                .as_deref()
-                .unwrap_or("History is process-local."),
-        ),
-        chunks[2],
-    );
+        for (offset, result) in search.search.matches[start..end].iter().enumerate() {
+            lines.push(list_option_line(
+                &result.display,
+                start + offset == search.selected,
+                inner.width,
+                no_color,
+            ));
+        }
+    }
+    if hint_rows > 0 {
+        let hint = search
+            .error
+            .as_deref()
+            .unwrap_or("Up/Down select · Enter restore · Esc close");
+        lines.push(band_hint_line(hint, inner.width, no_color));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_modal_state_error(frame: &mut ratatui::Frame<'_>, message: &'static str) {
@@ -2038,44 +2113,36 @@ fn render_interaction_overlay(
     pending_model: Option<&PendingModelSelection>,
     pending_switcher: Option<&SessionSwitcher>,
     pending_history_search: Option<&PendingHistorySearch>,
-    active_session_id: &str,
+    _active_session_id: &str,
 ) {
     match layer {
-        InteractionLayer::Model => {
-            if let Some(model) = pending_model {
-                render_model_selection(frame, model);
-            } else {
-                render_modal_state_error(
-                    frame,
-                    "Model selector state is unavailable; press Esc to continue.",
-                );
-            }
+        InteractionLayer::Model if pending_model.is_none() => render_modal_state_error(
+            frame,
+            "Model selector state is unavailable; press Esc to continue.",
+        ),
+        InteractionLayer::SessionConfirmation | InteractionLayer::SessionSwitcher
+            if pending_switcher.is_none() =>
+        {
+            render_modal_state_error(
+                frame,
+                "Session selector state is unavailable; press Esc to continue.",
+            );
         }
-        InteractionLayer::SessionConfirmation | InteractionLayer::SessionSwitcher => {
-            if let Some(switcher) = pending_switcher {
-                render_session_switcher(frame, switcher, active_session_id);
-            } else {
-                render_modal_state_error(
-                    frame,
-                    "Session selector state is unavailable; press Esc to continue.",
-                );
-            }
-        }
-        InteractionLayer::HistorySearch => {
-            if let Some(search) = pending_history_search {
-                render_history_search(frame, search);
-            } else {
-                render_modal_state_error(
-                    frame,
-                    "Draft history state is unavailable; press Esc to continue.",
-                );
-            }
+        InteractionLayer::HistorySearch if pending_history_search.is_none() => {
+            render_modal_state_error(
+                frame,
+                "Draft history state is unavailable; press Esc to continue.",
+            );
         }
         InteractionLayer::RecoverableError => render_modal_state_error(
             frame,
             "Interaction state is unavailable; press Esc to continue.",
         ),
-        InteractionLayer::Approval
+        InteractionLayer::Model
+        | InteractionLayer::SessionConfirmation
+        | InteractionLayer::SessionSwitcher
+        | InteractionLayer::HistorySearch
+        | InteractionLayer::Approval
         | InteractionLayer::Question
         | InteractionLayer::Composer
         | InteractionLayer::Completion => {}
@@ -2335,6 +2402,17 @@ fn prepare_tui_agent_worker(
 
 fn safe_agent_error_stream_event(_error: &str) -> StreamEvent {
     StreamEvent::End("local_error".to_string())
+}
+
+fn assign_session_title_from_goal(
+    store: &SessionStore,
+    session_id: &str,
+    goal: &str,
+    chrome_generation: &mut u64,
+) {
+    if let Ok(Some(_)) = maybe_assign_session_display_name(store, session_id, goal) {
+        *chrome_generation = chrome_generation.saturating_add(1);
+    }
 }
 
 fn spawn_tui_agent_worker(
@@ -3628,14 +3706,6 @@ fn render_question_card(
             .split(inner);
         (chunks[0], chunks[1])
     };
-    let selected_style = if no_color {
-        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    };
     if body_area.height > 0 && body_area.width > 0 {
         let indent = "  ";
         let subject_width = body_area.width.saturating_sub(2).max(1);
@@ -3666,18 +3736,12 @@ fn render_question_card(
                     break;
                 }
                 let number = index + 1;
-                let selected = index == question.selected_option;
-                let marker = if selected { "> " } else { "  " };
-                let row = truncate_completion_text(
-                    &format!("{marker}{number}  {option}"),
-                    usize::from(body_area.width),
-                );
-                let style = if selected {
-                    selected_style
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(Span::styled(row, style)));
+                lines.push(list_option_line(
+                    &format!("{number}  {option}"),
+                    index == question.selected_option,
+                    body_area.width,
+                    no_color,
+                ));
                 remaining = remaining.saturating_sub(1);
             }
             if remaining > 0 && question.request.options.is_empty() {
@@ -3720,7 +3784,7 @@ fn render_question_card(
     };
     let mut choices = vec![Line::from(Span::styled(
         truncate_completion_text(primary, usize::from(choice_area.width)),
-        selected_style,
+        selected_option_style(no_color),
     ))];
     if choice_area.height > 1 {
         choices.push(Line::from(Span::styled(
@@ -4002,6 +4066,7 @@ fn render_current_session_view_with_viewport(
         None,
         None,
         &welcome,
+        None,
     );
 }
 
@@ -4036,6 +4101,7 @@ fn render_session_view_with_completion(
         completion,
         meter,
         &welcome,
+        None,
     );
 }
 
@@ -4056,6 +4122,7 @@ fn render_session_activities(
     completion: Option<&CompletionMenu>,
     meter: Option<&WaitingMeter>,
     welcome: &StartupWelcome,
+    band: Option<&InteractionBand<'_>>,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let waiting = if pending_approval.is_some() {
@@ -4071,14 +4138,11 @@ fn render_session_activities(
         composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
     let meter_h = u16::from(meter.is_some());
     let completion = completion.filter(|menu| menu.is_open());
-    let completion_h = completion
-        .map(|menu| {
-            completion_reserved_height(
-                frame.area().height,
-                menu.suggestions.len(),
-                composer_h,
-                meter_h,
-            )
+    let completion_band = completion.map(InteractionBand::Completion);
+    let band = band.or(completion_band.as_ref());
+    let completion_h = band
+        .map(|band| {
+            completion_reserved_height(frame.area().height, band.row_count(), composer_h, meter_h)
         })
         .unwrap_or(0);
     let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
@@ -4235,12 +4299,35 @@ fn render_session_activities(
             }
         }
     }
-    if let Some(completion) = completion {
-        render_completion(frame, layout.completion, completion);
+    match band {
+        Some(InteractionBand::Completion(menu)) => {
+            render_completion(frame, layout.completion, menu);
+        }
+        Some(InteractionBand::Model(model)) => {
+            render_model_selection(frame, layout.completion, model);
+        }
+        Some(InteractionBand::Sessions { switcher, active }) => {
+            render_session_switcher(frame, layout.completion, switcher, active);
+        }
+        Some(InteractionBand::History(search)) => {
+            render_history_search(frame, layout.completion, search);
+        }
+        None => {}
+    }
+    let mut footer = footer_line(run_active, viewport, focus, queued, waiting);
+    if let Some(band) = band {
+        if waiting == WaitingKind::None {
+            footer = band.footer_hint().to_string();
+            if queued > 0 {
+                footer = format!("queue {queued} · {footer}");
+            }
+            if !viewport.is_pinned_to_tail() {
+                footer.push_str(" · Ctrl+End follow");
+            }
+        }
     }
     frame.render_widget(
-        Paragraph::new(footer_line(run_active, viewport, focus, queued, waiting))
-            .style(muted_style(no_color)),
+        Paragraph::new(footer).style(muted_style(no_color)),
         layout.footer,
     );
 }
@@ -4275,6 +4362,9 @@ fn draw_loop(
         welcome.consent_directory = Some(crate::interactive::folder_label(project_root));
     }
     let mut pending_goal = run_goal;
+    if let Some(goal) = pending_goal.as_deref() {
+        let _ = maybe_assign_session_display_name(&store, &active_session_id, goal);
+    }
     let mut worker = if welcome.consent_directory.is_none() {
         if let Some(goal) = pending_goal.take() {
             Some(spawn_tui_agent_worker(
@@ -4471,6 +4561,18 @@ fn draw_loop(
         } else {
             None
         };
+        let interaction_band = pending_history_search
+            .as_ref()
+            .map(InteractionBand::History)
+            .or_else(|| pending_model.as_ref().map(InteractionBand::Model))
+            .or_else(|| {
+                pending_switcher
+                    .as_ref()
+                    .map(|switcher| InteractionBand::Sessions {
+                        switcher,
+                        active: &active_session_id,
+                    })
+            });
         if let Err(error) = terminal.draw(|f| {
             render_session_activities(
                 f,
@@ -4488,6 +4590,7 @@ fn draw_loop(
                 Some(&completion).filter(|menu| menu.is_open()),
                 meter.as_ref(),
                 &welcome,
+                interaction_band.as_ref(),
             );
             render_interaction_overlay(
                 f,
@@ -5129,6 +5232,14 @@ fn draw_loop(
                                         );
                                     }
                                     Ok(InteractiveEffect::RunAgent { goal, mode }) => {
+                                        if mode != InteractiveAgentMode::Compact {
+                                            assign_session_title_from_goal(
+                                                &store,
+                                                &active_session_id,
+                                                &goal,
+                                                &mut chrome_generation,
+                                            );
+                                        }
                                         timeline.push_status(format!("[user] {goal}"));
                                         worker = Some(spawn_tui_agent_worker(
                                             agent_profile_scope.clone(),
@@ -5151,6 +5262,12 @@ fn draw_loop(
                                 }
                             }
                             InteractionReduction::IdleTurn(goal) => {
+                                assign_session_title_from_goal(
+                                    &store,
+                                    &active_session_id,
+                                    &goal,
+                                    &mut chrome_generation,
+                                );
                                 timeline.push_status(format!("[user] {goal}"));
                                 worker = Some(spawn_tui_agent_worker(
                                     agent_profile_scope.clone(),
@@ -5552,6 +5669,7 @@ mod tests {
                     None,
                     None,
                     &welcome,
+                    None,
                 )
             })
             .expect("render workspace consent");
@@ -5686,6 +5804,7 @@ mod tests {
                     None,
                     None,
                     &welcome,
+                    None,
                 )
             })
             .expect("render channels");
@@ -6144,7 +6263,7 @@ mod tests {
         let backend = TestBackend::new(60, 12);
         let mut terminal = Terminal::new(backend).expect("short switcher terminal");
         terminal
-            .draw(|frame| render_session_switcher(frame, &switcher, "session-000"))
+            .draw(|frame| render_session_switcher(frame, frame.area(), &switcher, "session-000"))
             .expect("render selected tail candidate");
         let rendered = terminal
             .backend()
@@ -6332,7 +6451,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
         terminal
-            .draw(|frame| render_session_switcher(frame, &switcher, "current-session"))
+            .draw(|frame| {
+                render_session_switcher(frame, frame.area(), &switcher, "current-session")
+            })
             .expect("render switcher");
 
         let rendered = terminal
@@ -6342,9 +6463,122 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Resume Confirmation"));
-        assert!(rendered.contains("Current: current-session"));
-        assert!(rendered.contains("Target:  visible-session"));
+        assert!(rendered.contains("Resume visible-session"), "{rendered}");
+        assert!(rendered.contains("Y / Enter resume"), "{rendered}");
+        assert!(!rendered.contains("Resume Confirmation"), "{rendered}");
+    }
+
+    #[test]
+    fn session_list_matches_slash_option_style_without_a_caret() {
+        let switcher = SessionSwitcher {
+            candidates: vec![
+                InteractiveSessionCandidate {
+                    id: "current-session".to_string(),
+                    label: "wrap-fix".to_string(),
+                    preview: "Latest user message: wrap".to_string(),
+                    is_active: true,
+                    snapshot_token: [0; 32],
+                },
+                InteractiveSessionCandidate {
+                    id: "other-session".to_string(),
+                    label: "inspect tests".to_string(),
+                    preview: "Latest user message: inspect".to_string(),
+                    is_active: false,
+                    snapshot_token: [1; 32],
+                },
+            ],
+            selected: 1,
+            omitted: 0,
+            confirming: false,
+            exact_id: String::new(),
+            error: None,
+        };
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_session_switcher(frame, frame.area(), &switcher, "current-session")
+            })
+            .expect("render session list");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("wrap-fix"), "{rendered}");
+        assert!(rendered.contains("inspect tests"), "{rendered}");
+        assert!(rendered.contains("active"), "{rendered}");
+        assert!(!rendered.contains(">wrap-fix"), "{rendered}");
+        assert!(!rendered.contains("> inspect"), "{rendered}");
+        assert!(!rendered.contains("* wrap-fix"), "{rendered}");
+    }
+
+    #[test]
+    fn session_switcher_stays_under_the_composer_like_slash_options() {
+        let switcher = SessionSwitcher {
+            candidates: vec![InteractiveSessionCandidate {
+                id: "visible-session".to_string(),
+                label: "visible-session".to_string(),
+                preview: "Latest user message: visible content".to_string(),
+                is_active: false,
+                snapshot_token: [0; 32],
+            }],
+            selected: 0,
+            omitted: 0,
+            confirming: false,
+            exact_id: String::new(),
+            error: None,
+        };
+        let band = InteractionBand::Sessions {
+            switcher: &switcher,
+            active: "current-session",
+        };
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut viewport = TranscriptViewport::default();
+        let welcome = StartupWelcome::fixture();
+        let composer = Composer::from_text("/session");
+        terminal
+            .draw(|frame| {
+                render_session_activities(
+                    frame,
+                    "nib · project",
+                    "idle · mock/mock-model",
+                    &[ActivityEntry::new(
+                        ActivityKind::User,
+                        "",
+                        "hello conversation",
+                    )],
+                    &composer,
+                    None,
+                    None,
+                    false,
+                    &mut viewport,
+                    TuiFocus::Composer,
+                    None,
+                    0,
+                    None,
+                    None,
+                    &welcome,
+                    Some(&band),
+                )
+            })
+            .expect("render under-composer sessions");
+        let rows = buffer_rows(&terminal);
+        let conversation = row_index_containing(&rows, "hello conversation").expect("conversation");
+        let prompt = row_index_containing(&rows, "> /session").expect("composer");
+        let option = row_index_containing(&rows, "visible-session").expect("session option");
+        assert!(conversation < prompt, "{rows:?}");
+        assert!(prompt < option, "{rows:?}");
+        let slash = rows[prompt].find('/').expect("composer slash");
+        let option_start = rows[option].find('v').expect("option text");
+        assert_eq!(
+            slash, option_start,
+            "prompt={:?} option={:?}",
+            rows[prompt], rows[option]
+        );
     }
 
     #[test]
@@ -6384,7 +6618,9 @@ mod tests {
                 })
                 .expect("render completion on small terminal");
             terminal
-                .draw(|frame| render_session_switcher(frame, &switcher, "small-session"))
+                .draw(|frame| {
+                    render_session_switcher(frame, frame.area(), &switcher, "small-session")
+                })
                 .expect("render switcher on small terminal");
         }
     }
@@ -8044,7 +8280,7 @@ mod tests {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| render_session_switcher(frame, &switcher, "session-a"))
+            .draw(|frame| render_session_switcher(frame, frame.area(), &switcher, "session-a"))
             .expect("render");
         let rendered = terminal
             .backend()
@@ -8370,29 +8606,31 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let composer = Composer::default();
+        let welcome = StartupWelcome::fixture();
+        let activities = activities_from_timeline_text(&transcript);
+        let band = InteractionBand::History(&search);
         terminal
             .draw(|frame| {
-                render_current_session_view_with_viewport(
+                render_session_activities(
                     frame,
                     "header",
                     "idle",
-                    &transcript,
+                    &activities,
                     &composer,
                     None,
                     None,
                     false,
                     &mut viewport,
-                );
-                render_interaction_overlay(
-                    frame,
-                    InteractionLayer::HistorySearch,
+                    TuiFocus::Composer,
+                    None,
+                    0,
                     None,
                     None,
-                    Some(&search),
-                    "session-a",
+                    &welcome,
+                    Some(&band),
                 );
             })
-            .expect("render history overlay");
+            .expect("render history list");
         let rendered = terminal
             .backend()
             .buffer()
@@ -8400,8 +8638,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Draft History"));
-        assert!(rendered.contains("safe draft 🙂"));
+        assert!(rendered.contains("safe draft 🙂"), "{rendered}");
+        assert!(rendered.contains("row-29"), "{rendered}");
+        assert!(!rendered.contains("Draft History"), "{rendered}");
         assert!(!rendered.contains('\0'));
         assert!(!rendered.contains('\u{1b}'));
         assert!(viewport.is_pinned_to_tail());

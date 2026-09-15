@@ -51,7 +51,12 @@ says `awaiting you`.
 - `/` and `@` completion is a reserved band under the composer, not a `Clear` overlay
   over the transcript. The conversation stays visible and the composer stays above the
   option list. Slash option signatures start on the same column as the composer `/`
-  and do not use a `>` caret; the selected row is emphasized in place.
+  and do not use a `>` caret; the selected row is emphasized in place. `/session`,
+  `/model`, `/history`, and question option lists use that same under-composer
+  band: no covering overlay, no caret, selected emphasis, optional
+  `active`/`current` suffix.
+- The first user goal assigns `display_name` when the session has no name.
+  `/rename` remains authoritative and is not overwritten.
 - A waiting meter appears between the transcript and the composer while a run is active
   or an approval/question is pending. It shows spinner, current job, plan step, elapsed
   time, a token estimate, and status.
@@ -114,7 +119,9 @@ says `awaiting you`.
       `task test:interactive` pass.
 - [ ] Slash completion options render under the composer; conversation text above the
       input remains visible and is not cleared. Option signatures start on the
-      same column as the composer `/` and have no `>` caret.
+      same column as the composer `/` and have no `>` caret. Session, model,
+      history, and question lists use that same selected-row style.
+- [ ] The first user goal assigns `display_name` when unset; `/rename` is kept.
 - [ ] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
       while a run is active or the TUI is waiting.
 - [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while

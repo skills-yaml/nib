@@ -3755,6 +3755,54 @@ fn fork_session(store: &SessionStore, session_id: &str) -> Result<(String, Strin
     ))
 }
 
+pub fn session_title_from_conversation(
+    conversation: &str,
+    sensitive_values: &[String],
+) -> Option<String> {
+    let line = conversation.lines().find_map(|line| {
+        let trimmed = line.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })?;
+    if line.starts_with("Continue with approved plan") {
+        return None;
+    }
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = bounded_public_text(&collapsed, sensitive_values, MAX_DISPLAY_NAME_BYTES, false);
+    let title = title.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+pub fn maybe_assign_session_display_name(
+    store: &SessionStore,
+    session_id: &str,
+    conversation: &str,
+) -> Result<Option<String>, String> {
+    let Some(name) = session_title_from_conversation(conversation, store.public_sensitive_values())
+    else {
+        return Ok(None);
+    };
+    let mut assigned = None;
+    store
+        .update_session(session_id, |session| {
+            if session
+                .display_name
+                .as_ref()
+                .is_some_and(|existing| !existing.trim().is_empty())
+            {
+                return Ok(());
+            }
+            session.display_name = Some(name.clone());
+            assigned = Some(name.clone());
+            Ok(())
+        })
+        .map_err(|error| format!("failed to name session: {error}"))?;
+    Ok(assigned)
+}
+
 fn rename_session(store: &SessionStore, session_id: &str, name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -6518,6 +6566,38 @@ mod tests {
                 "public history: {public_history:?}"
             );
         }
+    }
+
+    #[test]
+    fn first_user_goal_names_an_unnamed_session_once() {
+        let project = tempdir().expect("project");
+        let store = SessionStore::for_project(project.path()).expect("session store");
+        let session = store.create_session();
+        let assigned = maybe_assign_session_display_name(
+            &store,
+            &session.id,
+            "  Inspect the failing wrap tests\nmore detail",
+        )
+        .expect("auto-name");
+        assert_eq!(assigned.as_deref(), Some("Inspect the failing wrap tests"));
+        assert_eq!(
+            maybe_assign_session_display_name(&store, &session.id, "later goal")
+                .expect("existing name is kept"),
+            None
+        );
+        assert_eq!(
+            store
+                .load(&session.id)
+                .expect("named session")
+                .display_name
+                .as_deref(),
+            Some("Inspect the failing wrap tests")
+        );
+        assert_eq!(
+            session_title_from_conversation("Continue with approved plan step: x", &[]),
+            None
+        );
+        assert_eq!(session_title_from_conversation("   \n  ", &[]), None);
     }
 
     #[test]
