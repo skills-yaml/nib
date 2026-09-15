@@ -289,7 +289,7 @@ mod tests {
             ]
         }))
         .expect("session");
-        let context_length = 900;
+        let context_length = 2_400;
 
         let plan = generate_plan_with_context_events_bounded(
             &llm,

@@ -187,6 +187,64 @@ User / Workload Owner
    - The selected plain or TUI renderer shows live session history, tool calls (with
      boundaries/approvals), and loop state.
 
+### Working instructions and resource use
+
+`src/agent/instructions.rs` owns the compact shared behavior contract and the
+planner/executor-specific instructions. The bounded prompt builders preserve this
+contract intact and reject windows too small to hold it. It asks nib to use available
+evidence, clarify consequential unknowns, make low-risk assumptions explicit, keep
+plans proportional, avoid repeated work, and ground implementation in verification.
+These are model instructions; tool permissions, exact plan binding, and reconciliation
+are enforced by Rust independently of model compliance.
+
+Planning still takes one model request, even for a simple question. It exposes only
+`submit_plan`, so a needed inspection or clarification becomes an approved plan step.
+Execution can call `ask_question` alone, wait for the answer, and resume; skipped or
+unavailable input remains unresolved. Each tool batch continues the current step.
+A response without tools requests completion, but an unresolved tool failure keeps
+the step blocked. Three consecutive unchanged, fully failed batches stop with an
+audited failure instead of consuming the full turn allowance. Changed attempts or
+results and successful intervening work permit recovery.
+This status is deliberately coarse: a later successful batch clears the blocked
+status; it does not prove that an earlier failed test was repaired. The model must
+still verify the requested outcome. Likewise, the history reservation follows the
+latest `user` role, which can include a runtime-generated plan-continuation message.
+
+At startup nib loads one nearest supported project instruction file, selected skill
+bodies/references, fixed-root project documentation, profile memory, workload state,
+and attached files. It does not automatically merge nested instruction files or read
+every spec and project-memory document. The execution policy therefore calls for
+scoped reads of the relevant instructions, source, and specs before edits. Ordinary
+files, tool observations, remembered facts, and summaries supply evidence; they do
+not grant permission or replace the current user request.
+
+An explicit active-skill list on the profile selects by name; otherwise automatic
+selection matches names, tags, or description-word overlap with the goal. This can
+select broadly, and selected skills can contribute policy and after-tool hooks as
+well as text. Tighter automatic relevance filtering remains a separate improvement.
+
+Fresh requests allocate an initial 45% of the configured window to context sections,
+30% to tools, and 25% to history, then shrink within an aggregate serialized-input
+bound. Counts use a four-characters-per-token estimate, not provider tokenization.
+Attachments participate in this bound and use bounded identity-checked reads. History
+reserves space for the latest unsummarized user message before large tool output.
+Compression starts at the lower of its configured threshold and the history
+allocation, requests a bounded continuation summary, and retains the raw audit trail.
+The summary prioritizes intent, constraints, decisions, unanswered questions, failed
+approaches, verification evidence, and remaining work. Active provider continuations
+retain their separate bounded transport state and defer automatic compression.
+
+Self-development uses the same flow as other implementation work: inspect nib's
+instructions/specs and source, edit within the managed worktree, run focused checks
+and required Task gates, review the diff, and report artifacts and outstanding work.
+Editing source does not alter the running executable; review/merge and installation
+remain separate actions. Offline fixtures verify requests, tool execution, and
+reconciliation; they do not establish autonomous success for every live model.
+Build identity watches Git-resolved HEAD and ref paths, including linked-worktree
+and packed-ref layouts, so repeated Task gates do not recompile merely because
+`.git` is a file. A previously built source archive converted to a Git checkout needs
+a clean build to establish the new identity dependency.
+
 ### Sequence Diagram of Interactions
 
 ```mermaid

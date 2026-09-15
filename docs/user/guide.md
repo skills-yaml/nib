@@ -365,6 +365,26 @@ In a normal Git checkout, edits remain in a `nib/session/*` branch under
 `.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
 running inside a linked worktree, edits remain in that worktree.
 
+nib is instructed to inspect available information before asking questions, clarify
+missing details that affect the result, and keep plans and tool use proportional to
+the task. It stops repeated unchanged tool failures and keeps unresolved failed steps
+blocked. Required approvals and the configured turn limit still apply.
+
+To ask nib to develop its own source, run it from a nib checkout with a concrete
+change and acceptance criteria, for example:
+
+```bash
+nib run "Fix the reported parser bug. Follow AGENTS.md and the development spec, add a regression test, run task verify, and review the diff."
+```
+
+The same tools and worktree workflow apply to nib's repository. Source changes need
+review and a new build before they affect the executable you are running. A successful
+tool call alone does not establish that the whole requested change is correct; review
+the reported checks and remaining limitations.
+Full verification can take several minutes. The terminal tool accepts a `timeout`
+in seconds, up to 3,600; give long checks an appropriate bounded timeout and track
+an existing background check to completion before starting another.
+
 ### Interactive Session
 
 ```bash

@@ -271,7 +271,11 @@ fn project_relative_label(project_root: &Path, path: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-fn read_bounded_regular_file(project_root: &Path, path: &Path, limit: usize) -> Option<String> {
+pub(super) fn read_bounded_regular_file(
+    project_root: &Path,
+    path: &Path,
+    limit: usize,
+) -> Option<String> {
     read_bounded_regular_file_with_hook(project_root, path, limit, || {})
 }
 

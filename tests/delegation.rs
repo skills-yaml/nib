@@ -508,6 +508,30 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
 }
 
 #[cfg(target_os = "linux")]
+fn assert_policy_denial_reconciled(record: &SubagentRecord, child: &nib::session::Session) {
+    let result = record.result.as_ref().expect("failed child result");
+    assert_eq!(result["outcome"], "tool_execution_failed");
+    assert_eq!(
+        result["tool_call_count"], 1,
+        "denied action must not be retried"
+    );
+    assert_eq!(result["bound_reached"], false);
+    let plan = child.plan.as_ref().expect("approved child plan");
+    assert!(plan.approved);
+    assert!(!plan.is_complete());
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert_eq!(plan.outcome.as_deref(), Some("tool_execution_failed"));
+    assert!(child.events.iter().any(|event| {
+        event.kind == "reconciliation"
+            && event.details["outcome"] == "tool_execution_failed"
+            && event.details["continue"] == false
+    }));
+    child
+        .validate_message_sequence()
+        .expect("valid denied-child audit");
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
     let root = git_repository();
@@ -519,12 +543,13 @@ async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
     let id = started["subagent_id"].as_str().expect("subagent id");
     let record = wait_for_terminal_record(root.path(), id).await;
     assert_eq!(
-        record.status, "completed",
+        record.status, "failed",
         "destructive-denial subagent record: {record:#?}"
     );
 
     let store = SessionStore::for_project(&record.worktree_path).expect("child session store");
     let child = store.load(id).expect("child session");
+    assert_policy_denial_reconciled(&record, &child);
     assert!(child.events.iter().any(|event| {
         event.kind == "plan_approved"
             && event
@@ -575,10 +600,11 @@ async fn subagent_policy_allow_cannot_bypass_mutation_or_network_ceiling() {
             .expect("spawn policy fixture");
         let id = started["subagent_id"].as_str().expect("subagent id");
         let record = wait_for_terminal_record(root.path(), id).await;
-        assert_eq!(record.status, "completed", "record: {record:#?}");
+        assert_eq!(record.status, "failed", "record: {record:#?}");
 
         let store = SessionStore::for_project(&record.worktree_path).expect("child session store");
         let child = store.load(id).expect("child session");
+        assert_policy_denial_reconciled(&record, &child);
         let denied = child
             .tool_calls
             .iter()
