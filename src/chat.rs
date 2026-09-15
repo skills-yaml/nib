@@ -412,6 +412,9 @@ pub fn run_interactive(args: &ChatArgs) -> Result<(), String> {
     if let Some(session_id) = args.session.as_deref() {
         config.validate_public_session_id(session_id)?;
     }
+    if selection.mode == InteractiveMode::Plain {
+        confirm_workspace_access(&project)?;
+    }
     match selection.mode {
         InteractiveMode::Plain => run_plain_with_input(
             args,
@@ -462,6 +465,32 @@ fn run_chat_with_modal_state_input(
         ConsoleInput::new(reader),
         modal_state,
     )
+}
+
+fn confirm_workspace_access(project: &Path) -> Result<(), String> {
+    if nib::config::workspace_access_is_granted(project).map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return Ok(());
+    }
+    println!("Allow nib to work in this directory?");
+    println!("  {}", project.display());
+    println!("Y Allow  ·  N Decline");
+    print!("> ");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to prompt for workspace access: {error}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| format!("failed to read workspace access answer: {error}"))?;
+    let answer = line.trim();
+    if matches!(answer, "y" | "Y" | "yes" | "Yes") {
+        nib::config::grant_workspace_access(project).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    Err("workspace access declined".to_string())
 }
 
 fn prepare_interactive_config(

@@ -69,6 +69,10 @@ says `awaiting you`.
   the most-used keys including double `Ctrl+C` / `Ctrl+Q` to quit.
 - Idle empty `Ctrl+C` quits after a second press within 1000ms, matching
   `Ctrl+Q`. A running turn still cancels. A non-empty idle draft still clears.
+- The first interactive start in a project asks permission to work in the
+  working directory before any goal is accepted. The TUI shows a startup
+  `Permission required` card with the directory and Y/N. A grant is persisted
+  as `workspace.allowed` so later sessions skip the prompt. Decline quits.
 
 ## Scope
 
@@ -79,6 +83,7 @@ says `awaiting you`.
 - Layout reservation for completion under the composer and the waiting meter row.
 - Tests and user-guide copy.
 - Empty-session startup welcome and idle empty Ctrl+C quit confirm.
+- Startup workspace permission card and persisted `workspace.allowed` grant.
 - No change to `ApprovalDecision`, sandbox, or always-allow policy.
 
 ## Non-Goals
@@ -125,14 +130,20 @@ says `awaiting you`.
 - [ ] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
       cancels and a non-empty idle draft still clears. `/q` and `Ctrl+Q` still
       quit.
+- [ ] First TUI start without `workspace.allowed` shows a `Permission required`
+      card asking to work in the working directory. `Y`/`Enter` persist the
+      grant; `N`/`Esc` quit. `--run` waits until the grant. Later starts skip
+      the card.
 
 ## Affected Areas
 
 - `src/interactive.rs` — tool argument hints, title composition, display_text.
 - `src/tui/mod.rs` — tool row styling, approval card, footer/status override, keys,
   below-composer completion layout, waiting meter, transcript wheel/key scroll,
-  startup welcome, idle Ctrl+C quit.
-- `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI.
+  startup welcome, idle Ctrl+C quit, workspace permission card.
+- `src/config/mod.rs` — `workspace.allowed` grant.
+- `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
+  plain-mode TTY workspace consent.
 - `docs/user/guide.md` — approval, tool-block, completion placement, waiting-meter,
   startup welcome, and Ctrl+C quit copy.
 - `docs/specs/README.md` — lifecycle inventory.
@@ -147,6 +158,7 @@ says `awaiting you`.
 6. Add the waiting meter row for job, step, time, tokens, and status.
 7. Add the empty-session startup welcome (version, cwd, update, session/worktree, keys).
 8. Let idle empty Ctrl+C share the Ctrl+Q 1000ms quit confirm.
+9. Ask workspace permission on first interactive start and persist `workspace.allowed`.
 
 ## Validation Gates
 
