@@ -402,24 +402,28 @@ fn completed_update_message(current: &BuildIdentity, latest: &BuildIdentity) -> 
     format!("{action}: {} -> {}", current.display(), latest.display())
 }
 
-pub fn maybe_print_startup_notice() {
+pub fn startup_update_notice() -> Option<String> {
     if std::env::var_os("NIB_NO_UPDATE_CHECK").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return;
+        return None;
     }
     let Ok(current) = managed_current_identity() else {
-        return;
+        return None;
     };
     let Ok(transport) = Transport::startup() else {
-        return;
+        return None;
     };
     let Ok(manifest) = fetch_manifest(&transport, current.channel) else {
-        return;
+        return None;
     };
     let channel = current.channel;
     let Ok(availability) = classify(current, channel, &manifest) else {
-        return;
+        return None;
     };
-    if let Some(notice) = startup_notice(&availability) {
+    startup_notice(&availability)
+}
+
+pub fn maybe_print_startup_notice() {
+    if let Some(notice) = startup_update_notice() {
         if io::stderr().is_terminal() {
             eprintln!("{notice}");
         }

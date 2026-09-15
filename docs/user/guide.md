@@ -426,7 +426,7 @@ Parity matrix (same command/session effect in both renderers):
 | Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
 | Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
-| Quit | `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
+| Quit | idle `Ctrl+C` twice, `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`); idle `Ctrl+C` |
 | Transcript | `Tab`, then arrows / fold / `Ctrl+Y` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
@@ -522,7 +522,10 @@ While that card is open the status reads `WAITING QUESTION`.
 when idle and queues when a turn is running.
 
 The composer has focus initially, a top border, and a `> ` prompt. An empty session
-keeps the prompt and a muted `/` · `@` hint. A
+shows a startup welcome with `Nib <version>`, the working directory, an update
+notice and `nib update` when a newer build is available, `/new` to start a fresh
+session and worktree, `/session` to switch sessions, and the most-used keys, plus
+the prompt. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
 conversation. Each row shows one command signature
@@ -576,8 +579,9 @@ full-view replacement boundary for its new session.
 Approval, question, model, and session overlays take input before command completion.
 Switcher and selector errors render on the overlay that caused them. `Esc` never
 cancels a run; press it twice within 800ms to clear a non-empty draft. `Ctrl+C`
-cancels an active run, or clears an idle draft; it does not quit. `Ctrl+Q` twice
-within 1000ms quits. `/quit` still exits.
+cancels an active run, or clears an idle draft. On an empty idle composer, press
+`Ctrl+C` twice within 1000ms to quit (`Ctrl+Q` twice still quits). `/quit`,
+`/exit`, and `/q` still exit.
 Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.
 

@@ -42,9 +42,9 @@ T036 quieted chrome but the default view is still a string dump:
 - Tab inserts a slash completion; Enter submits a complete command (no trailing space).
 - `Shift+Enter` and `Alt+Enter` insert a newline; `Ctrl+J` remains a newline.
 - `Esc` never cancels a run. Double-Esc within 800ms clears a non-empty composer draft.
-- `Ctrl+C` cancels an active run, or clears an idle non-empty draft. Idle empty `Ctrl+C` does not quit.
-- `Ctrl+Q` quits only after a second press within 1000ms.
-- Composer is a bordered widget. Empty sessions show the prompt plus one muted `/` · `@` hint.
+- `Ctrl+C` cancels an active run, or clears an idle non-empty draft. Idle empty `Ctrl+C` arms quit; a second `Ctrl+C` or `Ctrl+Q` within 1000ms quits.
+- `Ctrl+Q` quits only after a second press within 1000ms. Idle empty `Ctrl+C` shares that confirm window.
+- Composer is a bordered widget. Empty sessions show a startup welcome (version, working directory, optional update, session/worktree help, and keys) plus the prompt.
 - Header/status are recomputed when session, lifecycle, queue, width, or a config-changing command changes — not on every idle frame.
 - Session switcher rows show `display_name` when set, otherwise the abbreviated id.
 
@@ -78,10 +78,10 @@ T036 quieted chrome but the default view is still a string dump:
 - [ ] Tab inserts slash completion; Enter on a complete insertion (no trailing space) submits it.
 - [ ] Shift+Enter and Alt+Enter insert a newline without submitting.
 - [ ] Esc never cancels a worker. Double-Esc within 800ms clears a non-empty idle draft.
-- [ ] Idle Ctrl+C clears a draft or is a no-op; it does not quit. Running Ctrl+C still cancels.
-- [ ] Ctrl+Q requires a second press within 1000ms to quit.
+- [ ] Idle Ctrl+C clears a draft, or on an empty composer arms quit and a second press within 1000ms quits. Running Ctrl+C still cancels.
+- [ ] Ctrl+Q requires a second press within 1000ms to quit; idle empty Ctrl+C shares that confirm window.
 - [ ] Composer has a visible border; focused border is distinct from transcript-focused.
-- [ ] Empty session no longer shows the slogan block; prompt and a muted `/` · `@` hint remain.
+- [ ] Empty session no longer shows the slogan block; the prompt and a startup welcome remain.
 - [ ] `format_tui_interaction_chrome` is not invoked on unchanged idle frames.
 - [ ] Session switcher list shows display names when present.
 - [ ] Existing docks, overlays, queue/steer, redaction, small-terminal, and `NO_COLOR` behavior remain.
