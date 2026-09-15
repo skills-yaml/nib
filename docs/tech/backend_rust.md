@@ -12,6 +12,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - **CLI Shell**: `clap` is used for command-line argument parsing. `nib` launches the
   unified interactive UI, while `nib run` remains the one-shot interface.
 - **TUI**: `ratatui` with `crossterm` is used for the terminal user interface, providing views for session history, live agent runs, and approval modals.
+  Speech blocks render markdown with `pulldown-cmark`; fenced code uses lightweight
+  keyword/string/comment coloring rather than a full syntax-highlighter grammar.
 - **Async Runtime**: `tokio` is the standard asynchronous runtime.
 - **Configuration**: Managed via `toml` (and `serde`). Config is strictly kept in `.nib/config.toml`.
 - **HTTP / LLMs**: `reqwest` (with `rustls`) is used for all LLM API calls.

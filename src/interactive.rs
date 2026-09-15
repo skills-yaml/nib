@@ -3059,14 +3059,6 @@ fn abbreviated_session_id(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
 
-fn compact_sandbox_label(posture: &EffectiveExecutionPosture) -> &'static str {
-    match &posture.sandbox_route {
-        crate::sandbox::SandboxExecutionRoute::Bwrap => "sandboxed",
-        crate::sandbox::SandboxExecutionRoute::Direct => "direct",
-        crate::sandbox::SandboxExecutionRoute::FailClosed(_) => "blocked",
-    }
-}
-
 fn compact_context_label(used: usize, limit: usize) -> String {
     if used == 0 || limit == 0 {
         return "0%".to_string();
@@ -3079,7 +3071,7 @@ fn compact_context_label(used: usize, limit: usize) -> String {
     }
 }
 
-fn truncate_display_cells(value: &str, max_cells: usize) -> String {
+pub(crate) fn truncate_display_cells(value: &str, max_cells: usize) -> String {
     if unicode_display_width(value) <= max_cells {
         return value.to_string();
     }
@@ -3100,15 +3092,6 @@ fn truncate_display_cells(value: &str, max_cells: usize) -> String {
     truncated
 }
 
-fn fit_tui_chrome_line(verbose: String, compact: String, width: u16) -> String {
-    let width = usize::from(width.max(1));
-    if unicode_display_width(&verbose) <= width {
-        verbose
-    } else {
-        truncate_display_cells(&compact, width)
-    }
-}
-
 pub(crate) fn folder_label(path: &Path) -> String {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -3122,6 +3105,15 @@ pub(crate) fn folder_label(path: &Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+fn chrome_branch_label(branch: &str, session_id: &str) -> String {
+    if (!session_id.is_empty() && branch.contains(session_id)) || branch.starts_with("nib/session/")
+    {
+        "session".to_string()
+    } else {
+        branch.to_string()
+    }
 }
 
 fn git_head_branch(cwd: &Path) -> String {
@@ -3143,19 +3135,51 @@ fn git_head_branch(cwd: &Path) -> String {
     }
 }
 
-/// Formats the two terse rows used by the full-screen TUI. The complete diagnostic
-/// contract intentionally remains in [`format_interaction_chrome`] for `/status`.
-#[allow(clippy::too_many_arguments)]
+/// Compact TUI chrome: folder/branch on the header, model/context on the header,
+/// approval mode and agent mode on the footer. `/status` keeps the full diagnostic
+/// contract via [`format_interaction_chrome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiChrome {
+    pub folder: String,
+    pub branch: String,
+    pub model: String,
+    pub context: String,
+    pub approval: String,
+    pub agent_mode: String,
+}
+
+impl TuiChrome {
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self {
+            folder: "workspace".to_string(),
+            branch: "main".to_string(),
+            model: "mock-model".to_string(),
+            context: "0%".to_string(),
+            approval: "manual".to_string(),
+            agent_mode: "idle".to_string(),
+        }
+    }
+
+    pub(crate) fn error(message: impl Into<String>) -> Self {
+        Self {
+            folder: bounded_status_value(&message.into()),
+            branch: "-".to_string(),
+            model: "-".to_string(),
+            context: "0%".to_string(),
+            approval: "-".to_string(),
+            agent_mode: "idle".to_string(),
+        }
+    }
+}
+
+/// Formats the compact TUI chrome fields. The complete diagnostic contract
+/// intentionally remains in [`format_interaction_chrome`] for `/status`.
 pub fn format_tui_interaction_chrome(
     project_root: &Path,
-    runtime_profile_id: &str,
     session: Option<&Session>,
     session_id: &str,
-    session_origin: &str,
-    lifecycle: &str,
-    queued: usize,
-    terminal_width: u16,
-) -> Result<(String, String), String> {
+) -> Result<TuiChrome, String> {
     let config = load_nib_config_full(project_root)
         .map_err(|error| bounded_status_value(&error.to_string()))?;
     let sensitive_values = config.public_session_sensitive_values();
@@ -3171,77 +3195,31 @@ pub fn format_tui_interaction_chrome(
         &config.approvals,
     );
     let folder = bounded_sensitive_status_value(&folder_label(project_root), &sensitive_values);
-    let session_value = session
-        .and_then(|session| session.display_name.as_deref())
-        .filter(|name| !name.is_empty())
-        .map(|name| bounded_sensitive_status_value(name, &sensitive_values))
-        .unwrap_or_else(|| {
-            bounded_sensitive_status_value(&abbreviated_session_id(session_id), &sensitive_values)
-        });
-    let origin = if session
-        .and_then(|session| session.forked_from.as_deref())
-        .is_some()
-    {
-        "fork"
-    } else {
-        session_origin
-    };
     let managed_worktree = crate::integrations::worktree::with_validated_session_worktree(
         project_root,
         session_id,
         |path| Ok(path.to_path_buf()),
     )?;
-    let (worktree, git_cwd) = match managed_worktree {
-        Some(path) => ("managed", path),
-        None => ("root", project_root.to_path_buf()),
+    let git_cwd = match managed_worktree {
+        Some(path) => path,
+        None => project_root.to_path_buf(),
     };
-    let branch = bounded_sensitive_status_value(&git_head_branch(&git_cwd), &sensitive_values);
-    let origin = bounded_sensitive_status_value(origin, &sensitive_values);
-    let profile = bounded_sensitive_status_value(runtime_profile_id, &sensitive_values);
-    let header = fit_tui_chrome_line(
-        format!(
-            "nib · {folder} · {branch} · wt {worktree} · session {session_value} · {origin} · profile {profile}"
-        ),
-        format!(
-            "nib · {} · {} · {}",
-            truncate_display_cells(&folder, 22),
-            truncate_display_cells(&branch, 18),
-            worktree,
-        ),
-        terminal_width,
+    let branch = bounded_sensitive_status_value(
+        &chrome_branch_label(&git_head_branch(&git_cwd), session_id),
+        &sensitive_values,
     );
-
-    let provider = bounded_sensitive_status_value(&diagnostics.provider, &sensitive_values);
     let model = bounded_sensitive_status_value(&diagnostics.model, &sensitive_values);
     let context_used = persisted_context_usage(session, config.llm.context_length);
     let context = compact_context_label(context_used, config.llm.context_length);
-    let plan = session
-        .and_then(|session| session.plan.as_ref())
-        .map(|plan| {
-            format!(
-                "{}/{}",
-                plan.current_step_index.min(plan.steps.len()),
-                plan.steps.len()
-            )
-        })
-        .unwrap_or_else(|| "-".to_string());
-    let lifecycle = bounded_sensitive_status_value(lifecycle, &sensitive_values);
     let approval = posture.effective_approval_mode.to_string();
-    let sandbox = compact_sandbox_label(&posture);
-    let provider_model = format!("{provider}/{model}");
-    let status = fit_tui_chrome_line(
-        format!(
-            "{lifecycle} · {provider_model} · approval {approval} · {sandbox} · queue {queued} · plan {plan} · ctx {context}"
-        ),
-        format!(
-            "{} · {} · {}",
-            truncate_display_cells(&lifecycle, 16),
-            truncate_display_cells(&provider_model, 24),
-            truncate_display_cells(&approval, 10),
-        ),
-        terminal_width,
-    );
-    Ok((header, status))
+    Ok(TuiChrome {
+        folder,
+        branch,
+        model,
+        context,
+        approval,
+        agent_mode: "idle".to_string(),
+    })
 }
 
 pub fn format_interaction_chrome(
@@ -6279,33 +6257,21 @@ mod tests {
             .expect("message");
         let persisted = store.load(&session.id).expect("persisted session");
 
-        let (header, status) = format_tui_interaction_chrome(
-            project.path(),
-            "default",
-            Some(&persisted),
-            &session.id,
-            "new",
-            "idle",
-            0,
-            80,
-        )
-        .expect("compact chrome");
-        assert!(header.starts_with("nib · "), "{header}");
-        assert!(header.contains(&folder_label(project.path())), "{header}");
+        let chrome = format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id)
+            .expect("compact chrome");
+        assert_eq!(chrome.folder, folder_label(project.path()));
         assert!(
-            header.contains("wt root") || header.contains("root"),
-            "{header}"
+            chrome.branch == "-"
+                || chrome.branch.contains("master")
+                || chrome.branch.contains("main"),
+            "{}",
+            chrome.branch
         );
-        assert!(
-            header.contains('-') || header.contains("master") || header.contains("main"),
-            "{header}"
-        );
-        assert!(!header.contains(&session.id), "{header}");
-        assert!(status.contains("mock/mock-model"), "{status}");
-        assert!(status.contains("manual"), "{status}");
-        assert!(unicode_display_width(&header) <= 80, "{header}");
-        assert!(unicode_display_width(&status) <= 80, "{status}");
-        assert!(!status.contains("transport"), "{status}");
+        assert!(!chrome.folder.contains(&session.id), "{}", chrome.folder);
+        assert!(!chrome.branch.contains(&session.id), "{}", chrome.branch);
+        assert_eq!(chrome.model, "mock-model");
+        assert_eq!(chrome.approval, "manual");
+        assert!(!chrome.model.contains("transport"));
 
         config
             .llm
@@ -6314,37 +6280,16 @@ mod tests {
             .expect("mock provider")
             .model = "model-with-a-deliberately-long-identifier".to_string();
         save_nib_config_full(project.path(), &mut config).expect("long model config");
-        let (resumed_header, constrained_status) = format_tui_interaction_chrome(
-            project.path(),
-            "long-runtime-profile-name",
-            Some(&persisted),
-            &session.id,
-            "resumed",
-            "waiting for approval",
-            128,
-            80,
-        )
-        .expect("width-aware chrome");
+        let resumed = format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id)
+            .expect("width-aware chrome");
+        assert_eq!(resumed.folder, folder_label(project.path()));
+        assert_eq!(resumed.approval, "manual");
         assert!(
-            resumed_header.contains("root")
-                || resumed_header.contains(&folder_label(project.path())),
-            "{resumed_header}"
-        );
-        assert!(
-            unicode_display_width(&resumed_header) <= 80,
-            "{resumed_header}"
-        );
-        assert!(
-            unicode_display_width(&constrained_status) <= 80,
-            "{constrained_status}"
-        );
-        assert!(
-            constrained_status.contains("manual"),
-            "{constrained_status}"
-        );
-        assert!(
-            constrained_status.contains("mock/") || constrained_status.contains("model"),
-            "{constrained_status}"
+            resumed
+                .model
+                .contains("model-with-a-deliberately-long-identifier"),
+            "{}",
+            resumed.model
         );
 
         let detailed =
@@ -6398,23 +6343,13 @@ mod tests {
         assert!(path.to_string_lossy().contains(&session.id));
 
         let persisted = store.load(&session.id).expect("persisted session");
-        let (header, _) = format_tui_interaction_chrome(
-            repository.path(),
-            "default",
-            Some(&persisted),
-            &session.id,
-            "new",
-            "idle",
-            0,
-            120,
-        )
-        .expect("managed-worktree chrome");
-        assert!(
-            header.contains("wt managed") || header.contains("managed"),
-            "{header}"
-        );
-        assert!(!header.contains(&session.id), "{header}");
-        assert!(unicode_display_width(&header) <= 120, "{header}");
+        let chrome =
+            format_tui_interaction_chrome(repository.path(), Some(&persisted), &session.id)
+                .expect("managed-worktree chrome");
+        assert!(!chrome.folder.contains(&session.id), "{}", chrome.folder);
+        assert!(!chrome.branch.contains(&session.id), "{}", chrome.branch);
+        assert!(!chrome.model.contains(&session.id), "{}", chrome.model);
+        assert_eq!(chrome.branch, "session");
     }
 
     #[test]
@@ -6428,55 +6363,18 @@ mod tests {
         let store = SessionStore::for_project(repository.path()).expect("store");
         let session = store.try_create_session().expect("session");
         let persisted = store.load(&session.id).expect("persisted session");
-        let (header, status) = format_tui_interaction_chrome(
-            repository.path(),
-            "default",
-            Some(&persisted),
-            &session.id,
-            "idle",
-            "idle",
-            0,
-            100,
-        )
-        .expect("chrome");
+        let chrome =
+            format_tui_interaction_chrome(repository.path(), Some(&persisted), &session.id)
+                .expect("chrome");
+        assert_eq!(chrome.folder, folder_label(repository.path()));
         assert!(
-            header.contains(&folder_label(repository.path())),
-            "{header}"
+            chrome.branch.contains("master") || chrome.branch.contains("main"),
+            "{}",
+            chrome.branch
         );
-        assert!(
-            header.contains("master") || header.contains("main"),
-            "{header}"
-        );
-        assert!(
-            header.contains("wt root") || header.contains("root"),
-            "{header}"
-        );
-        assert!(status.contains("mock-model"), "{status}");
-        assert!(status.contains("manual"), "{status}");
-        let (narrow_header, narrow_status) = format_tui_interaction_chrome(
-            repository.path(),
-            "default",
-            Some(&persisted),
-            &session.id,
-            "idle",
-            "idle",
-            0,
-            40,
-        )
-        .expect("narrow chrome");
-        assert!(
-            unicode_display_width(&narrow_header) <= 40,
-            "{narrow_header}"
-        );
-        assert!(
-            unicode_display_width(&narrow_status) <= 40,
-            "{narrow_status}"
-        );
-        assert!(
-            narrow_status.contains("mock-model") || narrow_status.contains("mock/"),
-            "{narrow_status}"
-        );
-        assert!(narrow_status.contains("manual"), "{narrow_status}");
+        assert_eq!(chrome.model, "mock-model");
+        assert_eq!(chrome.approval, "manual");
+        assert!(!chrome.context.is_empty());
     }
 
     #[test]
