@@ -62,6 +62,7 @@ const MAX_SESSION_DETAIL_ROWS: usize = 400;
 const SESSION_DETAIL_TRUNCATED_MARKER: &str = "\n[session detail truncated]\n";
 const MAX_VISIBLE_COMPLETIONS: usize = 7;
 const COMPOSER_BORDER_ROWS: u16 = 1;
+const COMPOSER_PROMPT_CELLS: u16 = 2;
 const CLEAR_DRAFT_CONFIRM: Duration = Duration::from_millis(800);
 const QUIT_CONFIRM: Duration = Duration::from_millis(1000);
 
@@ -1843,13 +1844,10 @@ fn completion_inner_rect(area: Rect) -> Rect {
     if area.width == 0 || area.height == 0 {
         return area;
     }
-    let horizontal_margin: u16 = if area.width >= 12 { 2 } else { 0 };
-    let width = area
-        .width
-        .saturating_sub(horizontal_margin.saturating_mul(2))
-        .clamp(1, 92);
+    let left = COMPOSER_PROMPT_CELLS.min(area.width.saturating_sub(1));
+    let width = area.width.saturating_sub(left).clamp(1, 92);
     Rect {
-        x: area.x.saturating_add(horizontal_margin),
+        x: area.x.saturating_add(left),
         y: area.y,
         width,
         height: area.height,
@@ -1892,29 +1890,19 @@ fn truncate_completion_text(value: &str, max_cells: usize) -> String {
     output
 }
 
-fn completion_line(suggestion: &InteractiveCompletion, selected: bool, width: u16) -> String {
-    let marker = if selected { "> " } else { "  " };
+fn completion_line(suggestion: &InteractiveCompletion, width: u16) -> String {
     let width = usize::from(width);
-    if width <= 2 {
-        return truncate_completion_text(marker, width);
+    if width == 0 {
+        return String::new();
     }
-    let content_width = width.saturating_sub(2);
-    let signature_column = content_width
-        .saturating_mul(2)
-        .checked_div(5)
-        .unwrap_or(0)
-        .max(1);
+    let signature_column = width.saturating_mul(2).checked_div(5).unwrap_or(0).max(1);
     let signature = truncate_completion_text(completion_signature(suggestion), signature_column);
     let signature_width = unicode_display_width(&signature);
-    let gap = if content_width > signature_column {
-        2
-    } else {
-        0
-    };
-    let description_width = content_width.saturating_sub(signature_column.saturating_add(gap));
+    let gap = if width > signature_column { 2 } else { 0 };
+    let description_width = width.saturating_sub(signature_column.saturating_add(gap));
     let description = truncate_completion_text(suggestion.summary, description_width);
     format!(
-        "{marker}{signature}{}{description}",
+        "{signature}{}{description}",
         " ".repeat(
             signature_column
                 .saturating_sub(signature_width)
@@ -1955,7 +1943,7 @@ fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &Co
                 Style::default()
             };
             Line::from(Span::styled(
-                completion_line(suggestion, selected, inner_width),
+                completion_line(suggestion, inner_width),
                 style,
             ))
         })
@@ -1963,7 +1951,7 @@ fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &Co
     if hint_rows > 0 {
         lines.push(Line::from(Span::styled(
             truncate_completion_text(
-                "  Up/Down select · Tab insert · Enter run · Esc close",
+                "Up/Down select · Tab insert · Enter run · Esc close",
                 usize::from(inner_width),
             ),
             muted_style(no_color),
@@ -5824,10 +5812,13 @@ mod tests {
         let permissions = interactive_completions("/permissions ");
         let rows = permissions
             .iter()
-            .map(|suggestion| completion_line(suggestion, false, 76))
+            .map(|suggestion| completion_line(suggestion, 76))
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(rows.len(), 4, "fixed subcommands must have distinct rows");
         assert!(rows.iter().any(|row| row.contains("/permissions manual")));
+        assert!(rows
+            .iter()
+            .all(|row| !row.starts_with('>') && !row.starts_with("  /")));
         assert!(rows.iter().all(|row| unicode_display_width(row) <= 76));
     }
 
@@ -5880,6 +5871,18 @@ mod tests {
         assert!(
             prompt < suggestion,
             "slash options must render under the text input: {rows:?}"
+        );
+        let prompt_slash = rows[prompt].find('/').expect("composer slash");
+        let option_slash = rows[suggestion].find('/').expect("option slash");
+        assert_eq!(
+            prompt_slash, option_slash,
+            "options must align to the composer /: prompt={:?} option={:?}",
+            rows[prompt], rows[suggestion]
+        );
+        assert!(
+            !rows[suggestion].contains("> /") && !rows[suggestion].contains("> /status"),
+            "completion list must not use a caret: {}",
+            rows[suggestion]
         );
     }
 
