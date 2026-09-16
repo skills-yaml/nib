@@ -118,6 +118,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Overrides the configured terminal timeout."},
                     "background": {"type": "boolean", "default": false},
                     "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072, "description": "Maximum retained tail bytes for each of stdout and stderr."},
+                    "verification_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Exact active-plan verification obligation this invocation resolves."},
                     "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
                 "required": ["command", "affected_paths"],

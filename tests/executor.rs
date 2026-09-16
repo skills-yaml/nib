@@ -437,6 +437,8 @@ async fn agents_named_boundary_profile_preserves_approval_worktree_and_audit() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -615,6 +617,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     let expected_plan_id = plan.id.clone();
@@ -660,6 +664,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     legacy_plan.id.clear();
@@ -684,6 +690,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     completed_plan.approve();
@@ -746,6 +754,8 @@ async fn caller_plan_id_cannot_forge_or_override_audit_linkage() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();

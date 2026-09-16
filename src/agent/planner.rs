@@ -4,7 +4,7 @@ use crate::context::budget::{
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
 use crate::llm::{LlmClient, LlmResponse, LlmStream};
-use crate::session::{Plan, PlanStep};
+use crate::session::{Plan, PlanStep, VerificationObligation};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -20,8 +20,39 @@ fn planning_tools() -> serde_json::Value {
                 "properties": {
                     "steps": {
                         "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
                         "items": {
-                            "type": "string"
+                            "anyOf": [
+                                {"type": "string", "minLength": 1, "maxLength": 4096},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "description": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                        "verification_obligations": {
+                                            "type": "array",
+                                            "maxItems": 16,
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": {"type": "string", "minLength": 1, "maxLength": 128},
+                                                    "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+                                                    "required": {"type": "boolean", "default": true},
+                                                    "affected_paths": {
+                                                        "type": "array",
+                                                        "maxItems": 32,
+                                                        "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+                                                    }
+                                                },
+                                                "required": ["id", "description"],
+                                                "additionalProperties": false
+                                            }
+                                        }
+                                    },
+                                    "required": ["description"],
+                                    "additionalProperties": false
+                                }
+                            ]
                         }
                     }
                 },
@@ -171,27 +202,98 @@ pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<P
         .get("steps")
         .and_then(|steps| steps.as_array())
         .ok_or_else(|| "structured plan is missing a steps array".to_string())?;
-    let plan_steps: Vec<PlanStep> = steps
+    let plan_steps = steps
         .iter()
-        .filter_map(|step| {
-            step.as_str()
-                .or_else(|| step.get("description").and_then(|value| value.as_str()))
-        })
-        .map(str::trim)
-        .filter(|step| !step.is_empty())
-        .map(|description| PlanStep {
-            description: description.to_string(),
-            status: "Pending".to_string(),
-            outcome: None,
-            attempts: 0,
-            updated_at: None,
-        })
-        .collect();
+        .map(parse_plan_step)
+        .collect::<Result<Vec<_>, _>>()?;
     let plan = Plan::new(goal, plan_steps);
     if !plan.is_structured() {
         return Err("planner submitted an empty or invalid plan".to_string());
     }
     Ok(plan)
+}
+
+fn parse_plan_step(step: &serde_json::Value) -> Result<PlanStep, String> {
+    let description = step
+        .as_str()
+        .or_else(|| step.get("description").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .ok_or_else(|| "plan step is missing a description".to_string())?;
+    let verification_values = step
+        .get("verification_obligations")
+        .map(|value| {
+            value
+                .as_array()
+                .cloned()
+                .ok_or_else(|| "verification_obligations must be an array".to_string())
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if verification_values.len() > 16 {
+        return Err("a plan step cannot declare more than 16 verification obligations".to_string());
+    }
+    let verification_obligations = verification_values
+        .into_iter()
+        .map(|obligation| {
+            let id = obligation
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "verification obligation is missing an id".to_string())?;
+            let obligation_description = obligation
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing a description")
+                })?;
+            let affected_paths = obligation
+                .get("affected_paths")
+                .map(|paths| {
+                    paths
+                        .as_array()
+                        .ok_or_else(|| {
+                            format!(
+                                "verification obligation {id:?} affected_paths must be an array"
+                            )
+                        })?
+                        .iter()
+                        .map(|path| {
+                            path.as_str()
+                                .map(str::trim)
+                                .filter(|path| !path.is_empty())
+                                .map(str::to_string)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "verification obligation {id:?} has an invalid affected path"
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let mut parsed =
+                VerificationObligation::pending(id, obligation_description, affected_paths);
+            parsed.required = obligation
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            Ok(parsed)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PlanStep {
+        description: description.to_string(),
+        status: "Pending".to_string(),
+        outcome: None,
+        attempts: 0,
+        updated_at: None,
+        verification_obligations,
+        content_generation: 0,
+    })
 }
 
 #[cfg(test)]
@@ -217,6 +319,39 @@ mod tests {
         assert!(!plan.approved);
         assert_eq!(plan.goal, "inspect and verify");
         assert!(plan.id.starts_with("plan-"));
+    }
+
+    #[test]
+    fn parses_bounded_verification_obligations_into_the_plan() {
+        let plan = plan_from_tool_calls(
+            "repair and verify",
+            vec![ToolCallRequest::new(
+                "submit_plan",
+                json!({
+                    "steps": [{
+                        "description": "repair the defect",
+                        "verification_obligations": [{
+                            "id": "required-check",
+                            "description": "run the focused behavior test",
+                            "affected_paths": ["src/agent", "tests/test_runtime_e2e.rs"]
+                        }]
+                    }]
+                }),
+            )],
+        )
+        .expect("structured verification plan");
+
+        let obligation = &plan.steps[0].verification_obligations[0];
+        assert_eq!(obligation.id, "required-check");
+        assert!(obligation.required);
+        assert_eq!(
+            obligation.status,
+            crate::session::VerificationStatus::Pending
+        );
+        assert_eq!(
+            obligation.affected_paths,
+            ["src/agent", "tests/test_runtime_e2e.rs"]
+        );
     }
 
     #[test]

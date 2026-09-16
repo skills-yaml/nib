@@ -742,6 +742,8 @@ async fn run_failure_fixture(
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -3183,6 +3185,8 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();

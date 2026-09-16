@@ -2162,6 +2162,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         );
         plan.approve();

@@ -6559,6 +6559,8 @@ mod tests {
                 outcome: None,
                 attempts: 1,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         ));
 
@@ -6853,6 +6855,8 @@ mod tests {
                 outcome: None,
                 attempts: 1,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         ));
         session.messages.push(crate::session::SessionMessage {
