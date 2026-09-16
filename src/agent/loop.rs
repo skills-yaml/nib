@@ -1603,6 +1603,7 @@ async fn run_agent_loop_inner(
                 };
                 let _ = stream_tx
                     .send(StreamEvent::TerminalOutput {
+                        invocation_id: event.invocation_id,
                         tool_name: event.tool_name,
                         stream: stream.to_string(),
                         chunk: String::from_utf8_lossy(&event.chunk).into_owned(),
@@ -2805,6 +2806,7 @@ async fn run_agent_loop_inner(
                         emit(
                             &cfg.stream_tx,
                             StreamEvent::ToolCompleted {
+                                invocation_id: request.invocation_id,
                                 tool_name: request.name.clone(),
                                 success: false,
                                 output: None,
@@ -2916,6 +2918,7 @@ async fn run_agent_loop_inner(
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::ToolStarted {
+                            invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
                         },
                     )
@@ -2970,6 +2973,7 @@ async fn run_agent_loop_inner(
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::ToolCompleted {
+                            invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
                             success: result.success,
                             output: output.clone(),
@@ -3281,6 +3285,7 @@ async fn run_agent_loop_inner(
                 emit(
                     &cfg.stream_tx,
                     StreamEvent::ToolCompleted {
+                        invocation_id: request.invocation_id,
                         tool_name: request.name.clone(),
                         success: question_success,
                         output: question_output.clone(),
@@ -4592,6 +4597,7 @@ fn project_validated_llm_response(
     if let Some(tool_calls) = response.tool_calls.as_ref() {
         events.extend(tool_calls.iter().enumerate().map(|(index, call)| {
             StreamEvent::ToolCallChunk {
+                invocation_id: call.invocation_id,
                 index,
                 name: Some(crate::interactive::bounded_public_text(
                     &call.name,
@@ -7045,7 +7051,7 @@ mod tests {
             loop {
                 if matches!(
                     stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name }) if tool_name == "run_terminal"
+                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
                 ) {
                     break;
                 }
@@ -7112,7 +7118,7 @@ mod tests {
             loop {
                 if matches!(
                     stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name }) if tool_name == "run_terminal"
+                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
                 ) {
                     loop {
                         if store

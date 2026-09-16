@@ -480,6 +480,7 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
     let environment = std::collections::HashMap::new();
     let bounded = nib::tools::core::dispatch(
         "invoke_subagent",
+        nib::tools::ToolInvocationId::new(),
         &json!({"prompt": "explore the project", "max_steps": 1}),
         root.path(),
         &ExecutionConfig::default(),

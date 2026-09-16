@@ -3573,9 +3573,12 @@ fn render_waiting_meter(
 }
 
 fn copy_text_osc52(text: &str) {
-    let encoded = encode_base64(text.as_bytes());
-    let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
+    let _ = write!(io::stdout(), "{}", osc52_sequence(text));
     let _ = io::stdout().flush();
+}
+
+fn osc52_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", encode_base64(text.as_bytes()))
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -4064,6 +4067,52 @@ fn ensure_selected_visible(viewport: &mut TranscriptViewport, owners: &[usize], 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceConsentAction {
+    Unhandled,
+    SelectionChanged,
+    Allow,
+    Decline,
+}
+
+fn workspace_consent_action_for_key(
+    selected: &mut usize,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> WorkspaceConsentAction {
+    match code {
+        KeyCode::Up => {
+            *selected = 0;
+            return WorkspaceConsentAction::SelectionChanged;
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            *selected = 1;
+            return WorkspaceConsentAction::SelectionChanged;
+        }
+        _ => {}
+    }
+    let control_quit = matches!(code, KeyCode::Char('c' | 'C' | 'q' | 'Q'))
+        && modifiers.contains(KeyModifiers::CONTROL);
+    let allow = (matches!(code, KeyCode::Char('y' | 'Y' | '1'))
+        || (code == KeyCode::Enter && *selected == 0))
+        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT);
+    let decline = control_quit
+        || matches!(code, KeyCode::Esc | KeyCode::Char('n' | 'N' | '2'))
+        || (code == KeyCode::Enter && *selected != 0);
+    if allow {
+        WorkspaceConsentAction::Allow
+    } else if decline {
+        WorkspaceConsentAction::Decline
+    } else {
+        WorkspaceConsentAction::Unhandled
+    }
+}
+
+fn pending_workspace_consent(project_root: &Path) -> Option<String> {
+    (!crate::config::workspace_access_is_granted(project_root).unwrap_or(false))
+        .then(|| crate::interactive::folder_label(project_root))
+}
+
 #[cfg(test)]
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
@@ -4432,11 +4481,7 @@ fn draw_loop(
     if let Some(notice) = session_notice {
         timeline.push_status(notice);
     }
-    if crate::config::workspace_access_is_granted(project_root).unwrap_or(false) {
-        welcome.consent_directory = None;
-    } else {
-        welcome.consent_directory = Some(crate::interactive::folder_label(project_root));
-    }
+    welcome.consent_directory = pending_workspace_consent(project_root);
     let mut pending_goal = run_goal;
     if let Some(goal) = pending_goal.as_deref() {
         let _ = maybe_assign_session_display_name(&store, &active_session_id, goal);
@@ -4733,67 +4778,48 @@ fn draw_loop(
                         transcript_viewport.apply(action);
                         continue;
                     }
-                    match key.code {
-                        KeyCode::Up => {
-                            welcome.consent_selected = 0;
-                            continue;
-                        }
-                        KeyCode::Down | KeyCode::Tab => {
-                            welcome.consent_selected = 1;
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    let allow = (matches!(
+                    match workspace_consent_action_for_key(
+                        &mut welcome.consent_selected,
                         key.code,
-                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1')
-                    ) || (key.code == KeyCode::Enter
-                        && welcome.consent_selected == 0))
-                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
-                    let decline = control_c
-                        || control_q
-                        || matches!(
-                            key.code,
-                            KeyCode::Esc
-                                | KeyCode::Char('n')
-                                | KeyCode::Char('N')
-                                | KeyCode::Char('2')
-                        )
-                        || (key.code == KeyCode::Enter && welcome.consent_selected != 0);
-                    if allow {
-                        match crate::config::grant_workspace_access(project_root) {
-                            Ok(()) => {
-                                welcome.consent_directory = None;
-                                timeline.push_status("Allowed work in this directory.".to_string());
-                                if let Some(goal) = pending_goal.take() {
-                                    match spawn_tui_agent_worker(
-                                        agent_profile_scope.clone(),
-                                        active_session_id.clone(),
-                                        goal,
-                                        InteractiveAgentMode::Execute,
-                                        approval_tx.clone(),
-                                        question_tx.clone(),
-                                        stream_tx.clone(),
-                                    ) {
-                                        Ok(next) => {
-                                            timeline.bind_run(Some(next.run_id.clone()));
-                                            worker = Some(next);
+                        key.modifiers,
+                    ) {
+                        WorkspaceConsentAction::SelectionChanged => continue,
+                        WorkspaceConsentAction::Allow => {
+                            match crate::config::grant_workspace_access(project_root) {
+                                Ok(()) => {
+                                    welcome.consent_directory = None;
+                                    timeline
+                                        .push_status("Allowed work in this directory.".to_string());
+                                    if let Some(goal) = pending_goal.take() {
+                                        match spawn_tui_agent_worker(
+                                            agent_profile_scope.clone(),
+                                            active_session_id.clone(),
+                                            goal,
+                                            InteractiveAgentMode::Execute,
+                                            approval_tx.clone(),
+                                            question_tx.clone(),
+                                            stream_tx.clone(),
+                                        ) {
+                                            Ok(next) => {
+                                                timeline.bind_run(Some(next.run_id.clone()));
+                                                worker = Some(next);
+                                            }
+                                            Err(error) => break Err(error),
                                         }
-                                        Err(error) => break Err(error),
                                     }
                                 }
+                                Err(error) => {
+                                    timeline.push_status(format!("[workspace error] {error}"))
+                                }
                             }
-                            Err(error) => {
-                                timeline.push_status(format!("[workspace error] {error}"))
-                            }
+                            continue;
                         }
-                        continue;
+                        WorkspaceConsentAction::Decline => {
+                            exit_requested = true;
+                            break Ok(());
+                        }
+                        WorkspaceConsentAction::Unhandled => continue,
                     }
-                    if decline {
-                        exit_requested = true;
-                        break Ok(());
-                    }
-                    continue;
                 }
                 let interaction_state = tui_interaction_state(
                     pending_approval.is_some(),
@@ -5677,6 +5703,67 @@ mod tests {
     }
 
     #[test]
+    fn osc52_copy_sequence_is_exact_and_utf8_safe() {
+        assert_eq!(osc52_sequence("hello"), "\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(osc52_sequence("🙂"), "\x1b]52;c;8J+Zgg==\x07");
+    }
+
+    #[test]
+    fn composer_border_is_visible_and_focus_changes_its_style() {
+        fn render_border_style(focus: TuiFocus) -> Style {
+            let backend = TestBackend::new(72, 18);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut viewport = TranscriptViewport::default();
+            terminal
+                .draw(|frame| {
+                    render_session_activities(
+                        frame,
+                        &TuiChrome::fixture(),
+                        &[ActivityEntry::new(ActivityKind::Assistant, "", "ready")],
+                        &Composer::default(),
+                        None,
+                        None,
+                        false,
+                        &mut viewport,
+                        focus,
+                        None,
+                        0,
+                        None,
+                        None,
+                        &StartupWelcome::fixture(),
+                        None,
+                    )
+                })
+                .expect("render");
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .find(|cell| cell.symbol() == "─")
+                .expect("composer top border")
+                .style()
+        }
+
+        let focused = render_border_style(TuiFocus::Composer);
+        let transcript = render_border_style(TuiFocus::Transcript);
+        assert_ne!(focused, transcript);
+    }
+
+    #[test]
+    fn selected_transcript_block_is_kept_inside_the_row_viewport() {
+        let owners = (0..12).flat_map(|owner| [owner, owner]).collect::<Vec<_>>();
+        let mut viewport = TranscriptViewport::default();
+        viewport.observe_layout(owners.len(), 5);
+        assert_eq!(viewport.top_row(), 19);
+
+        ensure_selected_visible(&mut viewport, &owners, 2);
+        assert_eq!(viewport.top_row(), 4);
+        ensure_selected_visible(&mut viewport, &owners, 11);
+        assert_eq!(viewport.top_row(), 19);
+    }
+
+    #[test]
     fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -5769,6 +5856,33 @@ mod tests {
             rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn workspace_consent_key_reducer_persists_the_gate_before_a_goal_can_start() {
+        let project = tempdir().expect("project");
+        assert!(pending_workspace_consent(project.path()).is_some());
+
+        let mut selected = 0;
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Down, KeyModifiers::NONE),
+            WorkspaceConsentAction::SelectionChanged
+        );
+        assert_eq!(selected, 1);
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Enter, KeyModifiers::NONE),
+            WorkspaceConsentAction::Decline
+        );
+        assert!(pending_workspace_consent(project.path()).is_some());
+
+        selected = 0;
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Char('y'), KeyModifiers::NONE),
+            WorkspaceConsentAction::Allow
+        );
+        crate::config::grant_workspace_access(project.path()).expect("persist workspace grant");
+        assert!(pending_workspace_consent(project.path()).is_none());
+        assert!(crate::config::workspace_access_is_granted(project.path()).expect("read grant"));
     }
 
     #[test]
@@ -6825,6 +6939,8 @@ mod tests {
     #[test]
     fn renders_every_agent_lifecycle_event() {
         let mut output = LiveOutput::default();
+        let read_invocation = crate::tools::ToolInvocationId::new();
+        let terminal_invocation = crate::tools::ToolInvocationId::new();
         let events = vec![
             StreamEvent::StateTransition {
                 state: "planning".to_string(),
@@ -6832,6 +6948,7 @@ mod tests {
             StreamEvent::PlanGenerated { step_count: 2 },
             StreamEvent::Content("Working".to_string()),
             StreamEvent::ToolCallChunk {
+                invocation_id: read_invocation,
                 index: 0,
                 name: Some("read_file".to_string()),
                 arguments: Some("{}".to_string()),
@@ -6844,21 +6961,25 @@ mod tests {
                 options: vec!["plan".to_string(), "execute".to_string()],
             },
             StreamEvent::ToolStarted {
+                invocation_id: read_invocation,
                 tool_name: "read_file".to_string(),
             },
             StreamEvent::TerminalOutput {
+                invocation_id: terminal_invocation,
                 tool_name: "run_terminal".to_string(),
                 stream: "stderr".to_string(),
                 chunk: "building\n".to_string(),
                 background_task_id: None,
             },
             StreamEvent::ToolCompleted {
+                invocation_id: read_invocation,
                 tool_name: "read_file".to_string(),
                 success: true,
                 output: Some(json!({"content": "nib"})),
                 error: None,
             },
             StreamEvent::ToolCompleted {
+                invocation_id: terminal_invocation,
                 tool_name: "run_terminal".to_string(),
                 success: false,
                 output: None,

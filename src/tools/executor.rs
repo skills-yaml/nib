@@ -1320,6 +1320,7 @@ impl ToolExecutor {
         } else {
             core::dispatch(
                 &call.tool_name,
+                call.invocation_id,
                 &dispatch_arguments,
                 execution_root,
                 &effective_execution_config,
@@ -1630,6 +1631,7 @@ impl ToolExecutor {
             }
             if let Some(callback) = &callback {
                 callback(core::TerminalOutputEvent {
+                    invocation_id: event.invocation_id,
                     tool_name: event.tool_name,
                     stream: event.stream,
                     chunk: redacted,
@@ -4058,6 +4060,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_output_sender_is_bounded_and_redacted() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let environment = HashMap::from([(
             "DEPLOY_TOKEN".to_string(),
@@ -4071,6 +4074,7 @@ mod tests {
             .expect("terminal callback");
 
         callback(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: format!("sk-123456789 profile-secret-value{}", "x".repeat(64)).into_bytes(),
@@ -4078,6 +4082,7 @@ mod tests {
             eof: false,
         });
         callback(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: b"dropped when full".to_vec(),
@@ -4086,6 +4091,7 @@ mod tests {
         });
 
         let event = receiver.recv().await.expect("stream event");
+        assert_eq!(event.invocation_id, invocation_id);
         let output = String::from_utf8(event.chunk).expect("redacted UTF-8");
         assert!(output.starts_with("[REDACTED] [REDACTED]"));
         assert!(!output.contains("sk-123456789"));
@@ -4096,6 +4102,7 @@ mod tests {
     #[test]
     fn terminal_stream_redaction_hides_secrets_split_across_chunks() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let callback: core::TerminalOutputCallback = Arc::new(move |event| {
@@ -4117,6 +4124,7 @@ mod tests {
         ];
         for chunk in chunks {
             redacted(core::TerminalOutputEvent {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream: core::TerminalOutputStream::Stdout,
                 chunk: chunk.to_vec(),
@@ -4125,6 +4133,7 @@ mod tests {
             });
         }
         redacted(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: Vec::new(),
@@ -4155,6 +4164,7 @@ mod tests {
     #[test]
     fn terminal_stream_redaction_hides_percent_encoded_secrets_across_chunks() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let callback: core::TerminalOutputCallback = Arc::new(move |event| {
@@ -4173,6 +4183,7 @@ mod tests {
         let input = format!("before {percent_secret} middle {nested_secret} after url=a%20b");
         for chunk in input.as_bytes().chunks(137) {
             redacted(core::TerminalOutputEvent {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream: core::TerminalOutputStream::Stdout,
                 chunk: chunk.to_vec(),
@@ -4181,6 +4192,7 @@ mod tests {
             });
         }
         redacted(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: Vec::new(),
