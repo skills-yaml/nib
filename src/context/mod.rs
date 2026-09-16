@@ -370,8 +370,18 @@ pub fn select_profile_skills(
     profile: &crate::profile::Profile,
     goal: &str,
 ) -> Result<Vec<skills::Skill>, String> {
+    select_profile_skill_selection(project_root, config, profile, goal)
+        .map(|selection| selection.skills)
+}
+
+pub fn select_profile_skill_selection(
+    project_root: &Path,
+    config: &crate::config::NibConfig,
+    profile: &crate::profile::Profile,
+    goal: &str,
+) -> Result<skills::SkillSelection, String> {
     if !config.skills.enabled {
-        return Ok(Vec::new());
+        return Ok(skills::SkillSelection::default());
     }
     let mut files = skills::find_skills(project_root);
     let mut configured_paths = config
@@ -395,28 +405,13 @@ pub fn select_profile_skills(
             == right.canonicalize().unwrap_or_else(|_| right.clone())
     });
 
-    let active = profile
-        .active_skills()
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    let parsed = files
-        .into_iter()
-        .map(|path| {
-            skills::parse_skill_file(&path)
-                .map_err(|error| format!("invalid skill {}: {error}", path.display()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parsed
-        .into_iter()
-        .filter(|skill| {
-            if active.is_empty() {
-                skills::skill_matches_task(skill, goal)
-            } else {
-                active.contains(&skill.frontmatter.name.to_ascii_lowercase())
-            }
-        })
-        .collect())
+    skills::select_skill_files(
+        files,
+        goal,
+        profile.active_skills(),
+        config.llm.context_length,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn assemble_runtime_context(
@@ -436,25 +431,9 @@ pub fn assemble_runtime_context_sections(
 ) -> RuntimeContextSections {
     let skill_sections = active_skills
         .iter()
-        .map(|skill| {
-            let mut content = format!("{}\n\n{}", skill.frontmatter.description, skill.body);
-            for reference in &skill.references {
-                content.push_str(&format!(
-                    "\n\n#### Skill Reference: {}\n{}",
-                    reference.path.display(),
-                    reference.content
-                ));
-            }
-            if !skill.assets.is_empty() {
-                content.push_str("\n\nVerified skill assets:\n");
-                for asset in &skill.assets {
-                    content.push_str(&format!("- {}\n", asset.display()));
-                }
-            }
-            RuntimeContextSection {
-                label: format!("Skill: {}", skill.frontmatter.name),
-                content,
-            }
+        .map(|skill| RuntimeContextSection {
+            label: format!("Skill: {}", skill.frontmatter.name),
+            content: skills::render_skill_content(skill),
         })
         .collect();
 

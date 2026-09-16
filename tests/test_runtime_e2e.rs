@@ -2594,6 +2594,68 @@ Do not inspect the repository without an explicit decision.
 }
 
 #[tokio::test]
+async fn non_selected_generic_skill_supplies_no_policy_or_after_tool_hook() {
+    let root = tempdir().expect("tempdir");
+    let skill_directory = root.path().join(".nib/skills/generic-policy");
+    std::fs::create_dir_all(&skill_directory).expect("skill directory");
+    std::fs::write(
+        skill_directory.join("SKILL.md"),
+        r#"---
+name: generic-policy
+description: Help manage repository files and project tasks
+tags: [project]
+constraints:
+  require_approval_tools: [list_directory]
+hooks:
+  after_tool:
+    - tool: list_directory
+      command: 'false'
+---
+GENERIC_POLICY_BODY_MUST_NOT_APPEAR
+"#,
+    )
+    .expect("skill fixture");
+    let mut config = mock_runtime_config();
+    save_nib_config_full(root.path(), &mut config).expect("runtime config");
+    let store = SessionStore::for_project(root.path()).expect("session store");
+    let session = store.create_session_with_id("generic-skill-isolation");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "explore the repository task",
+        AgentLoopConfig {
+            max_steps: 5,
+            approval_handler: Some(Arc::new(PlanThenDenyTool {
+                calls: Arc::clone(&calls),
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("unconstrained run completes");
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(*calls.lock().unwrap(), ["approve_plan".to_string()]);
+    let persisted = store.load(&session.id).expect("persisted run");
+    assert!(persisted.active_skills.is_empty());
+    assert!(persisted.skill_usage.is_empty());
+    assert_eq!(
+        persisted
+            .tool_calls
+            .iter()
+            .filter(|record| record.tool_name.as_deref() == Some("list_directory"))
+            .count(),
+        1
+    );
+    assert!(!persisted
+        .tool_calls
+        .iter()
+        .any(|record| record.tool_name.as_deref() == Some("run_terminal")));
+}
+
+#[tokio::test]
 async fn approved_patch_physically_changes_only_the_session_worktree_and_is_verified() {
     let root = git_repository();
     let store = SessionStore::new(root.path());

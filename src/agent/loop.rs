@@ -7,7 +7,7 @@ use crate::context::budget::{
 };
 use crate::context::skills::{Skill, SkillPolicyEffect};
 use crate::context::{
-    assemble_runtime_context_sections, attachment_context_sections, select_profile_skills,
+    assemble_runtime_context_sections, attachment_context_sections, select_profile_skill_selection,
     RuntimeContextSection,
 };
 use crate::llm::{
@@ -1842,9 +1842,10 @@ async fn run_agent_loop_inner(
             .await;
         }
     };
-    let active_skills = select_profile_skills(&project_root, &nib_cfg, &profile, goal)?;
-    let policy_rules = skill_policy_rules(&active_skills);
-    let after_tool_hooks = skill_after_tool_hooks(&active_skills);
+    let skill_selection = select_profile_skill_selection(&project_root, &nib_cfg, &profile, goal)?;
+    let active_skills = &skill_selection.skills;
+    let policy_rules = skill_policy_rules(active_skills);
+    let after_tool_hooks = skill_after_tool_hooks(active_skills);
     let mcp_manager = if nib_cfg.mcp.client_enabled && !nib_cfg.mcp.servers.is_empty() {
         Some(Arc::new(
             crate::integrations::mcp::McpManager::new(
@@ -1896,22 +1897,9 @@ async fn run_agent_loop_inner(
     }
 
     prepare_user_turn(&store, session_id, goal, profile.root_path())?;
-    for skill in &active_skills {
-        let reason = if profile
-            .active_skills()
-            .iter()
-            .any(|active| active.eq_ignore_ascii_case(&skill.frontmatter.name))
-        {
-            "profile active skill"
-        } else {
-            "matched current goal"
-        };
+    for record in &skill_selection.records {
         store
-            .record_skill_usage(
-                session_id,
-                &skill.frontmatter.name,
-                Some(reason.to_string()),
-            )
+            .record_skill_usage(session_id, &record.skill_name, Some(record.reason.clone()))
             .map_err(|error| error.to_string())?;
     }
 
@@ -1959,7 +1947,7 @@ async fn run_agent_loop_inner(
         crate::session::memory::MemoryStoreData::default()
     };
     let mut context_sections =
-        assemble_runtime_context_sections(&project_root, goal, &active_skills, &memory);
+        assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
     let mut instruction_root = project_root.clone();
     let mut instruction_scopes = vec![instruction_root.clone()];
     if let Ok(Some(session)) = store.load_result(session_id) {
