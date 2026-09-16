@@ -1,12 +1,13 @@
 # T038: TUI Block Transcript and Key Contract
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [T036: Conversational TUI Visual Hierarchy](../done/T036_conversational_tui_visual_hierarchy.md),
 [T031: FT-019 Interaction Model and Ledger TUI](../done/T031_ft019_interaction_model_and_ledger_tui.md),
 [T028: Current-Session-First TUI and Slash-Command Completion](../done/T028_current_session_first_tui_and_slash_command_completion.md),
 [T037: TUI Cancellation Modal Cleanup](../done/T037_tui_cancellation_modal_cleanup.md),
+[T039: Visible Tool Blocks and Explicit Approval Card](T039_visible_tool_blocks_and_explicit_approval.md),
 [FT-019: Codex-Inspired Chat and TUI Interactions](../done/ft_019_codex_inspired_chat_and_tui_interactions.md)
 
 ## Summary
@@ -69,23 +70,23 @@ T036 quieted chrome but the default view is still a string dump:
 
 ## Acceptance Criteria
 
-- [ ] One live tool call is one activity: `requested` then `running` then terminal mutate the same entry.
-- [ ] Collapsed `list_directory` success shows an entry count, not a JSON object.
-- [ ] Expanding a tool block reveals bounded detail; collapsing hides it.
-- [ ] Tab with completion closed focuses the transcript; Tab from transcript returns to the composer.
-- [ ] Transcript Up/Down changes the selected block and keeps it in view; Left/Right toggles fold.
-- [ ] Ctrl+Y copies the selected block (OSC 52) and shows a copied notice.
-- [ ] Tab inserts slash completion; Enter on a complete insertion (no trailing space) submits it.
-- [ ] Shift+Enter and Alt+Enter insert a newline without submitting.
-- [ ] Esc never cancels a worker. Double-Esc within 800ms clears a non-empty idle draft.
-- [ ] Idle Ctrl+C clears a draft, or on an empty composer arms quit and a second press within 1000ms quits. Running Ctrl+C still cancels.
-- [ ] Ctrl+Q requires a second press within 1000ms to quit; idle empty Ctrl+C shares that confirm window.
-- [ ] Composer has a visible border; focused border is distinct from transcript-focused.
-- [ ] Empty session no longer shows the slogan block; the prompt and a startup welcome remain.
-- [ ] `format_tui_interaction_chrome` is not invoked on unchanged idle frames.
-- [ ] Session switcher list shows display names when present.
-- [ ] Existing docks, overlays, queue/steer, redaction, small-terminal, and `NO_COLOR` behavior remain.
-- [ ] Focused interactive tests, `task docs:check`, `task check`, `task test:interactive`, and `task verify` pass.
+- [x] One live tool call is one activity: `requested` then `running` then terminal mutate the same entry.
+- [x] Collapsed `list_directory` success shows an entry count, not a JSON object.
+- [x] Expanding a tool block reveals bounded detail; collapsing hides it.
+- [x] Tab with completion closed focuses the transcript; Tab from transcript returns to the composer.
+- [x] Transcript Up/Down changes the selected block and keeps it in view; Left/Right toggles fold.
+- [x] Ctrl+Y copies the selected block (OSC 52) and shows a copied notice.
+- [x] Tab inserts slash completion; Enter on a complete insertion (no trailing space) submits it.
+- [x] Shift+Enter and Alt+Enter insert a newline without submitting.
+- [x] Esc never cancels a worker. Double-Esc within 800ms clears a non-empty idle draft.
+- [x] Idle Ctrl+C clears a draft, or on an empty composer arms quit and a second press within 1000ms quits. Running Ctrl+C still cancels.
+- [x] Ctrl+Q requires a second press within 1000ms to quit; idle empty Ctrl+C shares that confirm window.
+- [x] Composer has a visible border; focused border is distinct from transcript-focused.
+- [x] Empty session no longer shows the slogan block; the prompt and a startup welcome remain.
+- [x] `format_tui_interaction_chrome` is not invoked on unchanged idle frames.
+- [x] Session switcher list shows display names when present.
+- [x] Existing docks, overlays, queue/steer, redaction, small-terminal, and `NO_COLOR` behavior remain.
+- [x] Focused interactive tests, `task docs:check`, `task check`, `task test:interactive`, and `task verify` pass.
 
 ## Affected Areas
 
@@ -124,3 +125,25 @@ T036 quieted chrome but the default view is still a string dump:
 
 Presentation and TUI key routing only. No persistence schema, tool authority, or
 provider contract change. T023 and FT-020 remain out of scope.
+
+## Final Reconciliation (2026-09-16)
+
+T038 owns the block transcript, focus, folding, selection, copy, composer, and key
+contracts. T039 owns the later under-composer lists, compact one-row chrome, channel
+colors, waiting meter, workspace-consent prompt, and markdown speech presentation;
+those decisions supersede this spec's earlier two-row chrome and markdown non-goal.
+
+Live tool activities are correlated by nib's provider-neutral `ToolInvocationId`, not
+by tool name. Requested, running, terminal-output, and completed events for repeated or
+concurrent calls therefore update only their own block. The identifier remains internal
+and is never rendered in the transcript. Focused tests exercise out-of-order completion
+of two same-name calls, exact OSC 52 encoding, folded detail, row visibility, and the
+focused composer border under `NO_COLOR`.
+
+## Completion Evidence (2026-09-16)
+
+`task check` passed formatting, installer syntax, and warning-denying Clippy. The
+focused `task test:interactive` gate passed 16 steering, 57 shared-interaction, 95 TUI,
+6 console, 26 plain-chat, 6 CLI, and one smoke-contract test. `task docs:check`, the
+complete `task verify` gate, and `git diff --check` passed on the reconciled closure
+branch before handoff.

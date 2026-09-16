@@ -1,6 +1,6 @@
 # T039: Visible Tool Blocks and Explicit Approval Card
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [T038: TUI Block Transcript and Key Contract](T038_tui_block_transcript_and_key_contract.md),
@@ -117,50 +117,50 @@ says `awaiting you`.
 
 ## Acceptance Criteria
 
-- [ ] Live tool headers render as `● tool  <name> <phase>` with an argument hint when
+- [x] Live tool headers render as `● tool  <name> <phase>` with an argument hint when
       the stream provided path/command/pattern.
-- [ ] Collapsed completed `list_directory` still shows an entry count, not JSON.
-- [ ] Expanded tool bodies use a muted `·` result marker and remain bounded.
-- [ ] Failed tools are visually distinct without color (`failed` in the title) and red
+- [x] Collapsed completed `list_directory` still shows an entry count, not JSON.
+- [x] Expanded tool bodies use a muted `·` result marker and remain bounded.
+- [x] Failed tools are visually distinct without color (`failed` in the title) and red
       when color is available.
-- [ ] Approval uses the under-composer list: the composer states the intent
+- [x] Approval uses the under-composer list: the composer states the intent
       (`Run this command` / `Read this file` / …) and shows the command or path;
       `Y Approve once` and `N Deny` sit under the input even on a 40-column
       terminal. It does not render `command=` dumps.
-- [ ] Transcript text above the composer remains visible at ordinary terminal sizes.
-- [ ] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
+- [x] Transcript text above the composer remains visible at ordinary terminal sizes.
+- [x] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
       Deny deny. Up/Down change the selected choice.
-- [ ] The footer shows `WAITING APPROVAL` and the approval keys while the list is
+- [x] The footer shows `WAITING APPROVAL` and the approval keys while the list is
       open; `NO_COLOR` still has the same words.
-- [ ] Focused interactive tests, `task docs:check`, `task check`, and
+- [x] Focused interactive tests, `task docs:check`, `task check`, and
       `task test:interactive` pass.
-- [ ] Slash completion options render under the composer; conversation text above the
+- [x] Slash completion options render under the composer; conversation text above the
       input remains visible and is not cleared. Option signatures start on the
       same column as the composer `/` and have no `>` caret. Session, model,
       history, and question lists use that same selected-row style.
-- [ ] The first user goal assigns `display_name` when unset; `/rename` is kept.
-- [ ] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
+- [x] The first user goal assigns `display_name` when unset; `/rename` is kept.
+- [x] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
       while a run is active or the TUI is waiting.
-- [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
+- [x] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
       an approval list is open; unmodified Up/Down select approval choices.
-- [ ] The first row shows folder and branch on the left and model plus context
+- [x] The first row shows folder and branch on the left and model plus context
       usage on the right. The last row shows approval mode and agent mode.
       `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.
-- [ ] User and nib speech render markdown headings, lists, emphasis, inline code,
+- [x] User and nib speech render markdown headings, lists, emphasis, inline code,
       and fenced code; tool/thought channels are unchanged.
-- [ ] Internal thinking renders as `● thought` (stone/italic), tool calls as
+- [x] Internal thinking renders as `● thought` (stone/italic), tool calls as
       `● tool`, tool results as `·` body lines, user input as `● you`, and
       user-facing replies as `● nib` with indented body text.
-- [ ] A question uses the under-composer list: the composer shows the question,
+- [x] A question uses the under-composer list: the composer shows the question,
       numbered options sit under the input, and Enter/1-9/Esc still answer. The
       footer reads `WAITING QUESTION`.
-- [ ] An empty session welcome shows `Nib <version>`, the working directory,
+- [x] An empty session welcome shows `Nib <version>`, the working directory,
       `/new` and `/session` help, and the most-used keys. When an update is
       available it tells the user to run `nib update`.
-- [ ] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
+- [x] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
       cancels and a non-empty idle draft still clears. `/q` and `Ctrl+Q` still
       quit.
-- [ ] First TUI start without `workspace.allowed` asks to work in the working
+- [x] First TUI start without `workspace.allowed` asks to work in the working
       directory at the composer, with Allow/Decline under the input. `Y`/`Enter`
       persist the grant; `N`/`Esc` quit. `--run` waits until the grant. Later
       starts skip the prompt.
@@ -213,5 +213,33 @@ says `awaiting you`.
 
 ## Rollout Notes
 
-Presentation and TUI key aliases only. T038 remains the interaction-contract owner.
-T023 and FT-020 stay out of scope.
+T038 remains the base block-transcript and key-contract owner. T039 owns the final
+channel styling, under-composer decisions, compact chrome, markdown speech, startup
+workspace consent, and live tool-call correlation described here. No approval
+authority, sandbox boundary, provider request contract, or session persistence schema
+changed. T023, T041, and FT-020 stay out of scope.
+
+## Final Reconciliation (2026-09-16)
+
+The delivered TUI uses the filled `●` marker for tool headers and the muted `·` marker
+for expanded results; the line-oriented shared projection retains its compact `◆ tool`
+marker. Both are textual signals that remain meaningful without color. Completion,
+approval, question, session, model, history, and workspace choices share one reserved
+band under the composer. Approval and workspace reducers keep their existing one-shot
+authority, while modified scroll keys and the wheel continue to control the transcript.
+
+Workspace consent is evaluated before an initial `--run` worker is spawned. Allow
+persists `workspace.allowed`, releases the pending goal once, and later starts skip the
+prompt; decline exits without starting it. A deterministic reducer/persistence test
+covers selection, decline, allow, and reloading the grant. Tool lifecycle events now
+carry `ToolInvocationId` through provider projection, executor terminal output, and UI
+reduction, so same-name calls cannot overwrite one another.
+
+## Completion Evidence (2026-09-16)
+
+`task check` passed formatting, installer syntax, and warning-denying Clippy. The
+focused `task test:interactive` gate passed 16 steering, 57 shared-interaction, 95 TUI,
+6 console, 26 plain-chat, 6 CLI, and one smoke-contract test, including compact chrome,
+markdown, narrow approval, `NO_COLOR`, scroll, key, consent, OSC 52, and same-name tool
+regressions. `task docs:check`, the complete `task verify` gate, and `git diff --check`
+passed on the reconciled closure branch before handoff.

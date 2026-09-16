@@ -582,8 +582,9 @@ The transcript is a list of typed blocks with muted colored dots. User input is
 `● you` (dusty teal). Replies are `● nib` (sage). Internal thinking is
 `● thought` (stone, italic). Tool calls are `● tool` (sand) and mutate from
 requested to running to a collapsed summary, including the path or command when
-the stream provided it. Expanded tool results use a slate `·` marker, distinct
-from the call. User and nib speech render markdown, including headings, lists,
+the stream provided it. Repeated or concurrent calls to the same tool stay in
+separate blocks because each lifecycle is correlated to its own invocation. Expanded
+tool results use a slate `·` marker, distinct from the call. User and nib speech render markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring. Tool and
 thought blocks stay as structured channels, not markdown.
 `Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
