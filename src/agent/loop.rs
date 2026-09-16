@@ -8091,6 +8091,7 @@ mod tests {
     async fn exact_run_steering_stays_closed_when_the_final_provider_turn_starts_a_tool() {
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let goal = "exact run steering tool smoke final turn";
@@ -8267,12 +8268,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn exact_run_steering_drained_in_compression_abandons_the_tool_continuation() {
-        #[cfg(windows)]
         const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-        #[cfg(not(windows))]
-        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let goal = "exact run steering tool smoke compression race";
@@ -8760,6 +8759,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_question_batch_is_rejected_before_any_side_effect() {
         let dir = tempdir().unwrap();
+        initialize_git_repository(dir.path());
         save_config(dir.path(), &mock_config()).unwrap();
         let store = SessionStore::for_project(dir.path()).unwrap();
         let session = store.create_session();
