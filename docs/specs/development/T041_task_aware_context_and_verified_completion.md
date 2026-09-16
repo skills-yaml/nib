@@ -2,10 +2,15 @@
 
 **Status:** Development
 
-**Current stage:** Design decisions and regression-test planning; implementation pending.
+**Current stage:** Reconciled and implementation-ready; production changes and
+regression tests are pending.
 
-**Prerequisite:** T040: Resourceful Agent Loop and Context, reviewed locally at
-`4234be8` on `feat/t040-resourceful-agent-loop`; integration into `development` pending.
+**Open design decisions:** None. Any change to the decisions below must update this
+spec before its dependent implementation changes.
+
+**Prerequisite:** Satisfied. T040: Resourceful Agent Loop and Context is complete at
+`4234be8`, merged by `44c301f`, and verified on the integrated `development` baseline
+`c64f953`.
 
 **Related:** [T003: Context Engine](../done/T003_context_engine_with_dynamic_compression_and_session_management.md),
 [T005: Runtime Lifecycle](../done/T005_full_runtime_state_machine_and_lifecycle.md),
@@ -20,28 +25,28 @@ and verify the outcome. It should retain the user's intent as context changes an
 avoid extra model calls, irrelevant instructions, repeated questions, and unsupported
 completion claims.
 
-This spec covers the remaining findings from the T040 review. T040 implementation
-commit `4234be8` is the review baseline and is not included in this specification-only
-publication. Integrate and verify that prerequisite before dependent implementation.
-This spec entered development on 2026-09-15 for design and test preparation.
-Source implementation and live-model
-qualification remain pending.
+This spec covers the remaining findings from the T040 review. The verified integrated
+T040 baseline is `c64f953`. This spec entered development on 2026-09-15 for design and
+test preparation and was reconciled on 2026-09-16 after T040 integration. The design
+decisions below are now authoritative for implementation. Source implementation remains
+pending; live-model qualification remains separate under T023.
 
 ## Scope
 
 Development covers the five behavior contracts below and their deterministic
-regression tests. Start with the test scenarios and design decisions before changing
-runtime behavior. Each implementation slice must settle its relevant decisions,
-record its persistence/compatibility contract, and then add tests with the production
-change. The development state does not mean those decisions or tests are complete.
+regression tests. Implement them in reviewable slices, adding each production change
+with its persistence/compatibility contract and focused tests. The resolved decisions
+in this spec constrain those slices; changing one requires updating the spec before
+dependent code changes. The development state does not claim implementation or tests
+are complete.
 
 ## Findings and Existing Baseline
 
 T040 adds shared behavioral instructions, bounded attachment inclusion, earlier
 compression, a latest-user-role history reservation, repeated-failure termination,
 blocked-step completion rejection, and correct Git worktree build dependencies.
-Those changes have deterministic validation recorded with the local T040 review;
-they are not yet the behavior of the integration branch.
+Those changes and their deterministic validation are now part of `development` and
+form T041's implementation baseline.
 
 | Remaining finding | Consequence | Required outcome |
 | --- | --- | --- |
@@ -85,12 +90,21 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
   Ancestor rules remain applicable; a more specific rule wins within its scope when
   rules conflict. Explicit user direction and runtime permission boundaries retain
   their existing precedence.
-- Define precedence among supported filenames and configured global instructions
-  before implementation. Do not merge all discovered instruction files indiscriminately.
+- Apply instruction sources in this fixed low-to-high order: configured global rules
+  (or the existing home fallback), then repository directories from root to target.
+  In each directory select `AGENTS.md`, falling back to `CLAUDE.md`, as the base; then
+  select `AGENTS.local.md`, falling back to `CLAUDE.local.md`, as the local override.
+  Load at most one base and one local file per directory. Runtime permissions remain
+  authoritative, current explicit human direction governs task intent, deeper scopes
+  override ancestors only for paths beneath them, and selected skills cannot weaken
+  any higher-authority rule.
 - Load nested instructions before work in their directory. For work spanning scopes,
   apply each rule to its paths and surface conflicts that cannot be resolved by scope.
-  Opaque terminal commands require an explicit scope strategy; filename guessing is
-  insufficient to claim instruction coverage.
+  A filesystem tool uses its validated target path as scope. A terminal call uses its
+  working directory plus explicitly declared affected paths; a mutating opaque command
+  without bounded affected paths is treated as repository-wide and fails closed when
+  bounded instruction discovery cannot prove complete coverage. Command-text filename
+  guessing is never proof of scope.
 - Read referenced specs and project memory selectively when required for the task.
   Cache bounded reads by source identity; refresh affected instructions when the
   worktree, scope, or source changes, without rescanning the repository every turn.
@@ -108,6 +122,14 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
 - Automatic selection must use meaningful task relevance. Generic description words
   alone must not activate a skill. Use deterministic ordering, deduplication, and
   bounded selection; do not add a model call solely to rank skills.
+- Discover and cache bounded frontmatter before loading bodies or references. An exact
+  case-insensitive skill-name phrase is a match. Otherwise require an exact declared
+  non-generic tag or at least two distinct non-stopword description tokens present in
+  the task; the versioned stopword set applies to tags and descriptions, so one generic
+  word never matches. Rank exact name, tag count, then
+  description-token count, with canonical path as the stable tie-breaker. Select at
+  most three automatic skills within the aggregate prompt budget. Explicit and
+  configured selections are not displaced by that automatic limit.
 - Separate cheap discovery metadata from loading selected bodies and references where
   practical. Record a bounded reason for selection and reuse unchanged selections.
 - A non-selected skill contributes no prompt text, constraints, or hooks. Explicit
@@ -119,18 +141,36 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
 - Represent required verification and unresolved execution failures in the existing
   plan/session model, linked to the exact plan, step, worktree revision or content
   identity, and audited invocation. Avoid a second workload database.
+- Add a backward-compatible verification-obligation collection to each plan step.
+  Each obligation has a stable ID, description, required flag, status, plan/step
+  binding, affected-path scope, worktree/content identity, audited invocation ID,
+  timestamp, and bounded reason. Supported statuses are `pending`, `running`, `passed`,
+  `failed`, `cancelled`, `stale`, and `waived`; unknown serialized values fail closed.
+  Obligations come from explicit human requirements, applicable project gates, or an
+  approved plan. Model text may propose an obligation but cannot mark it passed or
+  waived.
 - A required check can be pending, running, passed, failed, or explicitly waived by
   authorized user scope change. Missing, cancelled, or interrupted results do not pass.
   A later unrelated successful command cannot clear a failed obligation.
 - A corrective rerun resolves only the obligation it verifies. Later relevant edits
   invalidate earlier passing evidence; until dependency tracking is justified, prefer
   conservative invalidation to reusing potentially stale results.
+- A successful audited invocation passes only the obligation named by its exact
+  invocation binding. Any later mutating tool in the same worktree conservatively
+  marks passed obligations stale unless the mutation is provably outside their bounded
+  affected-path scope. Do not infer success or identity by parsing arbitrary stdout.
 - Expected discovery misses, such as a search with no matches, must not require
   meaningless successful reruns. Define typed probe outcomes and a bounded recovery
   contract; a model's assertion alone cannot waive a failed required gate.
 - A completion request validates the current obligations against persisted evidence.
   Unresolved obligations leave the plan incomplete with an actionable reason in both
   live and reloaded views. A waived check is reported as waived, never as passed.
+- A waiver requires an explicit human scope change recorded by source message index
+  and plan ID. It may remove a check that became inapplicable; it cannot relabel failed
+  evidence or waive runtime safety and mandatory project gates. Legacy sessions load
+  absent message origin as `unknown` and absent obligations as empty, then derive any
+  currently required pending obligations before further execution. They never
+  manufacture human provenance or historical passing evidence.
 - Preserve cancellation, policy denials, exact plan identity, run leases, continuation
   handling, and the T040 repeated-failure guard. Resuming or delegating work must not
   silently erase outstanding obligations or reuse evidence from another plan.
@@ -143,14 +183,22 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
 - Design an opt-in answer-only route for requests satisfiable from available context.
   It must have no executable tools and make at most one generation request when the
   answer succeeds. It must not add a separate model classification call.
+- Configure the route as `agent.answer_only = false` by default. When enabled, it is
+  eligible only for a new interactive request with no active plan or run and no caller
+  requirement for planning. The one bounded request receives no executable tools and
+  may either return the answer or select one non-executable `request_plan` control.
+  Content completes only the answer-only activity; it never creates, advances, or
+  completes a plan.
 - Requests needing inspection, clarification, or actions use the normal approved-plan
   path. An ambiguous or unsupported answer-only result falls back once; it cannot
   initiate tools or invent missing evidence. Record the route and fallback outcome.
 - Preserve session ownership, cancellation, audit, and honest final-state reporting.
   Answer-only activity must not complete or modify an unrelated active plan.
-  Projects requiring planning for every request keep that behavior.
-- Select and review the routing, persistence, and configuration design before
-  implementing this slice. Measure fallback cost as well as successful savings.
+  Projects requiring planning for every request keep that behavior. `request_plan`
+  discards partial answer content and enters the normal planner exactly once; malformed
+  control output or transport failure is reported and does not loop through both routes.
+  Persist bounded `started`, `completed`, and `fallback` route events for accounting.
+  Measure fallback cost as well as successful savings.
 
 ## Acceptance Criteria
 
@@ -198,9 +246,9 @@ remain private and bound to its existing identity.
 
 ## Implementation and Rollout Plan
 
-1. Confirm T040 integration, record baseline resource counts, and settle the design
-   decisions below. Split independently reviewable slices into child development specs
-   if this scope is too broad for one change.
+1. Use integrated T040 revision `c64f953` as the baseline and capture its resource
+   counts for the fixed T041 fixtures before the first production change. The design
+   decisions are settled below; split child development specs only if scope expands.
 2. Add message provenance and bounded human-intent retention, including legacy fixtures.
 3. Add instruction scope/refresh and conservative skill relevance with bounded reads.
 4. Add verification obligations and evidence-based recovery using the existing session
@@ -229,7 +277,7 @@ always-passing placeholders, and do not weaken an assertion to fit current behav
 | T041-08 | Resume legacy state; replace a plan; supply stale or mismatched delegated evidence. | Legacy provenance stays unknown; evidence cannot cross plan/worktree identities; unresolved obligations survive reload and invalid child results. | `tests/session_roundtrip.rs` via `task test:integration`; `tests/delegation.rs` via `task test:delegation`. |
 | T041-09 | Opt-in answer-only success, action request, unsupported response, active unrelated plan, and project requiring planning. | Eligible success uses one generation request and zero executable tools; fallback occurs at most once; normal approval applies to actions; unrelated plan state stays intact. | `src/agent/` and `tests/test_runtime_e2e.rs` via `task test:agent-context` and `task test:runtime-e2e`. |
 | T041-10 | Implement a bounded Rust change in one managed worktree, encounter a failing behavior test, repair it, verify, and review the diff. | The intended source artifact exists, required Task gates really pass on the final content, no unrelated paths change, and the same plan/worktree reconciles from failure to completion. | Extend the existing source-edit fixture in `tests/test_runtime_e2e.rs` via `task test:runtime-e2e`; this proves mechanics, not arbitrary live self-development. |
-| T041-11 | Run the same scenario inputs against T040 and the candidate, including answer-only fallback and unchanged context reuse. | Counters record actual generation/compression requests, tool attempts, context size, and repeated questions. Per-scenario ceilings are set before implementation; gains cannot hide failed assertions or skipped gates. | Reuse agent/context and runtime fixture counters via `task test:agent-context` and `task test:runtime-e2e`. |
+| T041-11 | Run the same scenario inputs against T040 and the candidate, including answer-only fallback and unchanged context reuse. | Counters record actual generation/compression requests, tool attempts, context size, and repeated questions. The resolved resource policy and any stricter slice-specific ceiling are recorded before that slice lands; gains cannot hide failed assertions or skipped gates. | Reuse agent/context and runtime fixture counters via `task test:agent-context` and `task test:runtime-e2e`. |
 | T041-12 | Policy denial, three identical failed batches, cancellation, and misleading tool/file text around completion. | Denied actions do not retry; the existing failure bound and terminal reconciliation hold; supplied text cannot forge approval, human origin, or passing check evidence. | Extend T040 regressions via `task test:runtime-e2e`; verify live/reloaded projections through `task test:interactive`. |
 
 For each scenario, inspect captured requests, audited tool calls, persisted plan/check
@@ -246,10 +294,9 @@ During implementation use `task check` and the narrowest relevant focused target
 `git diff --check`. Add repeatable scenario runners to Task instead of ad hoc scripts.
 Persistence, filesystem, or process changes also require relevant native CI evidence.
 
-`task test:agent-context` and `task test:integration` are added by T040. The test plan
-above names the intended gates after prerequisite integration; it does not claim those
-targets already exist on the current development branch. `task docs:check` validates
-this specification-only publication.
+`task test:agent-context` and `task test:integration` are present on the integrated T040
+baseline. The test plan above names the intended focused gates; it does not claim the
+T041 scenarios are implemented. `task docs:check` validates this reconciliation.
 
 The offline matrix must cover success, failure, correction, changed scope, cancellation,
 resume, legacy state, context pressure, policy denial, and misleading file/tool text.
@@ -263,22 +310,36 @@ and model versions, repetitions, pass rubrics, cost/request/time ceilings, and r
 authority under T023. Report all failures and usage; a few successful runs cannot prove
 universal compliance. T041's offline closure does not close T023 or authorize paid runs.
 
-## Risks and Design Decisions
+## Resolved Design Decisions and Residual Risks
 
-- **Instruction precedence:** choose supported-file and global-rule precedence, plus
-  how opaque terminal scopes declare and refresh nested instructions.
-- **Evidence identity:** choose the minimal persisted schema and method for declaring
-  required checks without trusting model-authored success claims or parsing arbitrary
-  shell text as authority. Define legacy handling and authorized waiver semantics.
-- **Skill relevance:** choose a deterministic threshold and selection budget using
-  positive and negative examples; excessive filtering must not suppress explicit choices.
-- **Answer routing:** review eligibility, normal-path fallback, and interaction with
-  projects that require all requests to have an approved plan before enabling the route.
-- **Resource regression:** scoped loading and bookkeeping add cost. Establish baseline
-  fixture counts and per-scenario ceilings before implementation; recheck only when
-  relevant inputs change. Token estimates must be labeled when provider usage is absent.
+- **Instruction precedence and refresh:** use the fixed global/root-to-target and
+  base/local precedence above. Cache by worktree identity, canonical scope, and stable
+  file identity; refresh only affected entries when any identity changes. Incomplete
+  bounded discovery blocks dependent work instead of silently omitting rules.
+- **Evidence identity:** store obligations inside the existing plan/session authority,
+  bind results to audited invocation and worktree/content identity, and invalidate
+  conservatively after relevant mutation. Legacy absence means unknown or pending,
+  never passed. Only an explicit human scope change can produce `waived`.
+- **Skill relevance:** use frontmatter-first discovery, the exact name/tag/two-token
+  threshold, a three-skill automatic limit, and stable ranking. Explicit and configured
+  selections remain authoritative and fail visibly when missing or over budget.
+- **Answer routing:** use the disabled-by-default single-request route and typed
+  `request_plan` control above. One fallback is allowed; answer-only execution has no
+  executable tool authority and cannot mutate unrelated plan state.
+- **Resource regression:** capture the T040 baseline at `c64f953` with the same fixtures.
+  Direct answer success is exactly one generation request, zero executable tool calls,
+  zero compression requests, and no repeated question. Fallback adds at most the one
+  answer-only attempt before the unchanged normal path and performs no tool call first.
+  Unchanged instruction/skill inputs add no generation request and reuse cached reads.
+  Other fixtures must not exceed their T040 generation or compression count unless a
+  new correctness obligation requires it and the spec records a scenario-specific
+  ceiling before that slice lands. Estimated tokens are labeled when provider usage is
+  absent; a lower count never compensates for a failed correctness assertion.
 
-These decisions must be resolved in the development spec or child specs before their
-dependent implementation begins. Remaining non-goals are a new workload database,
-unbounded indexing, provider-specific tokenizers, changes to continuation compression,
-unattended self-improvement, automatic merge/publication, and executable replacement.
+Residual risks are larger scoped-policy prompts, conservative evidence invalidation,
+false-negative automatic skill selection, and answer-route fallback overhead. The
+bounded caches, visible diagnostics, explicit-skill path, persisted route/evidence
+state, and fixed regression matrix mitigate them. Remaining non-goals are a new workload
+database, unbounded indexing, provider-specific tokenizers, changes to continuation
+compression, unattended self-improvement, automatic merge/publication, and executable
+replacement.

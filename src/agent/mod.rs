@@ -2,6 +2,7 @@
 
 use std::future::Future;
 
+pub(crate) mod instructions;
 pub mod r#loop;
 pub mod planner;
 pub mod state;

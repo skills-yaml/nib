@@ -755,7 +755,7 @@ pub use LlmProvider as LlmClient;
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::{self, Receiver};
     use std::time::Duration;
 
@@ -841,11 +841,7 @@ pub(crate) mod test_support {
         let (request_tx, request_rx) = mpsc::channel();
 
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("test HTTP connection");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("request read timeout");
-            let request = read_request(&mut stream);
+            let (mut stream, request) = accept_post(&listener);
             let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
 
             let response = format!(
@@ -868,11 +864,7 @@ pub(crate) mod test_support {
 
         std::thread::spawn(move || {
             for response in responses {
-                let (mut stream, _) = listener.accept().expect("test HTTP connection");
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .expect("request read timeout");
-                let request = read_request(&mut stream);
+                let (mut stream, request) = accept_post(&listener);
                 let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
                 let headers = response
                     .headers
@@ -909,11 +901,7 @@ pub(crate) mod test_support {
         let (disconnect_tx, disconnect_rx) = mpsc::channel();
 
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("test HTTP connection");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("request read timeout");
-            let request = read_request(&mut stream);
+            let (mut stream, request) = accept_post(&listener);
             let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{first_event}"
@@ -936,6 +924,24 @@ pub(crate) mod test_support {
         });
 
         (format!("http://{address}"), request_rx, disconnect_rx)
+    }
+
+    fn accept_post(listener: &TcpListener) -> (TcpStream, Vec<u8>) {
+        const MAX_IGNORED_CONNECTIONS: usize = 8;
+        for _ in 0..=MAX_IGNORED_CONNECTIONS {
+            let (mut stream, _) = listener.accept().expect("test HTTP connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("request read timeout");
+            let request = read_request(&mut stream);
+            if request.starts_with(b"POST ") {
+                return (stream, request);
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+        panic!("too many unrelated test HTTP connections")
     }
 
     fn read_request(stream: &mut impl Read) -> Vec<u8> {
