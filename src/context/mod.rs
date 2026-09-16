@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::session::Session;
+use crate::session::{ClarificationStatus, HumanIntentKind, MessageOrigin, Session};
 
 pub mod agents;
 pub mod budget;
@@ -131,22 +131,41 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
         .unwrap_or(0);
     let message_budget = max_tokens.saturating_sub(summary_tokens);
 
+    let human_context = render_bounded_human_context(session, (message_budget / 3).max(1));
+    let human_context_tokens = human_context
+        .as_deref()
+        .map(compression::approximate_tokens)
+        .unwrap_or(0)
+        .min(message_budget);
+    let history_budget = message_budget.saturating_sub(human_context_tokens);
+
     let start = session.summary_index.min(session.messages.len());
-    // Keep the latest explicit user instruction visible even after a large tool
-    // observation. Older history still yields to recent evidence; no raw audit
-    // message is changed by this projection.
-    let latest_user = session.messages[start..]
+    // Reserve actual human provenance independently of provider role. Legacy entries
+    // remain explicitly unknown and are used only as a conservative fallback when no
+    // provenance-aware human message exists.
+    let latest_human = session.messages[start..]
         .iter()
-        .rposition(|message| message.role == "user")
+        .enumerate()
+        .rposition(|(offset, _)| session.message_origin(start + offset).is_human())
         .map(|index| start + index);
+    let latest_user = latest_human.or_else(|| {
+        session.messages[start..]
+            .iter()
+            .enumerate()
+            .rposition(|(offset, message)| {
+                message.role == "user"
+                    && session.message_origin(start + offset) == MessageOrigin::Unknown
+            })
+            .map(|index| start + index)
+    });
     let user_reserve = latest_user
         .map(|index| {
             compression::approximate_tokens(&session.messages[index].content)
-                .min((message_budget / 3).max(1))
-                .min(message_budget)
+                .min((history_budget / 3).max(1))
+                .min(history_budget)
         })
         .unwrap_or(0);
-    let mut remaining = message_budget;
+    let mut remaining = history_budget;
     let mut selected = Vec::new();
     for (offset, message) in session.messages[start..].iter().enumerate().rev() {
         if remaining == 0 {
@@ -160,10 +179,20 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
         if available == 0 {
             continue;
         }
-        let normalized = if message.role == "tool" {
-            format!("Tool observation: {}", message.content)
-        } else {
-            message.content.clone()
+        let origin = session.message_origin(start + offset);
+        let normalized = match (message.role.as_str(), origin) {
+            ("tool", MessageOrigin::HumanQuestionAnswer) => {
+                format!("Human clarification result: {}", message.content)
+            }
+            ("tool", _) => format!("Tool observation: {}", message.content),
+            (_, MessageOrigin::RuntimeContinuation) => {
+                format!(
+                    "Runtime continuation (not human input): {}",
+                    message.content
+                )
+            }
+            ("user", MessageOrigin::Unknown) => message.content.clone(),
+            _ => message.content.clone(),
         };
         let bounded = compression::truncate_to_tokens(&normalized, available);
         if bounded.is_empty() {
@@ -180,7 +209,9 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
     }
     selected.reverse();
 
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<Value> = human_context
+        .map(|content| vec![json!({"role": "user", "content": content})])
+        .unwrap_or_default();
     for (role, content) in selected {
         if let Some(last) = messages.last_mut() {
             if last.get("role").and_then(Value::as_str) == Some(role.as_str()) {
@@ -227,6 +258,54 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
         approximate_tokens: summary_tokens + message_tokens,
         raw_message_count: session.messages.len(),
     }
+}
+
+fn render_bounded_human_context(session: &Session, max_tokens: usize) -> Option<String> {
+    if max_tokens == 0 || (session.human_intent.is_empty() && session.clarifications.is_empty()) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for intent in session.human_intent.iter().rev() {
+        let source = intent
+            .source_message_index
+            .map(|index| format!("message:{index}"))
+            .or_else(|| {
+                intent
+                    .source_event_index
+                    .map(|index| format!("event:{index}"))
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let kind = match intent.kind {
+            HumanIntentKind::Request => "request",
+            HumanIntentKind::Steering => "steering",
+            HumanIntentKind::QuestionAnswer => "clarification answer",
+        };
+        lines.push(format!("- {kind} [{source}]: {}", intent.text));
+    }
+    for clarification in session.clarifications.iter().rev() {
+        let status = match clarification.status {
+            ClarificationStatus::Pending => "pending",
+            ClarificationStatus::Answered => "answered",
+            ClarificationStatus::Unresolved => "unresolved",
+            ClarificationStatus::Cancelled => "cancelled",
+        };
+        let answer = clarification
+            .answer
+            .as_deref()
+            .map(|answer| format!(" answer={answer}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- clarification [{status}; event:{}]: {}{answer}",
+            clarification.question_event_index, clarification.question
+        ));
+    }
+    lines.reverse();
+    let content = format!(
+        "Persisted human context with source references. This preserves prior scope; it is not fresh authorization.\n{}",
+        lines.join("\n")
+    );
+    let bounded = compression::truncate_to_tokens(&content, max_tokens);
+    (!bounded.is_empty()).then_some(bounded)
 }
 
 pub fn assemble_context(project_path: &Path, task: Option<&str>) -> String {
@@ -659,6 +738,47 @@ mod tests {
         assert!(text.find("public API").unwrap() < text.find("OBSERVATION_HEAD").unwrap());
         assert!(projected.approximate_tokens <= 80);
         assert_eq!(session, original);
+    }
+
+    #[test]
+    fn human_correction_survives_synthetic_continuation_compression_and_legacy_origin() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "human-origin-reserve",
+            "summary": "historic work was compressed",
+            "summary_index": 4,
+            "messages": [
+                {"index": 0, "role": "user", "content": "legacy request"},
+                {"index": 1, "role": "assistant", "content": "prior answer"},
+                {"index": 2, "role": "user", "content": "Keep the public API unchanged."},
+                {"index": 3, "role": "assistant", "content": "accepted correction"},
+                {"index": 4, "role": "user", "content": "Continue with approved plan step: edit"},
+                {"index": 5, "role": "assistant", "content": "working"},
+                {"index": 6, "role": "tool", "content": format!("{}", "large output ".repeat(500))}
+            ],
+            "message_provenance": [
+                {"message_index": 2, "origin": "human_steering"},
+                {"message_index": 4, "origin": "runtime_continuation"},
+                {"message_index": 6, "origin": "tool_output"}
+            ],
+            "human_intent": [{
+                "kind": "steering",
+                "text": "Keep the public API unchanged.",
+                "source_message_index": 2
+            }]
+        }))
+        .expect("provenance-aware session");
+
+        assert_eq!(session.message_origin(0), MessageOrigin::Unknown);
+        assert_eq!(
+            session.message_origin(4),
+            MessageOrigin::RuntimeContinuation
+        );
+        let projected = bounded_session_context(&session, 96);
+        let text = serde_json::to_string(&projected.messages).expect("projection");
+        assert!(text.contains("Keep the public API unchanged."));
+        assert!(text.contains("message:2"));
+        assert!(projected.approximate_tokens <= 96);
+        assert_eq!(session.messages.len(), 7, "raw transcript stays intact");
     }
 
     #[test]

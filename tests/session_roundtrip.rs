@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use nib::session::memory::{MemoryEntryMetadata, MemoryStore};
-use nib::session::{SessionEvent, SessionStore};
+use nib::session::{MessageOrigin, SessionEvent, SessionStore};
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier};
@@ -71,11 +71,53 @@ fn session_compat_legacy_json_fixture() {
     assert!(loaded.events.is_empty());
     assert!(loaded.active_skills.is_empty());
     assert!(loaded.skill_usage.is_empty());
+    assert!(loaded.message_provenance.is_empty());
+    assert!(loaded.human_intent.is_empty());
+    assert!(loaded.clarifications.is_empty());
+    assert_eq!(loaded.message_origin(0), MessageOrigin::Unknown);
     assert_eq!(loaded.tool_calls.len(), 1);
     assert_eq!(
         loaded.tool_calls[0].tool_name.as_deref(),
         Some("list_directory")
     );
+}
+
+#[test]
+fn message_origin_roundtrips_independently_from_provider_role() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let session = store.create_session_with_id("origin-roundtrip");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "human request",
+            MessageOrigin::HumanRequest,
+        )
+        .expect("human request");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "assistant",
+            "accepted",
+            MessageOrigin::ModelOutput,
+        )
+        .expect("assistant output");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "Continue with approved plan step",
+            MessageOrigin::RuntimeContinuation,
+        )
+        .expect("runtime continuation");
+
+    let loaded = store.load(&session.id).expect("session");
+    assert_eq!(loaded.message_origin(0), MessageOrigin::HumanRequest);
+    assert_eq!(loaded.message_origin(1), MessageOrigin::ModelOutput);
+    assert_eq!(loaded.message_origin(2), MessageOrigin::RuntimeContinuation);
+    assert_eq!(loaded.messages[2].role, "user");
+    loaded.validate().expect("valid provenance");
 }
 
 #[test]

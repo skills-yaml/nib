@@ -108,6 +108,12 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                 "properties": {
                     "command": {"type": "string", "minLength": 1, "maxLength": 65536},
                     "cwd": {"type": "string", "minLength": 1, "maxLength": 4096, "default": "."},
+                    "affected_paths": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "maxItems": 32,
+                        "description": "Explicit worktree-relative paths affected by an opaque mutating command."
+                    },
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Overrides the configured terminal timeout."},
                     "background": {"type": "boolean", "default": false},
                     "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072, "description": "Maximum retained tail bytes for each of stdout and stderr."},

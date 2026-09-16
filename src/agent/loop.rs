@@ -1,7 +1,10 @@
 //! Core agent loop: planned, approved, bounded LLM reasoning and tool execution.
 
 use crate::agent::state::AgentState;
-use crate::context::budget::{build_bounded_runtime_input, RuntimePromptRequest};
+use crate::context::agents::{tool_instruction_scopes, InstructionResolver};
+use crate::context::budget::{
+    build_bounded_runtime_input, ensure_required_instructions_present, RuntimePromptRequest,
+};
 use crate::context::skills::{Skill, SkillPolicyEffect};
 use crate::context::{
     assemble_runtime_context_sections, attachment_context_sections, select_profile_skills,
@@ -13,8 +16,9 @@ use crate::llm::{
     ToolResult as ProviderToolResult, ToolResultClass,
 };
 use crate::session::{
-    normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionRunLease, SessionStore,
-    ToolCallRecord,
+    normalize_plan_goal, ClarificationRecord, ClarificationStatus, HumanIntentKind,
+    HumanIntentRecord, MessageOrigin, MessageProvenance, Session, SessionEvent, SessionMessage,
+    SessionRunLease, SessionStore, ToolCallRecord,
 };
 use crate::tools::classifier::ToolRisk;
 use crate::tools::executor::{ApprovalHandler, StdinApprovalHandler};
@@ -288,6 +292,7 @@ impl ExactRunSteeringHandle {
                         ));
                     }
                     let sequence = accepted.len() + 1;
+                    let source_event_index = session.events.len();
                     append_session_event(
                         session,
                         "steering_input",
@@ -299,6 +304,12 @@ impl ExactRunSteeringHandle {
                             "text": text,
                         }),
                     );
+                    session.human_intent.push(HumanIntentRecord {
+                        kind: HumanIntentKind::Steering,
+                        text: text.clone(),
+                        source_message_index: None,
+                        source_event_index: Some(source_event_index),
+                    });
                     Ok(sequence)
                 })
                 .map_err(|error| error.to_string())?;
@@ -796,6 +807,142 @@ fn safe_question_execution_arguments(
         }
     }
     arguments
+}
+
+fn persist_question_required(
+    store: &SessionStore,
+    session_id: &str,
+    plan_id: Option<&str>,
+    invocation_id: crate::tools::ToolInvocationId,
+    question: &str,
+    options: &[String],
+) -> Result<Option<(String, usize)>, String> {
+    store
+        .update_session(session_id, |session| {
+            let prior = session
+                .clarifications
+                .iter()
+                .rev()
+                .find_map(|clarification| {
+                    (clarification.plan_id.as_deref() == plan_id
+                        && clarification.question == question
+                        && clarification.status == ClarificationStatus::Answered)
+                        .then(|| {
+                            Some((
+                                clarification.answer.clone()?,
+                                clarification.answer_message_index?,
+                            ))
+                        })
+                        .flatten()
+                });
+            let event_index = session.events.len();
+            append_session_event(
+                session,
+                "question_required",
+                json!({
+                    "invocation_id": invocation_id,
+                    "question": question,
+                    "options": options,
+                    "answer_reused": prior.is_some(),
+                }),
+            );
+            session.clarifications.push(ClarificationRecord {
+                invocation_id,
+                plan_id: plan_id.map(str::to_string),
+                question: question.to_string(),
+                options: options.to_vec(),
+                status: if prior.is_some() {
+                    ClarificationStatus::Answered
+                } else {
+                    ClarificationStatus::Pending
+                },
+                answer: prior.as_ref().map(|(answer, _)| answer.clone()),
+                question_event_index: event_index,
+                answer_message_index: prior.as_ref().map(|(_, index)| *index),
+                reason: prior
+                    .as_ref()
+                    .map(|_| "reused exact answered question in the same plan".to_string()),
+            });
+            Ok(prior)
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn persist_question_observation(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+    observations: &[Value],
+    answer: &Result<String, String>,
+    reused_answer: bool,
+) -> Result<(), String> {
+    let origin = if answer.is_ok() && !reused_answer {
+        MessageOrigin::HumanQuestionAnswer
+    } else {
+        MessageOrigin::ToolOutput
+    };
+    let persisted = store
+        .try_append_message_with_origin(
+            session_id,
+            "tool",
+            &json!({"observations": observations}).to_string(),
+            origin,
+        )
+        .map_err(|error| error.to_string())?;
+    let message_index = persisted.messages.len().saturating_sub(1);
+    store
+        .update_session(session_id, |session| {
+            let clarification = session
+                .clarifications
+                .iter_mut()
+                .rev()
+                .find(|clarification| clarification.invocation_id == invocation_id)
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(
+                        "question outcome has no persisted clarification".to_string(),
+                    )
+                })?;
+            match answer {
+                Ok(answer) => {
+                    clarification.status = ClarificationStatus::Answered;
+                    clarification.answer = Some(answer.clone());
+                    if !reused_answer {
+                        clarification.answer_message_index = Some(message_index);
+                        clarification.reason = None;
+                        session.human_intent.push(HumanIntentRecord {
+                            kind: HumanIntentKind::QuestionAnswer,
+                            text: answer.clone(),
+                            source_message_index: Some(message_index),
+                            source_event_index: None,
+                        });
+                    }
+                }
+                Err(error) => {
+                    clarification.status = if error.to_ascii_lowercase().contains("cancel") {
+                        ClarificationStatus::Cancelled
+                    } else {
+                        ClarificationStatus::Unresolved
+                    };
+                    clarification.reason = Some(error.clone());
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn tool_batch_depends_on_clarification(tool_calls: &[ToolCallRequest]) -> bool {
+    tool_calls.iter().any(|call| {
+        !matches!(
+            call.name.as_str(),
+            "ask_question"
+                | "read_file"
+                | "list_directory"
+                | "grep"
+                | "search_web"
+                | "read_url_content"
+        )
+    })
 }
 
 #[derive(Clone, Default)]
@@ -1685,6 +1832,8 @@ async fn run_agent_loop_inner(
     };
     let mut context_sections =
         assemble_runtime_context_sections(&project_root, goal, &active_skills, &memory);
+    let mut instruction_resolver = InstructionResolver::new(&project_root)?;
+    let mut instruction_scopes = vec![project_root.clone()];
     if let Ok(Some(session)) = store.load_result(session_id) {
         let attachments = session
             .messages
@@ -1693,8 +1842,19 @@ async fn run_agent_loop_inner(
             .find(|message| message.role == "user")
             .map(|message| message.attachments.as_slice())
             .unwrap_or(&[]);
+        instruction_scopes.extend(
+            attachments
+                .iter()
+                .map(|attachment| project_root.join(&attachment.path)),
+        );
         context_sections.attachments = attachment_context_sections(&project_root, attachments);
     }
+    instruction_scopes.sort();
+    instruction_scopes.dedup();
+    let resolved_instructions =
+        instruction_resolver.resolve_for_scopes(instruction_scopes.iter())?;
+    let mut instruction_identity = resolved_instructions.identity.clone();
+    context_sections.agents = resolved_instructions.render();
     let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
         profile.daemon_dir().to_path_buf(),
     )?;
@@ -2279,6 +2439,27 @@ async fn run_agent_loop_inner(
                 }
             }
             AgentState::BuildContext => {
+                let refreshed = instruction_resolver
+                    .resolve_for_scopes(instruction_scopes.iter())
+                    .map_err(|error| {
+                        format!("required project instructions are unavailable: {error}")
+                    })?;
+                if refreshed.identity != instruction_identity {
+                    let previous_identity =
+                        std::mem::replace(&mut instruction_identity, refreshed.identity.clone());
+                    context_sections.agents = refreshed.render();
+                    store
+                        .record_event(
+                            session_id,
+                            "instruction_context_refreshed",
+                            json!({
+                                "previous_identity": previous_identity,
+                                "identity": instruction_identity,
+                                "scope_count": instruction_scopes.len(),
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 if verify_bound_plan(
                     &store,
                     session_id,
@@ -2443,6 +2624,7 @@ async fn run_agent_loop_inner(
                             tool_use_enforcement: nib_cfg.agent.tool_use_enforcement,
                             context_length: nib_cfg.llm.context_length,
                         })?;
+                        ensure_required_instructions_present(&bounded, &context_sections.agents)?;
                         store
                             .record_event(
                                 session_id,
@@ -2638,7 +2820,12 @@ async fn run_agent_loop_inner(
                             true,
                         );
                         store
-                            .try_append_message(session_id, "assistant", &content)
+                            .try_append_message_with_origin(
+                                session_id,
+                                "assistant",
+                                &content,
+                                MessageOrigin::ModelOutput,
+                            )
                             .map_err(|error| error.to_string())?;
                         reconciliation_reason = Some("model_response".to_string());
                     } else {
@@ -2682,7 +2869,12 @@ async fn run_agent_loop_inner(
                         false,
                     );
                     store
-                        .try_append_message(session_id, "assistant", &persisted_intent)
+                        .try_append_message_with_origin(
+                            session_id,
+                            "assistant",
+                            &persisted_intent,
+                            MessageOrigin::ModelOutput,
+                        )
                         .map_err(|error| error.to_string())?;
                     transition_state(
                         &store,
@@ -2706,6 +2898,184 @@ async fn run_agent_loop_inner(
                     "user_approval",
                 )? {
                     reconciliation_reason = Some("plan_binding_changed".to_string());
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                let mut proposed_scopes = instruction_scopes.clone();
+                let scoped_resolution = (|| {
+                    for call in &tool_calls {
+                        proposed_scopes.extend(tool_instruction_scopes(
+                            &project_root,
+                            &call.name,
+                            &call.arguments,
+                        )?);
+                    }
+                    proposed_scopes.sort();
+                    proposed_scopes.dedup();
+                    instruction_resolver.resolve_for_scopes(proposed_scopes.iter())
+                })();
+                let resolved = match scoped_resolution {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let error = format!(
+                            "required project instructions are unavailable for the proposed tool scope: {error}"
+                        );
+                        store
+                            .record_event(
+                                session_id,
+                                "instruction_context_missing",
+                                json!({"error": error, "scope_count": proposed_scopes.len()}),
+                            )
+                            .map_err(|audit_error| audit_error.to_string())?;
+                        if provider_continuation.take().is_some() {
+                            record_provider_continuation_lifecycle(
+                                &store,
+                                session_id,
+                                "provider_continuation_abandoned",
+                                &run_id,
+                            )?;
+                        }
+                        let observations = tool_calls
+                            .iter()
+                            .map(|call| {
+                                json!({
+                                    "invocation_id": call.invocation_id,
+                                    "tool": call.name,
+                                    "success": false,
+                                    "error": error,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        store
+                            .try_append_message_with_origin(
+                                session_id,
+                                "tool",
+                                &json!({"observations": observations}).to_string(),
+                                MessageOrigin::ToolOutput,
+                            )
+                            .map_err(|append_error| append_error.to_string())?;
+                        update_plan_tool_outcome(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            false,
+                            &error,
+                        )?;
+                        tool_calls.clear();
+                        response_content = None;
+                        reconciliation_reason = Some("instruction_context_missing".to_string());
+                        state = transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                if resolved.identity != instruction_identity {
+                    if provider_continuation.take().is_some() {
+                        record_provider_continuation_lifecycle(
+                            &store,
+                            session_id,
+                            "provider_continuation_abandoned",
+                            &run_id,
+                        )?;
+                    }
+                    let previous_identity =
+                        std::mem::replace(&mut instruction_identity, resolved.identity.clone());
+                    context_sections.agents = resolved.render();
+                    instruction_scopes = proposed_scopes;
+                    let explanation =
+                        "applicable project instructions were refreshed before execution; reconsider the proposed action under the updated scoped rules";
+                    let observations = tool_calls
+                        .iter()
+                        .map(|call| {
+                            json!({
+                                "invocation_id": call.invocation_id,
+                                "tool": call.name,
+                                "success": false,
+                                "error": explanation,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    store
+                        .try_append_message_with_origin(
+                            session_id,
+                            "tool",
+                            &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    store
+                        .record_event(
+                            session_id,
+                            "instruction_context_refreshed",
+                            json!({
+                                "previous_identity": previous_identity,
+                                "identity": instruction_identity,
+                                "scope_count": instruction_scopes.len(),
+                                "execution_deferred": true,
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    tool_calls.clear();
+                    response_content = None;
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::BuildContext,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                instruction_scopes = proposed_scopes;
+                let unresolved_clarification = store
+                    .load_result(session_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|session| {
+                        session.has_unresolved_clarification(active_plan_id.as_deref())
+                    });
+                if unresolved_clarification && tool_batch_depends_on_clarification(&tool_calls) {
+                    store
+                        .record_event(
+                            session_id,
+                            "tool_batch_rejected",
+                            json!({
+                                "reason": "unresolved_clarification",
+                                "tool_calls": tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    update_plan_tool_outcome(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                        &normalized_goal,
+                        false,
+                        "required clarification remains unresolved",
+                    )?;
+                    tool_calls.clear();
+                    response_content = None;
+                    reconciliation_reason = Some("unresolved_clarification".to_string());
                     state = transition_state(
                         &store,
                         session_id,
@@ -2829,10 +3199,11 @@ async fn run_agent_loop_inner(
                         )
                         .map_err(|error| error.to_string())?;
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     let stalled = failed_tool_batches.observe(&tool_calls, &observations, false);
@@ -3016,10 +3387,11 @@ async fn run_agent_loop_inner(
                 };
                 if let Some(error) = continuation_failure {
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     tool_calls.clear();
@@ -3060,10 +3432,11 @@ async fn run_agent_loop_inner(
                     .await?
                 } else {
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     for (task, error) in prepared_tasks.start_all() {
@@ -3214,46 +3587,53 @@ async fn run_agent_loop_inner(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                emit(
-                    &cfg.stream_tx,
-                    StreamEvent::QuestionRequired {
-                        question: question.clone(),
-                        options: options.clone(),
-                    },
-                )
-                .await;
-                store
-                    .record_event(
-                        session_id,
-                        "question_required",
-                        json!({"invocation_id": request.invocation_id, "question": question, "options": options}),
+                let reused = persist_question_required(
+                    &store,
+                    session_id,
+                    active_plan_id.as_deref(),
+                    request.invocation_id,
+                    &question,
+                    &options,
+                )?;
+                if reused.is_none() {
+                    emit(
+                        &cfg.stream_tx,
+                        StreamEvent::QuestionRequired {
+                            question: question.clone(),
+                            options: options.clone(),
+                        },
                     )
-                    .map_err(|error| error.to_string())?;
-
-                let answer = match cfg.question_handler.as_ref() {
-                    Some(handler) => handler.ask(&question, &options).await,
-                    None => Err("no question handler configured".to_string()),
+                    .await;
                 }
-                .and_then(|answer| {
-                    if answer.trim().is_empty() {
-                        Err("question handler returned an empty answer".to_string())
-                    } else {
-                        Ok(crate::interactive::bounded_public_text(
-                            &answer,
+
+                let reused_answer = reused.is_some();
+                let answer = match reused {
+                    Some((answer, _)) => Ok(answer),
+                    None => match cfg.question_handler.as_ref() {
+                        Some(handler) => handler.ask(&question, &options).await,
+                        None => Err("no question handler configured".to_string()),
+                    }
+                    .and_then(|answer| {
+                        if answer.trim().is_empty() {
+                            Err("question handler returned an empty answer".to_string())
+                        } else {
+                            Ok(crate::interactive::bounded_public_text(
+                                &answer,
+                                &public_output_sensitive_values,
+                                MAX_QUESTION_BYTES,
+                                false,
+                            ))
+                        }
+                    })
+                    .map_err(|error| {
+                        crate::interactive::bounded_public_text(
+                            &error,
                             &public_output_sensitive_values,
                             MAX_QUESTION_BYTES,
                             false,
-                        ))
-                    }
-                })
-                .map_err(|error| {
-                    crate::interactive::bounded_public_text(
-                        &error,
-                        &public_output_sensitive_values,
-                        MAX_QUESTION_BYTES,
-                        false,
-                    )
-                });
+                        )
+                    }),
+                };
 
                 let arguments = safe_question_execution_arguments(
                     &request.arguments,
@@ -3273,14 +3653,14 @@ async fn run_agent_loop_inner(
                     )
                     .await;
                 tool_call_count += 1;
-                let (question_success, question_output, question_error) = match answer {
+                let (question_success, question_output, question_error) = match &answer {
                     Ok(answer) if result.success => (
                         true,
                         Some(json!({"question": question, "answer": answer})),
                         None,
                     ),
-                    Ok(_) => (false, result.output, result.error),
-                    Err(error) => (false, result.output, Some(error)),
+                    Ok(_) => (false, result.output.clone(), result.error.clone()),
+                    Err(error) => (false, result.output.clone(), Some(error.clone())),
                 };
                 emit(
                     &cfg.stream_tx,
@@ -3325,13 +3705,14 @@ async fn run_agent_loop_inner(
                 if batch_success {
                     failed_tool_batches.reset();
                 }
-                store
-                    .try_append_message(
-                        session_id,
-                        "tool",
-                        &json!({"observations": pending_observations}).to_string(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                persist_question_observation(
+                    &store,
+                    session_id,
+                    request.invocation_id,
+                    &pending_observations,
+                    &answer,
+                    reused_answer,
+                )?;
                 let plan_updated = update_plan_tool_outcome(
                     &store,
                     session_id,
@@ -3506,10 +3887,11 @@ async fn run_agent_loop_inner(
                             let next_step =
                                 next_step.as_deref().unwrap_or("the next approved step");
                             store
-                                .try_append_message(
+                                .try_append_message_with_origin(
                                     session_id,
                                     "user",
                                     &format!("Continue with approved plan step: {next_step}"),
+                                    MessageOrigin::RuntimeContinuation,
                                 )
                                 .map_err(|error| error.to_string())?;
                             "step_completed".to_string()
@@ -4238,12 +4620,23 @@ fn prepare_user_turn(
         crate::interactive::resolve_path_attachments(project_root, content)?;
     store
         .update_session(session_id, |session| {
+            let message_index = session.messages.len();
             session.messages.push(SessionMessage {
-                index: session.messages.len(),
+                index: message_index,
                 role: "user".to_string(),
-                content,
+                content: content.clone(),
                 timestamp: Some(Utc::now()),
                 attachments,
+            });
+            session.message_provenance.push(MessageProvenance {
+                message_index,
+                origin: MessageOrigin::HumanRequest,
+            });
+            session.human_intent.push(HumanIntentRecord {
+                kind: HumanIntentKind::Request,
+                text: content,
+                source_message_index: Some(message_index),
+                source_event_index: None,
             });
             Ok(())
         })
@@ -4702,6 +5095,112 @@ mod tests {
             "error": "file is missing",
         });
         (vec![request], vec![observation])
+    }
+
+    #[test]
+    fn clarification_answer_and_unresolved_state_persist_with_sources() {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::new(directory.path());
+        let session = store.create_session_with_id("clarification-provenance");
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "user",
+                "implement the selected mode",
+                MessageOrigin::HumanRequest,
+            )
+            .expect("request");
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "question intent",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant intent");
+
+        let first = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            first,
+            "Which verification mode?",
+            &["fast".to_string(), "full".to_string()],
+        )
+        .expect("persist question")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            first,
+            &[json!({"tool": "ask_question", "success": true})],
+            &Ok("full".to_string()),
+            false,
+        )
+        .expect("persist answer");
+
+        let reloaded = store.load(&session.id).expect("reload answer");
+        let answered = reloaded.clarifications.last().expect("clarification");
+        assert_eq!(answered.status, ClarificationStatus::Answered);
+        assert_eq!(answered.answer.as_deref(), Some("full"));
+        let source = answered.answer_message_index.expect("answer source");
+        assert_eq!(
+            reloaded.message_origin(source),
+            MessageOrigin::HumanQuestionAnswer
+        );
+        assert_eq!(
+            reloaded.human_intent.last().expect("human answer").text,
+            "full"
+        );
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "same question attempted again",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant retry");
+        let second = crate::tools::ToolInvocationId::new();
+        let reused = persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            second,
+            "Which verification mode?",
+            &["fast".to_string(), "full".to_string()],
+        )
+        .expect("reuse question")
+        .expect("prior answer");
+        assert_eq!(reused, ("full".to_string(), source));
+
+        let third = crate::tools::ToolInvocationId::new();
+        persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            third,
+            "Which target file?",
+            &[],
+        )
+        .expect("new question");
+        persist_question_observation(
+            &store,
+            &session.id,
+            third,
+            &[json!({"tool": "ask_question", "success": false})],
+            &Err("input unavailable".to_string()),
+            false,
+        )
+        .expect("persist unresolved");
+        let reloaded = store.load(&session.id).expect("reload unresolved");
+        assert!(reloaded.has_unresolved_clarification(Some("plan-a")));
+        assert_eq!(
+            reloaded.clarifications.last().expect("unresolved").status,
+            ClarificationStatus::Unresolved
+        );
+        reloaded.validate().expect("valid persisted provenance");
     }
 
     #[test]

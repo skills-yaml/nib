@@ -317,6 +317,93 @@ async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_d
 }
 
 #[tokio::test]
+async fn nested_instructions_are_loaded_before_the_scoped_tool_executes() {
+    let root = git_repository();
+    std::fs::create_dir_all(root.path().join("nested")).expect("nested directory");
+    std::fs::write(
+        root.path().join("nested/AGENTS.md"),
+        "NESTED_SCOPE_MARKER: reads here require the nested rule.\n",
+    )
+    .expect("nested instructions");
+    std::fs::write(root.path().join("nested/note.txt"), "nested evidence\n").expect("nested note");
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "nested-before-refresh",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_tool_turn(
+            "nested-after-refresh",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(
+        summary.tool_call_count, 1,
+        "deferred proposal is not execution"
+    );
+    assert_eq!(requests.len(), 3);
+    let first = requests[0].to_string();
+    let second = requests[1].to_string();
+    assert!(!first.contains("NESTED_SCOPE_MARKER"));
+    assert!(second.contains("NESTED_SCOPE_MARKER"));
+    let refresh = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "instruction_context_refreshed")
+        .expect("instruction refresh event");
+    assert_eq!(refresh.details["execution_deferred"], true);
+    assert_eq!(
+        persisted
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_name.as_deref() == Some("read_file"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn unreadable_scoped_instruction_context_blocks_dependent_execution() {
+    let root = git_repository();
+    std::fs::create_dir_all(root.path().join("nested")).expect("nested directory");
+    std::fs::write(
+        root.path().join("nested/AGENTS.md"),
+        vec![b'x'; 64 * 1024 + 1],
+    )
+    .expect("oversized nested instructions");
+    std::fs::write(root.path().join("nested/note.txt"), "must not be read\n").expect("nested note");
+
+    let (summary, persisted, requests) = run_failure_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "nested-instruction-failure",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        )],
+        None,
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "instruction_context_missing"));
+    let plan = persisted.plan.expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert!(plan.steps[0]
+        .outcome
+        .as_deref()
+        .is_some_and(|outcome| outcome.contains("required project instructions")));
+}
+
+#[tokio::test]
 async fn changed_failed_requests_reset_the_streak_and_a_corrective_tool_can_complete() {
     let root = git_repository();
     let mut responses: Vec<_> = [

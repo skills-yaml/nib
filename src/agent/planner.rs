@@ -1,4 +1,6 @@
-use crate::context::budget::{build_bounded_planning_input, PlanningPromptRequest};
+use crate::context::budget::{
+    build_bounded_planning_input, ensure_required_instructions_present, PlanningPromptRequest,
+};
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
 use crate::llm::{LlmClient, LlmResponse, LlmStream};
@@ -109,6 +111,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
         tools: tools.as_array().unwrap(),
         context_length,
     })?;
+    ensure_required_instructions_present(&bounded, &context.agents)?;
     let scope = match scope {
         Some(scope) => scope,
         None => LlmRequestScope::new(

@@ -1318,6 +1318,81 @@ pub struct SessionMessage {
     pub attachments: Vec<PathAttachment>,
 }
 
+/// Durable provenance for a transcript entry. Provider roles describe wire-format
+/// ordering; they do not prove who supplied the underlying information.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    #[default]
+    Unknown,
+    HumanRequest,
+    HumanSteering,
+    HumanQuestionAnswer,
+    RuntimeContinuation,
+    ModelOutput,
+    ToolOutput,
+}
+
+impl MessageOrigin {
+    pub fn is_human(self) -> bool {
+        matches!(
+            self,
+            Self::HumanRequest | Self::HumanSteering | Self::HumanQuestionAnswer
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageProvenance {
+    pub message_index: usize,
+    pub origin: MessageOrigin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanIntentKind {
+    Request,
+    Steering,
+    QuestionAnswer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanIntentRecord {
+    pub kind: HumanIntentKind,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarificationStatus {
+    Pending,
+    Answered,
+    Unresolved,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClarificationRecord {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    pub status: ClarificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    pub question_event_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathAttachment {
     pub path: String,
@@ -1520,6 +1595,12 @@ pub struct Session {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub messages: Vec<SessionMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_provenance: Vec<MessageProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_intent: Vec<HumanIntentRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clarifications: Vec<ClarificationRecord>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1566,6 +1647,15 @@ fn session_mismatch_field(expected: &Session, published: &Session) -> &'static s
     }
     if expected.messages != published.messages {
         return "messages";
+    }
+    if expected.message_provenance != published.message_provenance {
+        return "message_provenance";
+    }
+    if expected.human_intent != published.human_intent {
+        return "human_intent";
+    }
+    if expected.clarifications != published.clarifications {
+        return "clarifications";
     }
     if expected.tool_calls.len() != published.tool_calls.len() {
         return "tool_calls.length";
@@ -1654,6 +1744,9 @@ impl Session {
             revision: 0,
             started_at: Some(Utc::now()),
             messages: vec![],
+            message_provenance: vec![],
+            human_intent: vec![],
+            clarifications: vec![],
             tool_calls: vec![],
             plan: None,
             summary: None,
@@ -1699,7 +1792,68 @@ impl Session {
                 message_count: self.messages.len(),
             });
         }
+        let mut previous = None;
+        for provenance in &self.message_provenance {
+            if provenance.message_index >= self.messages.len()
+                || previous.is_some_and(|index| index >= provenance.message_index)
+            {
+                return Err(SessionError::InvalidMutation(
+                    "message provenance must be uniquely ordered and reference an existing message"
+                        .to_string(),
+                ));
+            }
+            previous = Some(provenance.message_index);
+        }
+        for intent in &self.human_intent {
+            if intent.text.trim().is_empty()
+                || intent
+                    .source_message_index
+                    .is_some_and(|index| index >= self.messages.len())
+                || intent
+                    .source_event_index
+                    .is_some_and(|index| index >= self.events.len())
+                || (intent.source_message_index.is_none() && intent.source_event_index.is_none())
+            {
+                return Err(SessionError::InvalidMutation(
+                    "human intent must have bounded content and an existing source".to_string(),
+                ));
+            }
+        }
+        for clarification in &self.clarifications {
+            if clarification.question.trim().is_empty()
+                || clarification.question_event_index >= self.events.len()
+                || clarification
+                    .answer_message_index
+                    .is_some_and(|index| index >= self.messages.len())
+                || (clarification.status == ClarificationStatus::Answered
+                    && (clarification.answer.as_deref().is_none_or(str::is_empty)
+                        || clarification.answer_message_index.is_none()))
+            {
+                return Err(SessionError::InvalidMutation(
+                    "clarification provenance is incomplete or inconsistent".to_string(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    pub fn message_origin(&self, index: usize) -> MessageOrigin {
+        self.message_provenance
+            .binary_search_by_key(&index, |provenance| provenance.message_index)
+            .ok()
+            .map(|position| self.message_provenance[position].origin)
+            .unwrap_or(MessageOrigin::Unknown)
+    }
+
+    pub fn has_unresolved_clarification(&self, plan_id: Option<&str>) -> bool {
+        self.clarifications.iter().any(|clarification| {
+            matches!(
+                clarification.status,
+                ClarificationStatus::Pending
+                    | ClarificationStatus::Unresolved
+                    | ClarificationStatus::Cancelled
+            ) && clarification.plan_id.as_deref() == plan_id
+        })
     }
 }
 
@@ -3186,6 +3340,16 @@ impl SessionStore {
         role: &str,
         content: &str,
     ) -> Result<Session, SessionError> {
+        self.try_append_message_with_origin(id, role, content, MessageOrigin::Unknown)
+    }
+
+    pub fn try_append_message_with_origin(
+        &self,
+        id: &str,
+        role: &str,
+        content: &str,
+        origin: MessageOrigin,
+    ) -> Result<Session, SessionError> {
         self.update_or_create_session(id, |session| {
             validate_role_transition(session.messages.last().map(|m| m.role.as_str()), role)?;
             let index = session.messages.len();
@@ -3196,6 +3360,12 @@ impl SessionStore {
                 timestamp: Some(Utc::now()),
                 attachments: Vec::new(),
             });
+            if origin != MessageOrigin::Unknown {
+                session.message_provenance.push(MessageProvenance {
+                    message_index: index,
+                    origin,
+                });
+            }
             Ok(session.clone())
         })
     }

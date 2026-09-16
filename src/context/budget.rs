@@ -56,6 +56,26 @@ pub fn approximate_llm_input_tokens(messages: &[Value], tools: Option<&[Value]>)
     approximate_tokens(&payload.to_string())
 }
 
+pub fn ensure_required_instructions_present(
+    input: &BoundedLlmInput,
+    instructions: &str,
+) -> Result<(), String> {
+    if instructions.is_empty() {
+        return Ok(());
+    }
+    let present = input.messages.iter().any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains(instructions))
+    });
+    if present {
+        Ok(())
+    } else {
+        Err("llm.context_length cannot fit the complete required project instructions; dependent work is blocked until the context budget or instruction scope changes".to_string())
+    }
+}
+
 pub fn bound_single_turn_input(
     system_prompt: &str,
     user_content: &str,
@@ -946,5 +966,28 @@ mod tests {
         assert!(bounded.contains("AGENTS_COMPLETE_HEAD"));
         assert!(bounded.contains("TAIL_RULE_MUST_RECONCILE"));
         assert!(bounded.contains("...[bounded]..."));
+    }
+
+    #[test]
+    fn required_instruction_fit_check_rejects_a_bounded_policy_prompt() {
+        let mut context = hostile_context();
+        context.agents = format!(
+            "REQUIRED_POLICY_HEAD\n{}\nREQUIRED_POLICY_TAIL",
+            "mandatory scoped rule ".repeat(1_000)
+        );
+        let input = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &hostile_session(),
+            current_step: None,
+            tools: None,
+            mode: "execute",
+            project_root: Path::new("/workspace/nib"),
+            tool_use_enforcement: false,
+            context_length: 2_400,
+        })
+        .expect("ordinary aggregate bounding remains available");
+        let error = ensure_required_instructions_present(&input, &context.agents)
+            .expect_err("runtime must not claim a truncated required policy was followed");
+        assert!(error.contains("complete required project instructions"));
     }
 }
