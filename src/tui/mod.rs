@@ -2974,17 +2974,46 @@ fn composer_visual_rows(composer: &Composer, width: u16) -> Vec<String> {
 }
 
 fn overlay_visual_rows(first: &str, extra: &[String], width: u16) -> Vec<String> {
-    let mut rows = wrapped_display_rows(&format!("> {first}"), width.max(1));
+    const MAX_ROWS: usize = 6;
+    let width = width.max(1);
+    let mut rows = wrapped_display_rows(&format!("> {first}"), width);
     let inner = width.saturating_sub(COMPOSER_PROMPT_CELLS).max(1);
-    for line in extra {
-        for wrapped in wrapped_display_rows(line, inner) {
-            rows.push(format!("  {wrapped}"));
+    let extras: Vec<&str> = extra
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut used = 0usize;
+    while used < extras.len() {
+        let remaining = extras.len() - used;
+        let item_rows: Vec<String> = wrapped_display_rows(extras[used], inner)
+            .into_iter()
+            .map(|wrapped| format!("  {wrapped}"))
+            .collect();
+        let limit = if remaining > 1 {
+            MAX_ROWS.saturating_sub(1)
+        } else {
+            MAX_ROWS
+        };
+        if rows.len().saturating_add(item_rows.len()) > limit {
+            if used == 0 {
+                let room = limit.saturating_sub(rows.len());
+                rows.extend(item_rows.into_iter().take(room));
+                if remaining > 1 && rows.len() < MAX_ROWS {
+                    rows.push(format!("  … {} more", remaining.saturating_sub(1)));
+                }
+            } else {
+                rows.push(format!("  … {remaining} more"));
+            }
+            break;
         }
+        rows.extend(item_rows);
+        used += 1;
     }
     if rows.len() < 2 {
         rows.resize(2, String::new());
     }
-    rows.truncate(6);
+    rows.truncate(MAX_ROWS);
     rows
 }
 
@@ -2999,15 +3028,23 @@ fn waiting_composer_rows(
         WaitingKind::Approval => {
             let req = pending_approval?;
             let prompt = approval_prompt(&req.call);
-            let mut extra = vec![prompt.subject];
-            if let Some(location) =
-                usable_approval_location(prompt.location.clone(), &req.context.target_scope)
-            {
-                extra.push(format!("in {location}"));
+            let mut extra = Vec::new();
+            if req.call.tool_name == "approve_plan" {
+                extra.extend(approval_plan_step_lines(&req.call));
             }
-            let risk = compact_approval_risk(&req.context.permission_and_risk);
-            if !risk.is_empty() {
-                extra.push(format!("Risk: {risk}"));
+            if extra.is_empty() && !prompt.subject.is_empty() {
+                extra.push(prompt.subject);
+            }
+            if req.call.tool_name != "approve_plan" {
+                if let Some(location) =
+                    usable_approval_location(prompt.location.clone(), &req.context.target_scope)
+                {
+                    extra.push(format!("in {location}"));
+                }
+                let risk = compact_approval_risk(&req.context.permission_and_risk);
+                if !risk.is_empty() {
+                    extra.push(format!("Risk: {risk}"));
+                }
             }
             Some((overlay_visual_rows(&prompt.statement, &extra, width), false))
         }
@@ -3119,18 +3156,23 @@ fn thought_body_style(no_color: bool) -> Style {
     ink_style(ChannelInk::Thought, no_color)
 }
 
-fn channel_label_for(kind: ActivityKind) -> &'static str {
-    match kind {
-        ActivityKind::Thinking | ActivityKind::Plan => "thought",
-        other => other.role_label(),
-    }
-}
-
 fn fold_prefix(entry: &ActivityEntry) -> &'static str {
     if entry.folded && !entry.body.is_empty() {
         "› "
     } else {
         ""
+    }
+}
+
+fn header_body_style(kind: ActivityKind, rest: &str, no_color: bool) -> Style {
+    if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
+        thought_body_style(no_color)
+    } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
+        speech_body_style(no_color)
+    } else if kind == ActivityKind::Tool {
+        tool_status_style(kind, rest, no_color)
+    } else {
+        ink_style(channel_ink(kind), no_color)
     }
 }
 
@@ -3141,19 +3183,24 @@ fn dotted_header_lines(
     width: u16,
     no_color: bool,
 ) -> Vec<Line<'static>> {
-    let label = channel_label_for(kind);
     let fold_width = unicode_display_width(fold);
     let dot_width = unicode_display_width(CHANNEL_DOT);
     let inner = usize::from(width.max(1))
         .saturating_sub(fold_width)
         .saturating_sub(dot_width)
         .max(1);
-    let content = if rest.is_empty() {
-        label.to_string()
-    } else {
-        format!("{label}  {rest}")
-    };
-    wrapped_display_rows(&content, u16::try_from(inner).unwrap_or(u16::MAX))
+    if rest.is_empty() {
+        let mut spans = Vec::new();
+        if !fold.is_empty() {
+            spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
+        }
+        spans.push(Span::styled(
+            CHANNEL_DOT.to_string(),
+            ink_style(channel_ink(kind), no_color),
+        ));
+        return vec![Line::from(spans)];
+    }
+    wrapped_display_rows(rest, u16::try_from(inner).unwrap_or(u16::MAX))
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
@@ -3166,27 +3213,12 @@ fn dotted_header_lines(
                     CHANNEL_DOT.to_string(),
                     ink_style(channel_ink(kind), no_color),
                 ));
-                if let Some(after) = row.strip_prefix(&format!("{label}  ")) {
-                    spans.push(Span::styled(label.to_string(), muted_style(no_color)));
-                    let body_style = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan)
-                    {
-                        thought_body_style(no_color)
-                    } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
-                        speech_body_style(no_color)
-                    } else if kind == ActivityKind::Tool {
-                        tool_status_style(kind, after, no_color)
-                    } else {
-                        ink_style(channel_ink(kind), no_color)
-                    };
-                    spans.push(Span::styled(format!("  {after}"), body_style));
-                } else {
-                    spans.push(Span::styled(row, muted_style(no_color)));
-                }
+                spans.push(Span::styled(row, header_body_style(kind, rest, no_color)));
                 Line::from(spans)
             } else {
                 Line::from(Span::styled(
                     format!("{}{}{row}", fold, " ".repeat(dot_width)),
-                    muted_style(no_color),
+                    header_body_style(kind, rest, no_color),
                 ))
             }
         })
@@ -3611,6 +3643,24 @@ struct ApprovalPrompt {
     location: Option<String>,
 }
 
+fn approval_plan_step_lines(call: &ToolCall) -> Vec<String> {
+    call.arguments
+        .get("steps")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            let text = step.as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let safe = safe_approval_text(text);
+            (!safe.is_empty()).then(|| format!("{}. {safe}", index + 1))
+        })
+        .collect()
+}
+
 fn approval_arg(call: &ToolCall, key: &str) -> Option<String> {
     call.arguments
         .get(key)
@@ -3937,19 +3987,43 @@ fn speech_source(entry: &ActivityEntry) -> String {
     }
 }
 
+fn prefix_speech_dot(
+    mut lines: Vec<Line<'static>>,
+    kind: ActivityKind,
+    no_color: bool,
+) -> Vec<Line<'static>> {
+    let dot = Span::styled(
+        CHANNEL_DOT.to_string(),
+        ink_style(channel_ink(kind), no_color),
+    );
+    if lines.is_empty() {
+        return vec![Line::from(dot)];
+    }
+    let indent = markdown::speech_indent();
+    let first = &mut lines[0];
+    if let Some(span) = first.spans.first_mut() {
+        if span.content.as_ref() == indent {
+            first.spans.remove(0);
+        } else if let Some(rest) = span.content.strip_prefix(indent) {
+            span.content = rest.to_string().into();
+        }
+    }
+    let rest = std::mem::take(&mut first.spans);
+    first.spans.push(dot);
+    first.spans.extend(rest);
+    lines
+}
+
 fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
-    let mut lines = dotted_header_lines(entry.kind, "", "", width, no_color);
     let source = speech_source(entry);
     if source.is_empty() {
-        return lines;
+        return dotted_header_lines(entry.kind, "", "", width, no_color);
     }
-    lines.extend(markdown::render_markdown(
-        &source,
-        width,
-        markdown::speech_indent(),
+    prefix_speech_dot(
+        markdown::render_markdown(&source, width, markdown::speech_indent(), no_color),
+        entry.kind,
         no_color,
-    ));
-    lines
+    )
 }
 
 fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
@@ -4026,21 +4100,19 @@ fn flatten_activity_lines(
     let mut owners = Vec::new();
     let mut previous_channel = None;
     for (index, entry) in activities.iter().enumerate() {
+        let wrapped = activity_lines(entry, width, no_color);
+        if wrapped.is_empty() {
+            continue;
+        }
         let channel = visual_channel(entry.kind);
         if previous_channel.is_some_and(|previous| previous != channel) {
             rows.push(Line::from(""));
             owners.push(index);
         }
         previous_channel = Some(channel);
-        let wrapped = activity_lines(entry, width, no_color);
-        if wrapped.is_empty() {
-            rows.push(Line::from(""));
+        for row in wrapped {
+            rows.push(row);
             owners.push(index);
-        } else {
-            for row in wrapped {
-                rows.push(row);
-                owners.push(index);
-            }
         }
     }
     (rows, owners)
@@ -5886,15 +5958,20 @@ mod tests {
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
         assert!(joined.contains("inspect wrap"), "{joined}");
-        assert!(joined.contains("thought"), "{joined}");
         assert!(joined.contains("planning"), "{joined}");
         assert!(joined.contains("●"), "{joined}");
-        assert!(joined.contains("tool"), "{joined}");
         assert!(joined.contains("read_file"), "{joined}");
         assert!(joined.contains("Here is the answer"), "{joined}");
-        let you = row_index_containing(&rows, "you").expect("you");
-        let thought = row_index_containing(&rows, "thought").expect("thought");
-        let tool = row_index_containing(&rows, "tool").expect("tool");
+        assert!(!joined.contains("● you"), "no you role label: {joined}");
+        assert!(!joined.contains("● nib"), "no nib role label: {joined}");
+        assert!(!joined.contains("thought"), "{joined}");
+        assert!(
+            !rows.iter().any(|row| row.contains("● tool")),
+            "tool rows use the tool name, not a tool role label: {rows:?}"
+        );
+        let you = row_index_containing(&rows, "inspect wrap").expect("user");
+        let thought = row_index_containing(&rows, "planning").expect("planning");
+        let tool = row_index_containing(&rows, "read_file").expect("tool");
         let speech = rows
             .iter()
             .position(|row| row.contains("Here is the answer"))
@@ -5909,7 +5986,7 @@ mod tests {
         );
         assert!(
             rows[thought].contains('●'),
-            "system thought is marked with a colored dot: {}",
+            "planning is marked with a colored dot: {}",
             rows[thought]
         );
         assert!(
@@ -5918,18 +5995,13 @@ mod tests {
             rows[tool]
         );
         assert!(
-            rows.iter()
-                .any(|row| row.contains("●") && row.contains("nib")),
-            "system speech is marked with a colored dot: {rows:?}"
-        );
-        assert!(
-            rows[speech].contains("  Here is the answer"),
-            "speech body is indented, not a log label: {}",
+            rows[speech].contains('●'),
+            "assistant speech starts with a colored dot: {}",
             rows[speech]
         );
         assert!(
-            !rows[speech].contains('●'),
-            "user-facing speech body is not a header row: {}",
+            !rows[speech].contains("nib"),
+            "assistant speech has no nib label: {}",
             rows[speech]
         );
         let result = rows
@@ -6010,7 +6082,6 @@ mod tests {
             .expect("render markdown speech");
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
-        assert!(joined.contains("nib"), "{joined}");
         assert!(joined.contains("# Fix"), "{joined}");
         assert!(joined.contains("task check"), "{joined}");
         assert!(joined.contains("fn main()"), "{joined}");
@@ -6029,9 +6100,8 @@ mod tests {
             .next()
             .expect("header");
         assert_eq!(line.spans[0].content, "● ");
-        assert_eq!(line.spans[1].content, "nib");
         assert_eq!(line.spans[0].style.fg, None);
-        assert_eq!(line.spans[1].style.fg, None);
+        assert!(line.spans.get(1).is_none_or(|span| span.content != "nib"));
         let tool = dotted_header_lines(
             ActivityKind::Tool,
             "read_file ok · src/lib.rs",
@@ -6043,7 +6113,7 @@ mod tests {
         .next()
         .expect("tool header");
         assert_eq!(tool.spans[0].content, "● ");
-        assert_eq!(tool.spans[1].content, "tool");
+        assert_eq!(tool.spans[1].content, "read_file ok · src/lib.rs");
         let result = dotted_result_lines("line one", 40, ChannelInk::ToolResult, true);
         assert_eq!(result[0].spans[0].content, "· ");
         assert_eq!(result[0].spans[1].content, "line one");
@@ -6829,7 +6899,10 @@ mod tests {
             StreamEvent::StateTransition {
                 state: "planning".to_string(),
             },
-            StreamEvent::PlanGenerated { step_count: 2 },
+            StreamEvent::PlanGenerated {
+                step_count: 2,
+                steps: vec!["inspect wrap".to_string(), "write tests".to_string()],
+            },
             StreamEvent::Content("Working".to_string()),
             StreamEvent::ToolCallChunk {
                 index: 0,
@@ -8310,6 +8383,104 @@ mod tests {
             compact_approval_risk("destructive / requires_approval"),
             "destructive"
         );
+    }
+
+    #[test]
+    fn plan_approval_card_lists_numbered_steps() {
+        let prompt = approval_prompt(&ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "approve_plan".to_string(),
+            arguments: json!({
+                "plan_id": "plan-123",
+                "goal": "inspect wrap",
+                "steps": ["inspect files", "change parser", "run tests"],
+            }),
+            session_id: None,
+            project_root: None,
+        });
+        assert_eq!(prompt.statement, "Approve this plan");
+        assert_eq!(
+            approval_plan_step_lines(&ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "approve_plan".to_string(),
+                arguments: json!({
+                    "steps": ["inspect files", "change parser", "run tests"],
+                }),
+                session_id: None,
+                project_root: None,
+            }),
+            vec![
+                "1. inspect files".to_string(),
+                "2. change parser".to_string(),
+                "3. run tests".to_string(),
+            ]
+        );
+        assert!(!prompt.subject.contains("plan_id="));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let composer = Composer::default();
+        let (approval_tx, _approval_rx) = oneshot::channel();
+        let approval = approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "approve_plan".to_string(),
+                arguments: json!({
+                    "plan_id": "plan-123",
+                    "goal": "inspect wrap",
+                    "steps": ["inspect files", "change parser", "run tests"],
+                }),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Plan,
+            approval_tx,
+        );
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace  ·  sess dock-session  ·  local  ·  -",
+                    "awaiting you  ·  mock/mock-model  ·  queue 0",
+                    "you  inspect wrap\n\nthought  generated 3 steps\n1. inspect files\n2. change parser\n3. run tests",
+                    &composer,
+                    Some(&approval),
+                    None,
+                )
+            })
+            .expect("render plan approval");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Approve this plan"), "{rendered}");
+        assert!(rendered.contains("1. inspect files"), "{rendered}");
+        assert!(rendered.contains("2. change parser"), "{rendered}");
+        assert!(rendered.contains("3. run tests"), "{rendered}");
+        assert!(rendered.contains("generated 3 steps"), "{rendered}");
+        assert!(rendered.contains("Approve once"), "{rendered}");
+        assert!(rendered.contains("Deny"), "{rendered}");
+        assert!(!rendered.contains("plan_id="), "{rendered}");
+        assert!(!rendered.contains("command="), "{rendered}");
+    }
+
+    #[test]
+    fn plan_approval_card_marks_omitted_steps() {
+        let rows = overlay_visual_rows(
+            "Approve this plan",
+            &(1..=8)
+                .map(|index| format!("{index}. step {index}"))
+                .collect::<Vec<_>>(),
+            40,
+        );
+        assert!(rows.iter().any(|row| row.contains("Approve this plan")));
+        assert!(rows.iter().any(|row| row.contains("1. step 1")));
+        assert!(rows.iter().any(|row| row.contains("more")), "{rows:?}");
+        assert_eq!(rows.len(), 6);
+        assert!(!rows.iter().any(|row| row.contains("8. step 8")));
     }
 
     #[test]

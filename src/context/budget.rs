@@ -295,9 +295,22 @@ fn build_runtime_system_prompt(
         format!("\n\n{context}")
     };
     format!(
-        "You are nib, a trustworthy local-first AI agent.\nProject root: {root}\nCurrent mode: {mode}{context}\n\nFollow only the persisted, approved plan. {tool_instruction}\nReport tool outcomes accurately and finish each step with a concise verification result."
+        "You are nib, a trustworthy local-first AI agent.\nProject root: {root}\nCurrent mode: {mode}{context}\n\nFollow only the persisted, approved plan. {tool_instruction}\nReport tool outcomes accurately and finish each step with a concise verification result.\n\n{}",
+        COMMUNICATION_STYLE
     )
 }
+
+/// Codex-style chat voice. The TUI already shows tool blocks; speech must say
+/// *why* work is happening, not dump arguments.
+const COMMUNICATION_STYLE: &str = "\
+## Communication
+Be concise, direct, and friendly.
+
+Before tools, write 1-2 sentences that say what you will do and why. Skip this only for a trivial isolated read. Do not dump arguments or JSON; the transcript shows the tool.
+
+Give a brief progress line when the next action changes. Do not run a long stretch of tools with no speech.
+
+When finished, lead with the outcome. Use short bullets. Do not paste files you already wrote, and do not tell the user to save or copy them. Ask only blocking questions; prefer the question tool.";
 
 fn build_planning_system_prompt(runtime_context: &str, session_context: &str) -> String {
     let runtime_context = if runtime_context.is_empty() {
@@ -311,7 +324,7 @@ fn build_planning_system_prompt(runtime_context: &str, session_context: &str) ->
         format!("\n\n{session_context}")
     };
     format!(
-        "You are a senior planner agent. Generate a step-by-step plan for the current goal. Follow the loaded project instructions and selected skills, account for profile memory and authoritative workload state, and use relevant session context. Use the `submit_plan` tool to submit the plan.{runtime_context}{session_context}"
+        "You are a senior planner agent. Generate a step-by-step plan for the current goal. Follow the loaded project instructions and selected skills, account for profile memory and authoritative workload state, and use relevant session context. Use the `submit_plan` tool to submit the plan. Be concise and direct. If you inspect the repo first, say in one sentence what you are checking and why, then call the tool.{runtime_context}{session_context}"
     )
 }
 
@@ -789,6 +802,10 @@ mod tests {
         );
         let system = bounded.messages[0]["content"].as_str().unwrap();
         assert!(system.contains("You are nib, a trustworthy local-first AI agent."));
+        assert!(system.contains("## Communication"));
+        assert!(
+            system.contains("Before tools, write 1-2 sentences that say what you will do and why")
+        );
         assert!(system.contains("AGENTS_HEAD"));
         assert!(system.contains("AGENTS_TAIL"));
         assert!(system.contains("TASK_HEAD"));
