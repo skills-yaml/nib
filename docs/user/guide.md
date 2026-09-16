@@ -502,7 +502,7 @@ the current project; it does not split the interface into separate coding and wo
 personas. Historical sessions are not a permanent pane. The first row shows the
 working directory and git branch on the left and the current model plus context
 usage on the right. The last row shows the command approval mode and the agent
-mode (`idle`, `execute`, `plan`, or `compact`). While an approval card is open the
+mode (`idle`, `execute`, `plan`, or `compact`). While an approval list is open the
 footer still keeps those fields and reads `WAITING APPROVAL` with the Y/N keys.
 `/status` retains the full session, transport, worktree path, context, and
 effective-permission diagnostics. If a requested session is missing, the
@@ -517,14 +517,14 @@ session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
 The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
-that still require interactive approval appear as a bordered `Approval required`
-card. The card states what nib wants to do, shows the command or path on its own
-lines, and pins two choices: `Y`/`Enter`/`1` approve once, or `N`/`Esc`/`2` deny.
-The transcript above the card stays visible. While the card is open the footer
-reads `WAITING APPROVAL` and shows the approval keys. When nib asks a
-question, a bordered `Question` card states `nib is asking`, shows the question,
-and numbers the choices. Press `Enter` or `1`-`9` to answer, or `Esc` to skip.
-While that card is open the footer reads `WAITING QUESTION`.
+that still require interactive approval use the same under-composer list as `/`
+options. The composer states what nib wants to do and shows the command or path;
+`Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
+`N`/`Esc`/`2` deny. Up/Down change the selected choice. The conversation stays
+visible. While approval is open the footer reads `WAITING APPROVAL`. When nib asks a
+question, the composer shows the question and numbered choices sit under the input.
+Press `Enter` or `1`-`9` to answer, or `Esc` to skip. While a question is open the
+footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 
@@ -533,9 +533,9 @@ shows a startup welcome with `Nib <version>`, the working directory, an update
 notice and `nib update` when a newer build is available, `/new` to start a fresh
 session and worktree, `/session` to switch sessions, and the most-used keys, plus
 the prompt. The first interactive start in a project asks permission to work in
-that directory before any goal runs. The TUI shows a `Permission required` card
-with the path; `Y`/`Enter` allow and persist `workspace.allowed`, and `N`/`Esc`
-quit. Later starts skip the card. A
+that directory before any goal runs. The composer shows the path and Allow/Decline
+choices sit under the input; `Y`/`Enter` allow and persist `workspace.allowed`, and
+`N`/`Esc` quit. Later starts skip the prompt. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
 conversation. Command signatures start on the same column as the `/` in the
@@ -558,21 +558,23 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript is a list of typed blocks with three distinct channels. Internal
-thinking is a dim `thought` block (planning and plan progress). Tool work is a
-`◆ tool` block that mutates from requested to running to a collapsed summary and
-includes the path or command when the stream provided it. Replies to you are a
-`nib` speech block. User and nib speech render markdown, including headings,
-lists, emphasis, inline code, and fenced code with lightweight syntax coloring.
-Tool and thought blocks stay as structured channels, not markdown.
-`Left`/`Right` expand or fold the selected block; expanded tool output is indented
-under a left accent. `Tab` moves focus between the composer and the transcript.
+The transcript is a list of typed blocks with muted colored dots. User input is
+`● you` (dusty teal). Replies are `● nib` (sage). Internal thinking is
+`● thought` (stone, italic). Tool calls are `● tool` (sand) and mutate from
+requested to running to a collapsed summary, including the path or command when
+the stream provided it. Expanded tool results use a slate `·` marker, distinct
+from the call. User and nib speech render markdown, including headings, lists,
+emphasis, inline code, and fenced code with lightweight syntax coloring. Tool and
+thought blocks stay as structured channels, not markdown.
+`Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
+composer and the transcript.
 With the transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it.
 Printable keys return to the composer and insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
-also work). Those keys still scroll while an approval card is open. Manual
+also work). Those keys still scroll while an approval list is open. Unmodified Up/Down
+select approval or question choices. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
 the footer labels that state. Submitting input or pressing `Ctrl+End` resumes
 follow-tail. The footer otherwise keeps approval mode and agent mode visible.
