@@ -4113,6 +4113,16 @@ fn pending_workspace_consent(project_root: &Path) -> Option<String> {
         .then(|| crate::interactive::folder_label(project_root))
 }
 
+fn grant_workspace_access_and_release_goal(
+    project_root: &Path,
+    consent_directory: &mut Option<String>,
+    pending_goal: &mut Option<String>,
+) -> Result<Option<String>, crate::config::ConfigError> {
+    crate::config::grant_workspace_access(project_root)?;
+    *consent_directory = None;
+    Ok(pending_goal.take())
+}
+
 #[cfg(test)]
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
@@ -4789,12 +4799,15 @@ fn draw_loop(
                     ) {
                         WorkspaceConsentAction::SelectionChanged => continue,
                         WorkspaceConsentAction::Allow => {
-                            match crate::config::grant_workspace_access(project_root) {
-                                Ok(()) => {
-                                    welcome.consent_directory = None;
+                            match grant_workspace_access_and_release_goal(
+                                project_root,
+                                &mut welcome.consent_directory,
+                                &mut pending_goal,
+                            ) {
+                                Ok(released_goal) => {
                                     timeline
                                         .push_status("Allowed work in this directory.".to_string());
-                                    if let Some(goal) = pending_goal.take() {
+                                    if let Some(goal) = released_goal {
                                         match spawn_tui_agent_worker(
                                             agent_profile_scope.clone(),
                                             active_session_id.clone(),
@@ -5865,7 +5878,9 @@ mod tests {
     #[test]
     fn workspace_consent_key_reducer_persists_the_gate_before_a_goal_can_start() {
         let project = tempdir().expect("project");
-        assert!(pending_workspace_consent(project.path()).is_some());
+        let mut consent_directory = pending_workspace_consent(project.path());
+        let mut pending_goal = Some("inspect the project".to_string());
+        assert!(consent_directory.is_some());
 
         let mut selected = 0;
         assert_eq!(
@@ -5878,15 +5893,31 @@ mod tests {
             WorkspaceConsentAction::Decline
         );
         assert!(pending_workspace_consent(project.path()).is_some());
+        assert_eq!(pending_goal.as_deref(), Some("inspect the project"));
 
         selected = 0;
         assert_eq!(
             workspace_consent_action_for_key(&mut selected, KeyCode::Char('y'), KeyModifiers::NONE),
             WorkspaceConsentAction::Allow
         );
-        crate::config::grant_workspace_access(project.path()).expect("persist workspace grant");
+        let released = grant_workspace_access_and_release_goal(
+            project.path(),
+            &mut consent_directory,
+            &mut pending_goal,
+        )
+        .expect("persist workspace grant before releasing goal");
+        assert_eq!(released.as_deref(), Some("inspect the project"));
+        assert!(pending_goal.is_none());
+        assert!(consent_directory.is_none());
         assert!(pending_workspace_consent(project.path()).is_none());
         assert!(crate::config::workspace_access_is_granted(project.path()).expect("read grant"));
+        assert!(grant_workspace_access_and_release_goal(
+            project.path(),
+            &mut consent_directory,
+            &mut pending_goal,
+        )
+        .expect("reload persisted workspace grant")
+        .is_none());
     }
 
     #[test]
