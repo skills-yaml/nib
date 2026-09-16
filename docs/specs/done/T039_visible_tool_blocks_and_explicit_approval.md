@@ -11,7 +11,7 @@
 ## Summary
 
 Make live tool work and approval decisions unmistakable in the TUI. Tool blocks get a
-Grok-style diamond marker, argument summary, and status coloring. Approval, questions,
+filled channel marker, argument summary, and status coloring. Approval, questions,
 and workspace permission use the same under-composer list as `/` options: the composer
 names the action and the choices sit under the input without covering the transcript
 or changing approval policy. Slash and path completion reserve rows under the composer
@@ -92,7 +92,7 @@ says `awaiting you`.
 
 ## Scope
 
-- Tool title composition with argument hints and diamond/accent rendering.
+- Tool title composition with argument hints and channel/accent rendering.
 - Distinct thought / tool / speech transcript channels.
 - Approval choices under the composer, footer override, Enter/1/2 aliases.
 - Question choices under the composer, Enter/1-9/Esc, WAITING QUESTION footer.
@@ -169,6 +169,9 @@ says `awaiting you`.
 
 - `src/interactive.rs` — tool argument hints, title composition, display_text,
   compact `TuiChrome`.
+- `src/llm/types.rs`, `src/agent/loop.rs`, `src/tools/core.rs`, and
+  `src/tools/executor.rs` — exact invocation identity from provider projection through
+  terminal output and completion.
 - `src/tui/mod.rs` — tool row styling, under-composer approval/question/workspace
   lists, header/footer chrome, keys, below-composer completion layout, waiting
   meter, transcript wheel/key scroll, startup welcome, idle Ctrl+C quit.
@@ -183,7 +186,7 @@ says `awaiting you`.
 ## Implementation Plan
 
 1. Compose tool titles with bounded argument hints across requested/running/terminal.
-2. Render diamond + accent tool blocks with status coloring.
+2. Render filled-marker + accent tool blocks with status coloring.
 3. Replace the approval dock dump with under-composer Y/N choices and status/footer.
 4. Add Enter/1/2 aliases; cover with TestBackend and key-dispatch tests.
 5. Reserve completion rows under the composer and stop overlaying the transcript.
@@ -197,7 +200,7 @@ says `awaiting you`.
 
 ## Validation Gates
 
-- Unit tests for argument hints and diamond display text.
+- Unit tests for argument hints and tool-channel display text.
 - Ratatui tests for under-composer approval choices, transcript visibility, and
   WAITING APPROVAL footer.
 - Tests for compact header/footer chrome and markdown speech (headings, lists, code).
@@ -215,9 +218,10 @@ says `awaiting you`.
 
 T038 remains the base block-transcript and key-contract owner. T039 owns the final
 channel styling, under-composer decisions, compact chrome, markdown speech, startup
-workspace consent, and live tool-call correlation described here. No approval
-authority, sandbox boundary, provider request contract, or session persistence schema
-changed. T023, T041, and FT-020 stay out of scope.
+workspace consent, and waiting-meter presentation. T038 owns exact live tool-call
+correlation; T039 relies on that identity when applying its final channel presentation.
+No approval authority, sandbox boundary, provider request contract, or session
+persistence schema changed. T023, T041, and FT-020 stay out of scope.
 
 ## Final Reconciliation (2026-09-16)
 

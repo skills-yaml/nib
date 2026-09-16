@@ -70,7 +70,8 @@ T036 quieted chrome but the default view is still a string dump:
 
 ## Acceptance Criteria
 
-- [x] One live tool call is one activity: `requested` then `running` then terminal mutate the same entry.
+- [x] Each live tool call is one activity: `requested` then `running` then terminal
+      mutate the same entry, including concurrent or repeated calls with the same name.
 - [x] Collapsed `list_directory` success shows an entry count, not a JSON object.
 - [x] Expanding a tool block reveals bounded detail; collapsing hides it.
 - [x] Tab with completion closed focuses the transcript; Tab from transcript returns to the composer.
@@ -91,6 +92,9 @@ T036 quieted chrome but the default view is still a string dump:
 ## Affected Areas
 
 - `src/interactive.rs` — activity fold flag, mutating tool projection, tool summaries, session labels, optional chrome-key helper.
+- `src/llm/types.rs`, `src/agent/loop.rs`, `src/tools/core.rs`, and
+  `src/tools/executor.rs` — exact invocation identity on projected tool lifecycle
+  and terminal-output events.
 - `src/tui/mod.rs` — block render, focus, keys, composer chrome, chrome cache, completion Enter, copy.
 - `docs/user/guide.md` — layout and key contract.
 - `docs/specs/README.md` — lifecycle inventory.
