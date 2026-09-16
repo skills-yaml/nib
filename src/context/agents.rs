@@ -3,7 +3,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -53,8 +53,10 @@ impl ResolvedInstructions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MetadataIdentity {
+    file: crate::fs_security::FileIdentitySnapshot,
     len: u64,
     modified_nanos: u128,
+    changed_nanos: i128,
 }
 
 #[derive(Debug, Clone)]
@@ -169,8 +171,12 @@ impl InstructionResolver {
         let identity_material = sources
             .iter()
             .flat_map(|source| {
+                let source_identity_path = source
+                    .path
+                    .strip_prefix(&self.repository_root)
+                    .unwrap_or(&source.path);
                 [
-                    source.path.to_string_lossy().as_bytes().to_vec(),
+                    source_identity_path.to_string_lossy().as_bytes().to_vec(),
                     source.scope.as_bytes().to_vec(),
                     source.identity.as_bytes().to_vec(),
                 ]
@@ -337,7 +343,7 @@ impl InstructionResolver {
     }
 
     fn read_instruction(&mut self, path: &Path) -> Result<ResolvedInstructionSource, String> {
-        let before = instruction_metadata(path)?;
+        let (mut file, before) = open_instruction(path)?;
         if let Some(cached) = self
             .cache
             .get(path)
@@ -350,12 +356,6 @@ impl InstructionResolver {
                 content: cached.content.clone(),
             });
         }
-        let mut file = fs::File::open(path).map_err(|error| {
-            format!(
-                "failed to read required instruction {}: {error}",
-                path.display()
-            )
-        })?;
         let mut bytes = Vec::with_capacity(before.len as usize);
         file.by_ref()
             .take(MAX_INSTRUCTION_FILE_BYTES + 1)
@@ -372,7 +372,7 @@ impl InstructionResolver {
                 path.display()
             ));
         }
-        let after = instruction_metadata(path)?;
+        let (_, after) = open_instruction(path)?;
         if before != after {
             return Err(format!(
                 "required instruction changed while being read: {}",
@@ -404,10 +404,28 @@ impl InstructionResolver {
     }
 }
 
-fn instruction_metadata(path: &Path) -> Result<MetadataIdentity, String> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+fn open_instruction(path: &Path) -> Result<(File, MetadataIdentity), String> {
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
         format!(
             "failed to inspect required instruction {}: {error}",
+            path.display()
+        )
+    })?;
+    if crate::fs_security::metadata_is_link_or_reparse(&path_metadata) || !path_metadata.is_file() {
+        return Err(format!(
+            "required instruction must remain a regular local file: {}",
+            path.display()
+        ));
+    }
+    let file = open_instruction_without_following_links(path).map_err(|error| {
+        format!(
+            "failed to open required instruction {} without following links: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        format!(
+            "failed to inspect opened required instruction {}: {error}",
             path.display()
         )
     })?;
@@ -429,10 +447,64 @@ fn instruction_metadata(path: &Path) -> Result<MetadataIdentity, String> {
         .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    Ok(MetadataIdentity {
-        len: metadata.len(),
-        modified_nanos,
-    })
+    let file_identity = crate::fs_security::file_identity_snapshot(&file).map_err(|error| {
+        format!(
+            "failed to identify opened required instruction {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok((
+        file,
+        MetadataIdentity {
+            file: file_identity,
+            len: metadata.len(),
+            modified_nanos,
+            changed_nanos: metadata_change_nanos(&metadata),
+        },
+    ))
+}
+
+#[cfg(any(unix, windows))]
+fn open_instruction_without_following_links(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_instruction_without_following_links(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "stable no-follow instruction reads are unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn metadata_change_nanos(metadata: &fs::Metadata) -> i128 {
+    use std::os::unix::fs::MetadataExt;
+    i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec())
+}
+
+#[cfg(windows)]
+fn metadata_change_nanos(metadata: &fs::Metadata) -> i128 {
+    use std::os::windows::fs::MetadataExt;
+    i128::from(metadata.last_write_time())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_change_nanos(_metadata: &fs::Metadata) -> i128 {
+    0
 }
 
 fn instruction_order_key(root: &Path, path: &Path) -> (usize, String, usize) {
@@ -484,17 +556,26 @@ pub fn tool_instruction_scopes(
             vec![declared("path").unwrap_or_else(|| project_root.to_path_buf())]
         }
         "run_terminal" => {
-            let mut paths = arguments
+            let affected = arguments
                 .get("affected_paths")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(|path| project_root.join(path))
-                .collect::<Vec<_>>();
-            if paths.is_empty() {
-                paths.push(declared("cwd").unwrap_or_else(|| project_root.to_path_buf()));
+                .ok_or_else(|| {
+                    "run_terminal requires explicit affected_paths for bounded instruction coverage"
+                        .to_string()
+                })?;
+            if affected.is_empty() {
+                return Err(
+                    "run_terminal affected_paths cannot be empty for bounded instruction coverage"
+                        .to_string(),
+                );
             }
+            let mut paths = vec![declared("cwd").unwrap_or_else(|| project_root.to_path_buf())];
+            paths.extend(
+                affected
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|path| project_root.join(path)),
+            );
             paths
         }
         "apply_patch" => patch_scopes(project_root, arguments)?,
@@ -652,6 +733,32 @@ mod tests {
     }
 
     #[test]
+    fn replacement_with_identical_content_is_revalidated_by_file_identity() {
+        let project = tempdir().expect("project");
+        let instructions = project.path().join("AGENTS.md");
+        fs::write(&instructions, "stable rule").expect("instructions");
+        let mut resolver = InstructionResolver::new(project.path()).expect("resolver");
+        resolver.home = None;
+        let first = resolver
+            .resolve_for_scopes([project.path()])
+            .expect("first resolution");
+        let first_reads = resolver.physical_reads();
+
+        let displaced = project.path().join("AGENTS.previous.md");
+        fs::rename(&instructions, &displaced).expect("displace prior inode");
+        fs::write(&instructions, "stable rule").expect("replace instructions");
+        let second = resolver
+            .resolve_for_scopes([project.path()])
+            .expect("replacement resolution");
+
+        assert_eq!(
+            first.identity, second.identity,
+            "content identity is stable"
+        );
+        assert_eq!(resolver.physical_reads(), first_reads + 1);
+    }
+
+    #[test]
     fn linked_and_oversized_required_instructions_fail_closed() {
         let project = tempdir().expect("project");
         fs::write(
@@ -691,9 +798,23 @@ mod tests {
         let terminal = tool_instruction_scopes(
             project,
             "run_terminal",
-            &serde_json::json!({"command": "cat nested/secret.rs", "cwd": "src"}),
+            &serde_json::json!({
+                "command": "opaque helper",
+                "cwd": "src",
+                "affected_paths": ["nested/secret.rs"]
+            }),
         )
         .expect("terminal scope");
-        assert_eq!(terminal, vec![project.join("src")]);
+        assert_eq!(
+            terminal,
+            vec![project.join("nested/secret.rs"), project.join("src")]
+        );
+        let error = tool_instruction_scopes(
+            project,
+            "run_terminal",
+            &serde_json::json!({"command": "cat nested/secret.rs", "cwd": "src"}),
+        )
+        .expect_err("command text cannot prove instruction scope");
+        assert!(error.contains("explicit affected_paths"));
     }
 }

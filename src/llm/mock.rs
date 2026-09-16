@@ -386,7 +386,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 1; printf '%s\\n' \"$NIB_DURABLE_TOKEN\"; cat ../../../config.toml",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -399,7 +400,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 30; printf 'must not complete\\n'",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -412,7 +414,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 2; printf 'durable worker complete\\n'",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -446,7 +449,8 @@ impl LlmClient for MockLlmClient {
                         ToolCallRequest::new(
                             "run_terminal",
                             json!({
-                                "command": "printf changed > mixed-side-effect.txt"
+                                "command": "printf changed > mixed-side-effect.txt",
+                                "affected_paths": ["mixed-side-effect.txt"]
                             }),
                         ),
                     ],
@@ -459,7 +463,8 @@ impl LlmClient for MockLlmClient {
                     vec![ToolCallRequest::new(
                         "run_terminal",
                         json!({
-                            "command": "printf 'recoverable stderr\\n' >&2; exit 7"
+                            "command": "printf 'recoverable stderr\\n' >&2; exit 7",
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -470,7 +475,7 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "printf ok"}),
+                        json!({"command": "printf ok", "affected_paths": ["."]}),
                     )],
                     scope,
                     false,
@@ -480,7 +485,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "sleep 1; printf 'completed before steering\\n'"}),
+                        json!({
+                            "command": "sleep 1; printf 'completed before steering\\n'",
+                            "affected_paths": ["."]
+                        }),
                     )],
                     scope,
                     false,
@@ -497,7 +505,8 @@ impl LlmClient for MockLlmClient {
                         ToolCallRequest::new(
                             "run_terminal",
                             json!({
-                                "command": "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet"
+                                "command": "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet",
+                                "affected_paths": [".tmp", "target"]
                             }),
                         ),
                     ],
@@ -509,7 +518,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "printf changed > delegated-side-effect.txt"}),
+                        json!({
+                            "command": "printf changed > delegated-side-effect.txt",
+                            "affected_paths": ["delegated-side-effect.txt"]
+                        }),
                     )],
                     scope,
                     false,
@@ -519,7 +531,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "curl --version > delegated-network-side-effect.txt"}),
+                        json!({
+                            "command": "curl --version > delegated-network-side-effect.txt",
+                            "affected_paths": ["delegated-network-side-effect.txt"]
+                        }),
                     )],
                     scope,
                     false,

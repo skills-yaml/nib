@@ -770,7 +770,21 @@ fn safe_question_arguments(arguments: &Value, sensitive_values: &[String]) -> Va
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({"question": question, "options": options})
+    let dependent_paths = arguments
+        .get("dependent_paths")
+        .and_then(Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|path| {
+                    crate::interactive::bounded_public_text(path, sensitive_values, 4_096, false)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({"question": question, "options": options, "dependent_paths": dependent_paths})
 }
 
 fn safe_question_execution_arguments(
@@ -809,6 +823,13 @@ fn safe_question_execution_arguments(
     arguments
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReusedClarificationAnswer {
+    answer: String,
+    answer_message_index: Option<usize>,
+    answer_event_index: Option<usize>,
+}
+
 fn persist_question_required(
     store: &SessionStore,
     session_id: &str,
@@ -816,7 +837,8 @@ fn persist_question_required(
     invocation_id: crate::tools::ToolInvocationId,
     question: &str,
     options: &[String],
-) -> Result<Option<(String, usize)>, String> {
+    dependent_paths: &[String],
+) -> Result<Option<ReusedClarificationAnswer>, String> {
     store
         .update_session(session_id, |session| {
             let prior = session
@@ -826,12 +848,14 @@ fn persist_question_required(
                 .find_map(|clarification| {
                     (clarification.plan_id.as_deref() == plan_id
                         && clarification.question == question
+                        && clarification.options == options
                         && clarification.status == ClarificationStatus::Answered)
                         .then(|| {
-                            Some((
-                                clarification.answer.clone()?,
-                                clarification.answer_message_index?,
-                            ))
+                            Some(ReusedClarificationAnswer {
+                                answer: clarification.answer.clone()?,
+                                answer_message_index: clarification.answer_message_index,
+                                answer_event_index: clarification.answer_event_index,
+                            })
                         })
                         .flatten()
                 });
@@ -851,14 +875,16 @@ fn persist_question_required(
                 plan_id: plan_id.map(str::to_string),
                 question: question.to_string(),
                 options: options.to_vec(),
+                dependent_paths: dependent_paths.to_vec(),
                 status: if prior.is_some() {
                     ClarificationStatus::Answered
                 } else {
                     ClarificationStatus::Pending
                 },
-                answer: prior.as_ref().map(|(answer, _)| answer.clone()),
+                answer: prior.as_ref().map(|prior| prior.answer.clone()),
                 question_event_index: event_index,
-                answer_message_index: prior.as_ref().map(|(_, index)| *index),
+                answer_message_index: prior.as_ref().and_then(|prior| prior.answer_message_index),
+                answer_event_index: prior.as_ref().and_then(|prior| prior.answer_event_index),
                 reason: prior
                     .as_ref()
                     .map(|_| "reused exact answered question in the same plan".to_string()),
@@ -876,48 +902,74 @@ fn persist_question_observation(
     answer: &Result<String, String>,
     reused_answer: bool,
 ) -> Result<(), String> {
-    let origin = if answer.is_ok() && !reused_answer {
-        MessageOrigin::HumanQuestionAnswer
-    } else {
-        MessageOrigin::ToolOutput
-    };
-    let persisted = store
+    store
         .try_append_message_with_origin(
             session_id,
             "tool",
             &json!({"observations": observations}).to_string(),
-            origin,
+            MessageOrigin::ToolOutput,
         )
         .map_err(|error| error.to_string())?;
-    let message_index = persisted.messages.len().saturating_sub(1);
     store
         .update_session(session_id, |session| {
-            let clarification = session
+            let target = session
                 .clarifications
-                .iter_mut()
+                .iter()
                 .rev()
                 .find(|clarification| clarification.invocation_id == invocation_id)
                 .ok_or_else(|| {
                     crate::session::SessionError::InvalidMutation(
                         "question outcome has no persisted clarification".to_string(),
                     )
-                })?;
+                })?
+                .clone();
             match answer {
                 Ok(answer) => {
-                    clarification.status = ClarificationStatus::Answered;
-                    clarification.answer = Some(answer.clone());
-                    if !reused_answer {
-                        clarification.answer_message_index = Some(message_index);
-                        clarification.reason = None;
+                    let (answer_message_index, answer_event_index) = if reused_answer {
+                        (target.answer_message_index, target.answer_event_index)
+                    } else {
+                        let event_index = session.events.len();
+                        append_session_event(
+                            session,
+                            "human_question_answer_received",
+                            json!({
+                                "invocation_id": invocation_id,
+                                "question_event_index": target.question_event_index,
+                                "answer": answer,
+                            }),
+                        );
                         session.human_intent.push(HumanIntentRecord {
                             kind: HumanIntentKind::QuestionAnswer,
                             text: answer.clone(),
-                            source_message_index: Some(message_index),
-                            source_event_index: None,
+                            source_message_index: None,
+                            source_event_index: Some(event_index),
                         });
+                        (None, Some(event_index))
+                    };
+                    for clarification in session.clarifications.iter_mut().filter(|candidate| {
+                        candidate.plan_id == target.plan_id
+                            && candidate.question == target.question
+                            && candidate.options == target.options
+                            && candidate.status != ClarificationStatus::Answered
+                    }) {
+                        clarification.status = ClarificationStatus::Answered;
+                        clarification.answer = Some(answer.clone());
+                        clarification.answer_message_index = answer_message_index;
+                        clarification.answer_event_index = answer_event_index;
+                        clarification.reason = (clarification.invocation_id != invocation_id)
+                            .then(|| {
+                                "resolved by a later valid answer to the same question and option set"
+                                    .to_string()
+                            });
                     }
                 }
                 Err(error) => {
+                    let clarification = session
+                        .clarifications
+                        .iter_mut()
+                        .rev()
+                        .find(|clarification| clarification.invocation_id == invocation_id)
+                        .expect("target clarification was cloned above");
                     clarification.status = if error.to_ascii_lowercase().contains("cancel") {
                         ClarificationStatus::Cancelled
                     } else {
@@ -931,18 +983,94 @@ fn persist_question_observation(
         .map_err(|error| error.to_string())
 }
 
-fn tool_batch_depends_on_clarification(tool_calls: &[ToolCallRequest]) -> bool {
-    tool_calls.iter().any(|call| {
-        !matches!(
-            call.name.as_str(),
-            "ask_question"
-                | "read_file"
-                | "list_directory"
-                | "grep"
-                | "search_web"
-                | "read_url_content"
-        )
-    })
+fn bounded_clarification_dependency_paths(arguments: &Value) -> Result<Vec<String>, String> {
+    let Some(values) = arguments.get("dependent_paths") else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| "ask_question dependent_paths must be an array".to_string())?;
+    if values.len() > 32 {
+        return Err("ask_question dependent_paths exceeds the 32-path limit".to_string());
+    }
+    let mut paths = values
+        .iter()
+        .map(|value| {
+            let path = value
+                .as_str()
+                .ok_or_else(|| "ask_question dependent path must be a string".to_string())?;
+            let parsed = Path::new(path);
+            if path.is_empty()
+                || parsed.is_absolute()
+                || parsed.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "ask_question dependent path is not a bounded worktree-relative path: {path}"
+                ));
+            }
+            Ok(path.to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn scopes_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn unresolved_clarification_dependencies(
+    session: &Session,
+    plan_id: Option<&str>,
+    instruction_root: &Path,
+    tool_calls: &[ToolCallRequest],
+) -> Result<Vec<crate::tools::ToolInvocationId>, String> {
+    let unresolved = session
+        .clarifications
+        .iter()
+        .filter(|clarification| {
+            clarification.plan_id.as_deref() == plan_id
+                && matches!(
+                    clarification.status,
+                    ClarificationStatus::Pending
+                        | ClarificationStatus::Unresolved
+                        | ClarificationStatus::Cancelled
+                )
+        })
+        .collect::<Vec<_>>();
+    let mut blockers = Vec::new();
+    for clarification in unresolved {
+        let dependencies = clarification
+            .dependent_paths
+            .iter()
+            .map(|path| instruction_root.join(path))
+            .collect::<Vec<_>>();
+        let blocked = tool_calls
+            .iter()
+            .filter(|call| call.name != "ask_question")
+            .try_fold(false, |blocked, call| -> Result<bool, String> {
+                if blocked || dependencies.is_empty() {
+                    return Ok(true);
+                }
+                let scopes =
+                    tool_instruction_scopes(instruction_root, &call.name, &call.arguments)?;
+                Ok(scopes.iter().any(|scope| {
+                    dependencies
+                        .iter()
+                        .any(|dependency| scopes_overlap(scope, dependency))
+                }))
+            })?;
+        if blocked {
+            blockers.push(clarification.invocation_id);
+        }
+    }
+    Ok(blockers)
 }
 
 #[derive(Clone, Default)]
@@ -1832,8 +1960,8 @@ async fn run_agent_loop_inner(
     };
     let mut context_sections =
         assemble_runtime_context_sections(&project_root, goal, &active_skills, &memory);
-    let mut instruction_resolver = InstructionResolver::new(&project_root)?;
-    let mut instruction_scopes = vec![project_root.clone()];
+    let mut instruction_root = project_root.clone();
+    let mut instruction_scopes = vec![instruction_root.clone()];
     if let Ok(Some(session)) = store.load_result(session_id) {
         let attachments = session
             .messages
@@ -1845,14 +1973,41 @@ async fn run_agent_loop_inner(
         instruction_scopes.extend(
             attachments
                 .iter()
-                .map(|attachment| project_root.join(&attachment.path)),
+                .map(|attachment| instruction_root.join(&attachment.path)),
         );
         context_sections.attachments = attachment_context_sections(&project_root, attachments);
     }
     instruction_scopes.sort();
     instruction_scopes.dedup();
+    let mut instruction_resolver = match InstructionResolver::new(&instruction_root) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return reconcile_preflight_instruction_failure(
+                &store,
+                session_id,
+                &normalized_goal,
+                "initial_resolution",
+                format!("required project instructions are unavailable: {error}"),
+                &cfg.stream_tx,
+            )
+            .await;
+        }
+    };
     let resolved_instructions =
-        instruction_resolver.resolve_for_scopes(instruction_scopes.iter())?;
+        match instruction_resolver.resolve_for_scopes(instruction_scopes.iter()) {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                return reconcile_preflight_instruction_failure(
+                    &store,
+                    session_id,
+                    &normalized_goal,
+                    "initial_resolution",
+                    format!("required project instructions are unavailable: {error}"),
+                    &cfg.stream_tx,
+                )
+                .await;
+            }
+        };
     let mut instruction_identity = resolved_instructions.identity.clone();
     context_sections.agents = resolved_instructions.render();
     let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
@@ -2106,13 +2261,43 @@ async fn run_agent_loop_inner(
                     {
                         continue;
                     }
-                    llm_turns += 1;
                     let planning_session = store
                         .load_result(session_id)
                         .map_err(|error| {
                             format!("failed to load session context for planning: {error}")
                         })?
                         .ok_or_else(|| "session disappeared before planning".to_string())?;
+                    if let Err(error) = crate::agent::planner::validate_planning_instruction_context(
+                        goal,
+                        &context_sections,
+                        Some(&planning_session),
+                        nib_cfg.llm.context_length,
+                    ) {
+                        let error = format!(
+                            "required project instructions cannot fit the planning request: {error}"
+                        );
+                        persist_instruction_context_block(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            "planning_prompt_fit",
+                            &error,
+                        )?;
+                        reconciliation_reason = Some("instruction_context_missing".to_string());
+                        state = transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    llm_turns += 1;
                     match crate::agent::planner::generate_plan_with_context_events_bounded_scoped(
                         &llm,
                         goal,
@@ -2439,11 +2624,34 @@ async fn run_agent_loop_inner(
                 }
             }
             AgentState::BuildContext => {
-                let refreshed = instruction_resolver
-                    .resolve_for_scopes(instruction_scopes.iter())
-                    .map_err(|error| {
-                        format!("required project instructions are unavailable: {error}")
-                    })?;
+                let refreshed =
+                    match instruction_resolver.resolve_for_scopes(instruction_scopes.iter()) {
+                        Ok(refreshed) => refreshed,
+                        Err(error) => {
+                            let error =
+                                format!("required project instructions are unavailable: {error}");
+                            persist_instruction_context_block(
+                                &store,
+                                session_id,
+                                active_plan_id.as_deref(),
+                                &normalized_goal,
+                                "refresh",
+                                &error,
+                            )?;
+                            reconciliation_reason = Some("instruction_context_missing".to_string());
+                            state = transition_state(
+                                &store,
+                                session_id,
+                                state,
+                                AgentState::Reconciliation,
+                                &mut trace,
+                                &mut transition_count,
+                                &cfg.stream_tx,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
                 if refreshed.identity != instruction_identity {
                     let previous_identity =
                         std::mem::replace(&mut instruction_identity, refreshed.identity.clone());
@@ -2614,17 +2822,51 @@ async fn run_agent_loop_inner(
                             .as_ref()
                             .and_then(|plan| plan.steps.get(plan.current_step_index))
                             .map(|step| format!("{}\nStatus: {}", step.description, step.status));
-                        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+                        let bounded = match build_bounded_runtime_input(RuntimePromptRequest {
                             context: &context_sections,
                             session: &session,
                             current_step: current_step.as_deref(),
                             tools: tools_ref,
                             mode: &cfg.mode,
-                            project_root: &project_root,
+                            project_root: &instruction_root,
                             tool_use_enforcement: nib_cfg.agent.tool_use_enforcement,
                             context_length: nib_cfg.llm.context_length,
-                        })?;
-                        ensure_required_instructions_present(&bounded, &context_sections.agents)?;
+                        })
+                        .and_then(|bounded| {
+                            ensure_required_instructions_present(
+                                &bounded,
+                                &context_sections.agents,
+                            )?;
+                            Ok(bounded)
+                        }) {
+                            Ok(bounded) => bounded,
+                            Err(error) => {
+                                let error = format!(
+                                    "required project instructions cannot fit the runtime request: {error}"
+                                );
+                                persist_instruction_context_block(
+                                    &store,
+                                    session_id,
+                                    active_plan_id.as_deref(),
+                                    &normalized_goal,
+                                    "runtime_prompt_fit",
+                                    &error,
+                                )?;
+                                reconciliation_reason =
+                                    Some("instruction_context_missing".to_string());
+                                state = transition_state(
+                                    &store,
+                                    session_id,
+                                    state,
+                                    AgentState::Reconciliation,
+                                    &mut trace,
+                                    &mut transition_count,
+                                    &cfg.stream_tx,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
                         store
                             .record_event(
                                 session_id,
@@ -2910,11 +3152,115 @@ async fn run_agent_loop_inner(
                     .await?;
                     continue;
                 }
+                let clarification_blockers = store
+                    .load_result(session_id)
+                    .map_err(|error| error.to_string())?
+                    .map(|session| {
+                        unresolved_clarification_dependencies(
+                            &session,
+                            active_plan_id.as_deref(),
+                            &instruction_root,
+                            &tool_calls,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                if !clarification_blockers.is_empty() {
+                    store
+                        .record_event(
+                            session_id,
+                            "tool_batch_rejected",
+                            json!({
+                                "reason": "unresolved_clarification",
+                                "tool_calls": tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                                "clarification_invocation_ids": clarification_blockers,
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    update_plan_tool_outcome(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                        &normalized_goal,
+                        false,
+                        "required clarification remains unresolved",
+                    )?;
+                    tool_calls.clear();
+                    response_content = None;
+                    reconciliation_reason = Some("unresolved_clarification".to_string());
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                let batch_requires_worktree = tool_calls.iter().any(|call| {
+                    crate::tools::registry::get_tool_metadata(&call.name)
+                        .is_some_and(|metadata| metadata.requires_worktree)
+                });
+                let mut instruction_root_rebound = false;
+                if batch_requires_worktree {
+                    let managed_root = executor.prepare_session_worktree(session_id).await?;
+                    if managed_root != instruction_root {
+                        let translated_scopes = instruction_scopes
+                            .iter()
+                            .map(|scope| {
+                                scope
+                                    .strip_prefix(&instruction_root)
+                                    .map(|relative| managed_root.join(relative))
+                                    .map_err(|_| {
+                                        "instruction scope cannot be rebound to the managed session worktree"
+                                            .to_string()
+                                    })
+                        })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        instruction_root = managed_root;
+                        instruction_scopes = translated_scopes;
+                        instruction_root_rebound = true;
+                        instruction_resolver = match InstructionResolver::new(&instruction_root) {
+                            Ok(resolver) => resolver,
+                            Err(error) => {
+                                let error = format!(
+                                    "required project instructions are unavailable in the managed session worktree: {error}"
+                                );
+                                persist_instruction_context_block(
+                                    &store,
+                                    session_id,
+                                    active_plan_id.as_deref(),
+                                    &normalized_goal,
+                                    "managed_worktree_resolution",
+                                    &error,
+                                )?;
+                                tool_calls.clear();
+                                response_content = None;
+                                reconciliation_reason =
+                                    Some("instruction_context_missing".to_string());
+                                state = transition_state(
+                                    &store,
+                                    session_id,
+                                    state,
+                                    AgentState::Reconciliation,
+                                    &mut trace,
+                                    &mut transition_count,
+                                    &cfg.stream_tx,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
+                    }
+                }
                 let mut proposed_scopes = instruction_scopes.clone();
                 let scoped_resolution = (|| {
                     for call in &tool_calls {
                         proposed_scopes.extend(tool_instruction_scopes(
-                            &project_root,
+                            &instruction_root,
                             &call.name,
                             &call.arguments,
                         )?);
@@ -2929,13 +3275,14 @@ async fn run_agent_loop_inner(
                         let error = format!(
                             "required project instructions are unavailable for the proposed tool scope: {error}"
                         );
-                        store
-                            .record_event(
-                                session_id,
-                                "instruction_context_missing",
-                                json!({"error": error, "scope_count": proposed_scopes.len()}),
-                            )
-                            .map_err(|audit_error| audit_error.to_string())?;
+                        persist_instruction_context_block(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            "tool_scope",
+                            &error,
+                        )?;
                         if provider_continuation.take().is_some() {
                             record_provider_continuation_lifecycle(
                                 &store,
@@ -2963,14 +3310,6 @@ async fn run_agent_loop_inner(
                                 MessageOrigin::ToolOutput,
                             )
                             .map_err(|append_error| append_error.to_string())?;
-                        update_plan_tool_outcome(
-                            &store,
-                            session_id,
-                            active_plan_id.as_deref(),
-                            &normalized_goal,
-                            false,
-                            &error,
-                        )?;
                         tool_calls.clear();
                         response_content = None;
                         reconciliation_reason = Some("instruction_context_missing".to_string());
@@ -3047,47 +3386,22 @@ async fn run_agent_loop_inner(
                     .await?;
                     continue;
                 }
-                instruction_scopes = proposed_scopes;
-                let unresolved_clarification = store
-                    .load_result(session_id)
-                    .map_err(|error| error.to_string())?
-                    .is_some_and(|session| {
-                        session.has_unresolved_clarification(active_plan_id.as_deref())
-                    });
-                if unresolved_clarification && tool_batch_depends_on_clarification(&tool_calls) {
+                if instruction_root_rebound {
+                    context_sections.agents = resolved.render();
                     store
                         .record_event(
                             session_id,
-                            "tool_batch_rejected",
+                            "instruction_context_rebound",
                             json!({
-                                "reason": "unresolved_clarification",
-                                "tool_calls": tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                                "identity": instruction_identity,
+                                "scope_count": proposed_scopes.len(),
+                                "instruction_root": instruction_root,
+                                "execution_deferred": false,
                             }),
                         )
                         .map_err(|error| error.to_string())?;
-                    update_plan_tool_outcome(
-                        &store,
-                        session_id,
-                        active_plan_id.as_deref(),
-                        &normalized_goal,
-                        false,
-                        "required clarification remains unresolved",
-                    )?;
-                    tool_calls.clear();
-                    response_content = None;
-                    reconciliation_reason = Some("unresolved_clarification".to_string());
-                    state = transition_state(
-                        &store,
-                        session_id,
-                        state,
-                        AgentState::Reconciliation,
-                        &mut trace,
-                        &mut transition_count,
-                        &cfg.stream_tx,
-                    )
-                    .await?;
-                    continue;
                 }
+                instruction_scopes = proposed_scopes;
                 for call in &tool_calls {
                     let tool_call = ToolCall {
                         invocation_id: call.invocation_id,
@@ -3587,6 +3901,7 @@ async fn run_agent_loop_inner(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let dependent_paths = bounded_clarification_dependency_paths(&request.arguments)?;
                 let reused = persist_question_required(
                     &store,
                     session_id,
@@ -3594,6 +3909,7 @@ async fn run_agent_loop_inner(
                     request.invocation_id,
                     &question,
                     &options,
+                    &dependent_paths,
                 )?;
                 if reused.is_none() {
                     emit(
@@ -3608,7 +3924,7 @@ async fn run_agent_loop_inner(
 
                 let reused_answer = reused.is_some();
                 let answer = match reused {
-                    Some((answer, _)) => Ok(answer),
+                    Some(prior) => Ok(prior.answer),
                     None => match cfg.question_handler.as_ref() {
                         Some(handler) => handler.ask(&question, &options).await,
                         None => Err("no question handler configured".to_string()),
@@ -3917,7 +4233,12 @@ async fn run_agent_loop_inner(
                         "plan_approval_denied".to_string()
                     }
                     other => {
-                        if is_agent_failure_outcome(other) {
+                        if is_agent_failure_outcome(other)
+                            && !matches!(
+                                other,
+                                "instruction_context_missing" | "unresolved_clarification"
+                            )
+                        {
                             block_active_plan_for_failure(
                                 &store,
                                 session_id,
@@ -4305,6 +4626,129 @@ async fn reconcile_preflight_llm_failure(
     })
 }
 
+fn persist_instruction_context_block(
+    store: &SessionStore,
+    session_id: &str,
+    active_plan_id: Option<&str>,
+    normalized_goal: &str,
+    stage: &str,
+    error: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            if let Some(plan) = session.plan.as_mut().filter(|plan| {
+                plan.matches_goal(normalized_goal)
+                    && !plan.is_complete()
+                    && active_plan_id.is_none_or(|expected| plan.id == expected)
+            }) {
+                plan.outcome = Some("instruction_context_missing".to_string());
+                if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
+                    if step.status != "Completed" {
+                        step.status = "Blocked".to_string();
+                        step.outcome = Some(error.to_string());
+                        step.updated_at = Some(Utc::now());
+                    }
+                }
+            }
+            append_session_event(
+                session,
+                "instruction_context_missing",
+                json!({
+                    "stage": stage,
+                    "error": error,
+                    "action": "restore readable bounded project instructions or increase the context budget, then retry the same plan",
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|audit_error| {
+            format!("failed to persist missing instruction context: {audit_error}")
+        })
+}
+
+async fn reconcile_preflight_instruction_failure(
+    store: &SessionStore,
+    session_id: &str,
+    normalized_goal: &str,
+    stage: &str,
+    error: String,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AgentRunSummary, String> {
+    persist_instruction_context_block(store, session_id, None, normalized_goal, stage, &error)?;
+    let (last_message, tool_call_count) = store
+        .update_session(session_id, |session| {
+            let previous_state = last_persisted_state(session);
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": previous_state, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({
+                    "outcome": "instruction_context_missing",
+                    "continue": false,
+                    "reason": error,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({
+                    "from": AgentState::Reconciliation.as_str(),
+                    "to": AgentState::Done.as_str(),
+                }),
+            );
+            Ok((
+                session
+                    .messages
+                    .last()
+                    .map(|message| message.content.clone()),
+                session.tool_calls.len(),
+            ))
+        })
+        .map_err(|audit_error| {
+            format!("failed to reconcile missing instruction context: {audit_error}")
+        })?;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Reconciliation.as_str().to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "instruction_context_missing".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: String::new(),
+        steps_taken: 0,
+        last_message,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "instruction_context_missing".to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
 fn last_persisted_state(session: &Session) -> Option<String> {
     session
         .events
@@ -4536,6 +4980,8 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "transition_limit_reached"
                 | "turn_limit_reached"
                 | "provider_continuation_interrupted"
+                | "instruction_context_missing"
+                | "unresolved_clarification"
         )
 }
 
@@ -5127,6 +5573,7 @@ mod tests {
             first,
             "Which verification mode?",
             &["fast".to_string(), "full".to_string()],
+            &["src".to_string()],
         )
         .expect("persist question")
         .is_none());
@@ -5144,10 +5591,15 @@ mod tests {
         let answered = reloaded.clarifications.last().expect("clarification");
         assert_eq!(answered.status, ClarificationStatus::Answered);
         assert_eq!(answered.answer.as_deref(), Some("full"));
-        let source = answered.answer_message_index.expect("answer source");
+        assert!(answered.answer_message_index.is_none());
+        let source = answered.answer_event_index.expect("answer source");
         assert_eq!(
-            reloaded.message_origin(source),
-            MessageOrigin::HumanQuestionAnswer
+            reloaded.events[source].kind,
+            "human_question_answer_received"
+        );
+        assert_eq!(
+            reloaded.message_origin(reloaded.messages.len() - 1),
+            MessageOrigin::ToolOutput
         );
         assert_eq!(
             reloaded.human_intent.last().expect("human answer").text,
@@ -5170,10 +5622,12 @@ mod tests {
             second,
             "Which verification mode?",
             &["fast".to_string(), "full".to_string()],
+            &["src".to_string()],
         )
         .expect("reuse question")
         .expect("prior answer");
-        assert_eq!(reused, ("full".to_string(), source));
+        assert_eq!(reused.answer, "full");
+        assert_eq!(reused.answer_event_index, Some(source));
 
         let third = crate::tools::ToolInvocationId::new();
         persist_question_required(
@@ -5182,6 +5636,7 @@ mod tests {
             Some("plan-a"),
             third,
             "Which target file?",
+            &[],
             &[],
         )
         .expect("new question");
@@ -5194,13 +5649,123 @@ mod tests {
             false,
         )
         .expect("persist unresolved");
-        let reloaded = store.load(&session.id).expect("reload unresolved");
-        assert!(reloaded.has_unresolved_clarification(Some("plan-a")));
+        let unresolved = store.load(&session.id).expect("reload unresolved");
+        assert!(unresolved.has_unresolved_clarification(Some("plan-a")));
         assert_eq!(
-            reloaded.clarifications.last().expect("unresolved").status,
+            unresolved.clarifications.last().expect("unresolved").status,
             ClarificationStatus::Unresolved
         );
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "retry the unanswered question",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant retry after unresolved input");
+        let fourth = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            fourth,
+            "Which target file?",
+            &[],
+            &[],
+        )
+        .expect("repeat unresolved question")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            fourth,
+            &[json!({"tool": "ask_question", "success": true})],
+            &Ok("src/lib.rs".to_string()),
+            false,
+        )
+        .expect("persist later valid answer");
+        let resolved = store.load(&session.id).expect("reload resolved records");
+        assert!(!resolved.has_unresolved_clarification(Some("plan-a")));
+        assert!(resolved.clarifications.iter().rev().take(2).all(|record| {
+            record.status == ClarificationStatus::Answered
+                && record.answer.as_deref() == Some("src/lib.rs")
+        }));
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "ask a materially different choice set",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant changed options");
+        let fifth = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            fifth,
+            "Which verification mode?",
+            &["fast".to_string(), "release".to_string()],
+            &["src".to_string()],
+        )
+        .expect("changed option set")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            fifth,
+            &[json!({"tool": "ask_question", "success": false})],
+            &Err("input unavailable".to_string()),
+            false,
+        )
+        .expect("persist changed-option unresolved state");
+        let reloaded = store.load(&session.id).expect("reload option identity");
+        assert!(reloaded.has_unresolved_clarification(Some("plan-a")));
         reloaded.validate().expect("valid persisted provenance");
+    }
+
+    #[test]
+    fn unresolved_clarification_blocks_overlapping_scope_and_allows_disjoint_scope() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "clarification-dependency",
+            "events": [{"index": 0, "kind": "question_required", "details": {}}],
+            "clarifications": [{
+                "invocation_id": crate::tools::ToolInvocationId::new(),
+                "plan_id": "plan-a",
+                "question": "Which target?",
+                "options": [],
+                "dependent_paths": ["src"],
+                "status": "unresolved",
+                "question_event_index": 0,
+                "reason": "input unavailable"
+            }]
+        }))
+        .expect("session fixture");
+        let root = Path::new("/workspace");
+        let blocked = unresolved_clarification_dependencies(
+            &session,
+            Some("plan-a"),
+            root,
+            &[ToolCallRequest::new(
+                "read_file",
+                json!({"path": "src/lib.rs"}),
+            )],
+        )
+        .expect("dependency check");
+        assert_eq!(blocked.len(), 1);
+        let independent = unresolved_clarification_dependencies(
+            &session,
+            Some("plan-a"),
+            root,
+            &[ToolCallRequest::new(
+                "read_file",
+                json!({"path": "docs/README.md"}),
+            )],
+        )
+        .expect("independent check");
+        assert!(independent.is_empty());
     }
 
     #[test]

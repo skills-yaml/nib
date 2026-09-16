@@ -187,6 +187,10 @@ impl WorktreeManager {
         crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership).ok()?;
         Some(worktree.path.clone())
     }
+
+    pub fn existing_for_session(&mut self, session_id: &str) -> Result<Option<PathBuf>, String> {
+        self.cached_path(session_id)
+    }
 }
 
 pub(crate) fn with_validated_session_worktree<T>(

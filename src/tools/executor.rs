@@ -1734,10 +1734,13 @@ impl ToolExecutor {
         effective_root: &Path,
         session_id: Option<&str>,
     ) -> Result<Option<PathBuf>, String> {
-        if !required {
-            return Ok(None);
-        }
-        let session_id = session_id.ok_or("mutating tools require a session id")?;
+        let Some(session_id) = session_id else {
+            return if required {
+                Err("mutating tools require a session id".to_string())
+            } else {
+                Ok(None)
+            };
+        };
         if self.project_root.join(".git").is_file() {
             return Ok(Some(effective_root.to_path_buf()));
         }
@@ -1749,9 +1752,16 @@ impl ToolExecutor {
             .worktree_manager
             .as_mut()
             .ok_or("worktree manager unavailable")?;
-        let worktree_root = manager
-            .create_for_session_cancellable(session_id, cancellation.as_ref())
-            .await?;
+        let worktree_root = if required {
+            manager
+                .create_for_session_cancellable(session_id, cancellation.as_ref())
+                .await?
+        } else {
+            let Some(existing) = manager.existing_for_session(session_id)? else {
+                return Ok(None);
+            };
+            existing
+        };
         let relative = effective_root
             .strip_prefix(&self.project_root)
             .map_err(|_| {
@@ -1769,6 +1779,18 @@ impl ToolExecutor {
             return Err("isolated execution root escaped its worktree".to_string());
         }
         Ok(Some(target))
+    }
+
+    /// Establishes the exact managed worktree that a later mutation will use so
+    /// instruction discovery can be resolved against the same filesystem view.
+    pub(crate) async fn prepare_session_worktree(
+        &mut self,
+        session_id: &str,
+    ) -> Result<PathBuf, String> {
+        let project_root = self.project_root.clone();
+        self.ensure_worktree(true, &project_root, Some(session_id))
+            .await?
+            .ok_or_else(|| "managed session worktree was not established".to_string())
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1383,12 +1383,18 @@ pub struct ClarificationRecord {
     pub question: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+    /// Worktree-relative scopes whose actions depend on this answer. An empty
+    /// collection is deliberately conservative and means the whole plan step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
     pub status: ClarificationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
     pub question_event_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_event_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -1802,6 +1808,10 @@ impl Session {
                         .to_string(),
                 ));
             }
+            validate_message_origin_role(
+                &self.messages[provenance.message_index].role,
+                provenance.origin,
+            )?;
             previous = Some(provenance.message_index);
         }
         for intent in &self.human_intent {
@@ -1818,16 +1828,50 @@ impl Session {
                     "human intent must have bounded content and an existing source".to_string(),
                 ));
             }
+            if let Some(index) = intent.source_message_index {
+                if !self.message_origin(index).is_human() {
+                    return Err(SessionError::InvalidMutation(
+                        "human intent message source does not have human provenance".to_string(),
+                    ));
+                }
+            }
+            if let Some(index) = intent.source_event_index {
+                if !matches!(
+                    self.events[index].kind.as_str(),
+                    "steering_input" | "human_question_answer_received"
+                ) {
+                    return Err(SessionError::InvalidMutation(
+                        "human intent event source is not a trusted human-input boundary"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         for clarification in &self.clarifications {
+            let answer_source_is_human = clarification
+                .answer_message_index
+                .is_some_and(|index| self.message_origin(index).is_human())
+                || clarification.answer_event_index.is_some_and(|index| {
+                    self.events
+                        .get(index)
+                        .is_some_and(|event| event.kind == "human_question_answer_received")
+                });
             if clarification.question.trim().is_empty()
                 || clarification.question_event_index >= self.events.len()
                 || clarification
                     .answer_message_index
                     .is_some_and(|index| index >= self.messages.len())
+                || clarification
+                    .answer_event_index
+                    .is_some_and(|index| index >= self.events.len())
+                || clarification.dependent_paths.len() > 32
+                || clarification
+                    .dependent_paths
+                    .iter()
+                    .any(|path| !valid_bounded_relative_path(path))
                 || (clarification.status == ClarificationStatus::Answered
                     && (clarification.answer.as_deref().is_none_or(str::is_empty)
-                        || clarification.answer_message_index.is_none()))
+                        || !answer_source_is_human))
             {
                 return Err(SessionError::InvalidMutation(
                     "clarification provenance is incomplete or inconsistent".to_string(),
@@ -1920,6 +1964,40 @@ fn validate_role_transition(previous: Option<&str>, next: &str) -> Result<(), Se
             next: next.to_string(),
         })
     }
+}
+
+fn validate_message_origin_role(role: &str, origin: MessageOrigin) -> Result<(), SessionError> {
+    let valid = match origin {
+        MessageOrigin::Unknown => true,
+        MessageOrigin::HumanRequest
+        | MessageOrigin::HumanSteering
+        | MessageOrigin::HumanQuestionAnswer
+        | MessageOrigin::RuntimeContinuation => role == "user",
+        MessageOrigin::ModelOutput => role == "assistant",
+        // A subagent-directed message uses a provider `user` role, but its
+        // persisted origin remains non-human. Ordinary tool observations keep
+        // the provider `tool` role.
+        MessageOrigin::ToolOutput => matches!(role, "user" | "tool"),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidMutation(format!(
+            "message origin {origin:?} is incompatible with provider role {role}"
+        )))
+    }
+}
+
+fn valid_bounded_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
 }
 
 pub(crate) fn validate_session_id(id: &str) -> Result<(), SessionError> {
@@ -3352,6 +3430,7 @@ impl SessionStore {
     ) -> Result<Session, SessionError> {
         self.update_or_create_session(id, |session| {
             validate_role_transition(session.messages.last().map(|m| m.role.as_str()), role)?;
+            validate_message_origin_role(role, origin)?;
             let index = session.messages.len();
             session.messages.push(SessionMessage {
                 index,

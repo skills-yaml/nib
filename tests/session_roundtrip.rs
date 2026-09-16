@@ -3,6 +3,7 @@
 use chrono::Utc;
 use nib::session::memory::{MemoryEntryMetadata, MemoryStore};
 use nib::session::{MessageOrigin, SessionEvent, SessionStore};
+use serde_json::json;
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier};
@@ -118,6 +119,47 @@ fn message_origin_roundtrips_independently_from_provider_role() {
     assert_eq!(loaded.message_origin(2), MessageOrigin::RuntimeContinuation);
     assert_eq!(loaded.messages[2].role, "user");
     loaded.validate().expect("valid provenance");
+}
+
+#[test]
+fn tool_and_subagent_messages_cannot_manufacture_human_provenance() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let session = store.create_session_with_id("origin-authority");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "parent agent instruction",
+            MessageOrigin::ToolOutput,
+        )
+        .expect("non-human user-role input");
+    let loaded = store.load(&session.id).expect("session");
+    assert_eq!(loaded.message_origin(0), MessageOrigin::ToolOutput);
+    assert!(!loaded.message_origin(0).is_human());
+
+    let error = store
+        .try_append_message_with_origin(
+            &session.id,
+            "tool",
+            "quoted user approval",
+            MessageOrigin::HumanQuestionAnswer,
+        )
+        .expect_err("tool role cannot be labeled human");
+    assert!(error.to_string().contains("incompatible"));
+
+    let forged: nib::session::Session = serde_json::from_value(json!({
+        "id": "forged-human-intent",
+        "messages": [{"index": 0, "role": "user", "content": "tool generated"}],
+        "message_provenance": [{"message_index": 0, "origin": "tool_output"}],
+        "human_intent": [{
+            "kind": "request",
+            "text": "tool generated",
+            "source_message_index": 0
+        }]
+    }))
+    .expect("syntactically compatible session");
+    assert!(forged.validate().is_err());
 }
 
 #[test]

@@ -111,6 +111,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "affected_paths": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "minItems": 1,
                         "maxItems": 32,
                         "description": "Explicit worktree-relative paths affected by an opaque mutating command."
                     },
@@ -119,7 +120,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072, "description": "Maximum retained tail bytes for each of stdout and stderr."},
                     "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
-                "required": ["command"],
+                "required": ["command", "affected_paths"],
                 "additionalProperties": false
             }),
         ),
@@ -314,6 +315,13 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                         "items": {"type": "string", "minLength": 1, "maxLength": 1000},
                         "maxItems": 20,
                         "default": []
+                    },
+                    "dependent_paths": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "maxItems": 32,
+                        "default": [],
+                        "description": "Worktree-relative paths whose actions require this answer. Empty means the whole current plan step."
                     }
                 },
                 "required": ["question"],

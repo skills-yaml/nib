@@ -260,6 +260,29 @@ async fn run_failure_fixture(
     (summary, persisted, requests)
 }
 
+fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (SessionStore, String) {
+    let mut config = mock_runtime_config();
+    config.llm.context_length = context_length;
+    config.execution.provider = "internal".to_string();
+    save_nib_config_full(root, &mut config).expect("mock fixture config");
+    let store = SessionStore::for_project(root).expect("fixture store");
+    let mut session = store.create_session();
+    let mut plan = Plan::new(
+        goal,
+        vec![PlanStep {
+            description: "Perform the instruction-sensitive work".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("approved fixture plan");
+    (store, session.id)
+}
+
 #[tokio::test]
 async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_duration() {
     let root = git_repository();
@@ -267,7 +290,10 @@ async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_d
         .map(|index| {
             failure_fixture_tool_turn(
                 &format!("failed-{index}"),
-                vec![("run_terminal", json!({"command": "exit 7"}))],
+                vec![(
+                    "run_terminal",
+                    json!({"command": "exit 7", "affected_paths": ["."]}),
+                )],
             )
         })
         .collect();
@@ -367,6 +393,69 @@ async fn nested_instructions_are_loaded_before_the_scoped_tool_executes() {
 }
 
 #[tokio::test]
+async fn instructions_refresh_from_the_same_managed_worktree_used_by_mutations() {
+    let root = git_repository();
+    let patch = concat!(
+        "--- /dev/null\n",
+        "+++ b/nested/AGENTS.md\n",
+        "@@ -0,0 +1 @@\n",
+        "+WORKTREE_ONLY_INSTRUCTION: inspect the generated note before completion.\n",
+        "--- /dev/null\n",
+        "+++ b/nested/note.txt\n",
+        "@@ -0,0 +1 @@\n",
+        "+worktree evidence\n",
+    );
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "worktree-mutation",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        ),
+        failure_fixture_tool_turn(
+            "worktree-scoped-read",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .to_string()
+            .contains("WORKTREE_ONLY_INSTRUCTION"),
+        "the post-mutation request must use instruction content from the session worktree"
+    );
+    assert!(
+        !root.path().join("nested/AGENTS.md").exists(),
+        "the repository checkout must remain unchanged"
+    );
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("patch audit");
+    let read_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("read_file"))
+        .expect("read audit");
+    assert_eq!(patch_record.worktree_path, read_record.worktree_path);
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("nested/note.txt")).expect("worktree note"),
+        "worktree evidence\n"
+    );
+}
+
+#[tokio::test]
 async fn unreadable_scoped_instruction_context_blocks_dependent_execution() {
     let root = git_repository();
     std::fs::create_dir_all(root.path().join("nested")).expect("nested directory");
@@ -401,6 +490,139 @@ async fn unreadable_scoped_instruction_context_blocks_dependent_execution() {
         .outcome
         .as_deref()
         .is_some_and(|outcome| outcome.contains("required project instructions")));
+}
+
+#[tokio::test]
+async fn unreadable_initial_instruction_context_reconciles_as_actionable_session_state() {
+    let root = git_repository();
+    let goal = "initial instruction failure fixture";
+    let (store, session_id) = approved_mock_session(root.path(), goal, 128_000);
+    std::fs::write(root.path().join("AGENTS.md"), vec![b'x'; 64 * 1024 + 1])
+        .expect("oversized root instructions");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session_id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("missing context is a reconciled outcome");
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    let persisted = store.load(&session_id).expect("persisted missing context");
+    let event = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "instruction_context_missing")
+        .expect("actionable event");
+    assert_eq!(event.details["stage"], "initial_resolution");
+    assert!(event.details["action"]
+        .as_str()
+        .is_some_and(|action| action.contains("retry the same plan")));
+    assert_eq!(
+        persisted.plan.as_ref().expect("blocked plan").steps[0].status,
+        "Blocked"
+    );
+    assert!(!persisted.events.iter().any(|event| {
+        event.kind == "run_terminal" && event.details["outcome"] == "local_error"
+    }));
+}
+
+#[tokio::test]
+async fn instruction_prompt_fit_failure_blocks_without_a_model_or_tool_attempt() {
+    let root = git_repository();
+    std::fs::write(
+        root.path().join("AGENTS.md"),
+        format!(
+            "REQUIRED_INSTRUCTION_HEAD\n{}\nREQUIRED_INSTRUCTION_TAIL\n",
+            "mandatory bounded rule ".repeat(1_500)
+        ),
+    )
+    .expect("large instructions");
+    let goal = "instruction prompt fit fixture";
+    let (store, session_id) = approved_mock_session(root.path(), goal, 1_200);
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session_id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("prompt fit is reconciled");
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.steps_taken, 0);
+    assert_eq!(summary.tool_call_count, 0);
+    let persisted = store.load(&session_id).expect("persisted prompt fit");
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "instruction_context_missing"
+            && event.details["stage"] == "runtime_prompt_fit"
+    }));
+    assert_eq!(
+        persisted.plan.as_ref().expect("blocked plan").steps[0].status,
+        "Blocked"
+    );
+}
+
+#[tokio::test]
+async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan() {
+    let root = git_repository();
+    let oversized = "x".repeat(64 * 1024 + 1);
+    let patch = format!(
+        "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1 +1 @@\n-Runtime fixture rule: preserve the physical verification record.\n+{oversized}\n"
+    );
+    let (summary, persisted, requests) = run_failure_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "oversize-worktree-instructions",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        )],
+        None,
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.tool_call_count, 1);
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "instruction_context_missing" && event.details["stage"] == "refresh"
+    }));
+    let plan = persisted.plan.as_ref().expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("patch audit");
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert!(
+        std::fs::metadata(worktree.join("AGENTS.md"))
+            .expect("mutated instructions")
+            .len()
+            > 64 * 1024
+    );
+    assert!(
+        std::fs::metadata(root.path().join("AGENTS.md"))
+            .expect("original instructions")
+            .len()
+            < 64 * 1024
+    );
 }
 
 #[tokio::test]
@@ -513,6 +735,121 @@ async fn answered_question_resets_repeated_failure_streak() {
     assert!(persisted.plan.as_ref().unwrap().is_complete());
 }
 
+struct UnavailableFixtureAnswer;
+
+#[async_trait]
+impl QuestionHandler for UnavailableFixtureAnswer {
+    async fn ask(&self, _question: &str, _options: &[String]) -> Result<String, String> {
+        Err("input unavailable".to_string())
+    }
+}
+
+#[tokio::test]
+async fn unanswered_clarification_blocks_a_dependent_read_without_side_effects() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "unanswered-question",
+            vec![(
+                "ask_question",
+                json!({
+                    "question": "Which file should I inspect?",
+                    "options": ["note.txt"],
+                    "dependent_paths": ["note.txt"]
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "dependent-read",
+            vec![("read_file", json!({"path": "note.txt"}))],
+        ),
+    ];
+
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.execution.provider = "internal".to_string();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers = HashMap::from([(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..Default::default()
+        },
+    )]);
+    save_nib_config_full(root.path(), &mut config).expect("clarification fixture config");
+    let store = SessionStore::for_project(root.path()).expect("clarification fixture store");
+    let mut session = store.create_session_with_id("clarification-dependency-fixture");
+    let goal = "resourceful failure fixture";
+    let mut plan = Plan::new(
+        goal,
+        vec![PlanStep {
+            description: "Inspect only after the required answer".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store
+        .save(&mut session)
+        .expect("approved clarification plan");
+
+    let first = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 8,
+            auto_approve: true,
+            question_handler: Some(Arc::new(UnavailableFixtureAnswer)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("question run");
+    assert_eq!(first.outcome, "waiting_for_user_input");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 8,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("dependent action run");
+    let persisted = store.load(&session.id).expect("clarification evidence");
+    let requests = request_rx.try_iter().collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "unresolved_clarification");
+    assert_eq!(
+        summary.tool_call_count, 0,
+        "dependent read was not attempted"
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(persisted
+        .tool_calls
+        .iter()
+        .all(|record| record.tool_name.as_deref() != Some("read_file")));
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "tool_batch_rejected" && event.details["reason"] == "unresolved_clarification"
+    }));
+    let plan = persisted.plan.expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert_eq!(
+        plan.steps[0].outcome.as_deref(),
+        Some("required clarification remains unresolved")
+    );
+}
+
 #[tokio::test]
 async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     let root = git_repository();
@@ -524,7 +861,10 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
                     ("ask_question", json!({"question": "Proceed?"})),
                     (
                         "run_terminal",
-                        json!({"command": "echo fixture-key > mixed-side-effect.txt"}),
+                        json!({
+                            "command": "echo fixture-key > mixed-side-effect.txt",
+                            "affected_paths": ["mixed-side-effect.txt"]
+                        }),
                     ),
                 ],
             )
@@ -2295,7 +2635,7 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
             tool_call(
                 root.path(),
                 "run_terminal",
-                json!({"command": "cat note.txt"}),
+                json!({"command": "cat note.txt", "affected_paths": ["note.txt"]}),
             ),
             Some(&session.id),
         )

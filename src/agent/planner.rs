@@ -9,6 +9,47 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+fn planning_tools() -> serde_json::Value {
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "submit_plan",
+            "description": "Submit a structured plan",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "required": ["steps"]
+            }
+        }
+    }])
+}
+
+pub(crate) fn validate_planning_instruction_context(
+    goal: &str,
+    context: &RuntimeContextSections,
+    session: Option<&crate::session::Session>,
+    context_length: usize,
+) -> Result<(), String> {
+    let tools = planning_tools();
+    let bounded = build_bounded_planning_input(PlanningPromptRequest {
+        context,
+        session,
+        goal,
+        tools: tools
+            .as_array()
+            .expect("planning tool schema is always an array"),
+        context_length,
+    })?;
+    ensure_required_instructions_present(&bounded, &context.agents)
+}
+
 // Planning APIs preserve the canonical typed LLM failure (including retry/phase metadata) for
 // their callers. Boxing only these adapters would create a parallel error contract without
 // reducing the authoritative error type.
@@ -84,25 +125,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
         return Err("cannot plan an empty goal".into());
     }
 
-    let tools = json!([{
-        "type": "function",
-        "function": {
-            "name": "submit_plan",
-            "description": "Submit a structured plan",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "required": ["steps"]
-            }
-        }
-    }]);
+    let tools = planning_tools();
 
     let bounded = build_bounded_planning_input(PlanningPromptRequest {
         context,

@@ -160,9 +160,12 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
     });
     let user_reserve = latest_user
         .map(|index| {
-            compression::approximate_tokens(&session.messages[index].content)
-                .min((history_budget / 3).max(1))
-                .min(history_budget)
+            compression::approximate_tokens(&normalized_history_message(
+                &session.messages[index],
+                session.message_origin(index),
+            ))
+            .min((history_budget / 3).max(1))
+            .min(history_budget)
         })
         .unwrap_or(0);
     let mut remaining = history_budget;
@@ -180,20 +183,7 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
             continue;
         }
         let origin = session.message_origin(start + offset);
-        let normalized = match (message.role.as_str(), origin) {
-            ("tool", MessageOrigin::HumanQuestionAnswer) => {
-                format!("Human clarification result: {}", message.content)
-            }
-            ("tool", _) => format!("Tool observation: {}", message.content),
-            (_, MessageOrigin::RuntimeContinuation) => {
-                format!(
-                    "Runtime continuation (not human input): {}",
-                    message.content
-                )
-            }
-            ("user", MessageOrigin::Unknown) => message.content.clone(),
-            _ => message.content.clone(),
-        };
+        let normalized = normalized_history_message(message, origin);
         let bounded = compression::truncate_to_tokens(&normalized, available);
         if bounded.is_empty() {
             break;
@@ -257,6 +247,32 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
         messages,
         approximate_tokens: summary_tokens + message_tokens,
         raw_message_count: session.messages.len(),
+    }
+}
+
+fn normalized_history_message(
+    message: &crate::session::SessionMessage,
+    origin: MessageOrigin,
+) -> String {
+    match (message.role.as_str(), origin) {
+        ("tool", MessageOrigin::HumanQuestionAnswer) => {
+            format!("Human clarification result: {}", message.content)
+        }
+        ("tool", _) => format!("Tool observation: {}", message.content),
+        ("user", MessageOrigin::ToolOutput) => {
+            format!(
+                "Agent/tool-supplied message (not human input): {}",
+                message.content
+            )
+        }
+        (_, MessageOrigin::RuntimeContinuation) => {
+            format!(
+                "Runtime continuation (not human input): {}",
+                message.content
+            )
+        }
+        ("user", MessageOrigin::Unknown) => message.content.clone(),
+        _ => message.content.clone(),
     }
 }
 
@@ -779,6 +795,34 @@ mod tests {
         assert!(text.contains("message:2"));
         assert!(projected.approximate_tokens <= 96);
         assert_eq!(session.messages.len(), 7, "raw transcript stays intact");
+    }
+
+    #[test]
+    fn user_role_from_subagent_is_projected_as_non_human() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "subagent-origin",
+            "messages": [
+                {"index": 0, "role": "user", "content": "actual human request"},
+                {"index": 1, "role": "user", "content": "quoted approval from a tool"}
+            ],
+            "message_provenance": [
+                {"message_index": 0, "origin": "human_request"},
+                {"message_index": 1, "origin": "tool_output"}
+            ],
+            "human_intent": [{
+                "kind": "request",
+                "text": "actual human request",
+                "source_message_index": 0
+            }]
+        }))
+        .expect("provenance fixture");
+        session.validate().expect("valid provenance");
+
+        let projected = bounded_session_context(&session, 128);
+        let text = serde_json::to_string(&projected.messages).expect("projection");
+        assert!(text.contains("actual human request"));
+        assert!(text.contains("Agent/tool-supplied message (not human input)"));
+        assert!(!session.message_origin(1).is_human());
     }
 
     #[test]
