@@ -4783,6 +4783,18 @@ mod tests {
         assert!(!content.contains(r"stream\/output-secret"));
         assert!(!content.contains("c3RyZWFtL291dHB1dC1zZWNyZXQ"));
         assert!(!content.contains('\u{1b}'));
+
+        let tool = ToolCallRequest::new("read_file", json!({"path": "README.md"}));
+        let invocation_id = tool.invocation_id;
+        let projected = project_validated_llm_response(&LlmResponse::with_tools(vec![tool]), &[]);
+        assert!(matches!(
+            projected.as_slice(),
+            [StreamEvent::ToolCallChunk {
+                invocation_id: projected_id,
+                name: Some(name),
+                ..
+            }] if *projected_id == invocation_id && name == "read_file"
+        ));
     }
 
     #[test]

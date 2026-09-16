@@ -4332,7 +4332,11 @@ fn render_session_activities(
     let composer_area = layout.composer;
     if composer_area.width > 0 && composer_area.height > 0 {
         let border_style = if focus == TuiFocus::Composer {
-            role_style(ActivityKind::User, no_color)
+            if no_color {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                role_style(ActivityKind::User, false)
+            }
         } else {
             muted_style(no_color)
         };
