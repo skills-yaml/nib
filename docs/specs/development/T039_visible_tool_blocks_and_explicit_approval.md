@@ -28,10 +28,15 @@ says `awaiting you`.
 
 ## Product Decisions
 
-- Transcript channels use a filled `●` with a soft muted color plus a text label so
-  they stay readable without color: dusty teal for user input, sage for system
-  speech, stone for thought, sand for tool calls. Tool results use a muted slate
-  `·` instead of the call marker.
+- Transcript channels use a filled `●` and Grok-style structure, not role labels.
+  User and assistant speech are markdown with a muted colored dot on the first
+  line (dusty teal vs sage). Thought is stone italic. Tool calls show the tool
+  name and hint, not the word `tool`. Tool results use a muted slate `·`.
+  Role words `you`, `nib`, `thought`, `tool`, and `system` are not printed.
+- Chat speech follows Codex communication style: concise, direct, and friendly.
+  Before tool calls the model writes a short preamble that says what it is about
+  to do and why. Tool blocks still show the call itself; speech does not dump
+  arguments. Final answers lead with the outcome.
 - Requested/running titles include a bounded argument hint (path, command, pattern).
 - Completed titles keep that hint and a result summary (`N lines`, `N entries`,
   `exit N`). Failed tools stay red even when folded.
@@ -41,7 +46,10 @@ says `awaiting you`.
   `/` options: no covering overlay, no caret, selected-row emphasis, two-column
   signature plus description. The composer shows the prompt (statement, question, or
   directory). Choices sit under the input. It does not dump `command=` metadata,
-  network essays, or classifier reasons.
+  network essays, or classifier reasons. Plan approval lists numbered steps in the
+  composer; the live transcript shows those same steps when the plan is generated.
+  After approval, the persisted ledger stays one-line plan progress; `/plan` still
+  shows every step.
 - `Y`, `Enter` on Approve, and `1` approve once. `N`, `Esc`, `2`, and `Enter` on Deny
   deny. Up/Down move the selected choice. Policy is unchanged: one-shot grant or
   deny; no always-allow in this slice.
@@ -75,10 +83,10 @@ says `awaiting you`.
 - User and nib speech blocks render markdown: headings, emphasis, lists, links,
   inline code, and fenced code with lightweight language coloring. Tool and
   thought blocks stay as structured transcript channels, not markdown.
-- The transcript has visually distinct channels marked with muted colored dots:
-  user input (`● you`), system speech (`● nib`), internal thought (`● thought`),
-  tool calls (`● tool`), and tool results (`·`). Channels are separated by a
-  blank row.
+- The transcript has visually distinct channels marked with muted colored dots
+  and Grok-style structure, not role labels. User and assistant speech are
+  markdown with a `●` on the first line. Tools show the tool name. Results use
+  `·`. Channels are separated by a blank row.
 - An empty session starts with a left-aligned welcome: `Nib <version>`, the
   working directory, an update notice with `nib update` when a channel update is
   available, `/new` for a new session and worktree, `/session` to switch, and
@@ -117,8 +125,8 @@ says `awaiting you`.
 
 ## Acceptance Criteria
 
-- [ ] Live tool headers render as `● tool  <name> <phase>` with an argument hint when
-      the stream provided path/command/pattern.
+- [ ] Live tool headers render as `● <name> <phase>` with an argument hint when
+      the stream provided path/command/pattern. No `tool` role label.
 - [ ] Collapsed completed `list_directory` still shows an entry count, not JSON.
 - [ ] Expanded tool bodies use a muted `·` result marker and remain bounded.
 - [ ] Failed tools are visually distinct without color (`failed` in the title) and red
@@ -127,6 +135,11 @@ says `awaiting you`.
       (`Run this command` / `Read this file` / …) and shows the command or path;
       `Y Approve once` and `N Deny` sit under the input even on a 40-column
       terminal. It does not render `command=` dumps.
+- [ ] Plan approval lists numbered steps in the composer and in the live
+      `PlanGenerated` transcript activity. It does not show only the goal or
+      `plan_id=`. Extra steps that cannot fit the six-row composer end with
+      `… N more`. After approval, persisted ledger projection stays one-line
+      progress; `/plan` still shows every step.
 - [ ] Transcript text above the composer remains visible at ordinary terminal sizes.
 - [ ] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
       Deny deny. Up/Down change the selected choice.
@@ -148,9 +161,13 @@ says `awaiting you`.
       `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.
 - [ ] User and nib speech render markdown headings, lists, emphasis, inline code,
       and fenced code; tool/thought channels are unchanged.
-- [ ] Internal thinking renders as `● thought` (stone/italic), tool calls as
-      `● tool`, tool results as `·` body lines, user input as `● you`, and
-      user-facing replies as `● nib` with indented body text.
+- [ ] The runtime system prompt uses Codex-style communication: a short preamble
+      before tool calls that says what is happening and why, plus concise final
+      answers. Speech does not dump tool arguments.
+- [ ] Chat has no `you` / `nib` / `thought` / `tool` / `system` role labels.
+      User and assistant speech are markdown with a `●` on the first line.
+      Tools show `● read_file …`; results use `·`. Thinking shows the state
+      (`planning`) without the word `thought`.
 - [ ] A question uses the under-composer list: the composer shows the question,
       numbered options sit under the input, and Enter/1-9/Esc still answer. The
       footer reads `WAITING QUESTION`.
@@ -173,6 +190,8 @@ says `awaiting you`.
   lists, header/footer chrome, keys, below-composer completion layout, waiting
   meter, transcript wheel/key scroll, startup welcome, idle Ctrl+C quit.
 - `src/tui/markdown.rs` — speech markdown and fenced-code rendering.
+- `src/context/budget.rs` — Codex-style communication instructions in the runtime
+  system prompt.
 - `src/config/mod.rs` — `workspace.allowed` grant.
 - `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
   plain-mode TTY workspace consent.
@@ -185,6 +204,7 @@ says `awaiting you`.
 1. Compose tool titles with bounded argument hints across requested/running/terminal.
 2. Render diamond + accent tool blocks with status coloring.
 3. Replace the approval dock dump with under-composer Y/N choices and status/footer.
+   Plan approval lists numbered steps in the composer and live transcript.
 4. Add Enter/1/2 aliases; cover with TestBackend and key-dispatch tests.
 5. Reserve completion rows under the composer and stop overlaying the transcript.
 6. Add the waiting meter row for job, step, time, tokens, and status.

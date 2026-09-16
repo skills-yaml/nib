@@ -1968,6 +1968,11 @@ async fn run_agent_loop_inner(
                             let step_count = plan.steps.len();
                             let plan_id = plan.id.clone();
                             let plan_goal = plan.goal.clone();
+                            let plan_steps: Vec<String> = plan
+                                .steps
+                                .iter()
+                                .map(|step| step.description.clone())
+                                .collect();
                             let stored = store
                                 .update_session(session_id, |session| {
                                     if let Some(current) = session.plan.as_ref() {
@@ -2001,8 +2006,14 @@ async fn run_agent_loop_inner(
                                 .map_err(|error| error.to_string())?;
                             if stored {
                                 active_plan_id = Some(plan_id);
-                                emit(&cfg.stream_tx, StreamEvent::PlanGenerated { step_count })
-                                    .await;
+                                emit(
+                                    &cfg.stream_tx,
+                                    StreamEvent::PlanGenerated {
+                                        step_count,
+                                        steps: plan_steps,
+                                    },
+                                )
+                                .await;
                                 if cfg.mode == "plan" {
                                     reconciliation_reason = Some("plan_ready".to_string());
                                     transition_state(

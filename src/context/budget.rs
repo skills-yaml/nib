@@ -295,9 +295,10 @@ fn build_runtime_system_prompt(
         format!("\n\n{context}")
     };
     format!(
-        "{}\n\n{}\n{tool_instruction}\nProject root: {root}\nCurrent mode: {mode}{context}",
+        "{}\n\n{}\n{}\n{tool_instruction}\nProject root: {root}\nCurrent mode: {mode}{context}",
         crate::agent::instructions::SHARED,
         crate::agent::instructions::EXECUTION,
+        crate::agent::instructions::COMMUNICATION,
     )
 }
 
@@ -801,6 +802,10 @@ mod tests {
         );
         let system = bounded.messages[0]["content"].as_str().unwrap();
         assert!(system.contains("You are nib, a trustworthy local-first AI agent."));
+        assert!(system.contains("## Communication"));
+        assert!(
+            system.contains("Before tools, write 1-2 sentences that say what you will do and why")
+        );
         assert!(system.contains("AGENTS_HEAD"));
         assert!(system.contains("AGENTS_TAIL"));
         assert!(system.contains("TASK_HEAD"));

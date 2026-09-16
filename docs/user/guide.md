@@ -536,10 +536,12 @@ footer without adding transcript noise; their exact records remain in the persis
 session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
-The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
-that still require interactive approval use the same under-composer list as `/`
-options. The composer states what nib wants to do and shows the command or path;
-`Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
+The normal ledger shows one-line plan progress after a plan is approved, while
+`/plan` shows every step. Until you approve, the live transcript and the approval
+composer list the numbered steps so you can read the plan before granting it.
+Calls that still require interactive approval use the same under-composer list as `/`
+options. The composer states what nib wants to do and shows the command, path, or
+plan steps; `Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
 `N`/`Esc`/`2` deny. Up/Down change the selected choice. The conversation stays
 visible. While approval is open the footer reads `WAITING APPROVAL`. When nib asks a
 question, the composer shows the question and numbered choices sit under the input.
@@ -578,14 +580,15 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript is a list of typed blocks with muted colored dots. User input is
-`● you` (dusty teal). Replies are `● nib` (sage). Internal thinking is
-`● thought` (stone, italic). Tool calls are `● tool` (sand) and mutate from
-requested to running to a collapsed summary, including the path or command when
-the stream provided it. Expanded tool results use a slate `·` marker, distinct
-from the call. User and nib speech render markdown, including headings, lists,
-emphasis, inline code, and fenced code with lightweight syntax coloring. Tool and
-thought blocks stay as structured channels, not markdown.
+The transcript uses Grok-style structure instead of role labels. User and
+assistant speech are markdown with a muted colored `●` on the first line (dusty
+teal vs sage). There is no `you`, `nib`, or `system` tag on each block. Tool
+calls show the tool name, phase, and path or command (`● read_file running ·
+src/lib.rs`). Expanded results use a slate `·`. Thinking is stone italic
+(`planning`) without a `thought` label. Speech follows Codex communication
+style: a short preamble before tools that says what it is about to do and why,
+then a concise final answer. Speech renders markdown, including headings, lists,
+emphasis, inline code, and fenced code with lightweight syntax coloring.
 `Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
 composer and the transcript.
 With the transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it.
