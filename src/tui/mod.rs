@@ -111,6 +111,7 @@ struct StartupWelcome {
     working_directory: String,
     update_notice: Option<String>,
     consent_directory: Option<String>,
+    consent_selected: usize,
 }
 
 impl StartupWelcome {
@@ -121,6 +122,7 @@ impl StartupWelcome {
             update_notice: update_notice
                 .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
             consent_directory: None,
+            consent_selected: 0,
         }
     }
 
@@ -131,6 +133,7 @@ impl StartupWelcome {
             working_directory: "~/project".to_string(),
             update_notice: None,
             consent_directory: None,
+            consent_selected: 0,
         }
     }
 }
@@ -159,6 +162,12 @@ enum InteractionBand<'a> {
         active: &'a str,
     },
     History(&'a PendingHistorySearch),
+    Approval(&'a TuiApprovalRequest),
+    Question(&'a PendingQuestion),
+    Workspace {
+        directory: &'a str,
+        selected: usize,
+    },
 }
 
 impl InteractionBand<'_> {
@@ -177,6 +186,8 @@ impl InteractionBand<'_> {
                 }
             }
             Self::History(search) => search.search.matches.len().max(1).saturating_add(1),
+            Self::Approval(_) | Self::Workspace { .. } => 2,
+            Self::Question(question) => question.request.options.len().max(1),
         }
     }
 
@@ -189,6 +200,9 @@ impl InteractionBand<'_> {
             }
             Self::Sessions { .. } => "Enter resume · Esc close",
             Self::History(_) => "Enter restore · Esc close",
+            Self::Approval(_) => "Y/Enter approve once · N deny · Esc deny",
+            Self::Question(_) => "Enter / 1-9 answer · Esc skip",
+            Self::Workspace { .. } => "Y/Enter allow this directory · N decline",
         }
     }
 }
@@ -598,6 +612,7 @@ pub struct TuiApprovalRequest {
     pub call: ToolCall,
     pub level: PermissionLevel,
     pub context: ApprovalContext,
+    pub selected_option: usize,
     pub reply: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -634,6 +649,7 @@ impl TuiApprovalHandler {
             call: call.clone(),
             level,
             context,
+            selected_option: 0,
             reply: reply_tx,
         };
         let _ = self.tx.send(req);
@@ -1425,7 +1441,7 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
 
 fn approval_decision_for_key(code: KeyCode) -> Option<ApprovalDecision> {
     let answer = match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') | KeyCode::Enter => "y",
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => "y",
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => "n",
         _ => return None,
     };
@@ -1445,14 +1461,41 @@ fn approval_decision_for_key(code: KeyCode) -> Option<ApprovalDecision> {
 }
 
 fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode) -> bool {
+    let Some(pending) = approval.as_mut() else {
+        return false;
+    };
+    match code {
+        KeyCode::Up => {
+            pending.selected_option = pending.selected_option.saturating_sub(1);
+            return true;
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            pending.selected_option = (pending.selected_option + 1).min(1);
+            return true;
+        }
+        KeyCode::Enter => {
+            let answer = if pending.selected_option == 0 {
+                KeyCode::Char('y')
+            } else {
+                KeyCode::Char('n')
+            };
+            let Some(decision) = approval_decision_for_key(answer) else {
+                return true;
+            };
+            if let Some(request) = approval.take() {
+                let _ = request.reply.send(decision);
+            }
+            return true;
+        }
+        _ => {}
+    }
     let Some(decision) = approval_decision_for_key(code) else {
         return false;
     };
     if let Some(request) = approval.take() {
         let _ = request.reply.send(decision);
-        return true;
     }
-    false
+    true
 }
 
 fn handle_pending_interaction_key(
@@ -1969,6 +2012,96 @@ fn band_hint_line(text: &str, width: u16, no_color: bool) -> Line<'static> {
         truncate_completion_text(text, usize::from(width.max(1))),
         muted_style(no_color),
     ))
+}
+
+fn render_choice_band(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    options: &[(&str, &str)],
+    selected: usize,
+    hint: &str,
+) {
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let hint_rows = u16::from(inner.height > 1);
+    let capacity = usize::from(inner.height.saturating_sub(hint_rows)).max(1);
+    let (start, end) = visible_option_range(selected, options.len(), capacity);
+    let mut lines = options[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, (signature, description))| {
+            two_column_option(
+                signature,
+                description,
+                start + offset == selected,
+                inner.width,
+                no_color,
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() || hint_rows > 0 {
+        lines.push(band_hint_line(hint, inner.width, no_color));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApprovalRequest) {
+    render_choice_band(
+        frame,
+        area,
+        &[("Y", "Approve once"), ("N", "Deny")],
+        req.selected_option.min(1),
+        "Up/Down select · Enter choose · Esc deny",
+    );
+}
+
+fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, question: &PendingQuestion) {
+    if question.request.options.is_empty() {
+        render_choice_band(
+            frame,
+            area,
+            &[],
+            0,
+            "Type an answer · Enter submit · Esc skip",
+        );
+        return;
+    }
+    let numbered = question
+        .request
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| (format!("{}", index + 1), option.as_str()))
+        .collect::<Vec<_>>();
+    let options = numbered
+        .iter()
+        .map(|(number, option)| (number.as_str(), *option))
+        .collect::<Vec<_>>();
+    render_choice_band(
+        frame,
+        area,
+        &options,
+        question.selected_option,
+        "Up/Down select · Enter / 1-9 choose · Esc skip",
+    );
+}
+
+fn render_workspace_band(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    _directory: &str,
+    selected: usize,
+) {
+    render_choice_band(
+        frame,
+        area,
+        &[("Y", "Allow"), ("N", "Decline and quit")],
+        selected.min(1),
+        "Up/Down select · Enter choose · Esc decline",
+    );
 }
 
 fn render_completion(frame: &mut ratatui::Frame<'_>, area: Rect, completion: &CompletionMenu) {
@@ -2840,56 +2973,247 @@ fn composer_visual_rows(composer: &Composer, width: u16) -> Vec<String> {
     rows
 }
 
+fn overlay_visual_rows(first: &str, extra: &[String], width: u16) -> Vec<String> {
+    let mut rows = wrapped_display_rows(&format!("> {first}"), width.max(1));
+    let inner = width.saturating_sub(COMPOSER_PROMPT_CELLS).max(1);
+    for line in extra {
+        for wrapped in wrapped_display_rows(line, inner) {
+            rows.push(format!("  {wrapped}"));
+        }
+    }
+    if rows.len() < 2 {
+        rows.resize(2, String::new());
+    }
+    rows.truncate(6);
+    rows
+}
+
+fn waiting_composer_rows(
+    waiting: WaitingKind,
+    pending_approval: Option<&TuiApprovalRequest>,
+    pending_question: Option<&PendingQuestion>,
+    consent_directory: Option<&str>,
+    width: u16,
+) -> Option<(Vec<String>, bool)> {
+    match waiting {
+        WaitingKind::Approval => {
+            let req = pending_approval?;
+            let prompt = approval_prompt(&req.call);
+            let mut extra = vec![prompt.subject];
+            if let Some(location) =
+                usable_approval_location(prompt.location.clone(), &req.context.target_scope)
+            {
+                extra.push(format!("in {location}"));
+            }
+            let risk = compact_approval_risk(&req.context.permission_and_risk);
+            if !risk.is_empty() {
+                extra.push(format!("Risk: {risk}"));
+            }
+            Some((overlay_visual_rows(&prompt.statement, &extra, width), false))
+        }
+        WaitingKind::Question => {
+            let question = pending_question?;
+            if question.request.options.is_empty() {
+                let first = if question.response.is_empty() {
+                    question.request.question.as_str()
+                } else {
+                    question.response.as_str()
+                };
+                Some((overlay_visual_rows(first, &[], width), true))
+            } else {
+                Some((
+                    overlay_visual_rows(&question.request.question, &[], width),
+                    false,
+                ))
+            }
+        }
+        WaitingKind::Workspace => {
+            let directory = consent_directory?;
+            Some((
+                overlay_visual_rows("Work in this directory", &[directory.to_string()], width),
+                false,
+            ))
+        }
+        WaitingKind::None => None,
+    }
+}
+
+const CHANNEL_DOT: &str = "● ";
+const RESULT_DOT: &str = "· ";
+
+#[derive(Clone, Copy)]
+enum ChannelInk {
+    User,
+    Assistant,
+    Thought,
+    ToolCall,
+    ToolResult,
+    System,
+    Failure,
+}
+
+fn channel_ink(kind: ActivityKind) -> ChannelInk {
+    match kind {
+        ActivityKind::User => ChannelInk::User,
+        ActivityKind::Assistant => ChannelInk::Assistant,
+        ActivityKind::Thinking | ActivityKind::Plan => ChannelInk::Thought,
+        ActivityKind::Tool | ActivityKind::Approval | ActivityKind::Question => {
+            ChannelInk::ToolCall
+        }
+        ActivityKind::Failure | ActivityKind::Cancellation => ChannelInk::Failure,
+        ActivityKind::Compression | ActivityKind::Reconcile | ActivityKind::System => {
+            ChannelInk::System
+        }
+    }
+}
+
+fn ink_color(ink: ChannelInk) -> Color {
+    match ink {
+        ChannelInk::User => Color::Rgb(122, 158, 168),
+        ChannelInk::Assistant => Color::Rgb(148, 156, 142),
+        ChannelInk::Thought => Color::Rgb(108, 108, 112),
+        ChannelInk::ToolCall => Color::Rgb(168, 148, 112),
+        ChannelInk::ToolResult => Color::Rgb(118, 122, 130),
+        ChannelInk::System => Color::Rgb(128, 132, 128),
+        ChannelInk::Failure => Color::Rgb(158, 118, 118),
+    }
+}
+
+fn ink_style(ink: ChannelInk, no_color: bool) -> Style {
+    if no_color {
+        match ink {
+            ChannelInk::Thought => Style::default().add_modifier(Modifier::ITALIC),
+            ChannelInk::Failure => Style::default().add_modifier(Modifier::BOLD),
+            _ => Style::default(),
+        }
+    } else {
+        let style = Style::default().fg(ink_color(ink));
+        match ink {
+            ChannelInk::Thought => style.add_modifier(Modifier::ITALIC),
+            _ => style,
+        }
+    }
+}
+
 fn muted_style(no_color: bool) -> Style {
     if no_color {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Rgb(108, 108, 112))
     }
 }
 
 fn role_style(kind: ActivityKind, no_color: bool) -> Style {
-    let style = Style::default().add_modifier(Modifier::BOLD);
-    if no_color {
-        return match kind {
-            ActivityKind::Thinking | ActivityKind::Plan => {
-                Style::default().add_modifier(Modifier::ITALIC)
-            }
-            _ => style,
-        };
-    }
-    match kind {
-        ActivityKind::User => style.fg(Color::Cyan),
-        ActivityKind::Assistant => style.fg(Color::Green),
-        ActivityKind::Thinking | ActivityKind::Plan => Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
-        ActivityKind::Tool | ActivityKind::Approval | ActivityKind::Question => {
-            style.fg(Color::Yellow)
-        }
-        ActivityKind::Failure | ActivityKind::Cancellation => style.fg(Color::Red),
-        ActivityKind::Compression | ActivityKind::Reconcile | ActivityKind::System => {
-            Style::default().fg(Color::DarkGray)
-        }
-    }
+    ink_style(channel_ink(kind), no_color)
 }
 
 fn speech_body_style(no_color: bool) -> Style {
     if no_color {
         Style::default()
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(Color::Rgb(168, 168, 164))
     }
 }
 
 fn thought_body_style(no_color: bool) -> Style {
-    if no_color {
-        Style::default().add_modifier(Modifier::ITALIC)
-    } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC)
+    ink_style(ChannelInk::Thought, no_color)
+}
+
+fn channel_label_for(kind: ActivityKind) -> &'static str {
+    match kind {
+        ActivityKind::Thinking | ActivityKind::Plan => "thought",
+        other => other.role_label(),
     }
+}
+
+fn fold_prefix(entry: &ActivityEntry) -> &'static str {
+    if entry.folded && !entry.body.is_empty() {
+        "› "
+    } else {
+        ""
+    }
+}
+
+fn dotted_header_lines(
+    kind: ActivityKind,
+    rest: &str,
+    fold: &str,
+    width: u16,
+    no_color: bool,
+) -> Vec<Line<'static>> {
+    let label = channel_label_for(kind);
+    let fold_width = unicode_display_width(fold);
+    let dot_width = unicode_display_width(CHANNEL_DOT);
+    let inner = usize::from(width.max(1))
+        .saturating_sub(fold_width)
+        .saturating_sub(dot_width)
+        .max(1);
+    let content = if rest.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}  {rest}")
+    };
+    wrapped_display_rows(&content, u16::try_from(inner).unwrap_or(u16::MAX))
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if index == 0 {
+                let mut spans = Vec::new();
+                if !fold.is_empty() {
+                    spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
+                }
+                spans.push(Span::styled(
+                    CHANNEL_DOT.to_string(),
+                    ink_style(channel_ink(kind), no_color),
+                ));
+                if let Some(after) = row.strip_prefix(&format!("{label}  ")) {
+                    spans.push(Span::styled(label.to_string(), muted_style(no_color)));
+                    let body_style = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan)
+                    {
+                        thought_body_style(no_color)
+                    } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
+                        speech_body_style(no_color)
+                    } else if kind == ActivityKind::Tool {
+                        tool_status_style(kind, after, no_color)
+                    } else {
+                        ink_style(channel_ink(kind), no_color)
+                    };
+                    spans.push(Span::styled(format!("  {after}"), body_style));
+                } else {
+                    spans.push(Span::styled(row, muted_style(no_color)));
+                }
+                Line::from(spans)
+            } else {
+                Line::from(Span::styled(
+                    format!("{}{}{row}", fold, " ".repeat(dot_width)),
+                    muted_style(no_color),
+                ))
+            }
+        })
+        .collect()
+}
+
+fn dotted_result_lines(
+    body: &str,
+    width: u16,
+    ink: ChannelInk,
+    no_color: bool,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2).max(1);
+    let style = ink_style(ink, no_color);
+    body.lines()
+        .flat_map(|line| {
+            wrapped_display_rows(line, inner)
+                .into_iter()
+                .map(|row| {
+                    Line::from(vec![
+                        Span::styled(RESULT_DOT.to_string(), style),
+                        Span::styled(row, style),
+                    ])
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn visual_channel(kind: ActivityKind) -> u8 {
@@ -2902,106 +3226,18 @@ fn visual_channel(kind: ActivityKind) -> u8 {
     }
 }
 
-fn styled_transcript_row(row: &str, no_color: bool) -> Line<'static> {
-    let (fold, rest) = row
-        .strip_prefix("› ")
-        .map(|rest| ("› ", rest))
-        .unwrap_or(("", row));
-    if let Some(body) = rest.strip_prefix("│ ") {
-        let mut spans = Vec::new();
-        if !fold.is_empty() {
-            spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
-        }
-        spans.push(Span::styled("│ ".to_string(), muted_style(no_color)));
-        spans.push(Span::styled(body.to_string(), muted_style(no_color)));
-        return Line::from(spans);
-    }
-    if let Some(body) = rest.strip_prefix("┊ ") {
-        return Line::from(vec![
-            Span::styled("┊ ".to_string(), thought_body_style(no_color)),
-            Span::styled(body.to_string(), thought_body_style(no_color)),
-        ]);
-    }
-    if let Some(body) = rest.strip_prefix("  ") {
-        return Line::from(Span::styled(
-            format!("  {body}"),
-            speech_body_style(no_color),
-        ));
-    }
-    let (diamond, rest) = rest
-        .strip_prefix("◆ ")
-        .map(|rest| ("◆ ", rest))
-        .unwrap_or(("", rest));
-    for kind in [
-        ActivityKind::User,
-        ActivityKind::Assistant,
-        ActivityKind::Thinking,
-        ActivityKind::Plan,
-        ActivityKind::Tool,
-        ActivityKind::Approval,
-        ActivityKind::Question,
-        ActivityKind::Compression,
-        ActivityKind::Reconcile,
-        ActivityKind::Cancellation,
-        ActivityKind::Failure,
-        ActivityKind::System,
-    ] {
-        let label = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
-            "thought"
-        } else {
-            kind.role_label()
-        };
-        let prefix = format!("{label}  ");
-        if rest == label || rest.starts_with(&prefix) {
-            let rest = rest.strip_prefix(&prefix).unwrap_or("");
-            let mut spans = Vec::new();
-            if !fold.is_empty() {
-                spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
-            }
-            if !diamond.is_empty() {
-                spans.push(Span::styled(
-                    diamond.to_string(),
-                    role_style(kind, no_color),
-                ));
-            }
-            spans.push(Span::styled(label.to_string(), role_style(kind, no_color)));
-            if !rest.is_empty() {
-                let body_style = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
-                    thought_body_style(no_color)
-                } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
-                    speech_body_style(no_color)
-                } else {
-                    tool_status_style(kind, rest, no_color)
-                };
-                spans.push(Span::styled(format!("  {rest}"), body_style));
-            }
-            return Line::from(spans);
-        }
-    }
-    Line::from(row.to_string())
-}
-
 fn tool_status_style(kind: ActivityKind, rest: &str, no_color: bool) -> Style {
-    if no_color {
-        return if rest.contains(" failed") {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-    }
     if kind != ActivityKind::Tool {
-        return Style::default();
+        return muted_style(no_color);
     }
     if rest.contains(" failed") {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        ink_style(ChannelInk::Failure, no_color)
     } else if rest.contains(" running") || rest.contains(" requested") {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        ink_style(ChannelInk::ToolCall, no_color)
     } else if rest.contains(" ok") {
-        Style::default().fg(Color::Green)
+        ink_style(ChannelInk::Assistant, no_color)
     } else {
-        Style::default()
+        ink_style(ChannelInk::ToolCall, no_color)
     }
 }
 
@@ -3517,189 +3753,6 @@ fn usable_approval_location(value: Option<String>, scope: &str) -> Option<String
     }
 }
 
-fn render_approval_card(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    req: &TuiApprovalRequest,
-    no_color: bool,
-) {
-    let border = approval_dock_style(no_color);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Approval required ")
-        .border_style(border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let prompt = approval_prompt(&req.call);
-    let risk = compact_approval_risk(&req.context.permission_and_risk);
-    let location = usable_approval_location(prompt.location.clone(), &req.context.target_scope);
-    let choice_h = 2u16.min(inner.height);
-    let (body_area, choice_area) = if choice_h == inner.height {
-        (Rect::default(), inner)
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
-            .split(inner);
-        (chunks[0], chunks[1])
-    };
-    if body_area.height > 0 && body_area.width > 0 {
-        let indent = "  ";
-        let subject_width = body_area.width.saturating_sub(2).max(1);
-        let mut lines = vec![Line::from(Span::styled(
-            truncate_completion_text(&prompt.statement, usize::from(body_area.width)),
-            approval_dock_style(no_color),
-        ))];
-        if body_area.height > 1 {
-            let mut remaining = usize::from(body_area.height.saturating_sub(1));
-            let subject_rows = wrapped_display_rows(&prompt.subject, subject_width);
-            if remaining > subject_rows.len() {
-                lines.push(Line::from(""));
-                remaining -= 1;
-            }
-            for row in subject_rows.into_iter().take(remaining) {
-                lines.push(Line::from(Span::styled(
-                    format!("{indent}{row}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                remaining = remaining.saturating_sub(1);
-            }
-            if remaining > 0 {
-                if let Some(location) = location {
-                    lines.push(Line::from(Span::styled(
-                        truncate_completion_text(
-                            &format!("in {location}"),
-                            usize::from(body_area.width),
-                        ),
-                        muted_style(no_color),
-                    )));
-                    remaining -= 1;
-                }
-            }
-            if remaining > 0 && !risk.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    truncate_completion_text(
-                        &format!("Risk: {risk}"),
-                        usize::from(body_area.width),
-                    ),
-                    muted_style(no_color),
-                )));
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), body_area);
-    }
-    let approve_style = if no_color {
-        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    };
-    let mut choices = vec![Line::from(Span::styled(
-        truncate_completion_text(
-            "  Y / Enter / 1   Approve once",
-            usize::from(choice_area.width),
-        ),
-        approve_style,
-    ))];
-    if choice_area.height > 1 {
-        choices.push(Line::from(Span::styled(
-            truncate_completion_text("  N / Esc / 2     Deny", usize::from(choice_area.width)),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    }
-    frame.render_widget(Paragraph::new(choices), choice_area);
-}
-
-fn render_workspace_card(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    directory: &str,
-    no_color: bool,
-) {
-    let border = approval_dock_style(no_color);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Permission required ")
-        .border_style(border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let choice_h = 2u16.min(inner.height);
-    let (body_area, choice_area) = if choice_h == inner.height {
-        (Rect::default(), inner)
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
-            .split(inner);
-        (chunks[0], chunks[1])
-    };
-    if body_area.height > 0 && body_area.width > 0 {
-        let indent = "  ";
-        let subject_width = body_area.width.saturating_sub(2).max(1);
-        let mut lines = vec![Line::from(Span::styled(
-            truncate_completion_text("Work in this directory", usize::from(body_area.width)),
-            approval_dock_style(no_color),
-        ))];
-        if body_area.height > 1 {
-            let mut remaining = usize::from(body_area.height.saturating_sub(1));
-            if remaining > 1 {
-                lines.push(Line::from(""));
-                remaining -= 1;
-            }
-            for row in wrapped_display_rows(directory, subject_width)
-                .into_iter()
-                .take(remaining)
-            {
-                lines.push(Line::from(Span::styled(
-                    format!("{indent}{row}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                remaining = remaining.saturating_sub(1);
-            }
-            if remaining > 0 {
-                lines.push(Line::from(Span::styled(
-                    truncate_completion_text(
-                        "Creates .nib state and a session worktree here.",
-                        usize::from(body_area.width),
-                    ),
-                    muted_style(no_color),
-                )));
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), body_area);
-    }
-    let allow_style = if no_color {
-        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    };
-    let mut choices = vec![Line::from(Span::styled(
-        truncate_completion_text("  Y / Enter / 1   Allow", usize::from(choice_area.width)),
-        allow_style,
-    ))];
-    if choice_area.height > 1 {
-        choices.push(Line::from(Span::styled(
-            truncate_completion_text(
-                "  N / Esc / 2     Decline and quit",
-                usize::from(choice_area.width),
-            ),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    }
-    frame.render_widget(Paragraph::new(choices), choice_area);
-}
-
 fn approval_dock_style(no_color: bool) -> Style {
     let style = Style::default().add_modifier(Modifier::BOLD);
     if no_color {
@@ -3707,133 +3760,6 @@ fn approval_dock_style(no_color: bool) -> Style {
     } else {
         style.fg(ratatui::style::Color::Yellow)
     }
-}
-
-fn question_dock_style(no_color: bool) -> Style {
-    let style = Style::default().add_modifier(Modifier::BOLD);
-    if no_color {
-        style
-    } else {
-        style.fg(Color::Cyan)
-    }
-}
-
-fn render_question_card(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    question: &PendingQuestion,
-    no_color: bool,
-) {
-    let border = question_dock_style(no_color);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Question ")
-        .border_style(border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let choice_h = 2u16.min(inner.height);
-    let (body_area, choice_area) = if choice_h == inner.height {
-        (Rect::default(), inner)
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(choice_h)])
-            .split(inner);
-        (chunks[0], chunks[1])
-    };
-    if body_area.height > 0 && body_area.width > 0 {
-        let indent = "  ";
-        let subject_width = body_area.width.saturating_sub(2).max(1);
-        let mut lines = vec![Line::from(Span::styled(
-            truncate_completion_text("nib is asking", usize::from(body_area.width)),
-            question_dock_style(no_color),
-        ))];
-        if body_area.height > 1 {
-            let mut remaining = usize::from(body_area.height.saturating_sub(1));
-            let question_rows = wrapped_display_rows(&question.request.question, subject_width);
-            if remaining > question_rows.len() {
-                lines.push(Line::from(""));
-                remaining -= 1;
-            }
-            for row in question_rows.into_iter().take(remaining) {
-                lines.push(Line::from(Span::styled(
-                    format!("{indent}{row}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                remaining = remaining.saturating_sub(1);
-            }
-            if remaining > 0 && !question.request.options.is_empty() {
-                lines.push(Line::from(""));
-                remaining = remaining.saturating_sub(1);
-            }
-            for (index, option) in question.request.options.iter().enumerate() {
-                if remaining == 0 {
-                    break;
-                }
-                let number = index + 1;
-                lines.push(list_option_line(
-                    &format!("{number}  {option}"),
-                    index == question.selected_option,
-                    body_area.width,
-                    no_color,
-                ));
-                remaining = remaining.saturating_sub(1);
-            }
-            if remaining > 0 && question.request.options.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    truncate_completion_text("Answer", usize::from(body_area.width)),
-                    muted_style(no_color),
-                )));
-                remaining = remaining.saturating_sub(1);
-                if remaining > 0 {
-                    let answer = if question.response.is_empty() {
-                        format!("{indent}> _")
-                    } else {
-                        format!("{indent}> {}", question.response)
-                    };
-                    lines.push(Line::from(Span::styled(
-                        truncate_completion_text(&answer, usize::from(body_area.width)),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )));
-                    remaining = remaining.saturating_sub(1);
-                }
-            }
-            if remaining > 0 {
-                if let Some(error) = &question.error {
-                    lines.push(Line::from(Span::styled(
-                        truncate_completion_text(
-                            &format!("[question error] {error}"),
-                            usize::from(body_area.width),
-                        ),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )));
-                }
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), body_area);
-    }
-    let primary = if question.request.options.is_empty() {
-        "  Enter          Submit answer"
-    } else {
-        "  Enter / 1-9    Choose this option"
-    };
-    let mut choices = vec![Line::from(Span::styled(
-        truncate_completion_text(primary, usize::from(choice_area.width)),
-        selected_option_style(no_color),
-    ))];
-    if choice_area.height > 1 {
-        choices.push(Line::from(Span::styled(
-            truncate_completion_text(
-                "  Esc            Skip this question",
-                usize::from(choice_area.width),
-            ),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    }
-    frame.render_widget(Paragraph::new(choices), choice_area);
 }
 
 fn tui_report_cancelled_run(
@@ -4012,10 +3938,7 @@ fn speech_source(entry: &ActivityEntry) -> String {
 }
 
 fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        entry.kind.role_label().to_string(),
-        role_style(entry.kind, no_color),
-    ))];
+    let mut lines = dotted_header_lines(entry.kind, "", "", width, no_color);
     let source = speech_source(entry);
     if source.is_empty() {
         return lines;
@@ -4029,13 +3952,68 @@ fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'
     lines
 }
 
+fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    let mut lines = dotted_header_lines(
+        entry.kind,
+        &entry.title,
+        fold_prefix(entry),
+        width,
+        no_color,
+    );
+    if !entry.folded && !entry.body.is_empty() {
+        lines.extend(dotted_result_lines(
+            &entry.body,
+            width,
+            ChannelInk::Thought,
+            no_color,
+        ));
+    }
+    lines
+}
+
+fn tool_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    let mut lines = dotted_header_lines(
+        entry.kind,
+        &entry.title,
+        fold_prefix(entry),
+        width,
+        no_color,
+    );
+    if !entry.folded && !entry.body.is_empty() {
+        lines.extend(dotted_result_lines(
+            &entry.body,
+            width,
+            ChannelInk::ToolResult,
+            no_color,
+        ));
+    }
+    lines
+}
+
+fn log_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    let rest = if entry.title.is_empty() {
+        entry.body.as_str()
+    } else {
+        entry.title.as_str()
+    };
+    let mut lines = dotted_header_lines(entry.kind, rest, fold_prefix(entry), width, no_color);
+    if !entry.folded && !entry.title.is_empty() && !entry.body.is_empty() {
+        lines.extend(dotted_result_lines(
+            &entry.body,
+            width,
+            channel_ink(entry.kind),
+            no_color,
+        ));
+    }
+    lines
+}
+
 fn activity_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
     match entry.kind {
         ActivityKind::User | ActivityKind::Assistant => speech_lines(entry, width, no_color),
-        _ => wrapped_display_rows(&entry.display_text(), width.max(1))
-            .into_iter()
-            .map(|row| styled_transcript_row(&row, no_color))
-            .collect(),
+        ActivityKind::Thinking | ActivityKind::Plan => thought_lines(entry, width, no_color),
+        ActivityKind::Tool => tool_lines(entry, width, no_color),
+        _ => log_lines(entry, width, no_color),
     }
 }
 
@@ -4206,27 +4184,40 @@ fn render_session_activities(
     } else {
         WaitingKind::None
     };
-    let composer_h =
-        composer_height(composer, frame.area().width).saturating_add(COMPOSER_BORDER_ROWS);
+    let overlay = waiting_composer_rows(
+        waiting,
+        pending_approval,
+        pending_question,
+        welcome.consent_directory.as_deref(),
+        frame.area().width,
+    );
+    let composer_h = overlay
+        .as_ref()
+        .map(|(rows, _)| u16::try_from(rows.len().clamp(2, 6)).unwrap_or(6))
+        .unwrap_or_else(|| composer_height(composer, frame.area().width))
+        .saturating_add(COMPOSER_BORDER_ROWS);
     let meter_h = u16::from(meter.is_some());
     let completion = completion.filter(|menu| menu.is_open());
     let completion_band = completion.map(InteractionBand::Completion);
-    let band = band.or(completion_band.as_ref());
+    let waiting_band = pending_approval
+        .map(InteractionBand::Approval)
+        .or_else(|| pending_question.map(InteractionBand::Question))
+        .or_else(|| {
+            welcome
+                .consent_directory
+                .as_deref()
+                .map(|directory| InteractionBand::Workspace {
+                    directory,
+                    selected: welcome.consent_selected,
+                })
+        });
+    let band = waiting_band.as_ref().or(band).or(completion_band.as_ref());
     let completion_h = band
         .map(|band| {
             completion_reserved_height(frame.area().height, band.row_count(), composer_h, meter_h)
         })
         .unwrap_or(0);
     let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
-    let dock = waiting != WaitingKind::None;
-    let desired_dock = if pending_question.is_some()
-        || pending_approval.is_some()
-        || welcome.consent_directory.is_some()
-    {
-        12
-    } else {
-        0
-    };
     let mut chrome = chrome.clone();
     if waiting != WaitingKind::None {
         chrome.agent_mode = agent_mode_label(waiting, None).to_string();
@@ -4235,25 +4226,10 @@ fn render_session_activities(
         Paragraph::new(header_line(&chrome, layout.header.width, no_color)),
         layout.header,
     );
-    let dock_h = if dock {
-        let keep_transcript = 3u16.min(layout.transcript.height.saturating_sub(1));
-        desired_dock
-            .min(layout.transcript.height.saturating_sub(keep_transcript))
-            .max(1)
-    } else {
-        0
-    };
-    let body = if dock {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(dock_h)])
-            .split(layout.transcript)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1)])
-            .split(layout.transcript)
-    };
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1)])
+        .split(layout.transcript);
     let empty = activities.is_empty();
     let (rendered_rows, owners) = if empty {
         (
@@ -4301,13 +4277,6 @@ fn render_session_activities(
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), body[0]);
     }
-    if let Some(req) = pending_approval {
-        render_approval_card(frame, body[1], req, no_color);
-    } else if let Some(question) = pending_question {
-        render_question_card(frame, body[1], question, no_color);
-    } else if let Some(directory) = welcome.consent_directory.as_deref() {
-        render_workspace_card(frame, body[1], directory, no_color);
-    }
     if let Some(meter) = meter {
         render_waiting_meter(frame, layout.meter, meter, no_color);
     }
@@ -4324,13 +4293,29 @@ fn render_session_activities(
         let inner = block.inner(composer_area);
         frame.render_widget(block, composer_area);
         if inner.width > 0 && inner.height > 0 {
-            let rows = composer_visual_rows(composer, inner.width);
-            let (cx, cursor_row) =
-                composer_cursor_cell(&composer.input, composer.cursor, inner.width);
+            let (rows, show_cursor) = overlay
+                .as_ref()
+                .map(|(rows, editable)| (rows.clone(), *editable))
+                .unwrap_or_else(|| (composer_visual_rows(composer, inner.width), true));
+            let (cx, cursor_row) = if overlay.is_some() {
+                if let Some(question) = pending_question.filter(|question| {
+                    waiting == WaitingKind::Question && question.request.options.is_empty()
+                }) {
+                    composer_cursor_cell(&question.response, question.response.len(), inner.width)
+                } else {
+                    (COMPOSER_PROMPT_CELLS, 0)
+                }
+            } else {
+                composer_cursor_cell(&composer.input, composer.cursor, inner.width)
+            };
             let visible_height = usize::from(inner.height);
             let first_visible = usize::from(cursor_row)
                 .saturating_sub(visible_height.saturating_sub(1))
                 .min(rows.len().saturating_sub(visible_height));
+            let placeholder = overlay.is_none() && composer.input.is_empty();
+            let muted_first = overlay.as_ref().is_some_and(|(_, editable)| {
+                *editable && pending_question.is_some_and(|question| question.response.is_empty())
+            });
             let lines = rows
                 .iter()
                 .skip(first_visible)
@@ -4341,8 +4326,17 @@ fn render_session_activities(
                         let input = row.strip_prefix("> ").unwrap_or(row);
                         let mut spans =
                             vec![Span::styled("> ", role_style(ActivityKind::User, no_color))];
-                        if composer.input.is_empty() {
+                        if placeholder {
                             spans.push(Span::styled("Ask nib anything…", muted_style(no_color)));
+                        } else if muted_first {
+                            spans.push(Span::styled(input.to_string(), muted_style(no_color)));
+                        } else if waiting == WaitingKind::Approval
+                            || waiting == WaitingKind::Workspace
+                        {
+                            spans.push(Span::styled(
+                                input.to_string(),
+                                approval_dock_style(no_color),
+                            ));
                         } else {
                             spans.push(Span::styled(
                                 input.to_string(),
@@ -4359,7 +4353,7 @@ fn render_session_activities(
                 })
                 .collect::<Vec<_>>();
             frame.render_widget(Paragraph::new(lines), inner);
-            if focus == TuiFocus::Composer {
+            if focus == TuiFocus::Composer && show_cursor {
                 let cy = usize::from(cursor_row).saturating_sub(first_visible);
                 frame.set_cursor_position(Position {
                     x: inner
@@ -4386,6 +4380,18 @@ fn render_session_activities(
         }
         Some(InteractionBand::History(search)) => {
             render_history_search(frame, layout.completion, search);
+        }
+        Some(InteractionBand::Approval(req)) => {
+            render_approval_band(frame, layout.completion, req);
+        }
+        Some(InteractionBand::Question(question)) => {
+            render_question_band(frame, layout.completion, question);
+        }
+        Some(InteractionBand::Workspace {
+            directory,
+            selected,
+        }) => {
+            render_workspace_band(frame, layout.completion, directory, *selected);
         }
         None => {}
     }
@@ -4727,14 +4733,23 @@ fn draw_loop(
                         transcript_viewport.apply(action);
                         continue;
                     }
-                    let allow = matches!(
+                    match key.code {
+                        KeyCode::Up => {
+                            welcome.consent_selected = 0;
+                            continue;
+                        }
+                        KeyCode::Down | KeyCode::Tab => {
+                            welcome.consent_selected = 1;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let allow = (matches!(
                         key.code,
-                        KeyCode::Enter
-                            | KeyCode::Char('y')
-                            | KeyCode::Char('Y')
-                            | KeyCode::Char('1')
-                    ) && (key.modifiers.is_empty()
-                        || key.modifiers == KeyModifiers::SHIFT);
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1')
+                    ) || (key.code == KeyCode::Enter
+                        && welcome.consent_selected == 0))
+                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
                     let decline = control_c
                         || control_q
                         || matches!(
@@ -4743,7 +4758,8 @@ fn draw_loop(
                                 | KeyCode::Char('n')
                                 | KeyCode::Char('N')
                                 | KeyCode::Char('2')
-                        );
+                        )
+                        || (key.code == KeyCode::Enter && welcome.consent_selected != 0);
                     if allow {
                         match crate::config::grant_workspace_access(project_root) {
                             Ok(()) => {
@@ -5459,6 +5475,7 @@ mod tests {
             call,
             level,
             context,
+            selected_option: 0,
             reply,
         }
     }
@@ -5708,6 +5725,7 @@ mod tests {
             working_directory: "~/work/nib".to_string(),
             update_notice: None,
             consent_directory: Some("~/work/nib".to_string()),
+            consent_selected: 0,
         };
         terminal
             .draw(|frame| {
@@ -5737,12 +5755,12 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Permission required"), "{rendered}");
         assert!(rendered.contains("Work in this directory"), "{rendered}");
         assert!(rendered.contains("~/work/nib"), "{rendered}");
         assert!(rendered.contains("WAITING PERMISSION"), "{rendered}");
         assert!(rendered.contains("Allow"), "{rendered}");
         assert!(rendered.contains("Decline"), "{rendered}");
+        assert!(!rendered.contains("Permission required"), "{rendered}");
         assert!(
             rendered.contains("Y/Enter allow this directory"),
             "{rendered}"
@@ -5763,6 +5781,7 @@ mod tests {
                     .to_string(),
             ),
             consent_directory: None,
+            consent_selected: 0,
         };
         let rendered = empty_state_lines(&welcome, true)
             .into_iter()
@@ -5835,7 +5854,7 @@ mod tests {
             ActivityEntry::new(
                 ActivityKind::Tool,
                 "read_file running · src/lib.rs",
-                String::new(),
+                "line one",
             ),
             ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer"),
         ];
@@ -5869,12 +5888,13 @@ mod tests {
         assert!(joined.contains("inspect wrap"), "{joined}");
         assert!(joined.contains("thought"), "{joined}");
         assert!(joined.contains("planning"), "{joined}");
-        assert!(joined.contains("◆ tool"), "{joined}");
+        assert!(joined.contains("●"), "{joined}");
+        assert!(joined.contains("tool"), "{joined}");
         assert!(joined.contains("read_file"), "{joined}");
         assert!(joined.contains("Here is the answer"), "{joined}");
         let you = row_index_containing(&rows, "you").expect("you");
         let thought = row_index_containing(&rows, "thought").expect("thought");
-        let tool = row_index_containing(&rows, "◆ tool").expect("tool");
+        let tool = row_index_containing(&rows, "tool").expect("tool");
         let speech = rows
             .iter()
             .position(|row| row.contains("Here is the answer"))
@@ -5883,15 +5903,46 @@ mod tests {
         assert!(thought < tool, "{rows:?}");
         assert!(tool < speech, "{rows:?}");
         assert!(
+            rows[you].contains('●'),
+            "user input is marked with a colored dot: {}",
+            rows[you]
+        );
+        assert!(
+            rows[thought].contains('●'),
+            "system thought is marked with a colored dot: {}",
+            rows[thought]
+        );
+        assert!(
+            rows[tool].contains('●'),
+            "tool calls are marked with a colored dot: {}",
+            rows[tool]
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("●") && row.contains("nib")),
+            "system speech is marked with a colored dot: {rows:?}"
+        );
+        assert!(
             rows[speech].contains("  Here is the answer"),
             "speech body is indented, not a log label: {}",
             rows[speech]
         );
         assert!(
-            !rows[speech].contains("◆"),
-            "user-facing speech is not a tool row: {}",
+            !rows[speech].contains('●'),
+            "user-facing speech body is not a header row: {}",
             rows[speech]
         );
+        let result = rows
+            .iter()
+            .position(|row| row.contains("line one"))
+            .expect("tool result");
+        assert!(
+            rows[result].contains('·'),
+            "tool results use a muted result dot: {}",
+            rows[result]
+        );
+        assert!(tool < result, "{rows:?}");
+        assert!(result < speech, "{rows:?}");
     }
 
     #[test]
@@ -5973,11 +6024,30 @@ mod tests {
 
     #[test]
     fn activity_styles_keep_text_labels_without_color() {
-        let line = styled_transcript_row("nib  concise answer", true);
-        assert_eq!(line.spans[0].content, "nib");
-        assert_eq!(line.spans[1].content, "  concise answer");
+        let line = dotted_header_lines(ActivityKind::Assistant, "", "", 40, true)
+            .into_iter()
+            .next()
+            .expect("header");
+        assert_eq!(line.spans[0].content, "● ");
+        assert_eq!(line.spans[1].content, "nib");
         assert_eq!(line.spans[0].style.fg, None);
-        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].style.fg, None);
+        let tool = dotted_header_lines(
+            ActivityKind::Tool,
+            "read_file ok · src/lib.rs",
+            "",
+            40,
+            true,
+        )
+        .into_iter()
+        .next()
+        .expect("tool header");
+        assert_eq!(tool.spans[0].content, "● ");
+        assert_eq!(tool.spans[1].content, "tool");
+        let result = dotted_result_lines("line one", 40, ChannelInk::ToolResult, true);
+        assert_eq!(result[0].spans[0].content, "· ");
+        assert_eq!(result[0].spans[1].content, "line one");
+        assert_eq!(result[0].spans[0].style.fg, None);
     }
 
     #[test]
@@ -7114,6 +7184,23 @@ mod tests {
             reply_tx,
         ));
         assert!(handle_approval_key(&mut pending, KeyCode::Char('2')));
+        assert!(!reply_rx.try_recv().unwrap().granted);
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task test"}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
+        assert!(handle_approval_key(&mut pending, KeyCode::Down));
+        assert!(pending.as_ref().is_some_and(|req| req.selected_option == 1));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         assert!(!reply_rx.try_recv().unwrap().granted);
     }
 
@@ -8264,13 +8351,13 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("inspect wrap"));
-        assert!(rendered.contains("Approval required"));
         assert!(rendered.contains("WAITING APPROVAL"));
         assert!(rendered.contains("mock-model"));
         assert!(rendered.contains("Run this command"));
         assert!(rendered.contains("task test"));
         assert!(rendered.contains("Approve once"));
         assert!(rendered.contains("Deny"));
+        assert!(!rendered.contains("Approval required"));
         assert!(!rendered.contains("command="));
         assert!(!rendered.contains("{\"command\""));
     }
@@ -8305,16 +8392,15 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Question"), "{rendered}");
-        assert!(rendered.contains("nib is asking"), "{rendered}");
         assert!(rendered.contains("Choose a mode"), "{rendered}");
-        assert!(rendered.contains("1  plan"), "{rendered}");
+        assert!(rendered.contains("plan"), "{rendered}");
         assert!(rendered.contains("execute"), "{rendered}");
         assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
         assert!(rendered.contains("Enter"), "{rendered}");
         assert!(rendered.contains("Esc"), "{rendered}");
         assert!(rendered.contains("inspect wrap"), "{rendered}");
         assert!(rendered.contains("keep this visible"), "{rendered}");
+        assert!(!rendered.contains("nib is asking"), "{rendered}");
         assert!(!rendered.contains("question  Choose a mode"), "{rendered}");
     }
 
@@ -8356,11 +8442,7 @@ mod tests {
         let joined = rows.concat();
         assert!(joined.contains("Run this command"), "{joined}");
         assert!(joined.contains("git status --short --branch"), "{joined}");
-        assert!(
-            rows.iter().any(|row| row.contains("task"))
-                && rows.iter().any(|row| row.contains("check")),
-            "{rows:?}"
-        );
+        assert!(rows.iter().any(|row| row.contains("task")), "{rows:?}");
         assert!(joined.contains("Approve once"), "{joined}");
         assert!(joined.contains("Deny"), "{joined}");
         assert!(joined.contains("keep this visible"), "{joined}");
@@ -8374,6 +8456,14 @@ mod tests {
             "command must sit above the choices: {rows:?}"
         );
         assert!(approve < deny, "approve must sit above deny: {rows:?}");
+        let prompt = rows
+            .iter()
+            .position(|row| row.contains("> Run this command") || row.contains("Run this command"))
+            .expect("composer prompt");
+        assert!(
+            prompt < approve,
+            "approval choices must sit under the composer: {rows:?}"
+        );
     }
 
     #[test]
