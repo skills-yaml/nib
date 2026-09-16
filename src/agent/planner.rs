@@ -219,7 +219,7 @@ fn parse_plan_step(step: &serde_json::Value) -> Result<PlanStep, String> {
         .or_else(|| step.get("description").and_then(serde_json::Value::as_str))
         .map(str::trim)
         .filter(|description| !description.is_empty())
-        .ok_or_else(|| "plan step is missing a description".to_string())?;
+        .ok_or_else(|| "planner submitted an empty or invalid plan".to_string())?;
     let verification_values = step
         .get("verification_obligations")
         .map(|value| {

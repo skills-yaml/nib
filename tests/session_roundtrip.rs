@@ -2,7 +2,11 @@
 
 use chrono::Utc;
 use nib::session::memory::{MemoryEntryMetadata, MemoryStore};
-use nib::session::{MessageOrigin, SessionEvent, SessionStore};
+use nib::session::{
+    MessageOrigin, Plan, PlanStep, SessionEvent, SessionStore, VerificationObligation,
+    VerificationStatus,
+};
+use nib::tools::ToolInvocationId;
 use serde_json::json;
 use std::fs;
 use std::process::{Child, Command, Stdio};
@@ -80,6 +84,77 @@ fn session_compat_legacy_json_fixture() {
     assert_eq!(
         loaded.tool_calls[0].tool_name.as_deref(),
         Some("list_directory")
+    );
+}
+
+#[test]
+fn verification_obligation_survives_reload_and_requires_an_exact_corrective_result() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let mut session = store.create_session_with_id("verification-reload");
+    let mut plan = Plan::new(
+        "repair and verify",
+        vec![PlanStep {
+            description: "repair and verify".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: vec![VerificationObligation::pending(
+                "required-check",
+                "run the required check",
+                vec!["src".to_string()],
+            )],
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    let failed = ToolInvocationId::new();
+    plan.begin_verification("required-check", failed, Some("worktree-a".to_string()))
+        .expect("start check");
+    plan.finish_verification(
+        "required-check",
+        failed,
+        Some("worktree-a"),
+        false,
+        Some("check failed".to_string()),
+    )
+    .expect("finish failed check");
+    plan.record_tool_outcome(true, "unrelated read succeeded");
+    session.plan = Some(plan);
+    store.save(&mut session).expect("persist failed obligation");
+
+    let mut loaded = store.load(&session.id).expect("reload failed obligation");
+    let loaded_plan = loaded.plan.as_mut().expect("reloaded plan");
+    assert_eq!(loaded_plan.steps[0].status, "Blocked");
+    assert_eq!(
+        loaded_plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Failed
+    );
+    loaded_plan.complete_current_step("unsupported completion claim");
+    assert!(!loaded_plan.is_complete());
+
+    let corrective = ToolInvocationId::new();
+    loaded_plan
+        .begin_verification("required-check", corrective, Some("worktree-a".to_string()))
+        .expect("start corrective check");
+    assert!(loaded_plan
+        .finish_verification("required-check", corrective, Some("worktree-b"), true, None,)
+        .is_err());
+    loaded_plan
+        .finish_verification("required-check", corrective, Some("worktree-a"), true, None)
+        .expect("pass corrective check");
+    loaded_plan.record_tool_outcome(true, "required check passed");
+    loaded_plan.complete_current_step("verified");
+    store
+        .save(&mut loaded)
+        .expect("persist corrective evidence");
+
+    let reloaded = store.load(&session.id).expect("reload corrective evidence");
+    assert!(reloaded.plan.as_ref().unwrap().is_complete());
+    assert_eq!(
+        reloaded.plan.as_ref().unwrap().steps[0].verification_obligations[0].status,
+        VerificationStatus::Passed
     );
 }
 

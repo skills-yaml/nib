@@ -3361,7 +3361,49 @@ async fn run_agent_loop_inner(
                     continue;
                 }
                 if tool_calls.is_empty() {
-                    if let Some(content) = response_content.as_deref() {
+                    let unresolved_verifications = store
+                        .update_session(session_id, |session| {
+                            let matches = session.plan.as_ref().is_some_and(|plan| {
+                                active_plan_id.as_deref() == Some(plan.id.as_str())
+                                    && plan.is_structured()
+                                    && plan.matches_goal(&normalized_goal)
+                                    && plan.approved
+                            });
+                            if !matches {
+                                return Err(crate::session::SessionError::InvalidMutation(
+                                    "completion verification does not match the active approved plan"
+                                        .to_string(),
+                                ));
+                            }
+                            let plan = session
+                                .plan
+                                .as_mut()
+                                .expect("plan presence was checked above");
+                            let unresolved = plan.unresolved_verification_ids();
+                            if !unresolved.is_empty() {
+                                plan.record_tool_outcome(
+                                    false,
+                                    "required verification remains unresolved",
+                                );
+                                plan.outcome =
+                                    Some("required_verification_unresolved".to_string());
+                                append_session_event(
+                                    session,
+                                    "step_completion_rejected",
+                                    json!({
+                                        "reason": "required_verification_unresolved",
+                                        "verification_ids": unresolved,
+                                    }),
+                                );
+                            }
+                            Ok(unresolved)
+                        })
+                        .map_err(|error| error.to_string())?;
+                    if !unresolved_verifications.is_empty() {
+                        response_content = None;
+                        reconciliation_reason =
+                            Some("required_verification_unresolved".to_string());
+                    } else if let Some(content) = response_content.as_deref() {
                         let content = safe_persisted_provider_message(
                             content,
                             &public_output_sensitive_values,
@@ -3925,19 +3967,93 @@ async fn run_agent_loop_inner(
                         continue;
                     }
                     resources.record_tool_attempt();
-                    let result = executor
-                        .execute(
-                            ToolCall {
-                                invocation_id: request.invocation_id,
-                                tool_name: request.name.clone(),
-                                arguments: request.arguments.clone(),
-                                session_id: Some(session_id.to_string()),
-                                project_root: Some(project_root.clone()),
-                            },
-                            Some(session_id),
-                        )
-                        .await;
+                    let verification_id = request
+                        .arguments
+                        .get("verification_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    let verification_started = match verification_id {
+                        Some(obligation_id) => match begin_plan_verification(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            obligation_id,
+                            request.invocation_id,
+                        ) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                store
+                                    .record_event(
+                                        session_id,
+                                        "verification_binding_rejected",
+                                        json!({
+                                            "invocation_id": request.invocation_id,
+                                            "verification_id": obligation_id,
+                                            "reason": error,
+                                        }),
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                    let result = if verification_id.is_some() && !verification_started {
+                        crate::tools::ToolResult {
+                            invocation_id: request.invocation_id,
+                            tool_name: request.name.clone(),
+                            success: false,
+                            output: None,
+                            error: Some(
+                                "verification binding was rejected before execution".to_string(),
+                            ),
+                            duration_seconds: 0.0,
+                            approval_granted: false,
+                            approval_source: Some("verification".to_string()),
+                        }
+                    } else {
+                        executor
+                            .execute(
+                                ToolCall {
+                                    invocation_id: request.invocation_id,
+                                    tool_name: request.name.clone(),
+                                    arguments: request.arguments.clone(),
+                                    session_id: Some(session_id.to_string()),
+                                    project_root: Some(project_root.clone()),
+                                },
+                                Some(session_id),
+                            )
+                            .await
+                    };
                     tool_call_count += 1;
+                    let (mutated_content, worktree_identity) =
+                        if result.success || verification_started {
+                            audited_tool_evidence(&store, session_id, request.invocation_id)?
+                        } else {
+                            (false, None)
+                        };
+                    if mutated_content {
+                        invalidate_plan_verification_after_mutation(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            request.invocation_id,
+                        )?;
+                    }
+                    if verification_started {
+                        finish_plan_verification(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            verification_id.expect("started verification has an id"),
+                            worktree_identity.as_deref(),
+                            &result,
+                        )?;
+                    }
                     batch_success &= result.success;
                     batch_denied |= !result.approval_granted
                         && (result.approval_source.as_deref() == Some("denied")
@@ -5227,7 +5343,10 @@ async fn reconcile_cancelled_run(
                 );
             }
 
+            let mut cancelled_verifications = Vec::new();
             if let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) {
+                cancelled_verifications =
+                    plan.cancel_running_verifications("agent run cancelled by user");
                 plan.outcome = Some("cancelled_by_user".to_string());
                 if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
                     if step.status != "Completed" {
@@ -5236,6 +5355,16 @@ async fn reconcile_cancelled_run(
                         step.updated_at = Some(Utc::now());
                     }
                 }
+            }
+            if !cancelled_verifications.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_cancelled",
+                    json!({
+                        "verification_ids": cancelled_verifications,
+                        "reason": "cancelled_by_user",
+                    }),
+                );
             }
             append_session_event(
                 session,
@@ -5785,6 +5914,7 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "tool_execution_failed"
                 | "repeated_tool_failure"
                 | "blocked_step_unresolved"
+                | "required_verification_unresolved"
                 | "transition_limit_reached"
                 | "turn_limit_reached"
                 | "provider_continuation_interrupted"
@@ -6120,6 +6250,184 @@ fn record_repeated_tool_failure(
             }),
         )
         .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn begin_plan_verification(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    obligation_id: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification binding does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .begin_verification(obligation_id, invocation_id, None)
+                .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_started",
+                json!({
+                    "plan_id": expected_plan_id,
+                    "step_index": step_index,
+                    "verification_id": obligation_id,
+                    "invocation_id": invocation_id,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn audited_tool_evidence(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Result<(bool, Option<String>), String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session disappeared after tool invocation {invocation_id}"))?;
+    let record = session
+        .tool_calls
+        .iter()
+        .rev()
+        .find(|record| record.invocation_id == Some(invocation_id));
+    let permission = record
+        .and_then(|record| record.result.as_ref())
+        .and_then(|result| result.get("permission_level"))
+        .and_then(Value::as_str);
+    let mutates_content = matches!(permission, Some("safe" | "destructive"));
+    let worktree_identity = record.and_then(|record| record.worktree_path.clone());
+    Ok((mutates_content, worktree_identity))
+}
+
+fn finish_plan_verification(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    obligation_id: &str,
+    worktree_identity: Option<&str>,
+    result: &crate::tools::ToolResult,
+) -> Result<(), String> {
+    let invocation_id = result.invocation_id;
+    let success = result.success;
+    let reason = result.error.clone();
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification result does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .finish_verification(
+                    obligation_id,
+                    invocation_id,
+                    worktree_identity,
+                    success,
+                    reason.clone(),
+                )
+                .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_finished",
+                json!({
+                    "plan_id": expected_plan_id,
+                    "step_index": step_index,
+                    "verification_id": obligation_id,
+                    "invocation_id": invocation_id,
+                    "worktree_identity": worktree_identity,
+                    "status": if success { "passed" } else { "failed" },
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn invalidate_plan_verification_after_mutation(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "mutation does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            let invalidated = session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .invalidate_verification_after_mutation(invocation_id);
+            if !invalidated.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_stale",
+                    json!({
+                        "plan_id": expected_plan_id,
+                        "step_index": step_index,
+                        "invocation_id": invocation_id,
+                        "verification_ids": invalidated,
+                        "reason": "relevant_worktree_content_changed",
+                    }),
+                );
+            }
+            Ok(())
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -9971,6 +10279,55 @@ mod tests {
             )
             .expect("terminal stream event");
         assert!(reconciled < ended);
+    }
+
+    #[tokio::test]
+    async fn cancellation_marks_running_verification_cancelled_without_passing_it() {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::new(directory.path());
+        let mut session = store.create_session_with_id("cancel-running-verification");
+        let mut plan = pending_plan("verify before completion", "run the required check");
+        plan.steps[0].verification_obligations.push(
+            crate::session::VerificationObligation::pending(
+                "required-check",
+                "run the required check",
+                vec!["src/".to_string()],
+            ),
+        );
+        plan.begin_verification(
+            "required-check",
+            crate::tools::ToolInvocationId::new(),
+            Some("worktree-a".to_string()),
+        )
+        .expect("start required verification");
+        plan.approve();
+        session.plan = Some(plan);
+        store
+            .save(&mut session)
+            .expect("persist running verification");
+
+        let summary = reconcile_cancelled_run(&store, &session.id, &None)
+            .await
+            .expect("reconcile cancellation");
+
+        assert_eq!(summary.outcome, "cancelled_by_user");
+        let persisted = store.load(&session.id).expect("cancelled session");
+        let obligation =
+            &persisted.plan.as_ref().expect("plan").steps[0].verification_obligations[0];
+        assert_eq!(
+            obligation.status,
+            crate::session::VerificationStatus::Cancelled
+        );
+        assert_eq!(
+            obligation.reason.as_deref(),
+            Some("agent run cancelled by user")
+        );
+        let event = persisted
+            .events
+            .iter()
+            .find(|event| event.kind == "verification_cancelled")
+            .expect("verification cancellation audit");
+        assert_eq!(event.details["verification_ids"], json!(["required-check"]));
     }
 
     #[test]

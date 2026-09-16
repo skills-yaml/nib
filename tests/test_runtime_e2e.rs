@@ -16,7 +16,9 @@ use nib::llm::{
 };
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
-use nib::session::{Plan, PlanStep, Session, SessionError, SessionStore};
+use nib::session::{
+    Plan, PlanStep, Session, SessionError, SessionStore, VerificationObligation, VerificationStatus,
+};
 #[cfg(target_os = "linux")]
 use nib::tools::delegation::get_subagent_record;
 use nib::tools::delegation::{write_subagent_record, SubagentRecord};
@@ -716,6 +718,15 @@ async fn run_failure_fixture(
     responses: Vec<Value>,
     question_handler: Option<Arc<dyn QuestionHandler>>,
 ) -> (AgentRunSummary, Session, Vec<Value>) {
+    run_failure_fixture_with_obligations(root, responses, question_handler, Vec::new()).await
+}
+
+async fn run_failure_fixture_with_obligations(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
+) -> (AgentRunSummary, Session, Vec<Value>) {
     let (base_url, request_rx) = serve_responses_sequence(responses);
     let mut config = mock_runtime_config();
     config.execution.provider = "internal".to_string();
@@ -742,7 +753,7 @@ async fn run_failure_fixture(
             outcome: None,
             attempts: 0,
             updated_at: None,
-            verification_obligations: Vec::new(),
+            verification_obligations,
             content_generation: 0,
         }],
     );
@@ -792,12 +803,186 @@ fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (Ses
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
     session.plan = Some(plan);
     store.save(&mut session).expect("approved fixture plan");
     (store, session.id)
+}
+
+fn required_check() -> VerificationObligation {
+    VerificationObligation::pending(
+        "required-check",
+        "run the required verification command",
+        vec![".".to_string()],
+    )
+}
+
+#[tokio::test]
+async fn unrelated_success_cannot_clear_a_failed_required_verification() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "exit 7",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "unrelated-read",
+            vec![("read_file", json!({"path": "note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
+            .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(summary.is_failure());
+    assert_eq!(summary.tool_call_count, 2);
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Failed
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "step_completion_rejected"
+            && event.details["reason"] == "required_verification_unresolved"
+    }));
+}
+
+#[tokio::test]
+async fn exact_corrective_verification_resolves_the_failed_obligation() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "exit 7",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "verification-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "true",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
+            .await;
+
+    assert_eq!(summary.outcome, "completed");
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert!(plan.is_complete());
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Passed
+    );
+    assert!(plan.steps[0].verification_obligations[0]
+        .worktree_identity
+        .is_some());
+}
+
+#[tokio::test]
+async fn mutation_after_a_passing_check_makes_its_evidence_stale() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "true",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "later-mutation",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf 'changed\\n' > note.txt",
+                    "affected_paths": ["note.txt"]
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
+            .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Stale
+    );
+    assert!(plan.steps[0].content_generation >= 1);
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "verification_stale"));
+}
+
+#[tokio::test]
+async fn unknown_verification_binding_is_rejected_before_tool_side_effects() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "unknown-binding",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf hacked > unknown-binding.txt",
+                    "affected_paths": ["unknown-binding.txt"],
+                    "verification_id": "unknown-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
+            .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(!root.path().join("unknown-binding.txt").exists());
+    assert!(persisted.tool_calls.iter().all(|record| {
+        record.invocation_id.is_none() || record.tool_name.as_deref() != Some("run_terminal")
+    }));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "verification_binding_rejected"));
 }
 
 #[tokio::test]

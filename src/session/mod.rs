@@ -1770,12 +1770,23 @@ impl Plan {
                 )
             })?;
         if obligation.invocation_id != Some(invocation_id)
-            || obligation.worktree_identity.as_deref() != worktree_identity
             || obligation.status != VerificationStatus::Running
+            || obligation
+                .worktree_identity
+                .as_deref()
+                .is_some_and(|expected| Some(expected) != worktree_identity)
         {
             return Err(format!(
                 "verification obligation {obligation_id:?} is not bound to invocation {invocation_id} in the active worktree"
             ));
+        }
+        if success && worktree_identity.is_none() {
+            return Err(format!(
+                "successful verification obligation {obligation_id:?} has no audited worktree identity"
+            ));
+        }
+        if obligation.worktree_identity.is_none() {
+            obligation.worktree_identity = worktree_identity.map(str::to_string);
         }
         obligation.status = if success {
             VerificationStatus::Passed
@@ -4711,10 +4722,20 @@ mod tests {
         let mut plan = Plan::new("repair", vec![step]);
         plan.approve();
         let check_invocation = crate::tools::ToolInvocationId::new();
-        plan.begin_verification("required-check", check_invocation, None)
-            .expect("bind check");
-        plan.finish_verification("required-check", check_invocation, None, true, None)
-            .expect("record pass");
+        plan.begin_verification(
+            "required-check",
+            check_invocation,
+            Some("worktree-a".to_string()),
+        )
+        .expect("bind check");
+        plan.finish_verification(
+            "required-check",
+            check_invocation,
+            Some("worktree-a"),
+            true,
+            None,
+        )
+        .expect("record pass");
         assert_eq!(
             plan.invalidate_verification_after_mutation(crate::tools::ToolInvocationId::new()),
             ["required-check"]
