@@ -60,6 +60,7 @@ impl std::fmt::Debug for LiveSettings {
 }
 
 impl LiveSettings {
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn from_environment() -> Result<Self, String> {
         require_flag("NIB_LIVE_TESTS")?;
         let mode = LiveMode::parse(&required("NIB_LIVE_MODE")?)?;

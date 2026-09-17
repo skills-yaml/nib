@@ -113,6 +113,7 @@ pub fn attachment_context_sections(
     sections
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedSessionContext {
     let max_tokens = max_tokens.max(1);
     let summary_budget = if session.summary.is_some() {

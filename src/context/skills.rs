@@ -1078,6 +1078,7 @@ pub fn automatic_skill_token_budget(context_length: usize) -> usize {
     context_length.saturating_mul(9) / 70
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn select_skill_files(
     files: Vec<PathBuf>,
     task: &str,

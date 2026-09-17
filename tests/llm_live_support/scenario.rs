@@ -378,7 +378,7 @@ impl std::fmt::Debug for HarnessFailure {
 
 #[derive(Clone, PartialEq, Eq)]
 enum ScenarioFailure {
-    Llm(LlmError),
+    Llm(Box<LlmError>),
     Harness(HarnessFailure),
 }
 
@@ -399,7 +399,7 @@ impl std::fmt::Debug for ScenarioFailure {
 
 impl From<LlmError> for ScenarioFailure {
     fn from(error: LlmError) -> Self {
-        Self::Llm(error)
+        Self::Llm(Box::new(error))
     }
 }
 
@@ -768,6 +768,7 @@ pub(super) async fn execute_provider_plan(
     report
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn execute_profile(
     settings: &LiveSettings,
     privacy_key: &ReportPrivacyKey,
@@ -1021,6 +1022,7 @@ async fn streamed_text(
     context.finish(result)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn tool_continuation(
     client: &dyn nib::llm::LlmClient,
     settings: &LiveSettings,
@@ -1489,9 +1491,9 @@ mod tests {
             Some(400),
             "provider-owned structural incompatibility",
         ) {
-            ScenarioFailure::Llm(error) => {
-                ScenarioFailure::Llm(error.with_documented_transport_incompatibility())
-            }
+            ScenarioFailure::Llm(error) => ScenarioFailure::Llm(Box::new(
+                (*error).with_documented_transport_incompatibility(),
+            )),
             ScenarioFailure::Harness(_) => unreachable!("typed error fixture"),
         };
         assert_eq!(
@@ -1534,8 +1536,8 @@ mod tests {
 
         let mut settings = settings();
         settings.limits.max_scenario_duration = Duration::ZERO;
-        let mut run = RunBudget::new();
-        let mut provider = ProviderBudget::new(&settings, &mut run);
+        let run = RunBudget::new();
+        let mut provider = ProviderBudget::new(&settings, &run);
         let execution = ScenarioContext::new(&mut provider, None).finish(Ok(()));
         assert_eq!(
             classify_failure(execution.result.as_ref().unwrap_err(), None).0,

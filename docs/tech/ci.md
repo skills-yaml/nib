@@ -10,8 +10,10 @@ Follows skm project structure.
   through credential-free localhost fixtures so T021 evidence cannot become stale after
   later transport changes.
 - `task check` is the fast static gate and `task test` is the full serial suite; CI
-  runs each once rather than nesting the suite inside the check step. Local completion
-  can use their `task verify` aggregate.
+  runs each once rather than nesting the suite inside the check step. The static gate
+  runs Clippy for every local target and feature, denies all emitted warnings, and
+  enforces the repository's 100-line `too_many_lines` policy. Local completion can use
+  their `task verify` aggregate.
 - Rust toolchain via dtolnay/rust-toolchain.
 - Task via arduino/setup-task.
 - Install bwrap on Linux and require the PID-namespace supervisor regressions.
@@ -129,7 +131,7 @@ See:
 
 ```bash
 task build          # Release binary
-task check          # Fast installer, format, and Clippy feedback
+task check          # Fast installer, format, and strict all-target Clippy feedback
 task verify         # Complete static + serial-test gate, once each
 task dev            # verify + build + --help
 ./target/release/nib

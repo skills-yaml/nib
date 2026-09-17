@@ -272,6 +272,7 @@ impl SessionStorePreparation {
         Self::cleanup_durable_with_guard(receipt, deadline, || Ok(()))
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn cleanup_durable_with_guard(
         receipt: &SessionPreparationReceipt,
         deadline: Instant,
@@ -560,6 +561,7 @@ impl SessionStorePreparation {
         Self::cleanup_planned_namespace_with_guard(plan, deadline, || Ok(()))
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn cleanup_planned_namespace_with_guard(
         plan: &SessionNamespacePreparationPlan,
         deadline: Instant,
@@ -1097,6 +1099,7 @@ impl SessionDirectoryPreflight {
         )
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn open_until_with_owned_worktree(
         self,
         deadline: Instant,
@@ -2279,6 +2282,7 @@ impl Session {
         Ok(())
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn validate(&self) -> Result<(), SessionError> {
         validate_session_id(&self.id)?;
         self.validate_message_sequence()?;
@@ -2730,6 +2734,7 @@ impl SessionStore {
         Self::for_project_until(project_root, None)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn preflight_project_sessions_dir_until(
         project_root: &Path,
         deadline: Instant,
@@ -4086,6 +4091,7 @@ impl SessionStore {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn list_entries_result(
         &self,
         max_sessions: usize,
@@ -5516,6 +5522,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn session_publication_rechecks_deadline_at_the_commit_boundary() {
         let root = tempdir().expect("project");
         let store = SessionStore::new(root.path());

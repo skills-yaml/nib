@@ -537,6 +537,7 @@ impl DurableTaskStore {
         Ok(task.record)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn start(&self, id: &str) -> Result<DurableTaskRecord, String> {
         let executable = worker_executable()?;
         #[cfg(not(windows))]
@@ -1866,6 +1867,7 @@ struct TerminalWorkerJob {
     max_output_bytes: usize,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_terminal_worker(
     store: &DurableTaskStore,
     owner: &WorkerOwner,
@@ -2662,6 +2664,7 @@ fn publish_schedule_failure_owned(
     })
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_schedule_worker(
     store: &DurableTaskStore,
     owner: &WorkerOwner,
@@ -2964,6 +2967,7 @@ enum ScheduleReconcileAudit {
     },
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn reconcile_expired_job(
     job: &DurableJob,
     daemon_dir: &Path,
@@ -3979,6 +3983,7 @@ mod tests {
     const TASK_COMMIT_CHILD_RELEASE: &str = "NIB_TASK_COMMIT_CHILD_RELEASE";
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn scheduled_plan_summary_accepts_only_the_exact_plan_ready_contract() {
         let failed = crate::agent::AgentRunSummary {
             session_id: "scheduled-provider-failure".to_string(),
@@ -4553,6 +4558,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn scheduled_agent_run_keeps_the_exact_non_default_profile_scope() {
         let (directory, _default_task_store, default_session_store) = scheduled_agent_fixture();
         let mut config =
@@ -5661,6 +5667,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn terminal_worker_rejects_transient_config_with_reduced_redaction_set() {
         let directory = tempdir().expect("tempdir");
         let project_root = directory.path();
@@ -5974,6 +5981,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn actual_worker_publication_loss_is_reconciled_once_and_fences_late_owners() {
         for point in [
             WorkerPublicationHookPoint::BeforeEffects,
@@ -6640,6 +6648,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn legacy_execution_generation_is_deterministic_persisted_and_dedupes_old_evidence() {
         let (directory, store, session_store) = fixture();
         let task_id = "legacy-generation";
@@ -6774,6 +6783,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn reused_schedule_id_keeps_wake_and_terminal_delivery_keys_generation_scoped() {
         fn publish_execution(
             directory: &tempfile::TempDir,
@@ -6906,6 +6916,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn schedule_publications_are_fenced_and_phase_consistent() {
         let (directory, store, session_store) = fixture();
         let task_id = "owned-schedule-success";

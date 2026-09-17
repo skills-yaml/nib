@@ -586,6 +586,7 @@ pub(super) fn blocked_planned_provider_report(
     report
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(super) fn generation_provider_report(
     privacy_key: &ReportPrivacyKey,
     _run_id: &str,
@@ -758,6 +759,10 @@ pub(super) fn mark_provider_blocker(
     report.passed = false;
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "report construction mirrors the serialized qualification evidence"
+)]
 pub(super) fn profile_report(
     privacy_key: &ReportPrivacyKey,
     _run_id: &str,
@@ -904,6 +909,7 @@ enum PublicationPoint {
     BeforeVisibleRevalidation,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn publish_with_hook(
     settings: &LiveSettings,
     report: QualificationReport,
@@ -1023,6 +1029,7 @@ fn publish_with_hook(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_report_consistency(report: &QualificationReport) -> Result<(), String> {
     if report.run_id.is_empty()
         || report.run_id.len() > MAX_RUN_ID_BYTES
@@ -1327,6 +1334,7 @@ fn validate_matrix_plan_evidence(report: &QualificationReport) -> Result<(), Str
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_provider_execution_evidence(
     provider: &ProviderReport,
     limits: &BudgetLimitsReport,
@@ -1546,6 +1554,7 @@ fn validate_pricing(pricing: Option<&super::CatalogPricing>) -> Result<(), Strin
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_scenario_execution_evidence(
     profile: &ProfileReport,
     scenario: &ScenarioReport,
@@ -1654,6 +1663,7 @@ fn validate_scenario_execution_evidence(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_passing_generation_provider(
     provider: &ProviderReport,
     mode: LiveMode,

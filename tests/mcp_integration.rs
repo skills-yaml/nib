@@ -224,6 +224,7 @@ fn complete_lifecycle_trace(path: &Path) -> Option<Vec<serde_json::Value>> {
 }
 
 #[cfg(all(debug_assertions, not(windows)))]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn verify_lifecycle_trace(trace: &Path, root: &Path, heartbeat_name: &str) {
     let records = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -464,6 +465,7 @@ async fn write_request(stdin: &mut tokio::process::ChildStdin, request: serde_js
 }
 
 #[cfg(debug_assertions)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn start_portable_terminal_tree(
     root: &Path,
     stdin: &mut tokio::process::ChildStdin,
@@ -2168,6 +2170,7 @@ async fn stdout_backpressure_does_not_block_eof_cleanup_on_windows() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn nib_run_precommit_cancellation_kills_git_and_leaves_no_spawn_state() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -2347,6 +2350,7 @@ async fn nib_run_precommit_cancellation_kills_git_and_leaves_no_spawn_state() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
     use std::os::unix::fs::PermissionsExt;
 

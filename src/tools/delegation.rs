@@ -115,8 +115,11 @@ impl Drop for SubagentCancellationTimeoutGuard {
 }
 
 #[cfg(test)]
+type SpawnPhaseHook = Option<Box<dyn FnMut(&'static str)>>;
+
+#[cfg(test)]
 thread_local! {
-    static SPAWN_HANDOFF_PHASE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str)>>> =
+    static SPAWN_HANDOFF_PHASE_HOOK: std::cell::RefCell<SpawnPhaseHook> =
         std::cell::RefCell::new(None);
 }
 
@@ -135,9 +138,9 @@ fn run_spawn_handoff_phase_hook(_phase: &'static str) {}
 fn spawn_preparation_operation_timeout() -> Duration {
     #[cfg(test)]
     {
-        return TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT
+        TEST_SPAWN_PREPARATION_OPERATION_TIMEOUT
             .with(|timeout| timeout.get())
-            .unwrap_or(SUBAGENT_RECORD_LOCK_TIMEOUT);
+            .unwrap_or(SUBAGENT_RECORD_LOCK_TIMEOUT)
     }
     #[cfg(not(test))]
     {
@@ -148,9 +151,9 @@ fn spawn_preparation_operation_timeout() -> Duration {
 fn spawn_reconciliation_deadline_timeout() -> Duration {
     #[cfg(test)]
     {
-        return TEST_SPAWN_RECONCILIATION_TIMEOUT
+        TEST_SPAWN_RECONCILIATION_TIMEOUT
             .with(|timeout| timeout.get())
-            .unwrap_or(SUBAGENT_RECORD_LOCK_TIMEOUT);
+            .unwrap_or(SUBAGENT_RECORD_LOCK_TIMEOUT)
     }
     #[cfg(not(test))]
     {
@@ -161,9 +164,9 @@ fn spawn_reconciliation_deadline_timeout() -> Duration {
 fn spawn_reconciliation_worktree_timeout() -> Duration {
     #[cfg(test)]
     {
-        return TEST_SPAWN_RECONCILIATION_TIMEOUT
+        TEST_SPAWN_RECONCILIATION_TIMEOUT
             .with(|timeout| timeout.get())
-            .unwrap_or(SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT);
+            .unwrap_or(SUBAGENT_PRECOMMIT_CLEANUP_TIMEOUT)
     }
     #[cfg(not(test))]
     {
@@ -174,9 +177,9 @@ fn spawn_reconciliation_worktree_timeout() -> Duration {
 fn subagent_cancellation_reconciliation_timeout() -> Duration {
     #[cfg(test)]
     {
-        return TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT
+        TEST_SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT
             .with(|timeout| timeout.get())
-            .unwrap_or(SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT);
+            .unwrap_or(SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT)
     }
     #[cfg(not(test))]
     {
@@ -719,7 +722,7 @@ fn run_after_preparation_intent_open_hook() {}
 
 #[cfg(test)]
 thread_local! {
-    static SPAWN_FORWARD_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str)>>> =
+    static SPAWN_FORWARD_MUTATION_HOOK: std::cell::RefCell<SpawnPhaseHook> =
         std::cell::RefCell::new(None);
 }
 
@@ -1245,6 +1248,7 @@ impl SubagentOwnerLease {
         )
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn create_locked(
         project_root: &Path,
         deadline: Instant,
@@ -2065,6 +2069,7 @@ impl RepositoryMergeLock {
         Self::acquire_with_timeout_and_cancellation(project_root, timeout, None).await
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn acquire_with_timeout_and_cancellation(
         project_root: &Path,
         timeout: Duration,
@@ -2237,6 +2242,7 @@ fn with_delegation_lock_in_deadline<T>(
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn with_delegation_lock_in_deadline_with_setup_hook<T>(
     lock_path: &Path,
     protected_directory: &Path,
@@ -3156,6 +3162,7 @@ fn is_canonical_spawn_preparation_uuid(value: &str) -> bool {
 /// preparation. Version four binds the preplanned cleanup and registration
 /// values to the persisted READY snapshot and, when supplied, to the observed
 /// scope. Older versions retain their existing absence-of-plan contract.
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_spawn_preparation_process_scope_binding(
     intent: &SpawnPreparationIntentData,
     observed: Option<&crate::sandbox::process::ProcessScopeRecord>,
@@ -3573,6 +3580,7 @@ fn adopt_spawn_preparation_publication_error(
     Ok(receipt)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn reconcile_spawn_preparations(
     project_root: &Path,
     records: &crate::daemons::state::StableDirectory,
@@ -4309,6 +4317,7 @@ fn preflight_subagent_audit_target(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn commit_subagent_audit_target(
     plan: SubagentAuditPreparationPlan,
     session_id: &str,
@@ -4554,6 +4563,7 @@ pub(crate) fn serialize_subagent_audit_destination(
     serialize_exact_subagent_audit_destination(&subagent_audit_target_for_store(store)?)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn spawn_subagent(args: &Value, project_root: &Path) -> Result<Value, String> {
     if std::env::var_os("NIB_MANAGED_PROCESS_SCOPE").is_some() {
         return Err(
@@ -5201,6 +5211,7 @@ pub fn spawn_subagent(args: &Value, project_root: &Path) -> Result<Value, String
     Ok(response)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn spawn_subagent_cancellable<'a>(
     args: &'a Value,
     project_root: &'a Path,
@@ -5923,6 +5934,7 @@ pub fn spawn_subagent_cancellable<'a>(
 // The test launcher mirrors the production lifecycle boundary, whose request,
 // durable authorities, and start gate must remain independently inspectable.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn launch_subagent_task(
     project_root: PathBuf,
     subagent_id: String,
@@ -6233,6 +6245,7 @@ enum TerminalProcessScopeAuthority {
     LaunchAbort(crate::sandbox::process::LaunchAbortProof),
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn terminal_process_scope_authority(
     record: &SubagentRecord,
 ) -> Result<Option<(u64, TerminalProcessScopeAuthority)>, String> {
@@ -6467,6 +6480,7 @@ fn parse_terminal_cleanup_proof(
 // The production launcher keeps request data, durable ownership, the start
 // gate, and process authority explicit across the handoff protocol.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn launch_subagent_task(
     project_root: PathBuf,
     subagent_id: String,
@@ -7341,6 +7355,7 @@ fn subagent_launch_failpoint(expected: &str) -> bool {
 }
 
 #[doc(hidden)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn run_subagent_supervisor(
     project_root: &Path,
     subagent_id: &str,
@@ -8184,6 +8199,7 @@ fn cleanup_precommit_record_with_timeout_and_hook(
 }
 
 #[cfg(test)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn cleanup_precommit_record_with_timeout_and_hooks(
     project_root: &Path,
     attempted_record: &SubagentRecord,
@@ -8324,6 +8340,7 @@ pub async fn merge_subagent_worktree(_args: &Value, _project_root: &Path) -> Res
     Err("merge_subagent_worktree must be executed through ToolExecutor so verification is sandboxed and audited".to_string())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) async fn merge_verified_subagent_worktree(
     args: &Value,
     project_root: &Path,
@@ -8598,6 +8615,7 @@ fn sweep_owner_lease_artifacts(
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn sweep_owner_lease_artifacts_with_timeout_and_guard(
     project_root: &Path,
     running_leases: &std::collections::HashSet<String>,
@@ -9174,6 +9192,7 @@ fn set_subagent_audit_target(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn legacy_running_reconciliation_evidence(
     record: &SubagentRecord,
     fresh_evidence: &Value,
@@ -9331,6 +9350,7 @@ fn reconcile_subagent_ownership_with_owner_state(
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn reconcile_subagent_ownership_with_owner_state_until(
     project_root: &Path,
     id: &str,
@@ -10317,6 +10337,7 @@ pub(crate) fn resolve_subagent_cancellation(
     resolve_subagent_cancellation_until(project_root, id, deadline)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn resolve_subagent_cancellation_until(
     project_root: &Path,
     id: &str,
@@ -11993,6 +12014,7 @@ async fn git_optional_object_id(cwd: &Path, revision: &str) -> Result<Option<Str
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn ensure_owned_merge_has_no_user_changes(
     project_root: &Path,
     active_merge_base: &str,
@@ -12101,6 +12123,7 @@ async fn ensure_owned_merge_has_no_user_changes(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn reconcile_pending_merge(
     project_root: &Path,
     record: &mut SubagentRecord,
@@ -12927,6 +12950,7 @@ impl LegacyRecordLockScan {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn scan_legacy_record_lock_namespaces(
     records_directory: &crate::daemons::state::StableDirectory,
     deadline: Option<Instant>,
@@ -13284,6 +13308,7 @@ fn save_legacy_record_lock_migration_receipt(
     unreachable!("bounded migration receipt save loop always returns")
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn migrate_legacy_record_locks_locked_with_scan_hook(
     project_root: &Path,
     records_directory: &crate::daemons::state::StableDirectory,
@@ -13842,7 +13867,7 @@ mod tests {
                 let rendered = path.to_string_lossy().replace('\\', "/");
                 let complete_worktree_proof = rendered.starts_with(".nib/worktree-ownership/")
                     && rendered.ends_with(".json")
-                    && before_map.get(*path).is_none()
+                    && !before_map.contains_key(*path)
                     && after_map.get(*path).is_some_and(|bytes| {
                         serde_json::from_slice::<Value>(bytes).is_ok_and(|record| {
                             record.get("phase").and_then(Value::as_str) == Some("complete")
@@ -13854,13 +13879,14 @@ mod tests {
                                     == Some("removed")
                         })
                     });
-                rendered != ".nib/subagents/.preparations"
-                    && !(rendered.starts_with(".nib/.subagent-record-stripe-")
+                let expected_cleanup_artifact = rendered == ".nib/subagents/.preparations"
+                    || (rendered.starts_with(".nib/.subagent-record-stripe-")
                         && rendered.ends_with(".lock"))
-                    && !(rendered
+                    || (rendered
                         .starts_with(".git/nib/locks/.nib-lock-4-.nib-.subagent-record-stripe-")
                         && rendered.ends_with(".lock.anchor"))
-                    && !complete_worktree_proof
+                    || complete_worktree_proof;
+                !expected_cleanup_artifact
             })
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
@@ -14694,6 +14720,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn preparation_supersession_requires_every_persisted_authority_field() {
         // This fixture stages every durable spawn resource before exercising
         // authority mismatch validation. Keep loaded Windows runners from
@@ -14811,6 +14838,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn handoff_execution_evidence_requires_exact_committed_scope_authority() {
         let root = tempfile::tempdir().expect("git project");
         initialize_spawn_test_repository(root.path());
@@ -15048,6 +15076,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn legacy_preparation_schema_and_evidence_reject_v2_ready_without_mutation() {
         let root = tempfile::tempdir().expect("git project");
         initialize_spawn_test_repository(root.path());
@@ -15279,6 +15308,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn atomic_legacy_preparation_recovery_rejects_v2_ready_in_every_artifact() {
         for variant in [
             "temporary-v2-ready",
@@ -15633,6 +15663,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn live_revision_and_intent_quarantine_block_reconcile_and_preserve_record() {
         let root = tempfile::tempdir().expect("git project");
         initialize_spawn_test_repository(root.path());
@@ -15876,6 +15907,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn partial_cleanup_failures_retain_intent_until_restart_reconciles_last() {
         #[cfg(windows)]
         let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(10));
@@ -16197,6 +16229,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() {
         const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
         const EXPIRY_DELAY: Duration = Duration::from_millis(5_100);
@@ -17430,6 +17463,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn legacy_audit_target_waits_for_evacuated_config_before_terminal_cas() {
         let root = tempfile::tempdir().expect("root");
         let nib = root.path().join(".nib");
@@ -17573,6 +17607,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn terminal_retry_finishes_owner_cleanup_and_audits_exactly_once() {
         let root = tempfile::tempdir().expect("root");
         let store = crate::session::SessionStore::for_project(root.path()).expect("session store");
@@ -19105,6 +19140,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
         let existing = tempfile::tempdir().expect("existing root");
         let existing_records = records_dir(existing.path());
@@ -19729,6 +19765,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn offline_epoch_preserves_an_open_before_lock_contender_until_operator_quiescence() {
         let root = tempfile::tempdir().expect("root");
         let records = ensure_records_directory(root.path()).expect("native records namespace");
@@ -20588,6 +20625,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn initial_and_revision_publications_stop_before_namespace_mutation_after_expiry() {
         let operation_timeout = if cfg!(windows) {
             Duration::from_secs(2)
@@ -20703,6 +20741,7 @@ mod tests {
     }
 
     #[cfg(any(unix, windows))]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn owner_cleanup_quarantine_expiry_fixture(half: Option<bool>) {
         let root = tempfile::tempdir().expect("root");
         let lease = SubagentOwnerLease::create(root.path()).expect("owner lease");
@@ -21109,6 +21148,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn merge_rejects_child_edit_after_immutable_verification_snapshot() {
         fn git(root: &Path, args: &[&str]) {
             let output = std::process::Command::new("git")

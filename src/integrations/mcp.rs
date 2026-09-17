@@ -822,6 +822,7 @@ impl McpServerClient {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn supervise_mcp_transport(
     entry: McpServerEntry,
     state: TransportState,

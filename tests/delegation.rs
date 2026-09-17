@@ -679,6 +679,7 @@ fn dropping_the_runtime_cannot_leave_a_spawned_record_running() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn subagent_merge_requires_successful_verification_and_preserves_result() {
     let root = git_repository();
     let worktree = Worktree::create(root.path(), "sub-test").expect("worktree");
@@ -1062,6 +1063,7 @@ async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn pending_recovery_never_aborts_an_unrelated_human_merge() {
     let root = git_repository();
     let base = git_stdout(root.path(), &["rev-parse", "HEAD"]);
@@ -1592,6 +1594,7 @@ async fn cancelled_repository_lock_wait_is_prompt_and_preserves_record() {
 
 #[cfg(all(unix, debug_assertions))]
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn cancelled_active_merge_preserves_user_changes_and_retries_owned_state() {
     let root = git_repository();
     let worktree = Worktree::create(root.path(), "sub-cancel-merge").expect("worktree");

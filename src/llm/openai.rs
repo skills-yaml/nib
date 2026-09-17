@@ -629,6 +629,7 @@ fn truncate_diagnostic(value: &str, max_bytes: usize) -> String {
     format!("{}...", &value[..end])
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for OpenAiCompatClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {

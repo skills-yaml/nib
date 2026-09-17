@@ -724,6 +724,7 @@ impl fmt::Display for ConfigValidationError {
 impl std::error::Error for ConfigValidationError {}
 
 impl NibConfig {
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         let mut issues = Vec::new();
 

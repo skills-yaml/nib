@@ -208,6 +208,7 @@ fn configure_interactive_failure(project: &Path, base_url: String) {
     save_nib_config_full(project, &mut config).expect("interactive fixture config");
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
     command
@@ -436,6 +437,7 @@ fn run_prints_one_plain_redacted_actionable_failure_and_exits_nonzero() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn plain_chat_recovers_after_one_structured_failure_with_identical_safe_output() {
     const MAX_STDOUT_BYTES: usize = 16 * 1024;
     const MAX_STDERR_BYTES: usize = 4 * 1024;

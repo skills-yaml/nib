@@ -656,6 +656,7 @@ pub fn run_stdio_relay() -> Result<(), String> {
         .map_err(|error| format!("MCP stdout relay flush failed: {error}"))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn serve_mcp_io<R>(
     project_root: PathBuf,
     config: NibConfig,
@@ -1507,6 +1508,7 @@ fn reconcile_cancellation_worker_outcome(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn cancel_active_request(mut request: ActiveRequest) -> CancellationOutcome {
     if request.cancellation_class.subagent_tool_name().is_some() {
         let terminal = {
@@ -3388,6 +3390,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn subagent_shutdown_joins_held_lock_reconciliation_before_returning() {
         let root = tempdir().expect("held-lock cancellation repository");
         let id = format!("sub-held-cancel-{}", uuid::Uuid::new_v4());
@@ -3925,6 +3928,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_audit() {
         let root = tempdir().expect("cancellation-win repository");
         #[cfg(windows)]
@@ -4372,6 +4376,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error() {
         const SECRET: &str = "mcp/provider+secret";
         const SECRET_PERCENT: &str = "mcp%2Fprovider%2Bsecret";

@@ -371,6 +371,7 @@ impl OpenAiResponsesClient {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for OpenAiResponsesClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
@@ -732,6 +733,7 @@ async fn fail_stream(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn parse_terminal_response(
     data: &Value,
     provider: &str,
@@ -1083,6 +1085,7 @@ enum StreamAction {
     Completed(Box<LlmResponse>),
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn parse_stream_event(
     data: &Value,
     provider: &str,
@@ -1330,6 +1333,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn posts_responses_native_payload_and_preserves_private_continuation() {
         let terminal = completed_with_call();
         let (base_url, request_rx) = serve_once("200 OK", "application/json", terminal.to_string());

@@ -2558,6 +2558,7 @@ impl Drop for PreparedTuiAgentWorker {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn prepare_tui_agent_worker(
     profile_scope: TuiAgentProfileScope,
     session_id: String,
@@ -4577,6 +4578,7 @@ fn render_session_view_with_completion(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn render_session_activities(
     frame: &mut ratatui::Frame<'_>,
     chrome: &TuiChrome,
@@ -4848,6 +4850,7 @@ fn composer_border_style(focus: TuiFocus, no_color: bool) -> Style {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn draw_loop(
     mut terminal: DefaultTerminal,
     project_root: &Path,
@@ -8360,6 +8363,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn tui_shutdown_rejects_modal_requests_published_after_initial_cleanup() {
         let session_id = "late-modal-session";
         let run_id = "0123456789abcdef0123456789abcdef";

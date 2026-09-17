@@ -268,6 +268,7 @@ impl Curator {
         Ok(self.cleanup_old_sessions_at(Utc::now())?.sessions_deleted)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn cleanup_old_sessions_at(&self, now: DateTime<Utc>) -> Result<CuratorReport, String> {
         let cutoff = self.retention_cutoff(now)?;
         ensure_local_directory(&self.sessions_dir)?;
@@ -536,6 +537,7 @@ impl Curator {
         Ok(report)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn collect_managed_skill_quarantines(
         &self,
         managed_directory: &crate::daemons::state::StableDirectory,

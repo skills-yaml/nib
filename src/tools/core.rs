@@ -103,6 +103,7 @@ pub async fn dispatch(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn read_file(args: &Value, cwd: &Path) -> Result<Value, String> {
     let path_str = args
         .get("path")
@@ -407,6 +408,7 @@ async fn grep(args: &Value, cwd: &Path) -> Result<Value, String> {
     .await
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn grep_with_limits(
     args: &Value,
     cwd: &Path,
@@ -604,6 +606,7 @@ async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_terminal(
     invocation_id: crate::tools::ToolInvocationId,
     args: &Value,
@@ -1190,6 +1193,7 @@ fn register_prepared_durable_task(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn register_and_audit_prepared_schedule(
     manager: &crate::daemons::task::TaskManager,
     task_store: &crate::daemons::workload::DurableTaskStore,

@@ -2197,6 +2197,7 @@ impl StableDirectory {
         )
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn save_bytes_atomically_expected_with_all_hooks_guarded(
         &self,
         path: &Path,
@@ -2896,6 +2897,7 @@ impl StableDirectory {
         unreachable!("bounded atomic recovery loop always returns")
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn recover_atomic_transaction_once(
         &self,
         target: &Path,
@@ -4308,6 +4310,7 @@ fn with_file_lock_in_with_deadline<T>(
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn with_file_lock_in_with_deadline_and_setup_hook<T>(
     lock_path: &Path,
     protected_directory: &Path,
@@ -4648,6 +4651,7 @@ fn cleanup_legacy_lock_pair_with_hook(
 }
 
 #[cfg(any(unix, windows))]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn cleanup_legacy_lock_pair_with_hooks(
     visible_directory: Option<&StableDirectory>,
     visible_path: &Path,

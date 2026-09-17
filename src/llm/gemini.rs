@@ -243,6 +243,7 @@ impl GeminiClient {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for GeminiClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {

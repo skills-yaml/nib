@@ -529,6 +529,7 @@ fn run_plain_with_input(
     run_plain_with_input_and_modal_state(args, project, config, input, PlainModalState::default())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_plain_with_input_and_modal_state(
     args: &ChatArgs,
     project: &Path,
@@ -1375,6 +1376,7 @@ fn execute_agent_step_with_modal_state(
     execute_prepared_agent_step(prepared, scope, session_id, goal, input, modal_state)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn execute_prepared_agent_step(
     mut prepared: PreparedPlainAgentStep,
     scope: &PlainAgentScope<'_>,
