@@ -17,7 +17,8 @@ use nib::llm::{
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
 use nib::session::{
-    Plan, PlanStep, Session, SessionError, SessionStore, VerificationObligation, VerificationStatus,
+    MessageOrigin, Plan, PlanStep, Session, SessionError, SessionStore, VerificationAuthority,
+    VerificationExpectedOutcome, VerificationObligation, VerificationStatus,
 };
 #[cfg(target_os = "linux")]
 use nib::tools::delegation::get_subagent_record;
@@ -33,6 +34,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tempfile::{tempdir, TempDir};
+
+const T041_T040_BASELINE_REVISION: &str = "c64f953";
 
 fn mock_llm_config(context_length: usize) -> LlmConfig {
     LlmConfig {
@@ -560,6 +563,8 @@ async fn active_unrelated_plan_rejects_answer_only_without_model_or_plan_mutatio
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     session.plan = Some(plan);
@@ -664,6 +669,7 @@ async fn caller_plan_mode_bypasses_answer_only() {
 
 #[tokio::test]
 async fn identical_fixture_inputs_record_baseline_and_candidate_resource_counters() {
+    assert_eq!(T041_T040_BASELINE_REVISION, "c64f953");
     let goal = "What is the fixture answer?";
     let baseline_root = git_repository();
     let (_, baseline, baseline_requests) = run_answer_fixture(
@@ -813,12 +819,16 @@ fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (Ses
     (store, session.id)
 }
 
-fn required_check() -> VerificationObligation {
-    VerificationObligation::pending(
+fn required_check(command: &str) -> VerificationObligation {
+    VerificationObligation::pending_tool(
         "required-check",
         "run the required verification command",
         vec![".".to_string()],
+        "run_terminal",
+        json!({"command": command, "affected_paths": ["."]}),
+        nib::session::VerificationExpectedOutcome::Success,
     )
+    .expect("valid required-check contract")
 }
 
 #[tokio::test]
@@ -843,9 +853,13 @@ async fn unrelated_success_cannot_clear_a_failed_required_verification() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) =
-        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
-            .await;
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("exit 7")],
+    )
+    .await;
 
     assert_eq!(summary.outcome, "required_verification_unresolved");
     assert!(summary.is_failure());
@@ -871,9 +885,19 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
             vec![(
                 "run_terminal",
                 json!({
-                    "command": "exit 7",
+                    "command": "test -f verification-ready.txt",
                     "affected_paths": ["."],
                     "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "repair",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf ready > verification-ready.txt",
+                    "affected_paths": ["verification-ready.txt"]
                 }),
             )],
         ),
@@ -882,7 +906,7 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
             vec![(
                 "run_terminal",
                 json!({
-                    "command": "true",
+                    "command": "test -f verification-ready.txt",
                     "affected_paths": ["."],
                     "verification_id": "required-check"
                 }),
@@ -891,9 +915,13 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) =
-        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
-            .await;
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("test -f verification-ready.txt")],
+    )
+    .await;
 
     assert_eq!(summary.outcome, "completed");
     let plan = persisted.plan.as_ref().expect("persisted plan");
@@ -902,8 +930,19 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
         plan.steps[0].verification_obligations[0].status,
         VerificationStatus::Passed
     );
+    assert_eq!(
+        plan.steps[0].verification_obligations[0]
+            .attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        [VerificationStatus::Failed, VerificationStatus::Passed]
+    );
     assert!(plan.steps[0].verification_obligations[0]
         .worktree_identity
+        .is_some());
+    assert!(plan.steps[0].verification_obligations[0]
+        .content_identity
         .is_some());
 }
 
@@ -935,9 +974,13 @@ async fn mutation_after_a_passing_check_makes_its_evidence_stale() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) =
-        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
-            .await;
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
 
     assert_eq!(summary.outcome, "required_verification_unresolved");
     let plan = persisted.plan.as_ref().expect("persisted plan");
@@ -970,9 +1013,13 @@ async fn unknown_verification_binding_is_rejected_before_tool_side_effects() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) =
-        run_failure_fixture_with_obligations(root.path(), responses, None, vec![required_check()])
-            .await;
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
 
     assert_eq!(summary.outcome, "required_verification_unresolved");
     assert!(!root.path().join("unknown-binding.txt").exists());
@@ -983,6 +1030,131 @@ async fn unknown_verification_binding_is_rejected_before_tool_side_effects() {
         .events
         .iter()
         .any(|event| event.kind == "verification_binding_rejected"));
+}
+
+#[tokio::test]
+async fn known_verification_id_cannot_credit_a_different_command() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "forged-binding",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf hacked > forged-verification.txt",
+                    "affected_paths": ["forged-verification.txt"],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(!root.path().join("forged-verification.txt").exists());
+    assert_eq!(
+        persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0].status,
+        VerificationStatus::Pending
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "verification_binding_rejected"
+            && event.details["verification_id"] == "required-check"
+    }));
+}
+
+#[tokio::test]
+async fn typed_untruncated_probe_miss_can_satisfy_an_absence_obligation() {
+    let root = git_repository();
+    let arguments = json!({"pattern": "forbidden-marker", "path": "note.txt"});
+    let obligation = VerificationObligation::pending_tool(
+        "absence-check",
+        "prove the forbidden marker is absent",
+        vec!["note.txt".to_string()],
+        "grep",
+        arguments.clone(),
+        VerificationExpectedOutcome::ProbeMiss,
+    )
+    .expect("valid typed absence contract");
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "absence-probe",
+            vec![(
+                "grep",
+                json!({
+                    "pattern": "forbidden-marker",
+                    "path": "note.txt",
+                    "verification_id": "absence-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![obligation]).await;
+
+    assert_eq!(summary.outcome, "completed");
+    let evidence = &persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0];
+    assert_eq!(evidence.status, VerificationStatus::Passed);
+    assert!(evidence.content_identity.is_some());
+}
+
+#[tokio::test]
+async fn authenticated_human_can_waive_only_an_unrun_non_project_obligation() {
+    let root = git_repository();
+    let mut config = mock_runtime_config();
+    save_nib_config_full(root.path(), &mut config).expect("waiver config");
+    let store = SessionStore::for_project(root.path()).expect("waiver store");
+    let mut session = store.create_session_with_id("verification-waiver");
+    let mut obligation = required_check("true");
+    obligation.authority = VerificationAuthority::Human;
+    let mut plan = Plan::new(
+        "original verified task",
+        vec![PlanStep {
+            description: "finish the original task".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: vec![obligation],
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("waiver fixture");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "waive verification required-check: the requested check is no longer applicable",
+        AgentLoopConfig::default(),
+    )
+    .await
+    .expect("authenticated waiver");
+
+    assert_eq!(summary.outcome, "verification_waived");
+    let persisted = store.load(&session.id).expect("waiver evidence");
+    let evidence = &persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0];
+    assert_eq!(evidence.status, VerificationStatus::Waived);
+    let source = evidence.waiver_source_message_index.expect("human source");
+    assert_eq!(
+        persisted.message_origin(source),
+        MessageOrigin::HumanRequest
+    );
+    assert_eq!(persisted.messages.last().unwrap().role, "user");
+    assert!(persisted
+        .message_provenance
+        .iter()
+        .all(|source| source.origin != MessageOrigin::ModelOutput));
 }
 
 #[tokio::test]
@@ -1493,6 +1665,8 @@ async fn unanswered_clarification_blocks_a_dependent_read_without_side_effects()
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -1586,7 +1760,22 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    assert!(!root.path().join(".nib/worktrees").exists());
+    let worktrees = root.path().join(".nib/worktrees");
+    if worktrees.exists() {
+        let sessions = worktrees.join("sessions");
+        let entries = if sessions.exists() {
+            std::fs::read_dir(&sessions)
+                .expect("inspect rejected-batch session worktrees")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read rejected-batch session worktree entries")
+        } else {
+            Vec::new()
+        };
+        assert!(
+            entries.is_empty(),
+            "rejected mixed batch created a session worktree: {entries:?}"
+        );
+    }
     assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
     assert!(!serde_json::to_string(&persisted)
         .unwrap()

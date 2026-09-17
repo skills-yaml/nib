@@ -1479,6 +1479,35 @@ pub enum VerificationAuthority {
     ApprovedPlan,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationExpectedOutcome {
+    #[default]
+    Success,
+    ProbeMiss,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationInvocationSpec {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub expected_outcome: VerificationExpectedOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationAttempt {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    pub status: VerificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationObligation {
     pub id: String,
@@ -1488,12 +1517,22 @@ pub struct VerificationObligation {
     #[serde(default)]
     pub authority: VerificationAuthority,
     pub status: VerificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_invocation: Option<VerificationInvocationSpec>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<crate::tools::ToolInvocationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_identity: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub content_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1502,6 +1541,8 @@ pub struct VerificationObligation {
     pub updated_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiver_source_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<VerificationAttempt>,
 }
 
 fn default_required_verification() -> bool {
@@ -1520,14 +1561,37 @@ impl VerificationObligation {
             required: true,
             authority: VerificationAuthority::ApprovedPlan,
             status: VerificationStatus::Pending,
+            expected_invocation: None,
+            plan_id: String::new(),
+            step_index: None,
+            source_message_index: None,
             affected_paths,
             invocation_id: None,
             worktree_identity: None,
+            content_identity: None,
             content_generation: 0,
             reason: None,
             updated_at: None,
             waiver_source_message_index: None,
+            attempts: Vec::new(),
         }
+    }
+
+    pub fn pending_tool(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        affected_paths: Vec<String>,
+        tool_name: impl Into<String>,
+        arguments: serde_json::Value,
+        expected_outcome: VerificationExpectedOutcome,
+    ) -> Result<Self, String> {
+        let mut obligation = Self::pending(id, description, affected_paths);
+        obligation.expected_invocation = Some(VerificationInvocationSpec {
+            tool_name: tool_name.into(),
+            arguments: normalize_verification_arguments(&arguments)?,
+            expected_outcome,
+        });
+        Ok(obligation)
     }
 
     pub fn is_unresolved_required(&self) -> bool {
@@ -1537,6 +1601,26 @@ impl VerificationObligation {
                 VerificationStatus::Passed | VerificationStatus::Waived
             )
     }
+}
+
+pub fn normalize_verification_arguments(
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut normalized = arguments
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "verification arguments must be an object".to_string())?;
+    normalized.remove("verification_id");
+    normalized.remove("plan_id");
+    let normalized = serde_json::Value::Object(normalized);
+    if serde_json::to_vec(&normalized)
+        .map_err(|error| format!("serialize verification arguments: {error}"))?
+        .len()
+        > 64 * 1024
+    {
+        return Err("verification arguments exceed the 64 KiB persistence limit".to_string());
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1560,9 +1644,16 @@ pub fn normalize_plan_goal(goal: &str) -> String {
 }
 
 impl Plan {
-    pub fn new(goal: &str, steps: Vec<PlanStep>) -> Self {
+    pub fn new(goal: &str, mut steps: Vec<PlanStep>) -> Self {
+        let id = format!("plan-{}", Uuid::new_v4().simple());
+        for (step_index, step) in steps.iter_mut().enumerate() {
+            for obligation in &mut step.verification_obligations {
+                obligation.plan_id.clone_from(&id);
+                obligation.step_index = Some(step_index);
+            }
+        }
         Self {
-            id: format!("plan-{}", Uuid::new_v4().simple()),
+            id,
             goal: normalize_plan_goal(goal),
             steps,
             current_step_index: 0,
@@ -1645,6 +1736,26 @@ impl Plan {
                         obligation.id
                     ));
                 }
+                if obligation.plan_id != self.id || obligation.step_index != Some(step_index) {
+                    return Err(format!(
+                        "verification obligation {:?} is not bound to its plan step",
+                        obligation.id
+                    ));
+                }
+                let Some(expected) = obligation.expected_invocation.as_ref() else {
+                    return Err(format!(
+                        "verification obligation {:?} has no independently persisted invocation contract",
+                        obligation.id
+                    ));
+                };
+                if expected.tool_name.trim().is_empty()
+                    || normalize_verification_arguments(&expected.arguments)? != expected.arguments
+                {
+                    return Err(format!(
+                        "verification obligation {:?} has an invalid invocation contract",
+                        obligation.id
+                    ));
+                }
                 if obligation.status == VerificationStatus::Waived
                     && obligation.waiver_source_message_index.is_none()
                 {
@@ -1720,6 +1831,8 @@ impl Plan {
         &mut self,
         obligation_id: &str,
         invocation_id: crate::tools::ToolInvocationId,
+        tool_name: &str,
+        arguments: &serde_json::Value,
         worktree_identity: Option<String>,
     ) -> Result<(), String> {
         let step_index = self.current_step_index;
@@ -1736,9 +1849,24 @@ impl Plan {
                     "verification obligation {obligation_id:?} is not declared on active step {step_index}"
                 )
             })?;
+        if obligation.plan_id != self.id || obligation.step_index != Some(step_index) {
+            return Err(format!(
+                "verification obligation {obligation_id:?} is not bound to the active plan step"
+            ));
+        }
+        let actual_arguments = normalize_verification_arguments(arguments)?;
+        let expected = obligation.expected_invocation.as_ref().ok_or_else(|| {
+            format!("verification obligation {obligation_id:?} has no trusted invocation contract")
+        })?;
+        if expected.tool_name != tool_name || expected.arguments != actual_arguments {
+            return Err(format!(
+                "verification obligation {obligation_id:?} does not match the persisted tool invocation contract"
+            ));
+        }
         obligation.status = VerificationStatus::Running;
         obligation.invocation_id = Some(invocation_id);
         obligation.worktree_identity = worktree_identity;
+        obligation.content_identity = None;
         obligation.content_generation = step.content_generation;
         obligation.reason = None;
         obligation.updated_at = Some(Utc::now());
@@ -1752,6 +1880,7 @@ impl Plan {
         obligation_id: &str,
         invocation_id: crate::tools::ToolInvocationId,
         worktree_identity: Option<&str>,
+        content_identity: Option<String>,
         success: bool,
         reason: Option<String>,
     ) -> Result<(), String> {
@@ -1788,6 +1917,7 @@ impl Plan {
         if obligation.worktree_identity.is_none() {
             obligation.worktree_identity = worktree_identity.map(str::to_string);
         }
+        obligation.content_identity = content_identity.clone();
         obligation.status = if success {
             VerificationStatus::Passed
         } else {
@@ -1796,6 +1926,14 @@ impl Plan {
         obligation.content_generation = step.content_generation;
         obligation.reason = reason;
         obligation.updated_at = Some(Utc::now());
+        obligation.attempts.push(VerificationAttempt {
+            invocation_id,
+            status: obligation.status,
+            worktree_identity: obligation.worktree_identity.clone(),
+            content_identity,
+            reason: obligation.reason.clone(),
+            recorded_at: Utc::now(),
+        });
         if !success {
             step.status = "Blocked".to_string();
         }
@@ -1873,6 +2011,14 @@ impl Plan {
         if obligation.authority == VerificationAuthority::Project {
             return Err(format!(
                 "project verification obligation {obligation_id:?} cannot be waived by a task scope change"
+            ));
+        }
+        if matches!(
+            obligation.status,
+            VerificationStatus::Running | VerificationStatus::Passed | VerificationStatus::Failed
+        ) {
+            return Err(format!(
+                "verification obligation {obligation_id:?} with recorded execution evidence cannot be waived"
             ));
         }
         obligation.status = VerificationStatus::Waived;
@@ -4557,6 +4703,22 @@ mod tests {
         }
     }
 
+    fn required_terminal_check(
+        id: &str,
+        description: &str,
+        paths: Vec<String>,
+    ) -> VerificationObligation {
+        VerificationObligation::pending_tool(
+            id,
+            description,
+            paths.clone(),
+            "run_terminal",
+            serde_json::json!({"command": "true", "affected_paths": paths}),
+            VerificationExpectedOutcome::Success,
+        )
+        .expect("valid verification contract")
+    }
+
     #[test]
     fn adjacent_user_turns_are_valid_after_a_run_without_an_assistant_message() {
         let dir = tempdir().expect("tempdir");
@@ -4647,18 +4809,19 @@ mod tests {
     #[test]
     fn failed_required_verification_survives_unrelated_success_and_requires_exact_rerun() {
         let mut step = plan_step("repair and verify");
-        step.verification_obligations
-            .push(VerificationObligation::pending(
-                "required-check",
-                "run the required check",
-                vec!["src".to_string()],
-            ));
+        step.verification_obligations.push(required_terminal_check(
+            "required-check",
+            "run the required check",
+            vec!["src".to_string()],
+        ));
         let mut plan = Plan::new("repair", vec![step]);
         plan.approve();
         let failed_invocation = crate::tools::ToolInvocationId::new();
         plan.begin_verification(
             "required-check",
             failed_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
             Some("worktree-a".to_string()),
         )
         .expect("bind required check");
@@ -4666,6 +4829,7 @@ mod tests {
             "required-check",
             failed_invocation,
             Some("worktree-a"),
+            None,
             false,
             Some("check failed".to_string()),
         )
@@ -4685,6 +4849,8 @@ mod tests {
         plan.begin_verification(
             "required-check",
             corrective_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
             Some("worktree-a".to_string()),
         )
         .expect("bind corrective rerun");
@@ -4693,6 +4859,7 @@ mod tests {
                 "required-check",
                 corrective_invocation,
                 Some("worktree-b"),
+                Some("sha256:other".to_string()),
                 true,
                 None,
             )
@@ -4701,6 +4868,7 @@ mod tests {
             "required-check",
             corrective_invocation,
             Some("worktree-a"),
+            Some("sha256:content".to_string()),
             true,
             None,
         )
@@ -4713,18 +4881,19 @@ mod tests {
     #[test]
     fn mutation_stales_passed_verification_and_unknown_status_fails_closed() {
         let mut step = plan_step("verify then edit");
-        step.verification_obligations
-            .push(VerificationObligation::pending(
-                "required-check",
-                "run the required check",
-                vec!["src".to_string()],
-            ));
+        step.verification_obligations.push(required_terminal_check(
+            "required-check",
+            "run the required check",
+            vec!["src".to_string()],
+        ));
         let mut plan = Plan::new("repair", vec![step]);
         plan.approve();
         let check_invocation = crate::tools::ToolInvocationId::new();
         plan.begin_verification(
             "required-check",
             check_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
             Some("worktree-a".to_string()),
         )
         .expect("bind check");
@@ -4732,6 +4901,7 @@ mod tests {
             "required-check",
             check_invocation,
             Some("worktree-a"),
+            Some("sha256:content".to_string()),
             true,
             None,
         )
@@ -4756,13 +4926,13 @@ mod tests {
     #[test]
     fn cancellation_and_waiver_remain_distinct_and_project_gate_fails_closed() {
         let mut step = plan_step("cancel or narrow scope");
-        let mut human = VerificationObligation::pending(
+        let mut human = required_terminal_check(
             "human-check",
             "user-requested check",
             vec!["src".to_string()],
         );
         human.authority = VerificationAuthority::Human;
-        let mut project = VerificationObligation::pending(
+        let mut project = required_terminal_check(
             "project-check",
             "mandatory project gate",
             vec![".".to_string()],
@@ -4771,8 +4941,14 @@ mod tests {
         step.verification_obligations = vec![human, project];
         let mut plan = Plan::new("verify", vec![step]);
         plan.approve();
-        plan.begin_verification("human-check", crate::tools::ToolInvocationId::new(), None)
-            .expect("start human check");
+        plan.begin_verification(
+            "human-check",
+            crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
+            None,
+        )
+        .expect("start human check");
 
         assert_eq!(
             plan.cancel_running_verifications("cancelled by user"),

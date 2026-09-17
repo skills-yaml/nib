@@ -1,5 +1,6 @@
 //! Scoped project-instruction discovery with bounded, identity-checked reads.
 
+use crate::tools::classifier::{classify_command, ToolRisk};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -556,26 +557,34 @@ pub fn tool_instruction_scopes(
             vec![declared("path").unwrap_or_else(|| project_root.to_path_buf())]
         }
         "run_terminal" => {
-            let affected = arguments
-                .get("affected_paths")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    "run_terminal requires explicit affected_paths for bounded instruction coverage"
-                        .to_string()
-                })?;
-            if affected.is_empty() {
-                return Err(
-                    "run_terminal affected_paths cannot be empty for bounded instruction coverage"
-                        .to_string(),
-                );
-            }
             let mut paths = vec![declared("cwd").unwrap_or_else(|| project_root.to_path_buf())];
-            paths.extend(
-                affected
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|path| project_root.join(path)),
-            );
+            let affected = arguments.get("affected_paths").and_then(Value::as_array);
+            if let Some(affected) = affected {
+                if affected.is_empty() {
+                    return Err(
+                        "run_terminal affected_paths cannot be empty for bounded instruction coverage"
+                            .to_string(),
+                    );
+                }
+                paths.extend(
+                    affected
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|path| project_root.join(path)),
+                );
+            } else {
+                let risk = arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(classify_command)
+                    .unwrap_or(ToolRisk::RequiresApproval);
+                if risk != ToolRisk::Safe {
+                    return Err(
+                        "opaque run_terminal mutation requires explicit affected_paths for repository-wide instruction coverage"
+                            .to_string(),
+                    );
+                }
+            }
             paths
         }
         "apply_patch" => patch_scopes(project_root, arguments)?,
@@ -809,12 +818,19 @@ mod tests {
             terminal,
             vec![project.join("nested/secret.rs"), project.join("src")]
         );
+        let safe = tool_instruction_scopes(
+            project,
+            "run_terminal",
+            &serde_json::json!({"command": "cargo check", "cwd": "src"}),
+        )
+        .expect("classified safe command may use its cwd scope");
+        assert_eq!(safe, vec![project.join("src")]);
         let error = tool_instruction_scopes(
             project,
             "run_terminal",
             &serde_json::json!({"command": "cat nested/secret.rs", "cwd": "src"}),
         )
         .expect_err("command text cannot prove instruction scope");
-        assert!(error.contains("explicit affected_paths"));
+        assert!(error.contains("requires explicit affected_paths"));
     }
 }

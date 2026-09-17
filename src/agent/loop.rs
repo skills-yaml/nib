@@ -18,7 +18,8 @@ use crate::llm::{
 use crate::session::{
     normalize_plan_goal, ClarificationRecord, ClarificationStatus, HumanIntentKind,
     HumanIntentRecord, MessageOrigin, MessageProvenance, Session, SessionEvent, SessionMessage,
-    SessionRunLease, SessionStore, ToolCallRecord,
+    SessionRunLease, SessionStore, ToolCallRecord, VerificationAuthority,
+    VerificationExpectedOutcome, VerificationObligation,
 };
 use crate::tools::classifier::ToolRisk;
 use crate::tools::executor::{ApprovalHandler, StdinApprovalHandler};
@@ -2047,6 +2048,18 @@ async fn run_agent_loop_inner(
         .load_result(session_id)
         .map_err(|error| format!("failed to inspect answer-only eligibility: {error}"))?
         .ok_or_else(|| "session disappeared before answer-only eligibility".to_string())?;
+    if parse_verification_waiver(goal).is_some() {
+        prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+        let verification_id = apply_human_verification_waiver(&store, session_id, goal)?
+            .expect("waiver syntax was checked before authenticated application");
+        return finish_human_verification_waiver(
+            &store,
+            session_id,
+            &run_id,
+            &verification_id,
+            &cfg.stream_tx,
+        );
+    }
     let answer_only_candidate =
         nib_cfg.agent.answer_only && cfg.interactive_request && cfg.mode == "execute";
     let active_plan = session_before_request
@@ -2314,6 +2327,12 @@ async fn run_agent_loop_inner(
         };
     let mut instruction_identity = resolved_instructions.identity.clone();
     context_sections.agents = resolved_instructions.render();
+    derive_active_plan_verification_requirements(
+        &store,
+        session_id,
+        goal,
+        &context_sections.agents,
+    )?;
     let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
         profile.daemon_dir().to_path_buf(),
     )?;
@@ -2614,6 +2633,18 @@ async fn run_agent_loop_inner(
                     .await
                     {
                         Ok(mut plan) => {
+                            let source_message_index = planning_session
+                                .message_provenance
+                                .iter()
+                                .rev()
+                                .find(|source| source.origin.is_human())
+                                .map(|source| source.message_index);
+                            add_independent_verification_requirements(
+                                &mut plan,
+                                goal,
+                                &context_sections.agents,
+                                source_message_index,
+                            )?;
                             sanitize_provider_plan(&mut plan, &public_output_sensitive_values);
                             let step_count = plan.steps.len();
                             let plan_id = plan.id.clone();
@@ -3361,6 +3392,11 @@ async fn run_agent_loop_inner(
                     continue;
                 }
                 if tool_calls.is_empty() {
+                    revalidate_plan_verification_content(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                    )?;
                     let unresolved_verifications = store
                         .update_session(session_id, |session| {
                             let matches = session.plan.as_ref().is_some_and(|plan| {
@@ -3493,6 +3529,23 @@ async fn run_agent_loop_inner(
                         session_id,
                         state,
                         AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                let question_count = tool_calls
+                    .iter()
+                    .filter(|request| request.name == "ask_question")
+                    .count();
+                if question_count > 0 && tool_calls.len() != 1 {
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::ToolExecute,
                         &mut trace,
                         &mut transition_count,
                         &cfg.stream_tx,
@@ -3674,6 +3727,12 @@ async fn run_agent_loop_inner(
                         continue;
                     }
                 };
+                derive_active_plan_verification_requirements(
+                    &store,
+                    session_id,
+                    goal,
+                    &resolved.render(),
+                )?;
                 if resolved.identity != instruction_identity {
                     if provider_continuation.take().is_some() {
                         record_provider_continuation_lifecycle(
@@ -3980,7 +4039,7 @@ async fn run_agent_loop_inner(
                             active_plan_id.as_deref(),
                             &normalized_goal,
                             obligation_id,
-                            request.invocation_id,
+                            request,
                         ) {
                             Ok(()) => true,
                             Err(error) => {
@@ -4028,12 +4087,15 @@ async fn run_agent_loop_inner(
                             .await
                     };
                     tool_call_count += 1;
-                    let (mutated_content, worktree_identity) =
+                    let (mutated_content, mut worktree_identity) =
                         if result.success || verification_started {
                             audited_tool_evidence(&store, session_id, request.invocation_id)?
                         } else {
                             (false, None)
                         };
+                    if verification_started && worktree_identity.is_none() {
+                        worktree_identity = Some(project_root.to_string_lossy().into_owned());
+                    }
                     if mutated_content {
                         invalidate_plan_verification_after_mutation(
                             &store,
@@ -5041,12 +5103,17 @@ async fn finish_answer_only_success(
                 "state_transition",
                 json!({"from": AgentState::Idle.as_str(), "to": AgentState::InspectLlm.as_str()}),
             );
+            let message_index = session.messages.len();
             session.messages.push(SessionMessage {
-                index: session.messages.len(),
+                index: message_index,
                 role: "assistant".to_string(),
                 content: persisted_content.clone(),
                 timestamp: Some(Utc::now()),
                 attachments: Vec::new(),
+            });
+            session.message_provenance.push(MessageProvenance {
+                message_index,
+                origin: MessageOrigin::ModelOutput,
             });
             append_session_event(
                 session,
@@ -6030,6 +6097,240 @@ fn prepare_user_turn(
     Ok(())
 }
 
+fn parse_verification_waiver(content: &str) -> Option<(&str, &str)> {
+    let request = content.trim().strip_prefix("waive verification ")?;
+    let (id, reason) = request.split_once(':')?;
+    let id = id.trim();
+    let reason = reason.trim();
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && !reason.is_empty())
+    .then_some((id, reason))
+}
+
+fn apply_human_verification_waiver(
+    store: &SessionStore,
+    session_id: &str,
+    content: &str,
+) -> Result<Option<String>, String> {
+    let Some((obligation_id, reason)) = parse_verification_waiver(content) else {
+        return Ok(None);
+    };
+    let obligation_id = obligation_id.to_string();
+    let reason = reason.to_string();
+    store
+        .update_session(session_id, |session| {
+            let source_message_index = session.messages.len().checked_sub(1).ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification waiver has no source message".to_string(),
+                )
+            })?;
+            if session.message_origin(source_message_index) != MessageOrigin::HumanRequest {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification waiver source is not an authenticated human request".to_string(),
+                ));
+            }
+            let plan = session.plan.as_mut().ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification waiver has no active plan".to_string(),
+                )
+            })?;
+            let plan_id = plan.id.clone();
+            plan.waive_verification(
+                &plan_id,
+                &obligation_id,
+                source_message_index,
+                reason.clone(),
+            )
+            .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_waived",
+                json!({
+                    "plan_id": plan_id,
+                    "verification_id": obligation_id,
+                    "source_message_index": source_message_index,
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(Some(obligation_id))
+}
+
+fn finish_human_verification_waiver(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    verification_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AgentRunSummary, String> {
+    let message =
+        format!("Verification requirement {verification_id} was waived for the active plan.");
+    store
+        .record_event(
+            session_id,
+            "reconciliation",
+            json!({"run_id": run_id, "outcome": "verification_waived", "continue": false}),
+        )
+        .map_err(|error| error.to_string())?;
+    emit_nonblocking(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "verification_waived".to_string(),
+        },
+    );
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 0,
+        last_message: Some(message),
+        tool_call_count: 0,
+        final_state: AgentState::Done,
+        outcome: "verification_waived".to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Idle.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+fn command_verification_obligation(
+    command: &str,
+    authority: VerificationAuthority,
+    source_message_index: Option<usize>,
+) -> Result<VerificationObligation, String> {
+    let fingerprint = format!("{:x}", Sha256::digest(command.as_bytes()));
+    let mut obligation = VerificationObligation::pending_tool(
+        format!("required-command-{}", &fingerprint[..16]),
+        format!("Run the required command: {command}"),
+        vec![".".to_string()],
+        "run_terminal",
+        json!({"command": command, "affected_paths": ["."]}),
+        VerificationExpectedOutcome::Success,
+    )?;
+    obligation.authority = authority;
+    obligation.source_message_index = source_message_index;
+    Ok(obligation)
+}
+
+fn explicit_human_verification_commands(goal: &str) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "task verify",
+        "task check",
+        "task test",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+    ];
+    let mut exact_segments = goal
+        .split('`')
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, segment)| segment.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    exact_segments.extend(goal.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("$ ")
+            .map(|command| command.trim().to_ascii_lowercase())
+    }));
+    KNOWN
+        .iter()
+        .filter(|command| exact_segments.iter().any(|segment| segment == **command))
+        .map(|command| (*command).to_string())
+        .collect()
+}
+
+fn add_independent_verification_requirements(
+    plan: &mut crate::session::Plan,
+    goal: &str,
+    project_instructions: &str,
+    source_message_index: Option<usize>,
+) -> Result<Vec<String>, String> {
+    if plan.steps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let step_index = plan.steps.len() - 1;
+    let mut candidates = explicit_human_verification_commands(goal)
+        .into_iter()
+        .map(|command| {
+            command_verification_obligation(
+                &command,
+                VerificationAuthority::Human,
+                source_message_index,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if project_instructions
+        .to_ascii_lowercase()
+        .contains("task verify")
+    {
+        candidates.push(command_verification_obligation(
+            "task verify",
+            VerificationAuthority::Project,
+            None,
+        )?);
+    }
+    let step = &mut plan.steps[step_index];
+    let mut added = Vec::new();
+    for mut obligation in candidates {
+        let duplicate = step
+            .verification_obligations
+            .iter()
+            .any(|existing| existing.expected_invocation == obligation.expected_invocation);
+        if duplicate {
+            continue;
+        }
+        obligation.plan_id.clone_from(&plan.id);
+        obligation.step_index = Some(step_index);
+        added.push(obligation.id.clone());
+        step.verification_obligations.push(obligation);
+    }
+    Ok(added)
+}
+
+fn derive_active_plan_verification_requirements(
+    store: &SessionStore,
+    session_id: &str,
+    goal: &str,
+    project_instructions: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let source_message_index = session
+                .message_provenance
+                .iter()
+                .rev()
+                .find(|source| source.origin.is_human())
+                .map(|source| source.message_index);
+            let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) else {
+                return Ok(());
+            };
+            let added = add_independent_verification_requirements(
+                plan,
+                goal,
+                project_instructions,
+                source_message_index,
+            )
+            .map_err(crate::session::SessionError::InvalidMutation)?;
+            if !added.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_requirements_derived",
+                    json!({"verification_ids": added, "source": "resolved_human_and_project_requirements"}),
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn plan_invalidation_reason(
     plan: &crate::session::Plan,
     normalized_goal: &str,
@@ -6259,8 +6560,9 @@ fn begin_plan_verification(
     expected_plan_id: Option<&str>,
     normalized_goal: &str,
     obligation_id: &str,
-    invocation_id: crate::tools::ToolInvocationId,
+    request: &ToolCallRequest,
 ) -> Result<(), String> {
+    let invocation_id = request.invocation_id;
     store
         .update_session(session_id, |session| {
             let matches = session.plan.as_ref().is_some_and(|plan| {
@@ -6283,7 +6585,13 @@ fn begin_plan_verification(
                 .plan
                 .as_mut()
                 .expect("plan presence was checked above")
-                .begin_verification(obligation_id, invocation_id, None)
+                .begin_verification(
+                    obligation_id,
+                    invocation_id,
+                    &request.name,
+                    &request.arguments,
+                    None,
+                )
                 .map_err(crate::session::SessionError::InvalidMutation)?;
             append_session_event(
                 session,
@@ -6323,6 +6631,208 @@ fn audited_tool_evidence(
     Ok((mutates_content, worktree_identity))
 }
 
+fn compute_verification_content_identity(
+    worktree_root: &Path,
+    affected_paths: &[String],
+) -> Result<String, String> {
+    use std::io::Read;
+    const MAX_ENTRIES: usize = 4_096;
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    let root = worktree_root
+        .canonicalize()
+        .map_err(|error| format!("resolve verification worktree: {error}"))?;
+    let requested = if affected_paths.is_empty() {
+        vec![".".to_string()]
+    } else {
+        affected_paths.to_vec()
+    };
+    let mut pending = Vec::new();
+    for relative in requested {
+        let relative_path = Path::new(&relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "verification affected path {relative:?} is not worktree-relative"
+            ));
+        }
+        pending.push(root.join(relative_path));
+    }
+
+    let mut entries = Vec::new();
+    while let Some(path) = pending.pop() {
+        if entries.len() >= MAX_ENTRIES {
+            return Err("verification content identity exceeds 4096 entries".to_string());
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| "verification path escaped the worktree".to_string())?
+            .to_path_buf();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "verification content identity rejects linked path {:?}",
+                    relative
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                entries.push((relative.clone(), None));
+                let mut children = std::fs::read_dir(&path)
+                    .map_err(|error| format!("read verification directory: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("read verification directory entry: {error}"))?;
+                children.sort_by_key(std::fs::DirEntry::file_name);
+                for child in children.into_iter().rev() {
+                    let name = child.file_name();
+                    if matches!(name.to_str(), Some(".git" | ".nib" | "target")) {
+                        continue;
+                    }
+                    pending.push(child.path());
+                }
+            }
+            Ok(metadata) if metadata.is_file() => {
+                entries.push((relative, Some((path, metadata.len()))));
+            }
+            Ok(_) => {
+                return Err("verification content identity encountered a special file".to_string())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                entries.push((relative, Some((path, u64::MAX))));
+            }
+            Err(error) => return Err(format!("inspect verification content: {error}")),
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    let mut bytes_read = 0u64;
+    for (relative, file) in entries {
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        match file {
+            None => digest.update(b"directory\0"),
+            Some((_, u64::MAX)) => digest.update(b"missing\0"),
+            Some((path, size)) => {
+                bytes_read = bytes_read.saturating_add(size);
+                if bytes_read > MAX_BYTES {
+                    return Err("verification content identity exceeds 64 MiB".to_string());
+                }
+                digest.update(b"file\0");
+                digest.update(size.to_le_bytes());
+                let mut file = std::fs::File::open(path)
+                    .map_err(|error| format!("open verification content: {error}"))?;
+                let mut buffer = [0u8; 16 * 1024];
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|error| format!("read verification content: {error}"))?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                }
+            }
+        }
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn revalidate_plan_verification_content(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let snapshot = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session disappeared before verification revalidation".to_string())?;
+    let Some(plan) = snapshot.plan.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if expected_plan_id != Some(plan.id.as_str()) {
+        return Err("verification revalidation does not match the active plan".to_string());
+    }
+    let Some(step) = plan.steps.get(plan.current_step_index) else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for obligation in &step.verification_obligations {
+        if obligation.status != crate::session::VerificationStatus::Passed {
+            continue;
+        }
+        let current = obligation
+            .worktree_identity
+            .as_deref()
+            .ok_or_else(|| format!("verification {:?} has no worktree", obligation.id))
+            .and_then(|root| {
+                compute_verification_content_identity(Path::new(root), &obligation.affected_paths)
+            });
+        let mismatch = match &current {
+            Ok(identity) => Some(identity.as_str()) != obligation.content_identity.as_deref(),
+            Err(_) => true,
+        };
+        if mismatch {
+            stale.push((
+                obligation.id.clone(),
+                current.err().unwrap_or_else(|| {
+                    "verified content no longer matches its recorded identity".to_string()
+                }),
+            ));
+        }
+    }
+    if stale.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stale_ids = stale.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    store
+        .update_session(session_id, |session| {
+            let plan = session.plan.as_mut().ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification revalidation lost its plan".to_string(),
+                )
+            })?;
+            if expected_plan_id != Some(plan.id.as_str()) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification revalidation plan changed".to_string(),
+                ));
+            }
+            let step = plan.steps.get_mut(plan.current_step_index).ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification revalidation has no active step".to_string(),
+                )
+            })?;
+            for (id, reason) in &stale {
+                if let Some(obligation) = step
+                    .verification_obligations
+                    .iter_mut()
+                    .find(|obligation| obligation.id == *id)
+                {
+                    obligation.status = crate::session::VerificationStatus::Stale;
+                    obligation.reason = Some(reason.clone());
+                    obligation.updated_at = Some(Utc::now());
+                }
+            }
+            step.status = "Blocked".to_string();
+            step.outcome = Some("verified worktree content changed".to_string());
+            append_session_event(
+                session,
+                "verification_stale",
+                json!({"verification_ids": stale_ids.clone(), "reason": "content_identity_changed"}),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(stale_ids)
+}
+
 fn finish_plan_verification(
     store: &SessionStore,
     session_id: &str,
@@ -6333,8 +6843,65 @@ fn finish_plan_verification(
     result: &crate::tools::ToolResult,
 ) -> Result<(), String> {
     let invocation_id = result.invocation_id;
-    let success = result.success;
-    let reason = result.error.clone();
+    let snapshot = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session disappeared before verification reconciliation".to_string())?;
+    let obligation = snapshot
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.steps.get(plan.current_step_index))
+        .and_then(|step| {
+            step.verification_obligations
+                .iter()
+                .find(|obligation| obligation.id == obligation_id)
+        })
+        .ok_or_else(|| format!("verification obligation {obligation_id:?} disappeared"))?;
+    let expected_outcome = obligation
+        .expected_invocation
+        .as_ref()
+        .map(|expected| expected.expected_outcome)
+        .ok_or_else(|| {
+            format!("verification obligation {obligation_id:?} has no expected outcome")
+        })?;
+    let success = match expected_outcome {
+        VerificationExpectedOutcome::Success => result.success,
+        VerificationExpectedOutcome::ProbeMiss => {
+            result.success
+                && result.output.as_ref().is_some_and(|output| {
+                    output
+                        .get("matches")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                        && output.get("truncated").and_then(Value::as_bool) == Some(false)
+                })
+        }
+    };
+    let reason = if success {
+        None
+    } else {
+        result.error.clone().or_else(|| {
+            Some(match expected_outcome {
+                VerificationExpectedOutcome::Success => {
+                    "verification tool did not report success".to_string()
+                }
+                VerificationExpectedOutcome::ProbeMiss => {
+                    "typed absence probe returned matches or incomplete evidence".to_string()
+                }
+            })
+        })
+    };
+    let content_identity = if success {
+        let root = worktree_identity.ok_or_else(|| {
+            format!("successful verification obligation {obligation_id:?} has no worktree")
+        })?;
+        Some(compute_verification_content_identity(
+            Path::new(root),
+            &obligation.affected_paths,
+        )?)
+    } else {
+        None
+    };
     store
         .update_session(session_id, |session| {
             let matches = session.plan.as_ref().is_some_and(|plan| {
@@ -6361,6 +6928,7 @@ fn finish_plan_verification(
                     obligation_id,
                     invocation_id,
                     worktree_identity,
+                    content_identity.clone(),
                     success,
                     reason.clone(),
                 )
@@ -6374,6 +6942,7 @@ fn finish_plan_verification(
                     "verification_id": obligation_id,
                     "invocation_id": invocation_id,
                     "worktree_identity": worktree_identity,
+                    "content_identity": content_identity,
                     "status": if success { "passed" } else { "failed" },
                     "reason": reason,
                 }),
@@ -6659,6 +7228,74 @@ mod tests {
             "error": "file is missing",
         });
         (vec![request], vec![observation])
+    }
+
+    #[test]
+    fn completion_revalidation_stales_content_changed_outside_the_tool_audit() {
+        let directory = tempdir().expect("verification root");
+        std::fs::write(directory.path().join("note.txt"), "verified\n").expect("fixture");
+        let store = SessionStore::new(&directory.path().join("sessions"));
+        let mut session = store.create_session_with_id("content-revalidation");
+        let obligation = VerificationObligation::pending_tool(
+            "content-check",
+            "verify note content",
+            vec!["note.txt".to_string()],
+            "run_terminal",
+            json!({"command": "true", "affected_paths": ["note.txt"]}),
+            VerificationExpectedOutcome::Success,
+        )
+        .expect("verification contract");
+        let mut plan = crate::session::Plan::new(
+            "verify content",
+            vec![crate::session::PlanStep {
+                description: "verify the note".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: vec![obligation],
+                content_generation: 0,
+            }],
+        );
+        plan.approve();
+        let plan_id = plan.id.clone();
+        let invocation_id = crate::tools::ToolInvocationId::new();
+        let root = directory.path().to_string_lossy().into_owned();
+        plan.begin_verification(
+            "content-check",
+            invocation_id,
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["note.txt"]}),
+            Some(root.clone()),
+        )
+        .expect("begin verification");
+        let identity =
+            compute_verification_content_identity(directory.path(), &["note.txt".to_string()])
+                .expect("content identity");
+        plan.finish_verification(
+            "content-check",
+            invocation_id,
+            Some(&root),
+            Some(identity),
+            true,
+            None,
+        )
+        .expect("finish verification");
+        session.plan = Some(plan);
+        store.save(&mut session).expect("persist evidence");
+
+        std::fs::write(directory.path().join("note.txt"), "changed externally\n")
+            .expect("external change");
+        assert_eq!(
+            revalidate_plan_verification_content(&store, &session.id, Some(&plan_id))
+                .expect("revalidate"),
+            ["content-check"]
+        );
+        let persisted = store.load(&session.id).expect("stale evidence");
+        assert_eq!(
+            persisted.plan.unwrap().steps[0].verification_obligations[0].status,
+            crate::session::VerificationStatus::Stale
+        );
     }
 
     #[test]
@@ -10287,16 +10924,23 @@ mod tests {
         let store = SessionStore::new(directory.path());
         let mut session = store.create_session_with_id("cancel-running-verification");
         let mut plan = pending_plan("verify before completion", "run the required check");
-        plan.steps[0].verification_obligations.push(
-            crate::session::VerificationObligation::pending(
-                "required-check",
-                "run the required check",
-                vec!["src/".to_string()],
-            ),
-        );
+        let mut obligation = crate::session::VerificationObligation::pending_tool(
+            "required-check",
+            "run the required check",
+            vec!["src/".to_string()],
+            "run_terminal",
+            json!({"command": "true", "affected_paths": ["src/"]}),
+            crate::session::VerificationExpectedOutcome::Success,
+        )
+        .expect("valid verification contract");
+        obligation.plan_id.clone_from(&plan.id);
+        obligation.step_index = Some(0);
+        plan.steps[0].verification_obligations.push(obligation);
         plan.begin_verification(
             "required-check",
             crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["src/"]}),
             Some("worktree-a".to_string()),
         )
         .expect("start required verification");

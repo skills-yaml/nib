@@ -4,12 +4,34 @@ use crate::context::budget::{
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
 use crate::llm::{LlmClient, LlmResponse, LlmStream};
-use crate::session::{Plan, PlanStep, VerificationObligation};
+use crate::session::{Plan, PlanStep, VerificationExpectedOutcome, VerificationObligation};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 fn planning_tools() -> serde_json::Value {
+    let verification_obligation = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "required": {"type": "boolean", "default": true},
+            "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "arguments": {"type": "object"},
+            "expected_outcome": {
+                "type": "string",
+                "enum": ["success", "probe_miss"],
+                "default": "success"
+            },
+            "affected_paths": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+            }
+        },
+        "required": ["id", "description", "tool_name", "arguments"],
+        "additionalProperties": false
+    });
     json!([{
         "type": "function",
         "function": {
@@ -32,21 +54,7 @@ fn planning_tools() -> serde_json::Value {
                                         "verification_obligations": {
                                             "type": "array",
                                             "maxItems": 16,
-                                            "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "id": {"type": "string", "minLength": 1, "maxLength": 128},
-                                                    "description": {"type": "string", "minLength": 1, "maxLength": 1024},
-                                                    "required": {"type": "boolean", "default": true},
-                                                    "affected_paths": {
-                                                        "type": "array",
-                                                        "maxItems": 32,
-                                                        "items": {"type": "string", "minLength": 1, "maxLength": 4096}
-                                                    }
-                                                },
-                                                "required": ["id", "description"],
-                                                "additionalProperties": false
-                                            }
+                                            "items": verification_obligation
                                         }
                                     },
                                     "required": ["description"],
@@ -276,8 +284,45 @@ fn parse_plan_step(step: &serde_json::Value) -> Result<PlanStep, String> {
                 })
                 .transpose()?
                 .unwrap_or_default();
-            let mut parsed =
-                VerificationObligation::pending(id, obligation_description, affected_paths);
+            let tool_name = obligation
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing a tool name")
+                })?;
+            let arguments = obligation
+                .get("arguments")
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing tool arguments")
+                })?;
+            let expected_outcome = match obligation
+                .get("expected_outcome")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("success")
+            {
+                "success" => VerificationExpectedOutcome::Success,
+                "probe_miss" => VerificationExpectedOutcome::ProbeMiss,
+                value => {
+                    return Err(format!(
+                        "verification obligation {id:?} has unsupported expected outcome {value:?}"
+                    ))
+                }
+            };
+            if expected_outcome == VerificationExpectedOutcome::ProbeMiss && tool_name != "grep" {
+                return Err(format!(
+                    "verification obligation {id:?} may use probe_miss only with the typed grep tool"
+                ));
+            }
+            let mut parsed = VerificationObligation::pending_tool(
+                id,
+                obligation_description,
+                affected_paths,
+                tool_name,
+                arguments.clone(),
+                expected_outcome,
+            )?;
             parsed.required = obligation
                 .get("required")
                 .and_then(serde_json::Value::as_bool)
@@ -333,6 +378,8 @@ mod tests {
                         "verification_obligations": [{
                             "id": "required-check",
                             "description": "run the focused behavior test",
+                            "tool_name": "run_terminal",
+                            "arguments": {"command": "task test:agent-context", "affected_paths": ["."]},
                             "affected_paths": ["src/agent", "tests/test_runtime_e2e.rs"]
                         }]
                     }]
@@ -351,6 +398,10 @@ mod tests {
         assert_eq!(
             obligation.affected_paths,
             ["src/agent", "tests/test_runtime_e2e.rs"]
+        );
+        assert_eq!(
+            obligation.expected_invocation.as_ref().unwrap().tool_name,
+            "run_terminal"
         );
     }
 

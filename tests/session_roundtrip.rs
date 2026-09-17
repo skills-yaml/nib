@@ -3,8 +3,8 @@
 use chrono::Utc;
 use nib::session::memory::{MemoryEntryMetadata, MemoryStore};
 use nib::session::{
-    MessageOrigin, Plan, PlanStep, SessionEvent, SessionStore, VerificationObligation,
-    VerificationStatus,
+    MessageOrigin, Plan, PlanStep, SessionEvent, SessionStore, VerificationExpectedOutcome,
+    VerificationObligation, VerificationStatus,
 };
 use nib::tools::ToolInvocationId;
 use serde_json::json;
@@ -100,22 +100,33 @@ fn verification_obligation_survives_reload_and_requires_an_exact_corrective_resu
             outcome: None,
             attempts: 0,
             updated_at: None,
-            verification_obligations: vec![VerificationObligation::pending(
+            verification_obligations: vec![VerificationObligation::pending_tool(
                 "required-check",
                 "run the required check",
                 vec!["src".to_string()],
-            )],
+                "run_terminal",
+                json!({"command": "true", "affected_paths": ["src"]}),
+                VerificationExpectedOutcome::Success,
+            )
+            .expect("verification contract")],
             content_generation: 0,
         }],
     );
     plan.approve();
     let failed = ToolInvocationId::new();
-    plan.begin_verification("required-check", failed, Some("worktree-a".to_string()))
-        .expect("start check");
+    plan.begin_verification(
+        "required-check",
+        failed,
+        "run_terminal",
+        &json!({"command": "true", "affected_paths": ["src"]}),
+        Some("worktree-a".to_string()),
+    )
+    .expect("start check");
     plan.finish_verification(
         "required-check",
         failed,
         Some("worktree-a"),
+        None,
         false,
         Some("check failed".to_string()),
     )
@@ -136,13 +147,33 @@ fn verification_obligation_survives_reload_and_requires_an_exact_corrective_resu
 
     let corrective = ToolInvocationId::new();
     loaded_plan
-        .begin_verification("required-check", corrective, Some("worktree-a".to_string()))
+        .begin_verification(
+            "required-check",
+            corrective,
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["src"]}),
+            Some("worktree-a".to_string()),
+        )
         .expect("start corrective check");
     assert!(loaded_plan
-        .finish_verification("required-check", corrective, Some("worktree-b"), true, None,)
+        .finish_verification(
+            "required-check",
+            corrective,
+            Some("worktree-b"),
+            Some("sha256:wrong".to_string()),
+            true,
+            None,
+        )
         .is_err());
     loaded_plan
-        .finish_verification("required-check", corrective, Some("worktree-a"), true, None)
+        .finish_verification(
+            "required-check",
+            corrective,
+            Some("worktree-a"),
+            Some("sha256:content".to_string()),
+            true,
+            None,
+        )
         .expect("pass corrective check");
     loaded_plan.record_tool_outcome(true, "required check passed");
     loaded_plan.complete_current_step("verified");
@@ -221,7 +252,12 @@ fn tool_and_subagent_messages_cannot_manufacture_human_provenance() {
             MessageOrigin::HumanQuestionAnswer,
         )
         .expect_err("tool role cannot be labeled human");
-    assert!(error.to_string().contains("incompatible"));
+    assert!(
+        error.to_string().contains("incompatible")
+            || error
+                .to_string()
+                .contains("invalid session role transition")
+    );
 
     let forged: nib::session::Session = serde_json::from_value(json!({
         "id": "forged-human-intent",

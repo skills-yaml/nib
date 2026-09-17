@@ -74,7 +74,9 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "pattern": {"type": "string", "minLength": 1, "maxLength": 4096},
                     "path": {"type": "string", "minLength": 1, "maxLength": 4096, "default": "."},
                     "glob": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50}
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+                    "verification_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Exact active-plan typed probe obligation this invocation resolves."},
+                    "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -121,7 +123,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "verification_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Exact active-plan verification obligation this invocation resolves."},
                     "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
-                "required": ["command", "affected_paths"],
+                "required": ["command"],
                 "additionalProperties": false
             }),
         ),

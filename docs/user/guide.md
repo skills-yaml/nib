@@ -380,6 +380,20 @@ missing details that affect the result, and keep plans and tool use proportional
 the task. It stops repeated unchanged tool failures and keeps unresolved failed steps
 blocked. Required approvals and the configured turn limit still apply.
 
+Plans can carry required verification separately from their step state. `/status`
+shows every requirement's ID, state, and authority, and `/plan` includes the same
+information with the step detail. A required command receives credit only when its
+exact persisted tool call succeeds on the same managed worktree content; an unrelated
+successful command cannot clear it. Later relevant changes make prior evidence stale.
+Absence checks use the typed `grep` result and pass only when the result is empty and
+untruncated.
+
+To remove an unrun human or approved-plan requirement that became inapplicable, enter
+`waive verification <id>: <reason>`. nib binds the waiver to that human message and
+active plan. Project gates and requirements with running, failed, or passed evidence
+cannot be waived. A waiver remains visible as `waived`; it is never reported as a
+passing check.
+
 To ask nib to develop its own source, run it from a nib checkout with a concrete
 change and acceptance criteria, for example:
 
@@ -417,6 +431,10 @@ Both presentation modes expose these commands:
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox
   posture, plan, and queued follow-up count.
+- `/context` shows the compact approximate usage indicator. `/context details` adds a
+  bounded breakdown of message and summary coverage, retained human intent,
+  unresolved clarifications, selected skills, and the latest run's generation, tool,
+  compression, repeated-question, and approximate input-token counters.
 - `/model` or `/model <name>` lists or selects a model.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox

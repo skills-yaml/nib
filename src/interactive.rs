@@ -118,6 +118,19 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         NO_COMPLETION,
     ),
     spec(
+        "context",
+        &[],
+        "/context [details]",
+        "Show compact context usage or its bounded breakdown",
+        InteractiveArgumentSchema::OptionalSingle,
+        InteractiveMutability::ReadOnly,
+        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveCompletionSpec {
+            candidates: &["details"],
+            argument_after: &[],
+        },
+    ),
+    spec(
         "model",
         &[],
         "/model [name]",
@@ -708,6 +721,7 @@ pub enum InteractiveCommand {
     Quit,
     Help,
     Status,
+    Context { details: bool },
     Providers,
     Permissions { selection: Option<String> },
     Plan { prompt: Option<String> },
@@ -735,6 +749,7 @@ impl InteractiveCommand {
             Self::Quit => "quit",
             Self::Help => "help",
             Self::Status => "status",
+            Self::Context { .. } => "context",
             Self::Providers => "providers",
             Self::Permissions { .. } => "permissions",
             Self::Plan { .. } => "plan",
@@ -2962,14 +2977,101 @@ fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> Ac
         .steps
         .iter()
         .enumerate()
-        .map(|(index, step)| format!("{}. [{}] {}", index + 1, step.status, step.description))
+        .flat_map(|(index, step)| {
+            let mut lines = vec![format!(
+                "{}. [{}] {}",
+                index + 1,
+                step.status,
+                step.description
+            )];
+            lines.extend(step.verification_obligations.iter().map(|obligation| {
+                format!(
+                    "   verify {} [{}; {}]",
+                    obligation.id,
+                    verification_status_label(obligation.status),
+                    verification_authority_label(obligation.authority),
+                )
+            }));
+            lines
+        })
         .collect::<Vec<_>>()
         .join("\n");
+    let unresolved = plan
+        .steps
+        .get(plan.current_step_index)
+        .map(|step| {
+            step.verification_obligations
+                .iter()
+                .filter(|obligation| obligation.is_unresolved_required())
+                .count()
+        })
+        .unwrap_or(0);
+    let verification = if unresolved > 0 {
+        format!(" · {unresolved} verification pending")
+    } else {
+        String::new()
+    };
     ActivityEntry::new(
         ActivityKind::Plan,
-        format!("{current}/{} {title}", plan.steps.len()),
+        format!("{current}/{} {title}{verification}", plan.steps.len()),
         bounded_activity_body(&body, sensitive_values),
     )
+}
+
+fn verification_status_label(status: crate::session::VerificationStatus) -> &'static str {
+    use crate::session::VerificationStatus;
+    match status {
+        VerificationStatus::Pending => "pending",
+        VerificationStatus::Running => "running",
+        VerificationStatus::Passed => "passed",
+        VerificationStatus::Failed => "failed",
+        VerificationStatus::Cancelled => "cancelled",
+        VerificationStatus::Stale => "stale",
+        VerificationStatus::Waived => "waived",
+    }
+}
+
+fn verification_authority_label(authority: crate::session::VerificationAuthority) -> &'static str {
+    use crate::session::VerificationAuthority;
+    match authority {
+        VerificationAuthority::Human => "human",
+        VerificationAuthority::Project => "project",
+        VerificationAuthority::ApprovedPlan => "approved plan",
+    }
+}
+
+fn format_verification_status(session: Option<&Session>, sensitive_values: &[String]) -> String {
+    let Some(plan) = session.and_then(|session| session.plan.as_ref()) else {
+        return "Verification: none".to_string();
+    };
+    let obligations = plan
+        .steps
+        .iter()
+        .flat_map(|step| step.verification_obligations.iter())
+        .collect::<Vec<_>>();
+    if obligations.is_empty() {
+        return "Verification: none".to_string();
+    }
+    let mut output = format!("Verification: {} requirement(s)", obligations.len());
+    for obligation in obligations.into_iter().take(16) {
+        output.push_str(&format!(
+            "\n  - {} | {} | {}{}",
+            bounded_sensitive_status_value(&obligation.id, sensitive_values),
+            verification_status_label(obligation.status),
+            verification_authority_label(obligation.authority),
+            obligation
+                .reason
+                .as_deref()
+                .map(|reason| {
+                    format!(
+                        " | {}",
+                        bounded_sensitive_status_value(reason, sensitive_values)
+                    )
+                })
+                .unwrap_or_default(),
+        ));
+    }
+    bounded_public_text(&output, sensitive_values, 4_096, true)
 }
 
 fn plan_summary_activity(
@@ -3378,8 +3480,86 @@ pub fn format_session_status(
         &config.approvals,
     );
     Ok(format!(
-        "{header}\n{status}\n{}",
-        format_effective_execution_posture(&posture)
+        "{header}\n{status}\n{}\n{}",
+        format_effective_execution_posture(&posture),
+        format_verification_status(session.as_ref(), store.public_sensitive_values()),
+    ))
+}
+
+fn format_context_monitor(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    details: bool,
+) -> Result<String, String> {
+    let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+    let used = persisted_context_usage(session.as_ref(), config.llm.context_length);
+    let compact = format!(
+        "Context ~{used}/{} ({})",
+        config.llm.context_length,
+        compact_context_label(used, config.llm.context_length),
+    );
+    if !details {
+        return Ok(format!(
+            "{compact}. Use /context details for the bounded breakdown."
+        ));
+    }
+    let Some(session) = session.as_ref() else {
+        return Ok(format!("{compact}\nSession context: unavailable"));
+    };
+    let summarized = session.summary_index.min(session.messages.len());
+    let unsummarized = session.messages.len().saturating_sub(summarized);
+    let latest_resources = session
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "agent_resource_usage")
+        .map(|event| {
+            let number = |key: &str| {
+                event
+                    .details
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            format!(
+                "Latest run: generations {} · tools {} · input tokens total ~{} · max ~{} · compressions {} · repeated questions {}",
+                number("generation_requests"),
+                number("tool_attempts"),
+                number("approximate_context_tokens_total"),
+                number("approximate_context_tokens_max"),
+                number("compression_requests"),
+                number("repeated_questions"),
+            )
+        })
+        .unwrap_or_else(|| "Latest run: no resource evidence yet".to_string());
+    let output = format!(
+        "{compact}\nHistory: {} message(s) · {} summarized · {} unsummarized\nSummary: {}\nHuman intent records: {} · unresolved clarifications: {}\nSelected skills: {}\n{latest_resources}",
+        session.messages.len(),
+        summarized,
+        unsummarized,
+        if session.summary.is_some() { "present" } else { "none" },
+        session.human_intent.len(),
+        session
+            .clarifications
+            .iter()
+            .filter(|clarification| {
+                !matches!(
+                    clarification.status,
+                    crate::session::ClarificationStatus::Answered
+                )
+            })
+            .count(),
+        session.active_skills.len(),
+    );
+    Ok(bounded_public_text(
+        &output,
+        &config.public_session_sensitive_values(),
+        MAX_PUBLIC_PRESENTATION_BYTES,
+        true,
     ))
 }
 
@@ -4093,6 +4273,10 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         "quit" if arguments.is_empty() => InteractiveCommand::Quit,
         "help" if arguments.is_empty() => InteractiveCommand::Help,
         "status" if arguments.is_empty() => InteractiveCommand::Status,
+        "context" if arguments.is_empty() => InteractiveCommand::Context { details: false },
+        "context" if arguments.len() == 1 && arguments[0].eq_ignore_ascii_case("details") => {
+            InteractiveCommand::Context { details: true }
+        }
         "providers" if arguments.is_empty() => InteractiveCommand::Providers,
         "permissions" => InteractiveCommand::Permissions {
             selection: if arguments.is_empty() {
@@ -4240,6 +4424,9 @@ pub fn execute_interactive_command_in_state(
             session_id,
             lifecycle,
         )?)),
+        InteractiveCommand::Context { details } => Ok(InteractiveEffect::Output(
+            format_context_monitor(project_root, store, session_id, details)?,
+        )),
         InteractiveCommand::Permissions { selection: None } => {
             Ok(InteractiveEffect::Output(format_permissions(project_root)?))
         }
@@ -5063,6 +5250,7 @@ mod tests {
         assert!(parse_interactive_command("/mcp add only-name").is_err());
         for invalid in [
             "/status extra",
+            "/context verbose",
             "/rename",
             "/permissions unsupported",
             "/model one two",
@@ -5896,6 +6084,8 @@ mod tests {
 
         for command in [
             "/status",
+            "/context",
+            "/context details",
             "/permissions",
             "/plan",
             "/review",
@@ -5927,6 +6117,19 @@ mod tests {
         assert!(status.contains("running"));
         assert!(status.contains(&session_id));
         assert!(status.contains("profile focused"));
+
+        let InteractiveEffect::Output(context) = execute_interactive_command(
+            InteractiveCommand::Context { details: true },
+            project.path(),
+            &store,
+            &session_id,
+        )
+        .expect("context details") else {
+            panic!("context output");
+        };
+        assert!(context.contains("Context ~"));
+        assert!(context.contains("History: 2 message(s)"));
+        assert!(context.contains("Latest run: no resource evidence yet"));
 
         let effect = execute_interactive_command(
             InteractiveCommand::Compact,
@@ -6258,6 +6461,7 @@ mod tests {
         assert!(output.contains("/32"), "{output}");
         assert!(output.contains("Configured approval preset: manual"));
         assert!(output.contains("platform sandbox:"));
+        assert!(output.contains("Verification: none"));
         assert!(!output.contains('\u{1b}'));
         assert!(!output.contains("\nINJECTED"));
         assert!(!output.contains("\nINJECTED_NAME"));
@@ -6266,6 +6470,57 @@ mod tests {
         assert!(!output.contains("c3RhdHVzL2NyZWRlbnRpYWw"));
         assert!(output.contains("[REDACTED]"));
         assert!(output.len() < 4_096, "status output must remain bounded");
+    }
+
+    #[test]
+    fn status_and_plan_projection_show_verification_state_and_authority() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(project.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(project.path()).expect("store");
+        let mut session = store.try_create_session().expect("session");
+        let mut obligation = crate::session::VerificationObligation::pending_tool(
+            "required-project-gate",
+            "run the project gate",
+            vec![".".to_string()],
+            "run_terminal",
+            serde_json::json!({"command": "task verify", "affected_paths": ["."]}),
+            crate::session::VerificationExpectedOutcome::Success,
+        )
+        .expect("verification contract");
+        obligation.authority = crate::session::VerificationAuthority::Project;
+        session.plan = Some(crate::session::Plan::new(
+            "verify the change",
+            vec![crate::session::PlanStep {
+                description: "verify".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: vec![obligation],
+                content_generation: 0,
+            }],
+        ));
+        store.save(&mut session).expect("verification session");
+
+        let status = format_session_status(
+            project.path(),
+            "verification-profile",
+            &store,
+            &session.id,
+            "idle",
+        )
+        .expect("status");
+        assert!(status.contains("required-project-gate | pending | project"));
+        let plan = session.plan.as_ref().expect("plan");
+        let activity = plan_activity(plan, &[]);
+        assert!(activity.title.contains("1 verification pending"));
+        assert!(activity
+            .body
+            .contains("verify required-project-gate [pending; project]"));
     }
 
     #[test]
