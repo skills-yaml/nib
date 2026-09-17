@@ -21083,7 +21083,10 @@ mod tests {
         }
 
         drop(held);
-        RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_millis(100))
+        // The timeout covers records-directory and lock-anchor validation as well as
+        // acquisition. Leave enough room for those bounded filesystem checks on a
+        // loaded CI host after the child-process probes exit.
+        RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(1))
             .await
             .expect("restored persistent lock identity remains usable");
     }
