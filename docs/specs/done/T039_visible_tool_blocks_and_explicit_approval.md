@@ -76,8 +76,10 @@ says `awaiting you`.
   time, a token estimate, and status.
 - The conversation stays scrollable while an approval list is open. Wheel, PageUp,
   PageDown, and Shift/Ctrl+Up/Down move the transcript; Y/N still answer. Unmodified
-  Up/Down select the under-composer choice. Click-drag selects chat text; Ctrl+Y
-  copies the selection, the selected block, or the last reply.
+  Up/Down select the under-composer choice. Click-drag selects chat text and
+  copies it on mouse-up. Esc, Enter, a click in the composer, Tab, or typing
+  clears the selection. Ctrl+C copies while a selection is active; Ctrl+Y /
+  Ctrl+Shift+C still copy the selection, selected block, or last reply.
 - The first chrome row shows the working directory and git branch on the left
   (branch colored when color is available) and the current model plus context
   usage on the right. The last row shows the command approval mode and the
@@ -159,9 +161,11 @@ says `awaiting you`.
       while a run is active or the TUI is waiting.
 - [x] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
       an approval list is open; unmodified Up/Down select approval choices.
-- [x] Click and drag selects chat text. `Ctrl+Y` / `Ctrl+Shift+C` copies the
-      selection, or the selected block, or the last assistant reply. `Ctrl+A`
-      selects the whole chat. Copy uses OSC 52.
+- [x] Click and drag selects chat text and copies on mouse-up. `Esc` / `Enter` /
+      composer click / typing leave selection. `Ctrl+C` copies while a selection
+      is active (otherwise it still cancels or quits). `Ctrl+Y` / `Ctrl+Shift+C`
+      copy the selection, selected block, or last reply. `Ctrl+A` selects the
+      whole chat. Copy uses OSC 52 plus the system clipboard when available.
 - [x] The first row shows folder and branch on the left and model plus context
       usage on the right. The last row shows approval mode and agent mode.
       `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.

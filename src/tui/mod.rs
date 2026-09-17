@@ -36,6 +36,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::DefaultTerminal;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -190,6 +191,14 @@ impl PointerSelection {
         let ((start_row, _), (end_row, _)) = self.ordered();
         row >= start_row && row <= end_row
     }
+
+    fn is_active(&self) -> bool {
+        self.moved
+    }
+}
+
+fn pointer_selection_is_active(pointer: Option<PointerSelection>) -> bool {
+    pointer.is_some_and(|selection| selection.is_active())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3739,6 +3748,10 @@ fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'stat
             "/               commands · @ files · Tab transcript",
             muted,
         )),
+        Line::from(Span::styled(
+            "drag            copy chat · Esc clears selection",
+            muted,
+        )),
         Line::from(Span::styled("Y / N           approve or deny", muted)),
     ]);
     lines
@@ -3750,10 +3763,13 @@ fn footer_line(
     queued: usize,
     waiting: WaitingKind,
     band_hint: Option<&str>,
+    selecting: bool,
 ) -> String {
     let mut hint = format!("approval {} · {}", chrome.approval, chrome.agent_mode);
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
+    } else if selecting {
+        hint = format!("{hint} · Ctrl+C copy · Esc clear");
     } else if let Some(band) = band_hint {
         hint = format!("{hint} · {band}");
     }
@@ -3901,8 +3917,67 @@ fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: bool) -> Str
 }
 
 fn copy_text_osc52(text: &str) {
-    let _ = write!(io::stdout(), "{}", osc52_sequence(text));
-    let _ = io::stdout().flush();
+    let encoded = encode_base64(text.as_bytes());
+    let mut out = io::stdout();
+    let _ = write!(out, "{}", osc52_sequence(text));
+    let _ = write!(out, "\x1b]52;c;{encoded}\x1b\\");
+    let _ = out.flush();
+}
+
+fn copy_text_to_clipboard(text: &str) {
+    copy_text_osc52(text);
+    let payload = text.to_string();
+    let _ = std::thread::Builder::new()
+        .name("nib-clipboard".to_string())
+        .spawn(move || {
+            let _ = copy_text_system_clipboard(&payload);
+        });
+}
+
+fn copy_text_system_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return pipe_stdin_to_command(text, "pbcopy", &[]);
+    }
+    #[cfg(windows)]
+    {
+        return pipe_stdin_to_command(text, "clip", &[]);
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        pipe_stdin_to_command(text, "wl-copy", &[])
+            || pipe_stdin_to_command(text, "xclip", &["-selection", "clipboard"])
+            || pipe_stdin_to_command(text, "xsel", &["--clipboard", "--input"])
+    }
+}
+
+fn pipe_stdin_to_command(text: &str, program: &str, args: &[&str]) -> bool {
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    matches!(child.wait(), Ok(status) if status.success()) && wrote
+}
+
+fn publish_copied_chat(
+    pointer: Option<PointerSelection>,
+    view: &TranscriptView,
+    selected: Option<usize>,
+    activities: &[ActivityEntry],
+) -> Option<&'static str> {
+    let (text, status) = copy_chat_content(pointer, view, selected, activities)?;
+    copy_text_to_clipboard(&text);
+    Some(status)
 }
 
 fn osc52_sequence(text: &str) -> String {
@@ -4752,6 +4827,7 @@ fn render_session_activities(
         queued,
         waiting,
         band.map(InteractionBand::footer_hint),
+        pointer_selection_is_active(pointer),
     );
     frame.render_widget(
         Paragraph::new(footer).style(muted_style(no_color)),
@@ -5111,6 +5187,13 @@ fn draw_loop(
                                 selection.drag_to(row, col);
                                 if !selection.moved {
                                     pointer_selection = None;
+                                } else if let Some(status) = publish_copied_chat(
+                                    pointer_selection,
+                                    &transcript_view,
+                                    selected_activity,
+                                    &timeline.activities,
+                                ) {
+                                    timeline.push_status(status.to_string());
                                 }
                             }
                             selected_activity = transcript_view.owners.get(row).copied();
@@ -5119,6 +5202,18 @@ fn draw_loop(
                     }
                 } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     tui_focus = TuiFocus::Composer;
+                    pointer_selection = None;
+                } else if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                    && pointer_selection_is_active(pointer_selection)
+                {
+                    if let Some(status) = publish_copied_chat(
+                        pointer_selection,
+                        &transcript_view,
+                        selected_activity,
+                        &timeline.activities,
+                    ) {
+                        timeline.push_status(status.to_string());
+                    }
                 }
                 continue;
             }
@@ -5206,6 +5301,21 @@ fn draw_loop(
                 } else {
                     None
                 };
+                let copy_requested = (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || control_shift_c
+                    || (control_c && pointer_selection_is_active(pointer_selection));
+                if copy_requested {
+                    if let Some(status) = publish_copied_chat(
+                        pointer_selection,
+                        &transcript_view,
+                        selected_activity,
+                        &timeline.activities,
+                    ) {
+                        timeline.push_status(status.to_string());
+                    }
+                    continue;
+                }
                 if global_reduction == Some(InteractionReduction::CancelRun) {
                     if let Err(error) = shutdown_agent_worker(
                         &mut worker,
@@ -5257,21 +5367,6 @@ fn draw_loop(
                             quit_armed_at = Some(now);
                             timeline.push_status("Press Ctrl+Q again to quit.".to_string());
                         }
-                    }
-                    continue;
-                }
-                if (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || control_shift_c
-                {
-                    if let Some((text, status)) = copy_chat_content(
-                        pointer_selection,
-                        &transcript_view,
-                        selected_activity,
-                        &timeline.activities,
-                    ) {
-                        copy_text_osc52(&text);
-                        timeline.push_status(status.to_string());
                     }
                     continue;
                 }
@@ -5480,7 +5575,10 @@ fn draw_loop(
                             tui_focus = TuiFocus::Transcript;
                             selected_activity = timeline.activities.len().checked_sub(1);
                         }
-                        TuiFocus::Transcript => tui_focus = TuiFocus::Composer,
+                        TuiFocus::Transcript => {
+                            tui_focus = TuiFocus::Composer;
+                            pointer_selection = None;
+                        }
                     }
                     continue;
                 }
@@ -5517,21 +5615,30 @@ fn draw_loop(
                             }
                             continue;
                         }
-                        KeyCode::Enter => continue,
-                        KeyCode::Esc => {
+                        KeyCode::Enter | KeyCode::Esc => {
                             tui_focus = TuiFocus::Composer;
+                            pointer_selection = None;
                             continue;
                         }
                         KeyCode::Char(character)
                             if !key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             tui_focus = TuiFocus::Composer;
+                            pointer_selection = None;
                             composer.insert_str(&character.to_string());
                             completion.sync_for(&composer.input, Some(project_root));
                             continue;
                         }
                         _ => {}
                     }
+                }
+                if key.code == KeyCode::Esc
+                    && pointer_selection_is_active(pointer_selection)
+                    && matches!(interaction_layer, InteractionLayer::Composer)
+                {
+                    pointer_selection = None;
+                    tui_focus = TuiFocus::Composer;
+                    continue;
                 }
                 if key.code == KeyCode::Esc
                     && tui_focus == TuiFocus::Composer
@@ -6585,35 +6692,42 @@ mod tests {
         let mut viewport = TranscriptViewport::default();
         let chrome = TuiChrome::fixture();
         assert_eq!(
-            footer_line(&chrome, &viewport, 0, WaitingKind::None, None),
+            footer_line(&chrome, &viewport, 0, WaitingKind::None, None, false),
             "approval manual · idle"
         );
         let mut running = chrome.clone();
         running.agent_mode = "execute".to_string();
         assert_eq!(
-            footer_line(&running, &viewport, 0, WaitingKind::None, None),
+            footer_line(&running, &viewport, 0, WaitingKind::None, None, false),
             "approval manual · execute"
         );
         assert_eq!(
-            footer_line(&running, &viewport, 2, WaitingKind::None, None),
+            footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
             "queue 2 · approval manual · execute"
         );
         let mut waiting = chrome.clone();
         waiting.agent_mode = "WAITING APPROVAL".to_string();
         assert_eq!(
-            footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None),
+            footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
             "approval manual · WAITING APPROVAL · Y/Enter approve once · N deny · Esc deny"
         );
         let mut question = chrome.clone();
         question.agent_mode = "WAITING QUESTION".to_string();
         assert_eq!(
-            footer_line(&question, &viewport, 0, WaitingKind::Question, None),
+            footer_line(&question, &viewport, 0, WaitingKind::Question, None, false),
             "approval manual · WAITING QUESTION · Enter / 1-9 answer · Esc skip"
         );
         let mut workspace = chrome.clone();
         workspace.agent_mode = "WAITING PERMISSION".to_string();
         assert_eq!(
-            footer_line(&workspace, &viewport, 0, WaitingKind::Workspace, None),
+            footer_line(
+                &workspace,
+                &viewport,
+                0,
+                WaitingKind::Workspace,
+                None,
+                false
+            ),
             "approval manual · WAITING PERMISSION · Y/Enter allow this directory · N decline"
         );
         assert!(footer_line(
@@ -6622,12 +6736,19 @@ mod tests {
             0,
             WaitingKind::None,
             Some("Tab insert · Enter run · Esc close"),
+            false,
         )
         .contains("Tab insert"));
+        assert!(
+            footer_line(&chrome, &viewport, 0, WaitingKind::None, None, true)
+                .contains("Ctrl+C copy · Esc clear")
+        );
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
-        assert!(footer_line(&running, &viewport, 0, WaitingKind::None, None)
-            .contains("Ctrl+End follow"));
+        assert!(
+            footer_line(&running, &viewport, 0, WaitingKind::None, None, false)
+                .contains("Ctrl+End follow")
+        );
 
         let area = Rect::new(0, 0, 100, 30);
         let composer_height = 2;
@@ -9387,6 +9508,15 @@ mod tests {
             copy_chat_content(None, &view, Some(0), &activities).expect("copy block");
         assert_eq!(block, "inspect wrap");
         assert_eq!(block_status, "Copied.");
+
+        let mut pointer = PointerSelection::at(0, 2);
+        assert!(!pointer_selection_is_active(Some(pointer)));
+        pointer.drag_to(0, 14);
+        assert!(pointer_selection_is_active(Some(pointer)));
+        let (selected, selected_status) =
+            copy_chat_content(Some(pointer), &view, Some(0), &activities).expect("copy drag");
+        assert_eq!(selected, "inspect wrap");
+        assert_eq!(selected_status, "Copied selection.");
     }
 
     #[test]

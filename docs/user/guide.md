@@ -479,7 +479,7 @@ Parity matrix (same command/session effect in both renderers):
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
 | Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
 | Quit | idle `Ctrl+C` twice, `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`); idle `Ctrl+C` |
-| Transcript | `Tab`, then arrows / fold / `Ctrl+Y` | ordered printed transcript |
+| Transcript | `Tab`, then arrows / fold / `Ctrl+C` or `Ctrl+Y` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
 | Approvals | dock on the current tool | Y/N prompt |
@@ -623,9 +623,12 @@ then a concise final answer. Speech renders markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring.
 `Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
 composer and the transcript. Click in the chat to focus it; drag to select text.
-`Ctrl+A` selects the whole chat. `Ctrl+Y` or `Ctrl+Shift+C` copies the selection,
-the selected block, or the last reply. Printable keys return to the composer and
-insert.
+Releasing the drag copies the selection. `Esc` or `Enter` clears it and returns
+to the composer; a click in the prompt or typing does the same. `Ctrl+A` selects
+the whole chat. `Ctrl+C` copies while text is selected (it still cancels a run
+or quits when nothing is selected). `Ctrl+Y` or `Ctrl+Shift+C` copy the
+selection, the selected block, or the last reply. Printable keys return to the
+composer and insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
