@@ -210,10 +210,15 @@ fn is_read_only_command(words: &[&str]) -> bool {
     };
     match program {
         "pwd" | "whoami" | "ls" | "wc" => true,
-        "git" => matches!(
-            words.get(1).copied(),
-            Some("status" | "log" | "diff" | "show" | "rev-parse")
-        ),
+        "git" => {
+            matches!(
+                words.get(1).copied(),
+                Some("status" | "log" | "diff" | "show" | "rev-parse")
+            ) && !words
+                .iter()
+                .skip(2)
+                .any(|word| matches!(*word, "-o" | "--output") || word.starts_with("--output="))
+        }
         _ => false,
     }
 }
@@ -243,6 +248,14 @@ mod tests {
         assert_eq!(
             classify_tool_call(&terminal("git diff --check")),
             ToolRisk::ReadOnly
+        );
+        assert_eq!(
+            classify_tool_call(&terminal("git diff --output=review.patch")),
+            ToolRisk::RequiresApproval
+        );
+        assert_eq!(
+            classify_tool_call(&terminal("git show -o review.patch")),
+            ToolRisk::RequiresApproval
         );
         assert_eq!(classify_tool_call(&terminal("ls .")), ToolRisk::ReadOnly);
         assert!(safe_command_requires_isolation("cargo check"));
