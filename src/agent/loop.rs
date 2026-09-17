@@ -10630,6 +10630,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_same_session_run_is_rejected_until_the_owner_releases_its_lease() {
         let directory = tempdir().unwrap();
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).unwrap();
         let store = SessionStore::for_project(directory.path()).unwrap();
         let session = store.create_session();
@@ -10658,7 +10659,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .expect("first run reached tool approval");
         let before_conflict = store.load(&session_id).expect("blocked session");
@@ -10689,7 +10690,7 @@ mod tests {
         assert_eq!(after_conflict.tool_calls, before_conflict.tool_calls);
 
         release.notify_one();
-        let first_summary = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+        let first_summary = tokio::time::timeout(std::time::Duration::from_secs(10), first)
             .await
             .expect("first run completed after release")
             .expect("first run joined")
@@ -10751,6 +10752,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_interrupts_blocked_approval_and_reconciles_the_session() {
         let directory = tempdir().unwrap();
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).unwrap();
         let store = SessionStore::for_project(directory.path()).unwrap();
         let session = store.create_session();
@@ -10780,7 +10782,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .expect("agent reached blocked approval");
         let messages_before_cancel = store

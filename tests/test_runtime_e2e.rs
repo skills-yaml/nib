@@ -3674,7 +3674,10 @@ GENERIC_POLICY_BODY_MUST_NOT_APPEAR
     .expect("unconstrained run completes");
 
     assert_eq!(summary.outcome, "completed");
-    assert_eq!(*calls.lock().unwrap(), ["approve_plan".to_string()]);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "plans are auto-approved and this skill is not selected, so no approval handler calls"
+    );
     let persisted = store.load(&session.id).expect("persisted run");
     assert!(persisted.active_skills.is_empty());
     assert!(persisted.skill_usage.is_empty());

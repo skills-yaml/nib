@@ -2785,7 +2785,6 @@ mod tests {
                 modal_state.clone(),
                 [
                     ModalInputStep::Immediate("ask a question before continuing\n"),
-                    ModalInputStep::AfterModal(PLAIN_MODAL_APPROVAL, "y\n\n"),
                     ModalInputStep::AfterModal(PLAIN_MODAL_QUESTION, "2\n\n"),
                 ],
             ),
@@ -2825,10 +2824,9 @@ mod tests {
             },
             ModalSynchronizedReader::new(
                 modal_state.clone(),
-                [
-                    ModalInputStep::Immediate("ask a question before continuing\n"),
-                    ModalInputStep::AfterModal(PLAIN_MODAL_APPROVAL, "y\n\n"),
-                ],
+                [ModalInputStep::Immediate(
+                    "ask a question before continuing\n",
+                )],
             ),
             modal_state,
         )
