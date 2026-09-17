@@ -838,10 +838,12 @@ The implementation and external evidence boundaries are now explicit:
 The remaining work was revalidated against the repository, local environment, and
 GitHub Actions state after T041 integration at development revision `dbd350f`:
 
-- The six `llm-live-*` GitHub environments exist, but their secret and variable
-  inventories are empty and they have no deployment protection rules. The repository
-  also has no live-qualification variables. The local environment has none of the six
-  provider credentials, `NIB_LIVE_META_BASE_URL`, or live/cost acknowledgements.
+- The six `llm-live-*` GitHub environments exist. On 2026-09-17 they were aligned with
+  the existing `release-prod` convention by adding `ejrav` as the required reviewer;
+  the resulting protection rules were reread from GitHub after each update. Their
+  secret and variable inventories are still empty, and the repository has no
+  live-qualification variables. The local environment has none of the six provider
+  credentials, `NIB_LIVE_META_BASE_URL`, or live/cost acknowledgements.
 - Scheduled catalog run
   [35078889158](https://github.com/skills-yaml/nib/actions/runs/35078889158) at source
   revision `1537f2cc78eb2178d85c9d686646e4b32334c297` attempted every provider on
@@ -861,8 +863,8 @@ Closure now requires these external actions in order:
 1. Create or designate six dedicated low-privilege provider accounts with hard spend
    and rate limits, and choose a supported-region Meta catalog root.
 2. Configure `LLM_API_KEY` in each matching `llm-live-*` environment, configure the
-   Meta root and all nine provider-scoped paid ceilings, and add the required protected
-   environment approval policy.
+   Meta root and all nine provider-scoped paid ceilings, and use the installed required
+   reviewer gate for live deployments.
 3. Run catalog mode from the intended exact revision. Review the retained catalogs,
    model capabilities, pricing, regions, privacy scan, and planned denominators.
 4. Approve the exact OpenRouter IDs in `openrouter_models.toml` with current rationale,
