@@ -980,6 +980,7 @@ struct BackgroundObservation {
     legacy_generation: bool,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn deliver_background_task_observation(
     target: &BackgroundTaskSession,
     task_id: &str,

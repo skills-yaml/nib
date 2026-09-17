@@ -374,6 +374,7 @@ fn registry_transports(provider: &str) -> Result<Vec<TransportId>, String> {
     Ok(transports)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub async fn run_from_environment() -> Result<PublishedReport, String> {
     let settings = config::LiveSettings::from_environment()?;
     let started_at = Utc::now();

@@ -221,6 +221,7 @@ pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<P
     Ok(plan)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn parse_plan_step(step: &serde_json::Value) -> Result<PlanStep, String> {
     let description = step
         .as_str()

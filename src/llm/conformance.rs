@@ -402,6 +402,7 @@ mod tests {
         json!({"id": "resp_matrix", "status": status, "output": output})
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn terminal_fixture(adapter: ConformanceAdapter, case: TerminalCase) -> WireFixture {
         match adapter {
             ConformanceAdapter::Chat(provider) => {
@@ -1575,6 +1576,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn every_network_transport_correlates_parallel_results_across_complete_and_stream() {
         for adapter in NETWORK_ADAPTERS {
             for stream in [false, true] {
@@ -2395,6 +2397,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn retried_tool_result_requests_preserve_method_path_and_body_for_each_wire_dialect() {
         let tool_result = json!({"retry_semantic_probe": true});
 

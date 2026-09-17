@@ -1324,6 +1324,7 @@ pub fn active_interaction_consumer(state: &InteractionState) -> InteractionConsu
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn reduce_interaction(
     state: &InteractionState,
     input: InteractionInput<'_>,
@@ -2094,6 +2095,7 @@ fn is_failure_outcome(outcome: &str) -> bool {
         || outcome == "blocked_step_unresolved"
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn project_session_event(
     event: &SessionEvent,
     sensitive_values: &[String],
@@ -2380,6 +2382,7 @@ fn approved_plan_continuation<'a>(
         .then_some(step)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn project_session_activities(
     session: &Session,
     sensitive_values: &[String],
@@ -2568,6 +2571,7 @@ fn sanitize_activity(activity: &mut ActivityEntry, sensitive_values: &[String]) 
     );
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn apply_stream_event(
     activities: &mut Vec<ActivityEntry>,
     event: StreamEvent,
@@ -4425,6 +4429,7 @@ pub fn execute_interactive_command(
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn execute_interactive_command_in_state(
     command: InteractiveCommand,
     project_root: &Path,
@@ -4810,6 +4815,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn shared_interaction_reducer_yields_one_effect_without_fallthrough() {
         let approval_state = InteractionState {
             approval_pending: true,
@@ -4965,6 +4971,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn shared_interaction_reducer_owns_modal_answers_and_terminal_outcomes() {
         let options = vec!["plan".to_string(), "execute".to_string()];
         let cases = [
@@ -5639,6 +5646,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn live_input_distinguishes_queue_and_exact_run_steering() {
         assert_eq!(
             classify_composer_submit(false),
@@ -6082,6 +6090,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn new_commands_are_parsed_and_runtime_commands_have_typed_effects() {
         let project = tempdir().expect("project");
         let mut config = NibConfig::default();
@@ -7113,6 +7122,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
         let directory = tempdir().expect("dir");
         let mut session = SessionStore::at_dir(directory.path().join("s"))
@@ -7400,6 +7410,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn persisted_terminal_deduplication_requires_matching_projected_run_evidence() {
         let directory = tempdir().expect("dir");
         let template = SessionStore::at_dir(directory.path().join("s"))

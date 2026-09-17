@@ -1215,6 +1215,7 @@ impl ProcessScopeStore {
     /// Completes a crashed Linux supervisor scope only after the exact cleanup
     /// lease is recoverable and both recorded process generations are gone.
     #[cfg(target_os = "linux")]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn recover_linux_supervisor_loss(
         &self,
         expected: &ProcessScopeRecord,
@@ -1901,6 +1902,7 @@ where
 // READY, COMMIT, and STARTED are deliberately separate protocol callbacks, and
 // the cleanup lease remains a distinct linear authority.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn supervise_foreground_with_claimed_cleanup_and_commit<R, F, C, S>(
     store: &ProcessScopeStore,
     prepared: &ProcessScopeRecord,
@@ -2472,6 +2474,7 @@ fn spawn_supervised_command(
     spawn_supervised_command_inner(backend, command, false, true)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn spawn_supervised_command_inner(
     backend: ProcessScopeBackend,
     command: &SupervisedCommand,
@@ -3888,6 +3891,7 @@ fn process_scope_directory_usage_with_limits(
     process_scope_directory_usage_with_limits_until(directory, limits, None)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn process_scope_directory_usage_with_limits_until(
     directory: &crate::daemons::state::StableDirectory,
     limits: ProcessScopeDirectoryLimits,
@@ -4208,6 +4212,7 @@ fn recover_all_process_atomic_transactions_until(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn recover_process_atomic_transaction_until(
     directory: &crate::daemons::state::StableDirectory,
     target: &Path,
@@ -5014,6 +5019,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn supervisor_self_registration_is_exact_idempotent_and_late_cas_fails() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");
@@ -5774,6 +5780,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn cleanup_lease_final_delete_preserves_quarantine_after_deadline_expiry() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");
@@ -5903,6 +5910,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn launch_abort_lease_delete_preserves_quarantine_and_retries_with_fresh_deadline() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");
@@ -6558,6 +6566,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn completed_scope_quarantines_recover_and_retire_from_embedded_proof() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");
@@ -6740,6 +6749,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn sigkill_at_scope_and_cleanup_quarantines_retries_exact_retirement_first() {
         for mode in ["lease", "scope"] {
             let root = git_project();
@@ -6991,6 +7001,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn process_scope_publications_reserve_all_limits_before_writing() {
         let root = git_project();
         let store = ProcessScopeStore::open(root.path()).expect("scope store");

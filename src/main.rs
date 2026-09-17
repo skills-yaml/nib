@@ -272,6 +272,7 @@ pub struct TuiArgs {
     pub auth: bool,
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn main() {
     #[cfg(windows)]
     if let Some(status) = updater::run_windows_update_worker_if_requested() {

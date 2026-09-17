@@ -1157,6 +1157,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn every_failure_class_has_a_stable_code_retry_state_and_action() {
         let fixtures = [
             LlmError::configuration("invalid local configuration"),

@@ -961,6 +961,7 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn self_development_failure_repair_verification_and_diff_share_one_worktree() {
     let root = git_repository();
     let cargo_command = "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet";
@@ -2164,6 +2165,7 @@ fn serve_planner_then_compression_failure(
     (format!("http://{address}/v1"), request_rx)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn serve_responses_interruption_fixture() -> (
     String,
     tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -2330,6 +2332,7 @@ fn captured_json_body(request: &str) -> Value {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn native_chat_anthropic_and_gemini_agent_loops_round_trip_approved_tool_results() {
     for adapter in [
         NativeRuntimeAdapter::Chat,
@@ -2482,6 +2485,7 @@ async fn native_chat_anthropic_and_gemini_agent_loops_round_trip_approved_tool_r
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn responses_planner_and_runtime_round_trip_tool_outputs_privately() {
     let root = git_repository();
     let responses = vec![
@@ -2620,6 +2624,7 @@ async fn responses_planner_and_runtime_round_trip_tool_outputs_privately() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn responses_process_kill_and_restart_does_not_replay_completed_tool() {
     let root = git_repository();
     let (base_url, mut request_rx, release_interrupted, server) =
@@ -2944,6 +2949,7 @@ async fn responses_planner_failure_reconciles_without_executing_tools_or_persist
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn compression_provider_failure_blocks_the_plan_and_reconciles_terminally() {
     const SECRET: &str = "compression-provider-secret";
     let root = git_repository();
@@ -3216,6 +3222,7 @@ async fn responses_runtime_transport_failure_blocks_the_approved_plan_without_to
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn runtime_sequence_selects_profile_context_and_skill_then_reconciles_audited_tools() {
     let root = git_repository();
     std::fs::write(
@@ -3420,6 +3427,7 @@ Observe the approved plan and verify each tool result.
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_worktree() {
     let root = git_repository();
     let mut config = mock_runtime_config();
@@ -3996,6 +4004,7 @@ async fn configured_turn_bound_reconciles_without_dispatching_a_tool() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn assembled_context_and_scoped_core_tools_return_real_artifacts_and_errors() {
     let root = tempdir().expect("tempdir");
     std::fs::write(
@@ -4261,6 +4270,7 @@ impl ApprovalHandler for DenyAll {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() {
     let root = git_repository();
     let now = Utc::now();

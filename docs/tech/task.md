@@ -12,7 +12,8 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 ## Current minimal tasks (see root Taskfile.yml)
 
 - `task` or `task default` — list tasks
-- `task check` — fast installer, Rust formatting, and warning-denying Clippy checks
+- `task check` — fast installer and formatting checks plus warning-denying Clippy
+  across every local target and feature
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
@@ -68,13 +69,16 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   privacy checks, and before/after console-mode evidence
 - `task smoke:managed-process` — build the Linux release binary, kill its active owner,
   and verify a detached supervised descendant is reaped before terminal publication
-- `task fix` — apply Rust formatting and Clippy fixes
+- `task fix` — apply Rust formatting and Clippy fixes across every local target and
+  feature
 - `task installers:check` — validate installer syntax, repository defaults, and checksum logic
 
 Use `task check` and the narrowest relevant `task test:*` target during implementation.
 Before completion, use `task verify` so static checks and the authoritative serial suite
 both run once. `task check` intentionally excludes `cargo test`; callers must not treat
-it as completion evidence by itself.
+it as completion evidence by itself. Clippy's `all` group and `too_many_lines` lint are
+repository errors, the function-length threshold is 100 lines, and `-D warnings` also
+makes compiler and newly introduced Clippy warnings fail the task.
 
 ## Live LLM qualification
 

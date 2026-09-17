@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **49 done, 2 development, and 2 backlog**.
+The current lifecycle is **51 done, 1 development, and 2 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -95,6 +95,7 @@ work or narrower guarantees.
 - [T040: Resourceful Agent Loop and Context](done/T040_resourceful_agent_loop_and_context.md)
 - [T041: Task-Aware Context and Verified Completion](done/T041_task_aware_context_and_verified_completion.md)
 - [T042: Context Budgeting and Live Visibility](backlog/T042_context_budgeting_and_live_visibility.md)
+- [T044: Strict Clippy Quality Gate](done/T044_strict_clippy_quality_gate.md)
 
 ### Feature specs
 

@@ -14,7 +14,7 @@ tasks:
     cmds:
       - task: installers:check
       - cargo fmt -- --check
-      - cargo clippy -- -D warnings
+      - cargo clippy --all-targets --all-features -- -D warnings
 
   check:all-targets:
     desc: Type-check every Rust target and feature (supports cross TARGET)
@@ -54,7 +54,7 @@ tasks:
     desc: Auto-format and apply clippy fixes
     cmds:
       - cargo fmt
-      - cargo clippy --fix --allow-dirty --allow-no-vcs
+      - cargo clippy --all-targets --all-features --fix --allow-dirty --allow-no-vcs
 
   test:
     desc: Run unit and integration tests
@@ -180,12 +180,11 @@ tasks:
       - cargo test --test installers -- --test-threads=1
 
   test:task-contract:
-    desc: Validate fast-check and full-verification Task composition
+    desc: Validate Task composition and strict Rust lint policy
     cmds:
       - >-
         cargo test --test installers
-        task_workflow_keeps_fast_feedback_separate_from_full_verification --
-        --exact --test-threads=1
+        task_contract_ -- --test-threads=1
 
   test:tui-shutdown:
     desc: Verify TUI cancellation, late modal cleanup, and shutdown deadlines

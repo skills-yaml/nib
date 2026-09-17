@@ -80,7 +80,7 @@ fn repository_text_normalization_accepts_windows_line_endings() {
 }
 
 #[test]
-fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
+fn task_contract_keeps_fast_feedback_separate_from_full_verification() {
     let taskfile = read_repository_text("Taskfile.yml");
     let check = task_section(&taskfile, "check");
     let test = task_section(&taskfile, "test");
@@ -90,7 +90,7 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
     for required in [
         "task: installers:check",
         "cargo fmt -- --check",
-        "cargo clippy -- -D warnings",
+        "cargo clippy --all-targets --all-features -- -D warnings",
     ] {
         assert!(check.contains(required), "check task lacks {required}");
     }
@@ -119,6 +119,104 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
     assert_eq!(dev.matches("task: build").count(), 1);
     assert!(!dev.contains("task: check"));
     assert!(!dev.contains("task: test"));
+}
+
+#[test]
+fn task_contract_enforces_strict_clippy_on_every_local_target_and_feature() {
+    let manifest = read_repository_text("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&manifest).expect("parse Cargo.toml");
+    let clippy = manifest
+        .get("lints")
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(toml::Value::as_table)
+        .expect("Cargo.toml [lints.clippy]");
+
+    let all = clippy
+        .get("all")
+        .and_then(toml::Value::as_table)
+        .expect("clippy::all table policy");
+    assert_eq!(all.get("level").and_then(toml::Value::as_str), Some("deny"));
+    assert_eq!(
+        all.get("priority").and_then(toml::Value::as_integer),
+        Some(-1)
+    );
+    assert_eq!(
+        clippy.get("too_many_lines").and_then(toml::Value::as_str),
+        Some("deny")
+    );
+
+    let configuration = read_repository_text(".clippy.toml");
+    let configuration: toml::Value = toml::from_str(&configuration).expect("parse .clippy.toml");
+    assert_eq!(
+        configuration
+            .get("too-many-lines-threshold")
+            .and_then(toml::Value::as_integer),
+        Some(100)
+    );
+
+    let taskfile = read_repository_text("Taskfile.yml");
+    let check = task_section(&taskfile, "check");
+    let fix = task_section(&taskfile, "fix");
+    assert!(check.contains("cargo clippy --all-targets --all-features -- -D warnings"));
+    assert!(fix
+        .contains("cargo clippy --all-targets --all-features --fix --allow-dirty --allow-no-vcs"));
+
+    const ALLOW_OPEN: &str = concat!("all", "ow(");
+    const EXPECT_OPEN: &str = concat!("ex", "pect(");
+    const TOO_MANY_LINES: &str = concat!("clippy::too_many", "_lines");
+    const REVIEWED_EXPECTATION: &str = concat!(
+        "#[expect(clippy::too_many",
+        "_lines,reason=\"legacyfunctionrecordedbyT044\")]"
+    );
+    let mut pending = ["src", "tests"]
+        .map(|relative| repository_root().join(relative))
+        .to_vec();
+    let mut forbidden_suppressions = Vec::new();
+    let mut malformed_expectations = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read Rust source directory") {
+            let entry = entry.expect("read Rust source entry");
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                let source = fs::read_to_string(&path).expect("read Rust source file");
+                let compact = source
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                let has_suppression = compact.split(ALLOW_OPEN).skip(1).any(|tail| {
+                    tail.split_once(')')
+                        .is_some_and(|(body, _)| body.split(',').any(|lint| lint == TOO_MANY_LINES))
+                });
+                if has_suppression {
+                    forbidden_suppressions.push(path.clone());
+                }
+                let expectation_count = compact
+                    .split(EXPECT_OPEN)
+                    .skip(1)
+                    .filter(|tail| {
+                        tail.split_once(")]")
+                            .is_some_and(|(body, _)| body.contains(TOO_MANY_LINES))
+                    })
+                    .count();
+                let reviewed_count = compact.matches(REVIEWED_EXPECTATION).count();
+                if expectation_count != reviewed_count {
+                    malformed_expectations.push(path.clone());
+                }
+            }
+        }
+    }
+    forbidden_suppressions.sort();
+    assert!(
+        forbidden_suppressions.is_empty(),
+        "too_many_lines must be fixed instead of suppressed: {forbidden_suppressions:?}"
+    );
+    malformed_expectations.sort();
+    assert!(
+        malformed_expectations.is_empty(),
+        "too_many_lines expectations require the reviewed T044 reason: {malformed_expectations:?}"
+    );
 }
 
 #[test]
@@ -784,6 +882,7 @@ impl ReleaseTransactionHarness {
         Self::with_workflow_change(false)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn with_workflow_change(workflow_change: bool) -> Self {
         let temp = tempfile::tempdir().expect("release transaction fixture");
         let remote = temp.path().join("remote.git");
@@ -1326,6 +1425,7 @@ exit "$status"
         self.run_from_ref_with_stage_visibility_delay("main", ReleaseFaults::default(), delay)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn run_from_ref_with_stage_visibility_delay(
         &self,
         source_ref: &str,

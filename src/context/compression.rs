@@ -77,6 +77,7 @@ pub async fn explicitly_compress_session(
 }
 
 #[allow(clippy::result_large_err)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn compress_session(
     store: &SessionStore,
     session_id: &str,

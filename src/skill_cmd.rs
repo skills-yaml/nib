@@ -480,6 +480,7 @@ fn run_bounded_command(
     run_bounded_command_with_staging(command, action, timeout, None)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_bounded_command_with_staging(
     command: &mut Command,
     action: &str,
