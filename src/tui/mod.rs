@@ -8450,6 +8450,28 @@ mod tests {
     }
 
     #[test]
+    fn approval_prompt_discloses_omitted_patch_targets() {
+        let patch = ["e.rs", "b.rs", "a.rs", "d.rs", "c.rs"]
+            .into_iter()
+            .map(|path| format!("*** Update File: {path}\n"))
+            .collect::<String>();
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({"dry_run": false, "patch": patch}),
+            session_id: None,
+            project_root: None,
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+
+        let prompt = approval_prompt(&call, &context);
+
+        assert_eq!(prompt.statement, "Apply a patch");
+        assert_eq!(prompt.subject, "5 files (+1 more): a.rs,b.rs,c.rs,d.rs");
+        assert!(!prompt.subject.contains("e.rs"));
+    }
+
+    #[test]
     fn ledger_keeps_transcript_visible_under_approval_and_question_docks() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");

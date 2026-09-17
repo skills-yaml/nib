@@ -15,7 +15,7 @@ use crate::tools::models::{
 use crate::tools::registry::get_tool_metadata;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -2280,6 +2280,7 @@ fn bounded_approval_field(value: &str, secrets: &[String]) -> String {
 
 fn bounded_approval_field_with_limit(value: &str, secrets: &[String], limit: usize) -> String {
     let redacted = redact_text_with_encoded_secrets(value, secrets);
+    let redacted = crate::interactive::control_safe_text(&redacted, true);
     let mut normalized = String::new();
     let mut truncated = false;
     for character in redacted.chars() {
@@ -2314,6 +2315,53 @@ fn approval_argument_string<'a>(call: &'a ToolCall, field: &str) -> Option<&'a s
     call.arguments.get(field).and_then(Value::as_str)
 }
 
+fn normalized_patch_targets(call: &ToolCall, secrets: &[String]) -> (usize, Vec<String>) {
+    let patch = approval_argument_string(call, "patch").unwrap_or_default();
+    let mut targets = HashSet::new();
+    let mut in_hunk = false;
+    let mut pending_old_header = false;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+            pending_old_header = false;
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            pending_old_header = false;
+            continue;
+        }
+        let custom_path = line
+            .strip_prefix("*** Update File: ")
+            .or_else(|| line.strip_prefix("*** Add File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "));
+        let unified_path = (!in_hunk && pending_old_header)
+            .then(|| line.strip_prefix("+++ "))
+            .flatten();
+        if !in_hunk && line.starts_with("--- ") {
+            pending_old_header = true;
+            continue;
+        }
+        pending_old_header = false;
+        let Some(path) = custom_path.or(unified_path) else {
+            continue;
+        };
+        let path = path.trim().trim_start_matches("b/");
+        if path != "/dev/null" {
+            targets.insert(path.to_string());
+        }
+    }
+    let target_count = targets.len();
+    let mut targets = targets.into_iter().collect::<Vec<_>>();
+    targets.sort();
+    targets.truncate(4);
+    let targets = targets
+        .into_iter()
+        .map(|path| bounded_approval_field_with_limit(&path, secrets, 40))
+        .collect();
+    (target_count, targets)
+}
+
 fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, Option<String>) {
     let path = || {
         ["path", "target_file", "file_path"]
@@ -2333,12 +2381,23 @@ fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, 
             (bounded(path().unwrap_or("(missing path)"), 120), None)
         }
         "apply_patch" => {
-            let action = normalized_approval_action(call, secrets);
-            let targets = action
-                .split_once(" targets=")
-                .map(|(_, targets)| targets)
-                .unwrap_or("workspace files");
-            (bounded(targets, 120), None)
+            let (target_count, targets) = normalized_patch_targets(call, secrets);
+            let subject = if targets.is_empty() {
+                "workspace files".to_string()
+            } else {
+                let omitted = target_count.saturating_sub(targets.len());
+                let omission = if omitted == 0 {
+                    String::new()
+                } else {
+                    format!(" (+{omitted} more)")
+                };
+                format!(
+                    "{target_count} {}{omission}: {}",
+                    if target_count == 1 { "file" } else { "files" },
+                    targets.join(",")
+                )
+            };
+            (bounded(&subject, 120), None)
         }
         "grep" => {
             let pattern = approval_argument_string(call, "pattern")
@@ -2433,48 +2492,7 @@ fn normalized_approval_action(call: &ToolCall, secrets: &[String]) -> String {
             format!("run_terminal command={command} cwd={cwd} background={background}")
         }
         "apply_patch" => {
-            let patch = approval_argument_string(call, "patch").unwrap_or_default();
-            let mut targets = Vec::new();
-            let mut target_count = 0usize;
-            let mut in_hunk = false;
-            let mut pending_old_header = false;
-            for line in patch.lines() {
-                if line.starts_with("diff --git ") {
-                    in_hunk = false;
-                    pending_old_header = false;
-                    continue;
-                }
-                if line.starts_with("@@ ") {
-                    in_hunk = true;
-                    pending_old_header = false;
-                    continue;
-                }
-                let custom_path = line
-                    .strip_prefix("*** Update File: ")
-                    .or_else(|| line.strip_prefix("*** Add File: "))
-                    .or_else(|| line.strip_prefix("*** Delete File: "));
-                let unified_path = (!in_hunk && pending_old_header)
-                    .then(|| line.strip_prefix("+++ "))
-                    .flatten();
-                if !in_hunk && line.starts_with("--- ") {
-                    pending_old_header = true;
-                    continue;
-                }
-                pending_old_header = false;
-                let Some(path) = custom_path.or(unified_path) else {
-                    continue;
-                };
-                let path = path.trim().trim_start_matches("b/");
-                if path == "/dev/null" {
-                    continue;
-                }
-                target_count = target_count.saturating_add(1);
-                if targets.len() < 4 {
-                    targets.push(bounded_approval_field_with_limit(path, secrets, 40));
-                }
-            }
-            targets.sort();
-            targets.dedup();
+            let (target_count, targets) = normalized_patch_targets(call, secrets);
             let mode = if call
                 .arguments
                 .get("dry_run")
@@ -3234,7 +3252,7 @@ mod tests {
             invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({
-                "command": format!("{base64_secret} provider%2Dprivate%2Dsentinel {}LONG_ARGUMENT_SENTINEL", "x".repeat(5_000)),
+                "command": format!("safe\u{202e}spoof {base64_secret} provider%2Dprivate%2Dsentinel {}LONG_ARGUMENT_SENTINEL", "x".repeat(5_000)),
                 "token": "sk-privateapproval123456",
                 "control": "\u{1b}[2J\nraw-json-sentinel",
             }),
@@ -3244,7 +3262,7 @@ mod tests {
         let effective = executor
             .effective_execution_config(PermissionLevel::Destructive, ToolRisk::Destructive);
         let target = PathBuf::from(format!(
-            "/tmp/provider-private-sentinel/\u{1b}[2J\n{}LONG_TARGET_SENTINEL",
+            "/tmp/provider-private-sentinel/\u{202e}spoof/\u{1b}[2J\n{}LONG_TARGET_SENTINEL",
             "x".repeat(500)
         ));
         let decision = executor
@@ -3278,6 +3296,7 @@ mod tests {
             .contains("provider%2Dprivate%2Dsentinel"));
         assert!(context.display_subject.len() <= 120);
         assert!(!context.display_subject.chars().any(char::is_control));
+        assert!(!context.display_subject.contains('\u{202e}'));
         assert_eq!(context.lines().len(), MAX_APPROVAL_LINES);
         assert!(context
             .lines()
@@ -3293,6 +3312,7 @@ mod tests {
         assert!(!rendered.contains(&base64_secret));
         assert!(!rendered.contains("sk-privateapproval"));
         assert!(!rendered.contains("raw-json-sentinel"));
+        assert!(!rendered.contains('\u{202e}'));
         assert!(!rendered.contains("LONG_ARGUMENT_SENTINEL"));
         assert!(!rendered.contains("LONG_TARGET_SENTINEL"));
         assert!(context
@@ -3360,6 +3380,37 @@ mod tests {
         assert!(context.action.contains("docs/a.md"));
         assert!(!context.render().contains("configured-patch-secret"));
         assert!(!context.render().contains("sk-privatepatch"));
+    }
+
+    #[test]
+    fn patch_approval_display_preserves_unique_target_count_and_omission() {
+        let patch = [
+            "docs/e.md",
+            "docs/b.md",
+            "docs/a.md",
+            "docs/d.md",
+            "docs/c.md",
+            "docs/a.md",
+        ]
+        .into_iter()
+        .map(|path| format!("*** Update File: {path}\n"))
+        .collect::<String>();
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({"dry_run": false, "patch": patch}),
+            session_id: None,
+            project_root: None,
+        };
+
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+
+        assert!(context.action.contains("files=5"), "{}", context.action);
+        assert_eq!(
+            context.display_subject,
+            "5 files (+1 more): docs/a.md,docs/b.md,docs/c.md,docs/d.md"
+        );
+        assert!(!context.display_subject.contains("docs/e.md"));
     }
 
     #[test]
