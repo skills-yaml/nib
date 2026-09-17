@@ -114,7 +114,9 @@ pub fn classify_command(command: &str) -> ToolRisk {
         return ToolRisk::RequiresApproval;
     }
 
-    if is_safe_command(&words) {
+    if is_read_only_command(&words) {
+        ToolRisk::ReadOnly
+    } else if is_safe_command(&words) {
         ToolRisk::Safe
     } else {
         ToolRisk::RequiresApproval
@@ -190,12 +192,24 @@ fn is_safe_command(words: &[&str]) -> bool {
 
     let program = words[0].rsplit('/').next().unwrap_or(words[0]);
     match program {
-        "pwd" | "whoami" | "ls" | "wc" => true,
         "echo" | "printf" => true,
         "cargo" => matches!(
             words.get(1).copied(),
             Some("test" | "check" | "build" | "fmt" | "clippy" | "metadata")
         ),
+        _ => false,
+    }
+}
+
+fn is_read_only_command(words: &[&str]) -> bool {
+    let Some(program) = words
+        .first()
+        .map(|word| word.rsplit('/').next().unwrap_or(word))
+    else {
+        return false;
+    };
+    match program {
+        "pwd" | "whoami" | "ls" | "wc" => true,
         "git" => matches!(
             words.get(1).copied(),
             Some("status" | "log" | "diff" | "show" | "rev-parse")
@@ -224,8 +238,13 @@ mod tests {
         assert_eq!(classify_tool_call(&terminal("cargo check")), ToolRisk::Safe);
         assert_eq!(
             classify_tool_call(&terminal("git status --short")),
-            ToolRisk::Safe
+            ToolRisk::ReadOnly
         );
+        assert_eq!(
+            classify_tool_call(&terminal("git diff --check")),
+            ToolRisk::ReadOnly
+        );
+        assert_eq!(classify_tool_call(&terminal("ls .")), ToolRisk::ReadOnly);
         assert!(safe_command_requires_isolation("cargo check"));
         assert!(safe_command_requires_isolation("git status --short"));
         assert!(!safe_command_requires_isolation("ls ."));
@@ -258,7 +277,7 @@ mod tests {
                 "{command}"
             );
         }
-        assert_eq!(classify_tool_call(&terminal("ls .")), ToolRisk::Safe);
+        assert_eq!(classify_tool_call(&terminal("ls .")), ToolRisk::ReadOnly);
     }
 
     #[test]

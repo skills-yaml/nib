@@ -820,15 +820,29 @@ fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (Ses
 }
 
 fn required_check(command: &str) -> VerificationObligation {
-    VerificationObligation::pending_tool(
+    required_terminal_check(
         "required-check",
         "run the required verification command",
+        command,
         vec![".".to_string()],
+    )
+}
+
+fn required_terminal_check(
+    id: &str,
+    description: &str,
+    command: &str,
+    affected_paths: Vec<String>,
+) -> VerificationObligation {
+    VerificationObligation::pending_tool(
+        id,
+        description,
+        affected_paths.clone(),
         "run_terminal",
-        json!({"command": command, "affected_paths": ["."]}),
+        json!({"command": command, "affected_paths": affected_paths}),
         nib::session::VerificationExpectedOutcome::Success,
     )
-    .expect("valid required-check contract")
+    .expect("valid terminal verification contract")
 }
 
 #[tokio::test]
@@ -944,6 +958,141 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
     assert!(plan.steps[0].verification_obligations[0]
         .content_identity
         .is_some());
+}
+
+#[tokio::test]
+async fn self_development_failure_repair_verification_and_diff_share_one_worktree() {
+    let root = git_repository();
+    let cargo_command = "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet";
+    let patch = concat!(
+        "--- a/src/lib.rs\n",
+        "+++ b/src/lib.rs\n",
+        "@@ -1,3 +1,3 @@\n",
+        " pub fn answer() -> u32 {\n",
+        "-    41\n",
+        "+    42\n",
+        " }\n",
+    );
+    let affected_paths = json!(["Cargo.toml", "src/lib.rs"]);
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "behavior-test-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": cargo_command,
+                    "affected_paths": affected_paths,
+                    "verification_id": "behavior-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "repair-source",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        ),
+        failure_fixture_tool_turn(
+            "behavior-test-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": cargo_command,
+                    "affected_paths": ["Cargo.toml", "src/lib.rs"],
+                    "verification_id": "behavior-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "review-diff",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "git diff -- src/lib.rs",
+                    "affected_paths": ["src/lib.rs"]
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let obligation = required_terminal_check(
+        "behavior-check",
+        "run the failing behavior test after repairing the Rust source",
+        cargo_command,
+        vec!["Cargo.toml".to_string(), "src/lib.rs".to_string()],
+    );
+    let (summary, persisted, requests) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![obligation]).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 4);
+    assert_eq!(requests.len(), 5);
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert!(plan.is_complete());
+    let verification = &plan.steps[0].verification_obligations[0];
+    assert_eq!(verification.status, VerificationStatus::Passed);
+    assert_eq!(
+        verification
+            .attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        [VerificationStatus::Failed, VerificationStatus::Passed]
+    );
+
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("repair audit");
+    let verification_records = persisted
+        .tool_calls
+        .iter()
+        .filter(|record| {
+            record.tool_name.as_deref() == Some("run_terminal")
+                && record.arguments["command"] == cargo_command
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(verification_records.len(), 2);
+    assert_eq!(
+        verification_records[0].result.as_ref().unwrap()["success"],
+        false
+    );
+    assert_eq!(
+        verification_records[1].result.as_ref().unwrap()["success"],
+        true
+    );
+    let diff_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.arguments["command"] == "git diff -- src/lib.rs")
+        .expect("diff review audit");
+    assert_eq!(diff_record.result.as_ref().unwrap()["risk"], "read_only");
+    assert!(diff_record.result.as_ref().unwrap()["output"]["stdout"]
+        .as_str()
+        .is_some_and(|stdout| stdout.contains("+    42")));
+
+    assert_eq!(
+        patch_record.worktree_path,
+        verification_records[0].worktree_path
+    );
+    assert_eq!(
+        patch_record.worktree_path,
+        verification_records[1].worktree_path
+    );
+    assert_eq!(patch_record.worktree_path, diff_record.worktree_path);
+    assert_eq!(verification.worktree_identity, patch_record.worktree_path);
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert!(std::fs::read_to_string(worktree.join("src/lib.rs"))
+        .expect("repaired source")
+        .contains("    42"));
+    assert!(std::fs::read_to_string(root.path().join("src/lib.rs"))
+        .expect("unchanged repository source")
+        .contains("    41"));
 }
 
 #[tokio::test]

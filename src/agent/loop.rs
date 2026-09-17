@@ -6622,11 +6622,31 @@ fn audited_tool_evidence(
         .iter()
         .rev()
         .find(|record| record.invocation_id == Some(invocation_id));
-    let permission = record
-        .and_then(|record| record.result.as_ref())
-        .and_then(|result| result.get("permission_level"))
-        .and_then(Value::as_str);
-    let mutates_content = matches!(permission, Some("safe" | "destructive"));
+    let mutates_content = record.is_some_and(|record| match record.tool_name.as_deref() {
+        Some("apply_patch" | "merge_subagent_worktree") => true,
+        Some("run_terminal") => {
+            record
+                .result
+                .as_ref()
+                .and_then(|result| result.get("risk"))
+                .and_then(Value::as_str)
+                != Some("read_only")
+        }
+        // The remaining built-in tools do not edit the active worktree. Unknown
+        // audited tools fail conservatively when their recorded permission can
+        // mutate local state.
+        Some(
+            "read_file" | "list_directory" | "grep" | "write_plan" | "spawn_subagent"
+            | "invoke_subagent" | "manage_subagents" | "send_message" | "search_web"
+            | "read_url_content" | "manage_task" | "manage_memory" | "schedule" | "ask_question",
+        ) => false,
+        _ => record
+            .result
+            .as_ref()
+            .and_then(|result| result.get("permission_level"))
+            .and_then(Value::as_str)
+            .is_some_and(|permission| matches!(permission, "safe" | "destructive")),
+    });
     let worktree_identity = record.and_then(|record| record.worktree_path.clone());
     Ok((mutates_content, worktree_identity))
 }
