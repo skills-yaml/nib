@@ -590,13 +590,15 @@ style: a short preamble before tools that says what it is about to do and why,
 then a concise final answer. Speech renders markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring.
 `Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
-composer and the transcript.
-With the transcript focused, `Up`/`Down` select a block and `Ctrl+Y` copies it.
-Printable keys return to the composer and insert.
+composer and the transcript. Click in the chat to focus it; drag to select text.
+`Ctrl+A` selects the whole chat. `Ctrl+Y` or `Ctrl+Shift+C` copies the selection,
+the selected block, or the last reply. Printable keys return to the composer and
+insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
-also work). Those keys still scroll while an approval list is open. Unmodified Up/Down
+also work). `Ctrl+Home` jumps to the top and `Ctrl+End` follows the tail. Those keys
+still scroll while an approval list is open. Unmodified Up/Down
 select approval or question choices. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
 the footer labels that state. Submitting input or pressing `Ctrl+End` resumes
