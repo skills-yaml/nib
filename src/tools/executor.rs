@@ -58,6 +58,10 @@ struct ResolvedExecutionConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalContext {
     pub action: String,
+    /// A short, already-redacted subject suitable for approval UIs.
+    pub display_subject: String,
+    /// An optional, already-redacted location suitable for approval UIs.
+    pub display_location: Option<String>,
     pub permission_and_risk: String,
     pub target_scope: String,
     pub network: String,
@@ -68,8 +72,11 @@ pub struct ApprovalContext {
 
 impl ApprovalContext {
     pub fn compatibility(call: &ToolCall, level: PermissionLevel) -> Self {
+        let (display_subject, display_location) = normalized_approval_display(call, &[]);
         Self {
             action: normalized_approval_action(call, &[]),
+            display_subject,
+            display_location,
             permission_and_risk: format!("{} / not classified", permission_label(level)),
             target_scope: "not available to compatibility handler".to_string(),
             network: "not available to compatibility handler".to_string(),
@@ -1877,8 +1884,11 @@ impl ToolExecutor {
         } else {
             "not required for this action"
         };
+        let (display_subject, display_location) = normalized_approval_display(call, &secrets);
         ApprovalContext {
             action: normalized_approval_action(call, &secrets),
+            display_subject,
+            display_location,
             permission_and_risk: bounded_approval_field(
                 &format!("{} / {}", permission_label(level), risk.as_str()),
                 &secrets,
@@ -2302,6 +2312,85 @@ fn bounded_approval_field_with_limit(value: &str, secrets: &[String], limit: usi
 
 fn approval_argument_string<'a>(call: &'a ToolCall, field: &str) -> Option<&'a str> {
     call.arguments.get(field).and_then(Value::as_str)
+}
+
+fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, Option<String>) {
+    let path = || {
+        ["path", "target_file", "file_path"]
+            .into_iter()
+            .find_map(|field| approval_argument_string(call, field))
+    };
+    let bounded = |value: &str, limit| bounded_approval_field_with_limit(value, secrets, limit);
+    let display = match call.tool_name.as_str() {
+        "run_terminal" => (
+            bounded(
+                approval_argument_string(call, "command").unwrap_or("(missing command)"),
+                120,
+            ),
+            approval_argument_string(call, "cwd").map(|value| bounded(value, 48)),
+        ),
+        "read_file" | "list_directory" | "search_replace" => {
+            (bounded(path().unwrap_or("(missing path)"), 120), None)
+        }
+        "apply_patch" => {
+            let action = normalized_approval_action(call, secrets);
+            let targets = action
+                .split_once(" targets=")
+                .map(|(_, targets)| targets)
+                .unwrap_or("workspace files");
+            (bounded(targets, 120), None)
+        }
+        "grep" => {
+            let pattern = approval_argument_string(call, "pattern")
+                .or_else(|| approval_argument_string(call, "query"));
+            let subject = [pattern, path()]
+                .into_iter()
+                .flatten()
+                .map(|value| bounded(value, 56))
+                .collect::<Vec<_>>()
+                .join(" in ");
+            (
+                if subject.is_empty() {
+                    "(missing pattern)".to_string()
+                } else {
+                    bounded(&subject, 120)
+                },
+                None,
+            )
+        }
+        "approve_plan" => (
+            bounded(
+                approval_argument_string(call, "goal")
+                    .or_else(|| approval_argument_string(call, "plan_id"))
+                    .unwrap_or("(missing plan)"),
+                120,
+            ),
+            None,
+        ),
+        "merge_subagent_worktree" => (
+            bounded(
+                approval_argument_string(call, "subagent_id").unwrap_or("(missing subagent)"),
+                96,
+            ),
+            None,
+        ),
+        other => {
+            let value = [
+                "command",
+                "path",
+                "query",
+                "pattern",
+                "url",
+                "action",
+                "target_file",
+            ]
+            .into_iter()
+            .find_map(|field| approval_argument_string(call, field))
+            .unwrap_or(other);
+            (bounded(value, 120), None)
+        }
+    };
+    display
 }
 
 fn normalized_approval_action(call: &ToolCall, secrets: &[String]) -> String {
@@ -3179,6 +3268,16 @@ mod tests {
             .clone()
             .expect("context captured");
         let rendered = context.render();
+        assert!(context.display_subject.contains("[REDACTED]"));
+        assert!(!context
+            .display_subject
+            .contains("provider-private-sentinel"));
+        assert!(!context.display_subject.contains(&base64_secret));
+        assert!(!context
+            .display_subject
+            .contains("provider%2Dprivate%2Dsentinel"));
+        assert!(context.display_subject.len() <= 120);
+        assert!(!context.display_subject.chars().any(char::is_control));
         assert_eq!(context.lines().len(), MAX_APPROVAL_LINES);
         assert!(context
             .lines()

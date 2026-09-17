@@ -240,13 +240,23 @@ enum CompletionKeyResult {
 struct ChromeCache {
     generation: u64,
     session_id: String,
+    session_revision: Option<u64>,
     origin: String,
     chrome: TuiChrome,
 }
 
 impl ChromeCache {
-    fn matches(&self, generation: u64, session_id: &str, origin: &str) -> bool {
-        self.generation == generation && self.session_id == session_id && self.origin == origin
+    fn matches(
+        &self,
+        generation: u64,
+        session_id: &str,
+        session_revision: Option<u64>,
+        origin: &str,
+    ) -> bool {
+        self.generation == generation
+            && self.session_id == session_id
+            && self.session_revision == session_revision
+            && self.origin == origin
     }
 }
 const MAX_SWITCHER_CANDIDATES: usize = 100;
@@ -2998,7 +3008,7 @@ fn waiting_composer_rows(
     match waiting {
         WaitingKind::Approval => {
             let req = pending_approval?;
-            let prompt = approval_prompt(&req.call);
+            let prompt = approval_prompt(&req.call, &req.context);
             let mut extra = vec![prompt.subject];
             if let Some(location) =
                 usable_approval_location(prompt.location.clone(), &req.context.target_scope)
@@ -3552,16 +3562,7 @@ fn render_waiting_meter(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let spin = spinner_glyph(meter.tick, no_color);
-    let text = format!(
-        "{spin}  {}  ·  step {}  ·  {}  ·  {}  ·  {}",
-        meter.job,
-        meter.step,
-        format_elapsed(meter.elapsed),
-        meter.tokens,
-        meter.status
-    );
-    let text = truncate_completion_text(&text, usize::from(area.width));
+    let text = waiting_meter_text(meter, usize::from(area.width), no_color);
     let style = if no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -3570,6 +3571,32 @@ fn render_waiting_meter(
             .add_modifier(Modifier::BOLD)
     };
     frame.render_widget(Paragraph::new(Span::styled(text, style)), area);
+}
+
+fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: bool) -> String {
+    let spin = spinner_glyph(meter.tick, no_color);
+    let job = control_safe_text(&meter.job, false);
+    let step = truncate_display_cells(&control_safe_text(&meter.step, false), 10);
+    let elapsed = truncate_display_cells(&format_elapsed(meter.elapsed), 8);
+    let tokens = meter.tokens.strip_prefix("tok ").unwrap_or(&meter.tokens);
+    let tokens = truncate_display_cells(&control_safe_text(tokens, false), 8);
+    let token_label = format!("tok {tokens}");
+    let status = truncate_display_cells(&control_safe_text(&meter.status, false), 16);
+    let full = format!(
+        "{spin}  {job}  ·  step {step}  ·  {elapsed}  ·  {}  ·  {status}",
+        token_label
+    );
+    if unicode_display_width(&full) <= width {
+        return full;
+    }
+
+    // Keep every operational field visible on constrained terminals. The job is
+    // the only elastic field; labels become compact before any suffix is dropped.
+    let suffix = format!("s:{step} {elapsed} t:{tokens} {status}");
+    let fixed_width = unicode_display_width(&format!("{spin}  {suffix}"));
+    let job_budget = width.saturating_sub(fixed_width.saturating_add(1)).max(1);
+    let job = truncate_display_cells(&job, job_budget);
+    truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
 }
 
 fn copy_text_osc52(text: &str) {
@@ -3614,18 +3641,6 @@ struct ApprovalPrompt {
     location: Option<String>,
 }
 
-fn approval_arg(call: &ToolCall, key: &str) -> Option<String> {
-    call.arguments
-        .get(key)
-        .and_then(|value| {
-            value.as_str().map(ToString::to_string).or_else(|| {
-                (!value.is_null() && !value.is_object() && !value.is_array())
-                    .then(|| value.to_string())
-            })
-        })
-        .filter(|value| !value.is_empty())
-}
-
 fn safe_approval_text(value: &str) -> String {
     control_safe_text(&crate::tools::executor::redact_text(value), true)
 }
@@ -3639,101 +3654,22 @@ fn compact_approval_risk(value: &str) -> String {
         .to_string()
 }
 
-fn approval_prompt(call: &ToolCall) -> ApprovalPrompt {
-    let path = || {
-        ["path", "target_file", "file_path"]
-            .into_iter()
-            .find_map(|key| approval_arg(call, key))
+fn approval_prompt(call: &ToolCall, context: &ApprovalContext) -> ApprovalPrompt {
+    let statement = match call.tool_name.as_str() {
+        "run_terminal" => "Run this command".to_string(),
+        "read_file" => "Read this file".to_string(),
+        "list_directory" => "List this directory".to_string(),
+        "search_replace" => "Edit this file".to_string(),
+        "apply_patch" => "Apply a patch".to_string(),
+        "grep" => "Search files".to_string(),
+        "approve_plan" => "Approve this plan".to_string(),
+        "merge_subagent_worktree" => "Merge a subagent worktree".to_string(),
+        other => format!("Use {other}"),
     };
-    match call.tool_name.as_str() {
-        "run_terminal" => ApprovalPrompt {
-            statement: "Run this command".to_string(),
-            subject: approval_arg(call, "command")
-                .map(|command| safe_approval_text(&command))
-                .filter(|command| !command.is_empty())
-                .unwrap_or_else(|| "(missing command)".to_string()),
-            location: approval_arg(call, "cwd").map(|cwd| safe_approval_text(&cwd)),
-        },
-        "read_file" => ApprovalPrompt {
-            statement: "Read this file".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "list_directory" => ApprovalPrompt {
-            statement: "List this directory".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "search_replace" => ApprovalPrompt {
-            statement: "Edit this file".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "apply_patch" => ApprovalPrompt {
-            statement: "Apply a patch".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "workspace files".to_string()),
-            location: None,
-        },
-        "grep" => {
-            let pattern = approval_arg(call, "pattern").or_else(|| approval_arg(call, "query"));
-            let path = path();
-            let subject = [pattern, path]
-                .into_iter()
-                .flatten()
-                .map(|part| safe_approval_text(&part))
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" in ");
-            ApprovalPrompt {
-                statement: "Search files".to_string(),
-                subject: if subject.is_empty() {
-                    "(missing pattern)".to_string()
-                } else {
-                    subject
-                },
-                location: None,
-            }
-        }
-        "approve_plan" => ApprovalPrompt {
-            statement: "Approve this plan".to_string(),
-            subject: approval_arg(call, "goal")
-                .or_else(|| approval_arg(call, "plan_id"))
-                .map(|goal| safe_approval_text(&goal))
-                .unwrap_or_else(|| "(missing plan)".to_string()),
-            location: None,
-        },
-        "merge_subagent_worktree" => ApprovalPrompt {
-            statement: "Merge a subagent worktree".to_string(),
-            subject: approval_arg(call, "subagent_id")
-                .map(|id| safe_approval_text(&id))
-                .unwrap_or_else(|| "(missing subagent)".to_string()),
-            location: None,
-        },
-        other => ApprovalPrompt {
-            statement: format!("Use {other}"),
-            subject: [
-                "command",
-                "path",
-                "query",
-                "pattern",
-                "url",
-                "action",
-                "target_file",
-            ]
-            .into_iter()
-            .find_map(|key| approval_arg(call, key))
-            .map(|value| safe_approval_text(&value))
-            .unwrap_or_else(|| other.to_string()),
-            location: None,
-        },
+    ApprovalPrompt {
+        statement,
+        subject: context.display_subject.clone(),
+        location: context.display_location.clone(),
     }
 }
 
@@ -4341,15 +4277,7 @@ fn render_session_activities(
     }
     let composer_area = layout.composer;
     if composer_area.width > 0 && composer_area.height > 0 {
-        let border_style = if focus == TuiFocus::Composer {
-            if no_color {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                role_style(ActivityKind::User, false)
-            }
-        } else {
-            muted_style(no_color)
-        };
+        let border_style = composer_border_style(focus, no_color);
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(border_style);
@@ -4469,6 +4397,18 @@ fn render_session_activities(
         Paragraph::new(footer).style(muted_style(no_color)),
         layout.footer,
     );
+}
+
+fn composer_border_style(focus: TuiFocus, no_color: bool) -> Style {
+    if focus == TuiFocus::Composer {
+        if no_color {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            role_style(ActivityKind::User, false)
+        }
+    } else {
+        muted_style(no_color)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4632,8 +4572,14 @@ fn draw_loop(
         if let Err(error) = terminal.size() {
             break Err(error);
         }
+        let session_revision = session.as_ref().map(|session| session.revision);
         let mut chrome = if chrome_cache.as_ref().is_some_and(|cache| {
-            cache.matches(chrome_generation, &timeline.session_id, &session_origin)
+            cache.matches(
+                chrome_generation,
+                &timeline.session_id,
+                session_revision,
+                &session_origin,
+            )
         }) {
             chrome_cache.as_ref().expect("checked").chrome.clone()
         } else {
@@ -4643,6 +4589,7 @@ fn draw_loop(
             chrome_cache = Some(ChromeCache {
                 generation: chrome_generation,
                 session_id: timeline.session_id.clone(),
+                session_revision,
                 origin: session_origin.clone(),
                 chrome: chrome.clone(),
             });
@@ -5568,6 +5515,14 @@ mod tests {
             Style::default().add_modifier(Modifier::BOLD)
         );
         assert_eq!(
+            composer_border_style(TuiFocus::Composer, true),
+            Style::default().add_modifier(Modifier::BOLD)
+        );
+        assert_ne!(
+            composer_border_style(TuiFocus::Composer, true),
+            composer_border_style(TuiFocus::Transcript, true)
+        );
+        assert_eq!(
             approval_dock_style(false),
             Style::default()
                 .add_modifier(Modifier::BOLD)
@@ -5696,13 +5651,15 @@ mod tests {
         let cache = ChromeCache {
             generation: 1,
             session_id: "abc".to_string(),
+            session_revision: Some(4),
             origin: "new".to_string(),
             chrome: TuiChrome::fixture(),
         };
-        assert!(cache.matches(1, "abc", "new"));
-        assert!(!cache.matches(1, "other", "new"));
-        assert!(!cache.matches(2, "abc", "new"));
-        assert!(!cache.matches(1, "abc", "resumed"));
+        assert!(cache.matches(1, "abc", Some(4), "new"));
+        assert!(!cache.matches(1, "abc", Some(5), "new"));
+        assert!(!cache.matches(1, "other", Some(4), "new"));
+        assert!(!cache.matches(2, "abc", Some(4), "new"));
+        assert!(!cache.matches(1, "abc", Some(4), "resumed"));
     }
 
     #[test]
@@ -6404,6 +6361,13 @@ mod tests {
             "read_file · src/lib.rs"
         );
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1m15s");
+
+        let compact = waiting_meter_text(&meter, 40, true);
+        assert!(unicode_display_width(&compact) <= 40, "{compact}");
+        assert!(compact.contains("s:2/5"), "{compact}");
+        assert!(compact.contains("12s"), "{compact}");
+        assert!(compact.contains("t:8k"), "{compact}");
+        assert!(compact.contains("running"), "{compact}");
     }
 
     #[test]
@@ -8444,7 +8408,7 @@ mod tests {
 
     #[test]
     fn approval_prompt_states_the_command_without_a_metadata_dump() {
-        let prompt = approval_prompt(&ToolCall {
+        let call = ToolCall {
             invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({
@@ -8454,7 +8418,9 @@ mod tests {
             }),
             session_id: None,
             project_root: None,
-        });
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+        let prompt = approval_prompt(&call, &context);
         assert_eq!(prompt.statement, "Run this command");
         assert_eq!(prompt.subject, "git status --short --branch && task check");
         assert_eq!(
@@ -8466,6 +8432,21 @@ mod tests {
             compact_approval_risk("destructive / requires_approval"),
             "destructive"
         );
+
+        let raw_secret = "raw-command-secret";
+        let secret_call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({"command": format!("deploy --token={raw_secret}")}),
+            session_id: None,
+            project_root: None,
+        };
+        let mut safe_context =
+            ApprovalContext::compatibility(&secret_call, PermissionLevel::Destructive);
+        safe_context.display_subject = "deploy --token=[REDACTED]".to_string();
+        let safe_prompt = approval_prompt(&secret_call, &safe_context);
+        assert_eq!(safe_prompt.subject, "deploy --token=[REDACTED]");
+        assert!(!safe_prompt.subject.contains(raw_secret));
     }
 
     #[test]

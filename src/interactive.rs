@@ -2888,7 +2888,7 @@ pub fn summarize_tool_result(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let extra = if truncated { ", truncated" } else { "" };
-            (format!("{count} entries{extra}"), String::new())
+            (format!("{count} entries{extra}"), inline_json(value))
         }
         ("read_file", Some(value)) => {
             let content = value
@@ -2900,7 +2900,7 @@ pub fn summarize_tool_result(
             } else {
                 content.lines().count()
             };
-            (format!("{lines} lines"), String::new())
+            (format!("{lines} lines"), inline_json(value))
         }
         ("grep", Some(value)) => {
             let matches = value
@@ -2908,7 +2908,7 @@ pub fn summarize_tool_result(
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len)
                 .unwrap_or(0);
-            (format!("{matches} matches"), String::new())
+            (format!("{matches} matches"), inline_json(value))
         }
         ("run_terminal", Some(value)) => {
             let code = value
@@ -6669,11 +6669,11 @@ mod tests {
         assert!(activities[0].render_line().contains("◆ tool"));
         assert!(!activities[0].render_line().contains("README.md"));
         assert!(!activities[0].render_line().contains("{\"entries\""));
-        assert!(
-            activities[0].body.is_empty() || activities[0].folded,
-            "{}",
-            activities[0].body
-        );
+        assert!(activities[0].folded);
+        assert!(activities[0].body.contains("README.md"));
+        let mut expanded = activities[0].clone();
+        expanded.folded = false;
+        assert!(expanded.render_line().contains("README.md"));
     }
 
     #[test]
@@ -6789,7 +6789,26 @@ mod tests {
             activities[0].title,
             "read_file ok · src/tui/mod.rs · 3 lines"
         );
-        assert!(activities[0].display_text().starts_with("◆ tool"));
+        assert!(activities[0].folded);
+        assert!(activities[0].body.contains("a\\nb\\nc\\n"));
+        assert!(!activities[0].render_line().contains("a\\nb\\nc\\n"));
+        assert!(activities[0].display_text().contains("◆ tool"));
+    }
+
+    #[test]
+    fn common_read_tools_keep_bounded_expandable_result_detail() {
+        let secret = "private-search-value";
+        let output = serde_json::json!({
+            "matches": [{"path": "src/lib.rs", "line": 4, "text": secret}],
+            "padding": "x".repeat(MAX_ACTIVITY_BODY_BYTES * 2)
+        });
+        let (status, summary, detail) = summarize_tool_result("grep", true, Some(&output), None);
+        assert_eq!(status, "ok");
+        assert_eq!(summary, "1 matches");
+        let body = bounded_activity_body(&detail, &[secret.to_string()]);
+        assert!(body.contains("[REDACTED]"));
+        assert!(!body.contains(secret));
+        assert!(body.len() <= MAX_ACTIVITY_BODY_BYTES);
     }
 
     #[test]

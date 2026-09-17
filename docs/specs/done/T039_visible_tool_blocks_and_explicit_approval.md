@@ -242,7 +242,7 @@ reduction, so same-name calls cannot overwrite one another.
 ## Completion Evidence (2026-09-16)
 
 `task check` passed formatting, installer syntax, and warning-denying Clippy. The
-focused `task test:interactive` gate passed 16 steering, 57 shared-interaction, 95 TUI,
+focused `task test:interactive` gate passed 16 steering, 58 shared-interaction, 95 TUI,
 6 console, 26 plain-chat, 6 CLI, and one smoke-contract test, including compact chrome,
 markdown, narrow approval, `NO_COLOR`, scroll, key, consent, OSC 52, and same-name tool
 regressions. `task docs:check`, the complete `task verify` gate, and `git diff --check`

@@ -147,7 +147,7 @@ focused composer border under `NO_COLOR`.
 ## Completion Evidence (2026-09-16)
 
 `task check` passed formatting, installer syntax, and warning-denying Clippy. The
-focused `task test:interactive` gate passed 16 steering, 57 shared-interaction, 95 TUI,
+focused `task test:interactive` gate passed 16 steering, 58 shared-interaction, 95 TUI,
 6 console, 26 plain-chat, 6 CLI, and one smoke-contract test. `task docs:check`, the
 complete `task verify` gate, and `git diff --check` passed on the reconciled closure
 branch before handoff.
