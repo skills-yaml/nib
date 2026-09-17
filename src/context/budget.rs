@@ -304,6 +304,18 @@ fn build_runtime_system_prompt(
     tool_count: usize,
 ) -> String {
     let root = truncate_to_tokens(&project_root.display().to_string(), MAX_PROJECT_ROOT_TOKENS);
+    if mode == "answer_only" {
+        let context = if context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{context}")
+        };
+        return format!(
+            "{}\n\n{}\nProject root: {root}{context}",
+            crate::agent::instructions::SHARED,
+            crate::agent::instructions::ANSWER_ONLY,
+        );
+    }
     let tool_instruction = if tool_use_enforcement && tool_count > 0 {
         "For any step that claims an observable inspection or change, use an available tool and ground the result in its returned artifact."
     } else {
@@ -850,6 +862,41 @@ mod tests {
                 .to_string()
                 .contains("schema injection"));
         }
+    }
+
+    #[test]
+    fn answer_only_prompt_exposes_only_the_routing_control_and_forbids_claimed_actions() {
+        let context = hostile_context();
+        let session = hostile_session();
+        let controls = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "request_plan",
+                "description": "Request normal planning",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })];
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: None,
+            tools: Some(&controls),
+            mode: "answer_only",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: false,
+            context_length: 2_400,
+        })
+        .expect("bounded answer-only input");
+
+        assert_eq!(bounded.included_tool_count, 1);
+        assert_eq!(
+            bounded.tools.as_ref().unwrap()[0]["function"]["name"],
+            "request_plan"
+        );
+        let system = bounded.messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("non-executable routing control"));
+        assert!(system.contains("no inspection, clarification, external lookup"));
+        assert!(!system.contains("current persisted, approved plan step"));
     }
 
     #[test]

@@ -197,8 +197,15 @@ plans proportional, avoid repeated work, and ground implementation in verificati
 These are model instructions; tool permissions, exact plan binding, and reconciliation
 are enforced by Rust independently of model compliance.
 
-Planning still takes one model request, even for a simple question. It exposes only
-`submit_plan`, so a needed inspection or clarification becomes an approved plan step.
+Normal planning takes one model request and exposes only `submit_plan`, so a needed
+inspection or clarification becomes an approved plan step. The disabled-by-default
+`agent.answer_only` route may precede planning for a new interactive execute request
+when the project and caller do not require planning and no plan or run is active. Its
+single bounded request exposes only the typed, non-executable `request_plan` control.
+Plain content completes that activity without creating or advancing a plan; a valid
+control or unsupported result falls back once to normal planning. Invalid controls
+and provider failures terminate the route without also invoking the planner. Active
+plan state is left intact and receives no model or tool call from the new request.
 Execution can call `ask_question` alone, wait for the answer, and resume; skipped or
 unavailable input remains unresolved. Each tool batch continues the current step.
 A response without tools requests completion, but an unresolved tool failure keeps
@@ -233,6 +240,11 @@ allocation, requests a bounded continuation summary, and retains the raw audit t
 The summary prioritizes intent, constraints, decisions, unanswered questions, failed
 approaches, verification evidence, and remaining work. Active provider continuations
 retain their separate bounded transport state and defer automatic compression.
+Each agent run also persists bounded `agent_resource_usage` evidence: logical
+generation requests, executable tool attempts, estimated input-token totals and
+maximum, compression requests, and repeated questions. The estimate uses the same
+provider-neutral approximation as prompt budgeting and is labeled approximate; raw
+prompt or question text is not copied into this accounting event.
 
 Self-development uses the same flow as other implementation work: inspect nib's
 instructions/specs and source, edit within the managed worktree, run focused checks

@@ -2468,6 +2468,7 @@ fn prepare_tui_agent_worker(
                 let loop_cfg = crate::agent::AgentLoopConfig {
                     max_steps: 0,
                     mode: mode.as_str().to_string(),
+                    interactive_request: mode == InteractiveAgentMode::Execute,
                     approval_handler: Some(std::sync::Arc::new(TuiApprovalHandler {
                         tx: approval_tx,
                     })),

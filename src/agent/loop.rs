@@ -28,7 +28,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, mpsc::Sender, Notify};
@@ -42,6 +42,186 @@ pub const MAX_STEERING_INPUT_BYTES: usize = 8 * 1024;
 const MAX_STEERING_INPUTS_PER_RUN: usize = 32;
 const MAX_STEERING_TOTAL_BYTES_PER_RUN: usize = 32 * 1024;
 const MAX_IDENTICAL_FAILED_TOOL_BATCHES: u8 = 3;
+
+/// Per-run resource evidence is deliberately provider-neutral and contains only
+/// bounded counters. Raw prompts, model output, and question text remain in their
+/// existing private/session boundaries.
+#[derive(Clone, Default)]
+struct AgentResourceTracker {
+    counters: Arc<AgentResourceCounters>,
+}
+
+#[derive(Default)]
+struct AgentResourceCounters {
+    generation_requests: AtomicU64,
+    tool_attempts: AtomicU64,
+    approximate_context_tokens_total: AtomicU64,
+    approximate_context_tokens_max: AtomicU64,
+    compression_requests: AtomicU64,
+    repeated_questions: AtomicU64,
+    question_fingerprints: std::sync::Mutex<std::collections::BTreeSet<[u8; 32]>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentResourceSnapshot {
+    generation_requests: u64,
+    tool_attempts: u64,
+    approximate_context_tokens_total: u64,
+    approximate_context_tokens_max: u64,
+    compression_requests: u64,
+    repeated_questions: u64,
+}
+
+impl AgentResourceTracker {
+    fn from_session(session: &Session) -> Self {
+        let tracker = Self::default();
+        {
+            let mut fingerprints = tracker
+                .counters
+                .question_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            fingerprints.extend(session.events.iter().filter_map(|event| {
+                (event.kind == "question_required")
+                    .then(|| event.details.get("question").and_then(Value::as_str))
+                    .flatten()
+                    .map(question_fingerprint)
+            }));
+        }
+        tracker
+    }
+
+    fn record_generation_request(&self, request: &LlmRequest<'_>) {
+        self.counters
+            .generation_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let messages = request
+            .messages
+            .iter()
+            .map(crate::llm::LlmMessage::to_openai_chat)
+            .collect::<Vec<_>>();
+        let tools = request.tools.map(|tools| {
+            tools
+                .iter()
+                .map(crate::llm::ToolDefinition::to_openai_tool)
+                .collect::<Vec<_>>()
+        });
+        let approximate = u64::try_from(crate::context::budget::approximate_llm_input_tokens(
+            &messages,
+            tools.as_deref(),
+        ))
+        .unwrap_or(u64::MAX);
+        self.counters
+            .approximate_context_tokens_total
+            .fetch_add(approximate, Ordering::Relaxed);
+        self.counters
+            .approximate_context_tokens_max
+            .fetch_max(approximate, Ordering::Relaxed);
+    }
+
+    fn record_tool_attempt(&self) {
+        self.counters.tool_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn generation_requests(&self) -> u64 {
+        self.counters.generation_requests.load(Ordering::Relaxed)
+    }
+
+    fn record_compression_requests_since(&self, previous_generation_requests: u64) {
+        let requested = self
+            .generation_requests()
+            .saturating_sub(previous_generation_requests);
+        self.counters
+            .compression_requests
+            .fetch_add(requested, Ordering::Relaxed);
+    }
+
+    fn observe_question(&self, question: &str) {
+        let repeated = !self
+            .counters
+            .question_fingerprints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(question_fingerprint(question));
+        if repeated {
+            self.counters
+                .repeated_questions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> AgentResourceSnapshot {
+        AgentResourceSnapshot {
+            generation_requests: self.generation_requests(),
+            tool_attempts: self.counters.tool_attempts.load(Ordering::Relaxed),
+            approximate_context_tokens_total: self
+                .counters
+                .approximate_context_tokens_total
+                .load(Ordering::Relaxed),
+            approximate_context_tokens_max: self
+                .counters
+                .approximate_context_tokens_max
+                .load(Ordering::Relaxed),
+            compression_requests: self.counters.compression_requests.load(Ordering::Relaxed),
+            repeated_questions: self.counters.repeated_questions.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn question_fingerprint(question: &str) -> [u8; 32] {
+    let normalized = question
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Sha256::digest(normalized.as_bytes()).into()
+}
+
+struct ResourceTrackingLlm {
+    inner: Arc<dyn LlmClient>,
+    resources: AgentResourceTracker,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ResourceTrackingLlm {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        self.resources.record_generation_request(&request);
+        self.inner.complete(request).await
+    }
+
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
+        self.resources.record_generation_request(&request);
+        self.inner.stream(request).await
+    }
+}
+
+fn persist_resource_evidence(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    outcome: &str,
+    resources: &AgentResourceTracker,
+) -> Result<(), String> {
+    let snapshot = resources.snapshot();
+    store
+        .record_event(
+            session_id,
+            "agent_resource_usage",
+            json!({
+                "version": 1,
+                "run_id": run_id,
+                "outcome": outcome,
+                "generation_requests": snapshot.generation_requests,
+                "tool_attempts": snapshot.tool_attempts,
+                "approximate_context_tokens_total": snapshot.approximate_context_tokens_total,
+                "approximate_context_tokens_max": snapshot.approximate_context_tokens_max,
+                "compression_requests": snapshot.compression_requests,
+                "repeated_questions": snapshot.repeated_questions,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|error| format!("failed to persist run resource evidence: {error}"))
+}
 
 /// Retains bounded comparison state, never raw requests or tool output. Invocation IDs
 /// identify executions rather than progress, so they are deliberately excluded.
@@ -1170,6 +1350,9 @@ pub struct AgentLoopConfig {
     /// A non-zero value overrides `agent.max_turns` for this run.
     pub max_steps: u32,
     pub mode: String,
+    /// True only for a newly submitted plain/TUI request. Non-interactive,
+    /// delegated, gateway, and durable callers retain mandatory planning.
+    pub interactive_request: bool,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub auto_approve: bool,
@@ -1186,6 +1369,7 @@ impl Default for AgentLoopConfig {
         Self {
             max_steps: 0,
             mode: "execute".to_string(),
+            interactive_request: false,
             provider: None,
             model: None,
             auto_approve: false,
@@ -1405,6 +1589,13 @@ async fn run_agent_loop_with_runtime_and_recovery(
             .try_create_session_with_id(session_id.to_string())
             .map_err(|error| error.to_string())?;
     }
+    let resources = AgentResourceTracker::from_session(
+        &runtime
+            .session_store
+            .load_result(session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session disappeared before run resource setup".to_string())?,
+    );
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -1454,7 +1645,13 @@ async fn run_agent_loop_with_runtime_and_recovery(
                 if cancellation.is_cancelled() {
                     reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
                 } else {
-                    let mut running = Box::pin(run_agent_operation(runtime, session_id, goal, cfg));
+                    let mut running = Box::pin(run_agent_operation(
+                        runtime,
+                        session_id,
+                        goal,
+                        cfg,
+                        resources.clone(),
+                    ));
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => {
@@ -1475,7 +1672,14 @@ async fn run_agent_loop_with_runtime_and_recovery(
                     }
                 }
             } else {
-                Box::pin(run_agent_operation(runtime, session_id, goal, cfg)).await
+                Box::pin(run_agent_operation(
+                    runtime,
+                    session_id,
+                    goal,
+                    cfg,
+                    resources.clone(),
+                ))
+                .await
             }
         }
     };
@@ -1483,10 +1687,24 @@ async fn run_agent_loop_with_runtime_and_recovery(
         (Ok(mut summary), Ok(())) => {
             summary.run_id = run_id.clone();
             let outcome = summary.outcome.clone();
+            persist_resource_evidence(
+                &cancellation_store,
+                session_id,
+                &run_id,
+                &outcome,
+                &resources,
+            )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, &outcome)?;
             Ok(summary)
         }
         (Err(error), Ok(())) => {
+            persist_resource_evidence(
+                &cancellation_store,
+                session_id,
+                &run_id,
+                "local_error",
+                &resources,
+            )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, "local_error")?;
             Err(error)
         }
@@ -1529,11 +1747,15 @@ async fn run_agent_operation(
     session_id: &str,
     goal: &str,
     cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     if cfg.mode == "compact" {
-        Box::pin(run_explicit_compaction(runtime, session_id, cfg)).await
+        Box::pin(run_explicit_compaction(runtime, session_id, cfg, resources)).await
     } else {
-        Box::pin(run_agent_loop_inner(runtime, session_id, goal, cfg)).await
+        Box::pin(run_agent_loop_inner(
+            runtime, session_id, goal, cfg, resources,
+        ))
+        .await
     }
 }
 
@@ -1541,6 +1763,7 @@ async fn run_explicit_compaction(
     runtime: AgentLoopRuntime,
     session_id: &str,
     cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     let AgentLoopRuntime {
         nib_cfg,
@@ -1592,34 +1815,41 @@ async fn run_explicit_compaction(
     }
 
     let sensitive_values = nib_cfg.sensitive_values();
-    let llm: Arc<dyn LlmClient> = match crate::llm::factory::create_client_with_sensitive_values(
-        &nib_cfg.llm,
-        cfg.provider.as_deref(),
-        &sensitive_values,
-    ) {
-        Ok(llm) => llm,
-        Err(error) => {
-            let failure = llm_configuration_failure(
-                &nib_cfg,
-                cfg.provider.as_deref(),
-                &error,
-                &sensitive_values,
-            );
-            return reconcile_explicit_compression_failure(
-                &store,
-                session_id,
-                &cfg.stream_tx,
-                failure,
-                "configuration_failed",
-            );
-        }
-    };
+    let untracked_llm: Arc<dyn LlmClient> =
+        match crate::llm::factory::create_client_with_sensitive_values(
+            &nib_cfg.llm,
+            cfg.provider.as_deref(),
+            &sensitive_values,
+        ) {
+            Ok(llm) => llm,
+            Err(error) => {
+                let failure = llm_configuration_failure(
+                    &nib_cfg,
+                    cfg.provider.as_deref(),
+                    &error,
+                    &sensitive_values,
+                );
+                return reconcile_explicit_compression_failure(
+                    &store,
+                    session_id,
+                    &cfg.stream_tx,
+                    failure,
+                    "configuration_failed",
+                );
+            }
+        };
+    let llm: Arc<dyn LlmClient> = Arc::new(ResourceTrackingLlm {
+        inner: untracked_llm,
+        resources: resources.clone(),
+    });
+    let generation_requests_before = resources.generation_requests();
     match crate::context::compression::explicitly_compress_session(
         &store, session_id, &llm, &nib_cfg,
     )
     .await
     {
         Ok(Some(report)) => {
+            resources.record_compression_requests_since(generation_requests_before);
             emit_nonblocking(
                 &cfg.stream_tx,
                 StreamEvent::Compression {
@@ -1637,15 +1867,19 @@ async fn run_explicit_compaction(
                 1,
             )
         }
-        Ok(None) => finish_explicit_compaction(
-            &store,
-            session_id,
-            run_id,
-            &cfg.stream_tx,
-            "context_unchanged",
-            0,
-        ),
+        Ok(None) => {
+            resources.record_compression_requests_since(generation_requests_before);
+            finish_explicit_compaction(
+                &store,
+                session_id,
+                run_id,
+                &cfg.stream_tx,
+                "context_unchanged",
+                0,
+            )
+        }
         Err(error) => {
+            resources.record_compression_requests_since(generation_requests_before);
             let failure = redact_provider_failure(&nib_cfg, error);
             reconcile_explicit_compression_failure(
                 &store,
@@ -1777,6 +2011,7 @@ async fn run_agent_loop_inner(
     session_id: &str,
     goal: &str,
     mut cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     let AgentLoopRuntime {
         nib_cfg,
@@ -1808,7 +2043,34 @@ async fn run_agent_loop_inner(
         steering.verify_binding(&store, session_id, &run_id)?;
     }
     let steering_enabled = cfg.steering.is_some();
-    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
+    let session_before_request = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to inspect answer-only eligibility: {error}"))?
+        .ok_or_else(|| "session disappeared before answer-only eligibility".to_string())?;
+    let answer_only_candidate =
+        nib_cfg.agent.answer_only && cfg.interactive_request && cfg.mode == "execute";
+    let active_plan = session_before_request
+        .plan
+        .as_ref()
+        .is_some_and(|plan| !plan.is_complete());
+    let active_prior_run = has_unterminated_prior_run(&session_before_request, &run_id);
+    if answer_only_candidate && (active_plan || active_prior_run) {
+        prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+        return finish_answer_only_planning_required(
+            &store,
+            session_id,
+            &run_id,
+            &cfg.stream_tx,
+            if active_plan {
+                "active_plan"
+            } else {
+                "active_run"
+            },
+        )
+        .await;
+    }
+    let answer_only_eligible =
+        answer_only_candidate && !nib_cfg.execution.plan_mode && !active_plan && !active_prior_run;
 
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
@@ -1819,33 +2081,94 @@ async fn run_agent_loop_inner(
     let max_transitions = max_turns.saturating_mul(10).saturating_add(10);
     let sensitive_values = nib_cfg.sensitive_values();
     let public_output_sensitive_values = nib_cfg.public_session_sensitive_values();
-    let llm: Arc<dyn LlmClient> = match crate::llm::factory::create_client_with_sensitive_values(
-        &nib_cfg.llm,
-        cfg.provider.as_deref(),
-        &sensitive_values,
-    ) {
-        Ok(llm) => llm,
-        Err(error) => {
-            let failure = llm_configuration_failure(
-                &nib_cfg,
-                cfg.provider.as_deref(),
-                &error,
-                &sensitive_values,
-            );
-            return reconcile_preflight_llm_failure(
-                &store,
-                session_id,
-                &normalized_goal,
-                failure,
-                &cfg.stream_tx,
-            )
-            .await;
-        }
-    };
+    let untracked_llm: Arc<dyn LlmClient> =
+        match crate::llm::factory::create_client_with_sensitive_values(
+            &nib_cfg.llm,
+            cfg.provider.as_deref(),
+            &sensitive_values,
+        ) {
+            Ok(llm) => llm,
+            Err(error) => {
+                let failure = llm_configuration_failure(
+                    &nib_cfg,
+                    cfg.provider.as_deref(),
+                    &error,
+                    &sensitive_values,
+                );
+                return reconcile_preflight_llm_failure(
+                    &store,
+                    session_id,
+                    &normalized_goal,
+                    failure,
+                    &cfg.stream_tx,
+                )
+                .await;
+            }
+        };
+    let llm: Arc<dyn LlmClient> = Arc::new(ResourceTrackingLlm {
+        inner: untracked_llm,
+        resources: resources.clone(),
+    });
     let skill_selection = select_profile_skill_selection(&project_root, &nib_cfg, &profile, goal)?;
     let active_skills = &skill_selection.skills;
     let policy_rules = skill_policy_rules(active_skills);
     let after_tool_hooks = skill_after_tool_hooks(active_skills);
+    prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+    for record in &skill_selection.records {
+        store
+            .record_skill_usage(session_id, &record.skill_name, Some(record.reason.clone()))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut answer_route_requests = 0u32;
+    if answer_only_eligible {
+        let memory = if nib_cfg.memory.enabled {
+            profile.memory_store().load_result()?
+        } else {
+            crate::session::memory::MemoryStoreData::default()
+        };
+        let mut answer_context =
+            assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
+        if let Some(session) = store
+            .load_result(session_id)
+            .map_err(|error| format!("failed to load answer-only attachments: {error}"))?
+        {
+            let attachments = session
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| message.attachments.as_slice())
+                .unwrap_or(&[]);
+            answer_context.attachments = attachment_context_sections(&project_root, attachments);
+        }
+        let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
+            profile.daemon_dir().to_path_buf(),
+        )?;
+        answer_context.workload = workload_context_sections(&workload_store.list()?);
+        answer_route_requests = 1;
+        match run_answer_only_route(
+            &store,
+            session_id,
+            &run_id,
+            &project_root,
+            &answer_context,
+            &llm,
+            &nib_cfg,
+            &public_output_sensitive_values,
+            &request_scope,
+            &cfg.stream_tx,
+        )
+        .await?
+        {
+            AnswerOnlyRoute::Completed(summary) | AnswerOnlyRoute::Failed(summary) => {
+                return Ok(summary)
+            }
+            AnswerOnlyRoute::Fallback => {}
+        }
+    }
+
+    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
     let mcp_manager = if nib_cfg.mcp.client_enabled && !nib_cfg.mcp.servers.is_empty() {
         Some(Arc::new(
             crate::integrations::mcp::McpManager::new(
@@ -1894,13 +2217,6 @@ async fn run_agent_loop_inner(
     }
     if let Some(handler) = cfg.approval_handler.clone() {
         executor = executor.with_approval_handler(handler);
-    }
-
-    prepare_user_turn(&store, session_id, goal, profile.root_path())?;
-    for record in &skill_selection.records {
-        store
-            .record_skill_usage(session_id, &record.skill_name, Some(record.reason.clone()))
-            .map_err(|error| error.to_string())?;
     }
 
     if nib_cfg.daemons.cron_enabled && nib_cfg.daemons.curator_enabled {
@@ -2721,11 +3037,13 @@ async fn run_agent_loop_inner(
                     let compression = if llm_turns.saturating_add(1) >= max_turns {
                         None
                     } else {
-                        match crate::context::compression::maybe_compress_session(
+                        let generation_requests_before = resources.generation_requests();
+                        let result = crate::context::compression::maybe_compress_session(
                             &store, session_id, &llm, &nib_cfg,
                         )
-                        .await
-                        {
+                        .await;
+                        resources.record_compression_requests_since(generation_requests_before);
+                        match result {
                             Ok(compression) => compression,
                             Err(error) => {
                                 reconciliation_failure =
@@ -3606,6 +3924,7 @@ async fn run_agent_loop_inner(
                         pending_question = Some(request.clone());
                         continue;
                     }
+                    resources.record_tool_attempt();
                     let result = executor
                         .execute(
                             ToolCall {
@@ -3870,6 +4189,7 @@ async fn run_agent_loop_inner(
                     MAX_QUESTION_BYTES,
                     false,
                 );
+                resources.observe_question(&question);
                 let options = request
                     .arguments
                     .get("options")
@@ -3944,6 +4264,7 @@ async fn run_agent_loop_inner(
                     &answer,
                     &public_output_sensitive_values,
                 );
+                resources.record_tool_attempt();
                 let result = executor
                     .execute(
                         ToolCall {
@@ -4299,7 +4620,7 @@ async fn run_agent_loop_inner(
     Ok(AgentRunSummary {
         session_id: session_id.to_string(),
         run_id: run_id.clone(),
-        steps_taken: llm_turns,
+        steps_taken: llm_turns.saturating_add(answer_route_requests),
         last_message: final_session
             .as_ref()
             .and_then(|session| session.messages.last())
@@ -4310,6 +4631,503 @@ async fn run_agent_loop_inner(
         failure: reconciliation_failure,
         bound_reached,
         trace,
+    })
+}
+
+enum AnswerOnlyRoute {
+    Completed(AgentRunSummary),
+    Failed(AgentRunSummary),
+    Fallback,
+}
+
+fn has_unterminated_prior_run(session: &Session, current_run_id: &str) -> bool {
+    let terminal = session
+        .events
+        .iter()
+        .filter(|event| event.kind == "run_terminal")
+        .filter_map(|event| event.details.get("run_id").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    session.events.iter().any(|event| {
+        if event.kind != "run_started" {
+            return false;
+        }
+        event
+            .details
+            .get("run_id")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| run_id != current_run_id && !terminal.contains(run_id))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_answer_only_route(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    project_root: &Path,
+    context: &crate::context::RuntimeContextSections,
+    llm: &Arc<dyn LlmClient>,
+    config: &crate::config::NibConfig,
+    sensitive_values: &[String],
+    request_scope: &LlmRequestScope,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AnswerOnlyRoute, String> {
+    store
+        .record_event(
+            session_id,
+            "answer_route_started",
+            json!({"run_id": run_id, "route": "answer_only"}),
+        )
+        .map_err(|error| format!("failed to audit answer-only route start: {error}"))?;
+
+    let control = json!({
+        "type": "function",
+        "function": {
+            "name": "request_plan",
+            "description": "Request the normal approved planning path because the current request needs inspection, clarification, or action.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    });
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load answer-only session context: {error}"))?
+        .ok_or_else(|| "session disappeared before answer-only context assembly".to_string())?;
+    let bounded = match build_bounded_runtime_input(RuntimePromptRequest {
+        context,
+        session: &session,
+        current_step: None,
+        tools: Some(std::slice::from_ref(&control)),
+        mode: "answer_only",
+        project_root,
+        tool_use_enforcement: false,
+        context_length: config.llm.context_length,
+    }) {
+        Ok(bounded) => bounded,
+        Err(error) => {
+            let failure = LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error);
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                failure,
+                "context_rejected",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed);
+        }
+    };
+    store
+        .record_event(
+            session_id,
+            "context_bounded",
+            json!({
+                "run_id": run_id,
+                "route": "answer_only",
+                "context_length": config.llm.context_length,
+                "approximate_input_tokens": bounded.approximate_tokens,
+                "raw_message_count": bounded.raw_message_count,
+                "raw_tool_count": bounded.raw_tool_count,
+                "included_tool_count": bounded.included_tool_count,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+    let typed_messages = match crate::llm::LlmMessage::from_openai_values(&bounded.messages) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error),
+                "request_rejected",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+    let mut typed_tools =
+        match crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref()) {
+            Ok(tools) => tools,
+            Err(error) => {
+                return finish_answer_only_failure(
+                    store,
+                    session_id,
+                    run_id,
+                    stream_tx,
+                    LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error),
+                    "request_rejected",
+                )
+                .await
+                .map(AnswerOnlyRoute::Failed)
+            }
+        };
+    if let Some(tools) = typed_tools.as_mut() {
+        for tool in tools.iter_mut() {
+            *tool = tool.clone().with_strict(true);
+        }
+    }
+    let request =
+        LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(request_scope.clone());
+    let stream = match llm.stream(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                redact_provider_failure(config, error),
+                "transport_failed",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+    let (response, projected) = match finish_private_provider_stream(stream, sensitive_values).await
+    {
+        Ok(completed) => completed,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                redact_provider_failure(config, error),
+                "transport_failed",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+
+    if response.terminal_status == LlmTerminalStatus::Refused {
+        record_answer_only_fallback(store, session_id, run_id, "model_refusal")?;
+        return Ok(AnswerOnlyRoute::Fallback);
+    }
+
+    let calls = response.tool_calls.as_deref().unwrap_or_default();
+    if calls.is_empty() {
+        let Some(content) = response
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        else {
+            record_answer_only_fallback(store, session_id, run_id, "empty_response")?;
+            return Ok(AnswerOnlyRoute::Fallback);
+        };
+        if response.continuation.is_some() {
+            let failure = LlmError::local(
+                LlmErrorClass::Protocol,
+                LlmErrorPhase::TerminalValidation,
+                "answer-only content unexpectedly retained provider continuation state",
+            );
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                failure,
+                "malformed_control",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed);
+        }
+        for event in projected {
+            emit(stream_tx, event).await;
+        }
+        let content = safe_persisted_provider_message(content, sensitive_values, true);
+        return finish_answer_only_success(store, session_id, run_id, stream_tx, &content)
+            .await
+            .map(AnswerOnlyRoute::Completed);
+    }
+
+    let valid_request_plan = calls.len() == 1
+        && calls[0].name == "request_plan"
+        && calls[0]
+            .arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty);
+    if valid_request_plan {
+        record_answer_only_fallback(store, session_id, run_id, "request_plan")?;
+        return Ok(AnswerOnlyRoute::Fallback);
+    }
+
+    finish_answer_only_failure(
+        store,
+        session_id,
+        run_id,
+        stream_tx,
+        LlmError::local(
+            LlmErrorClass::Protocol,
+            LlmErrorPhase::TerminalValidation,
+            "answer-only response contained a malformed routing control",
+        ),
+        "malformed_control",
+    )
+    .await
+    .map(AnswerOnlyRoute::Failed)
+}
+
+fn record_answer_only_fallback(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_fallback",
+                json!({"run_id": run_id, "route": "answer_only", "reason": reason}),
+            );
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({
+                    "run_id": run_id,
+                    "route": "answer_only",
+                    "outcome": "fallback",
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| format!("failed to audit answer-only fallback: {error}"))
+}
+
+async fn finish_answer_only_success(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    content: &str,
+) -> Result<AgentRunSummary, String> {
+    let content = content.to_string();
+    let persisted_content = content.clone();
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Idle.as_str()}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Idle.as_str(), "to": AgentState::InspectLlm.as_str()}),
+            );
+            session.messages.push(SessionMessage {
+                index: session.messages.len(),
+                role: "assistant".to_string(),
+                content: persisted_content.clone(),
+                timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
+            });
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({"run_id": run_id, "route": "answer_only", "outcome": "completed"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::InspectLlm.as_str(), "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({"outcome": "completed", "continue": false, "route": "answer_only"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to commit answer-only response: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "completed".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 1,
+        last_message: Some(content),
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "completed".to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Idle.as_str().to_string(),
+            AgentState::InspectLlm.as_str().to_string(),
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+async fn finish_answer_only_failure(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    failure: LlmError,
+    reason: &str,
+) -> Result<AgentRunSummary, String> {
+    let persisted_failure = failure.clone();
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({
+                    "run_id": run_id,
+                    "route": "answer_only",
+                    "outcome": "failed",
+                    "reason": reason,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({
+                    "outcome": "answer_only_failed",
+                    "continue": false,
+                    "route": "answer_only",
+                    "failure": persisted_failure,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to reconcile answer-only failure: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "answer_only_failed".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 1,
+        last_message: None,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "answer_only_failed".to_string(),
+        failure: Some(failure),
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+async fn finish_answer_only_planning_required(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    reason: &str,
+) -> Result<AgentRunSummary, String> {
+    let outcome = if reason == "active_plan" {
+        "planning_required_active_plan"
+    } else {
+        "planning_required_active_run"
+    };
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_bypassed",
+                json!({"run_id": run_id, "route": "answer_only", "reason": reason}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({"outcome": outcome, "continue": false, "route": "answer_only"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to reconcile answer-only planning requirement: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: outcome.to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 0,
+        last_message: None,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: outcome.to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
     })
 }
 
@@ -4942,6 +5760,7 @@ fn is_llm_failure_outcome(outcome: &str) -> bool {
         "provider_continuation_failed:",
         "compression_failed:",
         "configuration_failed:",
+        "answer_only_failed:",
     ]
     .iter()
     .any(|prefix| outcome.starts_with(prefix))
@@ -4953,6 +5772,7 @@ fn is_llm_failure_outcome(outcome: &str) -> bool {
                 | "provider_continuation_failed"
                 | "compression_failed"
                 | "configuration_failed"
+                | "answer_only_failed"
         )
 }
 
@@ -4970,6 +5790,8 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "provider_continuation_interrupted"
                 | "instruction_context_missing"
                 | "unresolved_clarification"
+                | "planning_required_active_plan"
+                | "planning_required_active_run"
         )
 }
 

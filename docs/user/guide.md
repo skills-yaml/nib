@@ -138,6 +138,7 @@ reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|ma
 [agent]
 max_turns = 90
 tool_use_enforcement = true
+answer_only = false
 
 [terminal]
 backend = "local"
@@ -354,6 +355,15 @@ Useful options include `--session <id>` to resume, `--provider <name>`, `--mode 
 mutating tools are allowed. Default manual mode prompts for the plan and calls not
 auto-classified as safe. `--yes` bypasses interactive plan and tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
+
+Set `agent.answer_only = true` to allow a new interactive execute request to use one
+bounded response before planning when no plan or run is active and
+`execution.plan_mode = false`. This route has no executable tools. It can answer from
+the supplied context or select the non-executable `request_plan` control, which
+discards partial content and enters the normal approved-plan flow once. Unsupported
+responses also fall back once. Invalid control output and provider failures are
+reported without invoking the planner. An active plan or run keeps its existing state
+and the new request reports that planning is required.
 When the agent calls `ask_question`, the CLI prints the available options and accepts
 either an option number or free-form text on the same input stream. Closed or empty
 question input stops the run and reconciles the session without continuing execution.

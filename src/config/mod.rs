@@ -301,6 +301,10 @@ pub struct AgentConfig {
     pub max_turns: u32,
     #[serde(default = "default_true")]
     pub tool_use_enforcement: bool,
+    /// Permit a bounded, non-executable response before normal planning for a new
+    /// interactive request. The route remains disabled unless explicitly enabled.
+    #[serde(default)]
+    pub answer_only: bool,
 }
 
 impl Default for AgentConfig {
@@ -308,6 +312,7 @@ impl Default for AgentConfig {
         Self {
             max_turns: default_max_turns(),
             tool_use_enforcement: true,
+            answer_only: false,
         }
     }
 }
@@ -2823,6 +2828,7 @@ api_key = "fixture"
         cfg.validate().expect("default config must be valid");
         assert_eq!(cfg.agent.max_turns, 90);
         assert!(cfg.agent.tool_use_enforcement);
+        assert!(!cfg.agent.answer_only);
         assert_eq!(cfg.terminal.backend, "local");
         assert_eq!(cfg.terminal.timeout, 180);
         assert_eq!(cfg.approvals.mode, "manual");
@@ -3416,6 +3422,21 @@ request_timeot_secs = 10
         let persisted = load_nib_config_full(root.path()).expect("updated config");
         assert_eq!(persisted.revision, 1);
         assert_eq!(persisted.agent.max_turns, 42);
+        assert!(!persisted.agent.answer_only);
+    }
+
+    #[test]
+    fn answer_only_is_opt_in_and_roundtrips_without_changing_legacy_defaults() {
+        let legacy: NibConfig =
+            toml::from_str("[agent]\nmax_turns = 41\ntool_use_enforcement = true\n")
+                .expect("legacy agent config");
+        assert!(!legacy.agent.answer_only);
+
+        let mut configured = legacy;
+        configured.agent.answer_only = true;
+        let encoded = toml::to_string(&configured).expect("serialize answer-only config");
+        let decoded: NibConfig = toml::from_str(&encoded).expect("reload answer-only config");
+        assert!(decoded.agent.answer_only);
     }
 
     #[test]

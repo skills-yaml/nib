@@ -169,6 +169,29 @@ fn serve_responses_sequence(responses: Vec<Value>) -> (String, std::sync::mpsc::
     (format!("http://{address}/v1"), request_rx)
 }
 
+fn serve_malformed_responses_stream_once() -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed Responses listener");
+    let address = listener.local_addr().expect("malformed Responses address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, request) =
+            accept_fixture_post(&listener, "malformed Responses fixture connection");
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("capture malformed Responses fixture request");
+        let body = "data: {not-json}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("malformed Responses fixture response");
+    });
+    (format!("http://{address}/v1"), request_rx)
+}
+
 fn failure_fixture_tool_turn(id: &str, calls: Vec<(&str, Value)>) -> Value {
     json!({
         "id": format!("response-{id}"),
@@ -194,6 +217,498 @@ fn failure_fixture_text_turn() -> Value {
             "content": [{"type": "output_text", "text": "The approved step is complete."}],
         }],
     })
+}
+
+fn answer_fixture_text_turn(text: &str) -> Value {
+    json!({
+        "id": "response-answer-only",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }],
+    })
+}
+
+fn answer_fixture_refusal_turn() -> Value {
+    json!({
+        "id": "response-answer-refusal",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "fixture refusal"}],
+        }],
+    })
+}
+
+fn answer_fixture_planner_turn() -> Value {
+    failure_fixture_tool_turn(
+        "answer-planner",
+        vec![("submit_plan", json!({"steps": ["Answer the request"]}))],
+    )
+}
+
+fn configure_answer_fixture(
+    root: &Path,
+    base_url: &str,
+    answer_only: bool,
+    project_requires_planning: bool,
+) {
+    let mut config = mock_runtime_config();
+    config.agent.answer_only = answer_only;
+    config.execution.provider = "internal".to_string();
+    config.execution.plan_mode = project_requires_planning;
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers = HashMap::from([(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url.to_string()),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..Default::default()
+        },
+    )]);
+    save_nib_config_full(root, &mut config).expect("answer fixture config");
+}
+
+fn answer_resource_event(session: &Session) -> &Value {
+    &session
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "agent_resource_usage")
+        .expect("persisted resource evidence")
+        .details
+}
+
+async fn run_answer_fixture(
+    root: &Path,
+    responses: Vec<Value>,
+    answer_only: bool,
+    project_requires_planning: bool,
+    session_id: &str,
+    goal: &str,
+) -> (AgentRunSummary, Session, Vec<Value>) {
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    configure_answer_fixture(root, &base_url, answer_only, project_requires_planning);
+    let store = SessionStore::for_project(root).expect("answer fixture store");
+    store.create_session_with_id(session_id);
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_agent_loop(
+            root.to_path_buf(),
+            session_id,
+            goal,
+            AgentLoopConfig {
+                max_steps: 8,
+                interactive_request: true,
+                auto_approve: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("bounded answer fixture")
+    .expect("answer fixture run");
+    let persisted = store.load(session_id).expect("answer fixture session");
+    let requests = request_rx
+        .try_iter()
+        .map(|request| captured_json_body(&request))
+        .collect();
+    (summary, persisted, requests)
+}
+
+fn response_tool_names(request: &Value) -> Vec<&str> {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect()
+}
+
+#[tokio::test]
+async fn answer_only_success_uses_one_generation_and_no_executable_resources() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![answer_fixture_text_turn("The fixture answer is forty-two.")],
+        true,
+        false,
+        "answer-only-success",
+        "What is the fixture answer?",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.steps_taken, 1);
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(
+        summary.last_message.as_deref(),
+        Some("The fixture answer is forty-two.")
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    assert_eq!(requests[0]["tools"][0]["strict"], true);
+    assert!(persisted.plan.is_none());
+    assert!(persisted.tool_calls.is_empty());
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_started")
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_completed")
+            .count(),
+        1
+    );
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 1);
+    assert_eq!(resources["tool_attempts"], 0);
+    assert_eq!(resources["compression_requests"], 0);
+    assert_eq!(resources["repeated_questions"], 0);
+    assert!(resources["approximate_context_tokens_total"]
+        .as_u64()
+        .is_some_and(|tokens| tokens > 0));
+}
+
+#[tokio::test]
+async fn answer_only_request_plan_falls_back_once_to_the_normal_planner() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![
+            failure_fixture_tool_turn("request-normal-plan", vec![("request_plan", json!({}))]),
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("Normal planning completed the answer."),
+        ],
+        true,
+        false,
+        "answer-only-action-fallback",
+        "Inspect the project and answer from the result.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.steps_taken, 3);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    assert_eq!(response_tool_names(&requests[1]), ["submit_plan"]);
+    assert!(response_tool_names(&requests[2]).contains(&"read_file"));
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_fallback")
+            .count(),
+        1
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "answer_route_completed"
+            && event.details["outcome"] == "fallback"
+            && event.details["reason"] == "request_plan"
+    }));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "plan_generated"));
+    assert!(!persisted
+        .tool_calls
+        .iter()
+        .any(|record| record.tool_name.as_deref() == Some("request_plan")));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 3);
+    assert_eq!(resources["tool_attempts"], 0);
+}
+
+#[tokio::test]
+async fn answer_only_refusal_is_one_unsupported_fallback_before_normal_planning() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![
+            answer_fixture_refusal_turn(),
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("Fallback answer."),
+        ],
+        true,
+        false,
+        "answer-only-refusal-fallback",
+        "Answer the fixture request.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(requests.len(), 3);
+    let fallbacks = persisted
+        .events
+        .iter()
+        .filter(|event| event.kind == "answer_route_fallback")
+        .collect::<Vec<_>>();
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].details["reason"], "model_refusal");
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "answer_route_completed"
+            && event.details["outcome"] == "fallback"
+            && event.details["reason"] == "model_refusal"
+    }));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 3);
+}
+
+#[tokio::test]
+async fn malformed_answer_only_control_reports_failure_without_invoking_the_planner() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "malformed-request-plan",
+            vec![("request_plan", json!({"unexpected": true}))],
+        )],
+        true,
+        false,
+        "answer-only-malformed",
+        "Answer or request a plan.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "answer_only_failed");
+    assert!(summary.is_failure());
+    assert_eq!(
+        summary.failure.as_ref().unwrap().class,
+        LlmErrorClass::Protocol
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.plan.is_none());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn answer_only_transport_failure_reports_once_without_invoking_the_planner() {
+    let root = git_repository();
+    let (base_url, request_rx) = serve_malformed_responses_stream_once();
+    configure_answer_fixture(root.path(), &base_url, true, false);
+    let store = SessionStore::for_project(root.path()).expect("transport failure store");
+    let session = store.create_session_with_id("answer-only-transport-failure");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "Answer the fixture request.",
+        AgentLoopConfig {
+            max_steps: 8,
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("answer-only transport failure reconciles");
+    let persisted = store.load(&session.id).expect("transport failure session");
+    let requests = request_rx.try_iter().collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "answer_only_failed");
+    assert!(summary.is_failure());
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.plan.is_none());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    let completed = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "answer_route_completed")
+        .expect("failed route terminal event");
+    assert_eq!(completed.details["reason"], "transport_failed");
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn active_unrelated_plan_rejects_answer_only_without_model_or_plan_mutation() {
+    let root = git_repository();
+    let mut config = mock_runtime_config();
+    config.agent.answer_only = true;
+    config.execution.plan_mode = false;
+    save_nib_config_full(root.path(), &mut config).expect("active plan config");
+    let store = SessionStore::for_project(root.path()).expect("active plan store");
+    let mut session = store.create_session_with_id("answer-only-active-plan");
+    let plan = Plan::new(
+        "unrelated existing work",
+        vec![PlanStep {
+            description: "Preserve this exact pending step".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+        }],
+    );
+    session.plan = Some(plan);
+    store.save(&mut session).expect("active plan fixture");
+    let expected_plan = serde_json::to_value(session.plan.as_ref().unwrap()).unwrap();
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "What is two plus two?",
+        AgentLoopConfig {
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("active plan rejection");
+    let persisted = store.load(&session.id).expect("active plan session");
+
+    assert_eq!(summary.outcome, "planning_required_active_plan");
+    assert!(summary.is_failure());
+    assert_eq!(
+        serde_json::to_value(persisted.plan.as_ref().unwrap()).unwrap(),
+        expected_plan
+    );
+    assert!(!persisted.events.iter().any(|event| matches!(
+        event.kind.as_str(),
+        "answer_route_started" | "plan_invalidated" | "plan_generated"
+    )));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 0);
+    assert_eq!(resources["tool_attempts"], 0);
+}
+
+#[tokio::test]
+async fn project_planning_requirement_and_disabled_default_bypass_answer_only() {
+    for (session_id, enabled, project_requires_planning) in [
+        ("answer-only-project-planning", true, true),
+        ("answer-only-disabled-default", false, false),
+    ] {
+        let root = git_repository();
+        let (summary, persisted, requests) = run_answer_fixture(
+            root.path(),
+            vec![
+                answer_fixture_planner_turn(),
+                answer_fixture_text_turn("Planned answer."),
+            ],
+            enabled,
+            project_requires_planning,
+            session_id,
+            "Answer through required planning.",
+        )
+        .await;
+        assert_eq!(summary.outcome, "completed");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
+        assert!(!persisted
+            .events
+            .iter()
+            .any(|event| event.kind.starts_with("answer_route_")));
+        assert_eq!(answer_resource_event(&persisted)["generation_requests"], 2);
+    }
+}
+
+#[tokio::test]
+async fn caller_plan_mode_bypasses_answer_only() {
+    let root = git_repository();
+    let (base_url, request_rx) = serve_responses_sequence(vec![answer_fixture_planner_turn()]);
+    configure_answer_fixture(root.path(), &base_url, true, false);
+    let store = SessionStore::for_project(root.path()).expect("plan-mode store");
+    let session = store.create_session_with_id("answer-only-caller-plan-mode");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "Prepare a plan for this request.",
+        AgentLoopConfig {
+            max_steps: 8,
+            mode: "plan".to_string(),
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("caller-required planning completes");
+    let persisted = store.load(&session.id).expect("plan-mode session");
+    let requests = request_rx
+        .try_iter()
+        .map(|request| captured_json_body(&request))
+        .collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "plan_ready");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
+    assert!(persisted.plan.is_some());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind.starts_with("answer_route_")));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn identical_fixture_inputs_record_baseline_and_candidate_resource_counters() {
+    let goal = "What is the fixture answer?";
+    let baseline_root = git_repository();
+    let (_, baseline, baseline_requests) = run_answer_fixture(
+        baseline_root.path(),
+        vec![
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("The fixture answer is forty-two."),
+        ],
+        false,
+        false,
+        "answer-resource-baseline",
+        goal,
+    )
+    .await;
+    let candidate_root = git_repository();
+    let (_, candidate, candidate_requests) = run_answer_fixture(
+        candidate_root.path(),
+        vec![answer_fixture_text_turn("The fixture answer is forty-two.")],
+        true,
+        false,
+        "answer-resource-candidate",
+        goal,
+    )
+    .await;
+
+    let baseline_resources = answer_resource_event(&baseline);
+    let candidate_resources = answer_resource_event(&candidate);
+    assert_eq!(baseline_requests.len(), 2);
+    assert_eq!(candidate_requests.len(), 1);
+    assert_eq!(baseline_resources["generation_requests"], 2);
+    assert_eq!(candidate_resources["generation_requests"], 1);
+    for field in [
+        "tool_attempts",
+        "compression_requests",
+        "repeated_questions",
+    ] {
+        assert_eq!(baseline_resources[field], 0, "baseline {field}");
+        assert_eq!(candidate_resources[field], 0, "candidate {field}");
+    }
+    for resource in [baseline_resources, candidate_resources] {
+        assert!(resource["approximate_context_tokens_total"]
+            .as_u64()
+            .is_some_and(|tokens| tokens > 0));
+        assert!(resource["approximate_context_tokens_max"]
+            .as_u64()
+            .is_some_and(|tokens| tokens > 0));
+    }
 }
 
 async fn run_failure_fixture(
