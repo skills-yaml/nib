@@ -2,6 +2,10 @@
 
 **Status:** Development
 
+**Current stage:** Offline implementation and native portability are complete. Closure
+is blocked on owner-provided live-provider authority and evidence, as detailed in the
+2026-09-17 external authority audit below.
+
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
@@ -828,6 +832,50 @@ The implementation and external evidence boundaries are now explicit:
   provider groups, privacy scans, exact revision and matrix/catalog fingerprints,
   denominators, blockers, and bounded usage/cost evidence before this spec can move to
   `done/`.
+
+### External Authority Audit (2026-09-17)
+
+The remaining work was revalidated against the repository, local environment, and
+GitHub Actions state after T041 integration at development revision `dbd350f`:
+
+- The six `llm-live-*` GitHub environments exist. On 2026-09-17 they were aligned with
+  the existing `release-prod` convention by adding `ejrav` as the required reviewer;
+  the resulting protection rules were reread from GitHub after each update. Their
+  secret and variable inventories are still empty, and the repository has no
+  live-qualification variables. The local environment has none of the six provider
+  credentials, `NIB_LIVE_META_BASE_URL`, or live/cost acknowledgements.
+- Scheduled catalog run
+  [35078889158](https://github.com/skills-yaml/nib/actions/runs/35078889158) at source
+  revision `1537f2cc78eb2178d85c9d686646e4b32334c297` attempted every provider on
+  2026-09-16. Each provider job failed safely during credential preflight with its
+  provider key missing. No sanitized report artifact was produced, so the strict
+  aggregate job also failed. This is blocker evidence, not catalog qualification.
+- Every checked-in OpenRouter entry remains `approved = false`; each rationale still
+  says that authenticated catalog, capability, regional availability, and price review
+  are pending. No source change can truthfully convert those entries into an
+  owner-approved support and spending decision.
+- The T041-integrated implementation tree at `dbd350f` passed `task verify`, including
+  all 66 credential-free live harness tests with the paid entrypoint ignored. No
+  additional repository-side implementation gap was found by this audit.
+
+Closure now requires these external actions in order:
+
+1. Create or designate six dedicated low-privilege provider accounts with hard spend
+   and rate limits, and choose a supported-region Meta catalog root.
+2. Configure `LLM_API_KEY` in each matching `llm-live-*` environment, configure the
+   Meta root and all nine provider-scoped paid ceilings, and use the installed required
+   reviewer gate for live deployments.
+3. Run catalog mode from the intended exact revision. Review the retained catalogs,
+   model capabilities, pricing, regions, privacy scan, and planned denominators.
+4. Approve the exact OpenRouter IDs in `openrouter_models.toml` with current rationale,
+   owner, review/expiry dates, and cost ceilings; update selected IDs only when the
+   catalog evidence requires it.
+5. Run canary, selected, and full modes on that same exact revision, retain the six
+   sanitized reports, inspect their aggregate evidence, and record the results here.
+
+Provider secrets must be installed through GitHub environment secret management or an
+equivalent local secret channel; they must not be pasted into this spec, chat, command
+arguments, repository files, or ordinary workflow variables.
 
 ## Affected Areas
 

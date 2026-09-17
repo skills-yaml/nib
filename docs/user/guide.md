@@ -138,6 +138,7 @@ reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|ma
 [agent]
 max_turns = 90
 tool_use_enforcement = true
+answer_only = false
 
 [terminal]
 backend = "local"
@@ -354,6 +355,15 @@ Useful options include `--session <id>` to resume, `--provider <name>`, `--mode 
 Default manual mode prompts only when the request is unclear or a call is not
 auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
+
+Set `agent.answer_only = true` to allow a new interactive execute request to use one
+bounded response before planning when no plan or run is active and
+`execution.plan_mode = false`. This route has no executable tools. It can answer from
+the supplied context or select the non-executable `request_plan` control, which
+discards partial content and enters the normal approved-plan flow once. Unsupported
+responses also fall back once. Invalid control output and provider failures are
+reported without invoking the planner. An active plan or run keeps its existing state
+and the new request reports that planning is required.
 When the agent calls `ask_question`, the CLI prints the available options and accepts
 either an option number or free-form text on the same input stream. Closed or empty
 question input stops the run and reconciles the session without continuing execution.
@@ -369,6 +379,20 @@ nib is instructed to inspect available information before asking questions, clar
 missing details that affect the result, and keep plans and tool use proportional to
 the task. It stops repeated unchanged tool failures and keeps unresolved failed steps
 blocked. Required approvals and the configured turn limit still apply.
+
+Plans can carry required verification separately from their step state. `/status`
+shows every requirement's ID, state, and authority, and `/plan` includes the same
+information with the step detail. A required command receives credit only when its
+exact persisted tool call succeeds on the same managed worktree content; an unrelated
+successful command cannot clear it. Later relevant changes make prior evidence stale.
+Absence checks use the typed `grep` result and pass only when the result is empty and
+untruncated.
+
+To remove an unrun human or approved-plan requirement that became inapplicable, enter
+`waive verification <id>: <reason>`. nib binds the waiver to that human message and
+active plan. Project gates and requirements with running, failed, or passed evidence
+cannot be waived. A waiver remains visible as `waived`; it is never reported as a
+passing check.
 
 To ask nib to develop its own source, run it from a nib checkout with a concrete
 change and acceptance criteria, for example:
@@ -407,6 +431,10 @@ Both presentation modes expose these commands:
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox
   posture, plan, and queued follow-up count.
+- `/context` shows the compact approximate usage indicator. `/context details` adds a
+  bounded breakdown of message and summary coverage, retained human intent,
+  unresolved clarifications, selected skills, and the latest run's generation, tool,
+  compression, repeated-question, and approximate input-token counters.
 - `/model` or `/model <name>` lists or selects a model.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox

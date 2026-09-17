@@ -8,6 +8,7 @@ use crate::session::{PathAttachment, QueuedFollowUp, Session, SessionEvent, Sess
 use crate::tools::executor::{
     EffectiveExecutionPosture, InstructionExecutionPosture, ToolExecutor,
 };
+use crate::tools::ToolInvocationId;
 use crate::{mcp_cmd, skill_cmd};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -115,6 +116,19 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         InteractiveMutability::ReadOnly,
         InteractiveWorkerPolicy::RequiresIdle,
         NO_COMPLETION,
+    ),
+    spec(
+        "context",
+        &[],
+        "/context [details]",
+        "Show compact context usage or its bounded breakdown",
+        InteractiveArgumentSchema::OptionalSingle,
+        InteractiveMutability::ReadOnly,
+        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveCompletionSpec {
+            candidates: &["details"],
+            argument_after: &[],
+        },
     ),
     spec(
         "model",
@@ -707,6 +721,7 @@ pub enum InteractiveCommand {
     Quit,
     Help,
     Status,
+    Context { details: bool },
     Providers,
     Permissions { selection: Option<String> },
     Plan { prompt: Option<String> },
@@ -734,6 +749,7 @@ impl InteractiveCommand {
             Self::Quit => "quit",
             Self::Help => "help",
             Self::Status => "status",
+            Self::Context { .. } => "context",
             Self::Providers => "providers",
             Self::Permissions { .. } => "permissions",
             Self::Plan { .. } => "plan",
@@ -1544,6 +1560,9 @@ pub struct ActivityEntry {
     pub title: String,
     pub body: String,
     pub folded: bool,
+    /// Runtime-only correlation for a live tool block. It is deliberately kept
+    /// out of the rendered text and persisted session projection.
+    pub tool_invocation_id: Option<ToolInvocationId>,
 }
 
 impl ActivityKind {
@@ -1572,11 +1591,17 @@ impl ActivityEntry {
             title: title.into(),
             body: body.into(),
             folded: false,
+            tool_invocation_id: None,
         }
     }
 
     pub fn folded(mut self) -> Self {
         self.folded = true;
+        self
+    }
+
+    pub fn for_tool_invocation(mut self, invocation_id: ToolInvocationId) -> Self {
+        self.tool_invocation_id = Some(invocation_id);
         self
     }
 
@@ -2588,13 +2613,14 @@ pub fn apply_stream_event(
             ));
         }
         StreamEvent::ToolCallChunk {
+            invocation_id,
             name: Some(name),
             arguments,
             ..
         } if !name.is_empty() => {
             let hint = tool_argument_summary(&name, arguments.as_deref());
             let detail = tool_argument_detail(&name, arguments.as_deref());
-            upsert_tool_activity(activities, &name, "requested", detail, &hint)
+            upsert_tool_activity(activities, invocation_id, &name, "requested", detail, &hint)
         }
         StreamEvent::ToolCallChunk { .. } => {}
         StreamEvent::PlanGenerated { step_count, steps } => {
@@ -2626,14 +2652,26 @@ pub fn apply_stream_event(
                 options,
             ));
         }
-        StreamEvent::ToolStarted { tool_name } => {
+        StreamEvent::ToolStarted {
+            invocation_id,
+            tool_name,
+        } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
-            upsert_tool_activity(activities, &tool_name, "running", String::new(), "");
+            upsert_tool_activity(
+                activities,
+                invocation_id,
+                &tool_name,
+                "running",
+                String::new(),
+                "",
+            );
         }
         StreamEvent::TerminalOutput {
-            tool_name, chunk, ..
+            invocation_id,
+            chunk,
+            ..
         } => {
-            if let Some(last) = find_tool_activity_mut(activities, &tool_name, false) {
+            if let Some(last) = find_tool_activity_mut(activities, invocation_id) {
                 if !last.body.is_empty() && !last.body.ends_with('\n') {
                     last.body.push('\n');
                 }
@@ -2643,6 +2681,7 @@ pub fn apply_stream_event(
             }
         }
         StreamEvent::ToolCompleted {
+            invocation_id,
             tool_name,
             success,
             output,
@@ -2651,7 +2690,7 @@ pub fn apply_stream_event(
             let (status, summary, detail) =
                 summarize_tool_result(&tool_name, success, output.as_ref(), error.as_deref());
             let body = bounded_activity_body(&detail, sensitive_values);
-            if let Some(existing) = find_tool_activity_mut(activities, &tool_name, true) {
+            if let Some(existing) = find_tool_activity_mut(activities, invocation_id) {
                 let hint = tool_arg_hint_from_title(&existing.title);
                 existing.title = compose_tool_title(&tool_name, &status, &hint, &summary);
                 existing.body = merge_tool_body(&existing.body, &body);
@@ -2663,6 +2702,7 @@ pub fn apply_stream_event(
                         compose_tool_title(&tool_name, &status, "", &summary),
                         body,
                     )
+                    .for_tool_invocation(invocation_id)
                     .folded(),
                 );
             }
@@ -2734,23 +2774,12 @@ pub fn apply_stream_event(
     }
 }
 
-fn tool_name_from_title(title: &str) -> &str {
-    title.split(' ').next().unwrap_or(title)
-}
-
-fn tool_title_is_terminal(title: &str) -> bool {
-    title.contains(" ok") || title.contains(" failed")
-}
-
-fn find_tool_activity_mut<'a>(
-    activities: &'a mut [ActivityEntry],
-    tool_name: &str,
-    include_terminal: bool,
-) -> Option<&'a mut ActivityEntry> {
+fn find_tool_activity_mut(
+    activities: &mut [ActivityEntry],
+    invocation_id: ToolInvocationId,
+) -> Option<&mut ActivityEntry> {
     activities.iter_mut().rev().find(|entry| {
-        entry.kind == ActivityKind::Tool
-            && tool_name_from_title(&entry.title) == tool_name
-            && (include_terminal || !tool_title_is_terminal(&entry.title))
+        entry.kind == ActivityKind::Tool && entry.tool_invocation_id == Some(invocation_id)
     })
 }
 
@@ -2912,12 +2941,13 @@ fn merge_tool_body(existing: &str, output: &str) -> String {
 
 fn upsert_tool_activity(
     activities: &mut Vec<ActivityEntry>,
+    invocation_id: ToolInvocationId,
     tool_name: &str,
     phase: &str,
     body: String,
     arg_hint: &str,
 ) {
-    if let Some(existing) = find_tool_activity_mut(activities, tool_name, false) {
+    if let Some(existing) = find_tool_activity_mut(activities, invocation_id) {
         let hint = if arg_hint.is_empty() {
             tool_arg_hint_from_title(&existing.title)
         } else {
@@ -2930,11 +2960,14 @@ fn upsert_tool_activity(
         existing.folded = !matches!(phase, "requested" | "running") && !existing.body.is_empty();
         return;
     }
-    activities.push(ActivityEntry::new(
-        ActivityKind::Tool,
-        compose_tool_title(tool_name, phase, arg_hint, ""),
-        body,
-    ));
+    activities.push(
+        ActivityEntry::new(
+            ActivityKind::Tool,
+            compose_tool_title(tool_name, phase, arg_hint, ""),
+            body,
+        )
+        .for_tool_invocation(invocation_id),
+    );
 }
 
 pub fn summarize_tool_result(
@@ -2962,7 +2995,7 @@ pub fn summarize_tool_result(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let extra = if truncated { ", truncated" } else { "" };
-            (format!("{count} entries{extra}"), String::new())
+            (format!("{count} entries{extra}"), inline_json(value))
         }
         ("read_file", Some(value)) => {
             let content = value
@@ -2974,7 +3007,7 @@ pub fn summarize_tool_result(
             } else {
                 content.lines().count()
             };
-            (format!("{lines} lines"), String::new())
+            (format!("{lines} lines"), inline_json(value))
         }
         ("grep", Some(value)) => {
             let matches = value
@@ -2982,7 +3015,7 @@ pub fn summarize_tool_result(
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len)
                 .unwrap_or(0);
-            (format!("{matches} matches"), String::new())
+            (format!("{matches} matches"), inline_json(value))
         }
         ("run_terminal", Some(value)) => {
             let code = value
@@ -3118,17 +3151,96 @@ fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> Ac
         .steps
         .iter()
         .enumerate()
-        .map(|(index, step)| {
+        .flat_map(|(index, step)| {
             let marker = todo_marker_for_step(&step.status, index, current, complete);
-            format!("{marker} {}", step.description.trim())
+            let mut lines = vec![format!("{marker} {}", step.description.trim())];
+            lines.extend(step.verification_obligations.iter().map(|obligation| {
+                format!(
+                    "   verify {} [{}; {}]",
+                    obligation.id,
+                    verification_status_label(obligation.status),
+                    verification_authority_label(obligation.authority),
+                )
+            }));
+            lines
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let unresolved = plan
+        .steps
+        .get(plan.current_step_index)
+        .map(|step| {
+            step.verification_obligations
+                .iter()
+                .filter(|obligation| obligation.is_unresolved_required())
+                .count()
+        })
+        .unwrap_or(0);
+    let mut title = todo_plan_title(plan.steps.len(), complete);
+    if unresolved > 0 {
+        title.push_str(&format!(" · {unresolved} verification pending"));
+    }
     ActivityEntry::new(
         ActivityKind::Plan,
-        todo_plan_title(plan.steps.len(), complete),
+        title,
         bounded_activity_body(&body, sensitive_values),
     )
+}
+
+fn verification_status_label(status: crate::session::VerificationStatus) -> &'static str {
+    use crate::session::VerificationStatus;
+    match status {
+        VerificationStatus::Pending => "pending",
+        VerificationStatus::Running => "running",
+        VerificationStatus::Passed => "passed",
+        VerificationStatus::Failed => "failed",
+        VerificationStatus::Cancelled => "cancelled",
+        VerificationStatus::Stale => "stale",
+        VerificationStatus::Waived => "waived",
+    }
+}
+
+fn verification_authority_label(authority: crate::session::VerificationAuthority) -> &'static str {
+    use crate::session::VerificationAuthority;
+    match authority {
+        VerificationAuthority::Human => "human",
+        VerificationAuthority::Project => "project",
+        VerificationAuthority::ApprovedPlan => "approved plan",
+    }
+}
+
+fn format_verification_status(session: Option<&Session>, sensitive_values: &[String]) -> String {
+    let Some(plan) = session.and_then(|session| session.plan.as_ref()) else {
+        return "Verification: none".to_string();
+    };
+    let obligations = plan
+        .steps
+        .iter()
+        .flat_map(|step| step.verification_obligations.iter())
+        .collect::<Vec<_>>();
+    if obligations.is_empty() {
+        return "Verification: none".to_string();
+    }
+    let mut output = format!("Verification: {} requirement(s)", obligations.len());
+    for obligation in obligations.into_iter().take(16) {
+        output.push_str(&format!(
+            "\n  - {} | {} | {}{}",
+            bounded_sensitive_status_value(&obligation.id, sensitive_values),
+            verification_status_label(obligation.status),
+            verification_authority_label(obligation.authority),
+            obligation
+                .reason
+                .as_deref()
+                .map(|reason| {
+                    format!(
+                        " | {}",
+                        bounded_sensitive_status_value(reason, sensitive_values)
+                    )
+                })
+                .unwrap_or_default(),
+        ));
+    }
+    bounded_public_text(&output, sensitive_values, 4_096, true)
 }
 
 fn bounded_activity_body(content: &str, sensitive_values: &[String]) -> String {
@@ -3528,8 +3640,86 @@ pub fn format_session_status(
         &config.approvals,
     );
     Ok(format!(
-        "{header}\n{status}\n{}",
-        format_effective_execution_posture(&posture)
+        "{header}\n{status}\n{}\n{}",
+        format_effective_execution_posture(&posture),
+        format_verification_status(session.as_ref(), store.public_sensitive_values()),
+    ))
+}
+
+fn format_context_monitor(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    details: bool,
+) -> Result<String, String> {
+    let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+    let used = persisted_context_usage(session.as_ref(), config.llm.context_length);
+    let compact = format!(
+        "Context ~{used}/{} ({})",
+        config.llm.context_length,
+        compact_context_label(used, config.llm.context_length),
+    );
+    if !details {
+        return Ok(format!(
+            "{compact}. Use /context details for the bounded breakdown."
+        ));
+    }
+    let Some(session) = session.as_ref() else {
+        return Ok(format!("{compact}\nSession context: unavailable"));
+    };
+    let summarized = session.summary_index.min(session.messages.len());
+    let unsummarized = session.messages.len().saturating_sub(summarized);
+    let latest_resources = session
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "agent_resource_usage")
+        .map(|event| {
+            let number = |key: &str| {
+                event
+                    .details
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            format!(
+                "Latest run: generations {} · tools {} · input tokens total ~{} · max ~{} · compressions {} · repeated questions {}",
+                number("generation_requests"),
+                number("tool_attempts"),
+                number("approximate_context_tokens_total"),
+                number("approximate_context_tokens_max"),
+                number("compression_requests"),
+                number("repeated_questions"),
+            )
+        })
+        .unwrap_or_else(|| "Latest run: no resource evidence yet".to_string());
+    let output = format!(
+        "{compact}\nHistory: {} message(s) · {} summarized · {} unsummarized\nSummary: {}\nHuman intent records: {} · unresolved clarifications: {}\nSelected skills: {}\n{latest_resources}",
+        session.messages.len(),
+        summarized,
+        unsummarized,
+        if session.summary.is_some() { "present" } else { "none" },
+        session.human_intent.len(),
+        session
+            .clarifications
+            .iter()
+            .filter(|clarification| {
+                !matches!(
+                    clarification.status,
+                    crate::session::ClarificationStatus::Answered
+                )
+            })
+            .count(),
+        session.active_skills.len(),
+    );
+    Ok(bounded_public_text(
+        &output,
+        &config.public_session_sensitive_values(),
+        MAX_PUBLIC_PRESENTATION_BYTES,
+        true,
     ))
 }
 
@@ -4078,7 +4268,7 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
             };
             StreamDisplay::Status(format!("[question] {question}{options}"))
         }
-        StreamEvent::ToolStarted { tool_name } => {
+        StreamEvent::ToolStarted { tool_name, .. } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
             StreamDisplay::Status(format!("[tool started] {tool_name}"))
         }
@@ -4087,6 +4277,7 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
             stream,
             chunk,
             background_task_id,
+            ..
         } => {
             let task = background_task_id
                 .as_deref()
@@ -4102,6 +4293,7 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
             success,
             output,
             error,
+            ..
         } => {
             let status = if success { "ok" } else { "failed" };
             let detail = match (output.as_ref(), error.as_deref()) {
@@ -4241,6 +4433,10 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         "quit" if arguments.is_empty() => InteractiveCommand::Quit,
         "help" if arguments.is_empty() => InteractiveCommand::Help,
         "status" if arguments.is_empty() => InteractiveCommand::Status,
+        "context" if arguments.is_empty() => InteractiveCommand::Context { details: false },
+        "context" if arguments.len() == 1 && arguments[0].eq_ignore_ascii_case("details") => {
+            InteractiveCommand::Context { details: true }
+        }
         "providers" if arguments.is_empty() => InteractiveCommand::Providers,
         "permissions" => InteractiveCommand::Permissions {
             selection: if arguments.is_empty() {
@@ -4388,6 +4584,9 @@ pub fn execute_interactive_command_in_state(
             session_id,
             lifecycle,
         )?)),
+        InteractiveCommand::Context { details } => Ok(InteractiveEffect::Output(
+            format_context_monitor(project_root, store, session_id, details)?,
+        )),
         InteractiveCommand::Permissions { selection: None } => {
             Ok(InteractiveEffect::Output(format_permissions(project_root)?))
         }
@@ -5211,6 +5410,7 @@ mod tests {
         assert!(parse_interactive_command("/mcp add only-name").is_err());
         for invalid in [
             "/status extra",
+            "/context verbose",
             "/rename",
             "/permissions unsupported",
             "/model one two",
@@ -6044,6 +6244,8 @@ mod tests {
 
         for command in [
             "/status",
+            "/context",
+            "/context details",
             "/permissions",
             "/plan",
             "/review",
@@ -6075,6 +6277,19 @@ mod tests {
         assert!(status.contains("running"));
         assert!(status.contains(&session_id));
         assert!(status.contains("profile focused"));
+
+        let InteractiveEffect::Output(context) = execute_interactive_command(
+            InteractiveCommand::Context { details: true },
+            project.path(),
+            &store,
+            &session_id,
+        )
+        .expect("context details") else {
+            panic!("context output");
+        };
+        assert!(context.contains("Context ~"));
+        assert!(context.contains("History: 2 message(s)"));
+        assert!(context.contains("Latest run: no resource evidence yet"));
 
         let effect = execute_interactive_command(
             InteractiveCommand::Compact,
@@ -6406,6 +6621,7 @@ mod tests {
         assert!(output.contains("/32"), "{output}");
         assert!(output.contains("Configured approval preset: manual"));
         assert!(output.contains("platform sandbox:"));
+        assert!(output.contains("Verification: none"));
         assert!(!output.contains('\u{1b}'));
         assert!(!output.contains("\nINJECTED"));
         assert!(!output.contains("\nINJECTED_NAME"));
@@ -6414,6 +6630,57 @@ mod tests {
         assert!(!output.contains("c3RhdHVzL2NyZWRlbnRpYWw"));
         assert!(output.contains("[REDACTED]"));
         assert!(output.len() < 4_096, "status output must remain bounded");
+    }
+
+    #[test]
+    fn status_and_plan_projection_show_verification_state_and_authority() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        save_nib_config_full(project.path(), &mut config).expect("config");
+        let store = SessionStore::for_project(project.path()).expect("store");
+        let mut session = store.try_create_session().expect("session");
+        let mut obligation = crate::session::VerificationObligation::pending_tool(
+            "required-project-gate",
+            "run the project gate",
+            vec![".".to_string()],
+            "run_terminal",
+            serde_json::json!({"command": "task verify", "affected_paths": ["."]}),
+            crate::session::VerificationExpectedOutcome::Success,
+        )
+        .expect("verification contract");
+        obligation.authority = crate::session::VerificationAuthority::Project;
+        session.plan = Some(crate::session::Plan::new(
+            "verify the change",
+            vec![crate::session::PlanStep {
+                description: "verify".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: vec![obligation],
+                content_generation: 0,
+            }],
+        ));
+        store.save(&mut session).expect("verification session");
+
+        let status = format_session_status(
+            project.path(),
+            "verification-profile",
+            &store,
+            &session.id,
+            "idle",
+        )
+        .expect("status");
+        assert!(status.contains("required-project-gate | pending | project"));
+        let plan = session.plan.as_ref().expect("plan");
+        let activity = plan_activity(plan, &[]);
+        assert!(activity.title.contains("1 verification pending"));
+        assert!(activity
+            .body
+            .contains("verify required-project-gate [pending; project]"));
     }
 
     #[test]
@@ -6707,6 +6974,8 @@ mod tests {
                 outcome: None,
                 attempts: 1,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         ));
 
@@ -6778,9 +7047,11 @@ mod tests {
     fn tool_lifecycle_mutates_one_folded_summary_entry() {
         let mut activities = Vec::new();
         let mut state = None;
+        let invocation_id = ToolInvocationId::new();
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCallChunk {
+                invocation_id,
                 index: 0,
                 name: Some("list_directory".to_string()),
                 arguments: Some("{}".to_string()),
@@ -6791,6 +7062,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolStarted {
+                invocation_id,
                 tool_name: "list_directory".to_string(),
             },
             &mut state,
@@ -6799,6 +7071,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCompleted {
+                invocation_id,
                 tool_name: "list_directory".to_string(),
                 success: true,
                 output: Some(serde_json::json!({
@@ -6817,20 +7090,91 @@ mod tests {
         assert!(activities[0].render_line().contains("◆ tool"));
         assert!(!activities[0].render_line().contains("README.md"));
         assert!(!activities[0].render_line().contains("{\"entries\""));
-        assert!(
-            activities[0].body.is_empty() || activities[0].folded,
-            "{}",
-            activities[0].body
+        assert!(activities[0].folded);
+        assert!(activities[0].body.contains("README.md"));
+        let mut expanded = activities[0].clone();
+        expanded.folded = false;
+        assert!(expanded.render_line().contains("README.md"));
+    }
+
+    #[test]
+    fn same_name_tool_calls_keep_distinct_blocks_by_invocation() {
+        let first = ToolInvocationId::new();
+        let second = ToolInvocationId::new();
+        let mut activities = Vec::new();
+        let mut state = None;
+
+        for (index, invocation_id, command) in
+            [(0, first, "printf first"), (1, second, "printf second")]
+        {
+            apply_stream_event(
+                &mut activities,
+                StreamEvent::ToolCallChunk {
+                    invocation_id,
+                    index,
+                    name: Some("run_terminal".to_string()),
+                    arguments: Some(serde_json::json!({"command": command}).to_string()),
+                },
+                &mut state,
+                &[],
+            );
+        }
+
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolStarted {
+                invocation_id: second,
+                tool_name: "run_terminal".to_string(),
+            },
+            &mut state,
+            &[],
         );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::TerminalOutput {
+                invocation_id: second,
+                tool_name: "run_terminal".to_string(),
+                stream: "stdout".to_string(),
+                chunk: "second-stream\n".to_string(),
+                background_task_id: None,
+            },
+            &mut state,
+            &[],
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCompleted {
+                invocation_id: first,
+                tool_name: "run_terminal".to_string(),
+                success: true,
+                output: Some(serde_json::json!({"exit_code": 0, "stdout": "first-result"})),
+                error: None,
+            },
+            &mut state,
+            &[],
+        );
+
+        assert_eq!(activities.len(), 2);
+        assert_eq!(activities[0].tool_invocation_id, Some(first));
+        assert_eq!(activities[1].tool_invocation_id, Some(second));
+        assert_eq!(
+            activities[0].title,
+            "run_terminal ok · printf first · exit 0"
+        );
+        assert_eq!(activities[0].body, "printf first\nfirst-result");
+        assert_eq!(activities[1].title, "run_terminal running · printf second");
+        assert_eq!(activities[1].body, "printf second\nsecond-stream");
     }
 
     #[test]
     fn tool_titles_keep_argument_hints_across_lifecycle() {
         let mut activities = Vec::new();
         let mut state = None;
+        let invocation_id = ToolInvocationId::new();
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCallChunk {
+                invocation_id,
                 index: 0,
                 name: Some("read_file".to_string()),
                 arguments: Some(r#"{"path":"src/tui/mod.rs"}"#.to_string()),
@@ -6842,6 +7186,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolStarted {
+                invocation_id,
                 tool_name: "read_file".to_string(),
             },
             &mut state,
@@ -6852,6 +7197,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCompleted {
+                invocation_id,
                 tool_name: "read_file".to_string(),
                 success: true,
                 output: Some(serde_json::json!({"content": "a\nb\nc\n"})),
@@ -6864,7 +7210,26 @@ mod tests {
             activities[0].title,
             "read_file ok · src/tui/mod.rs · 3 lines"
         );
-        assert!(activities[0].display_text().starts_with("◆ tool"));
+        assert!(activities[0].folded);
+        assert!(activities[0].body.contains("a\\nb\\nc\\n"));
+        assert!(!activities[0].render_line().contains("a\\nb\\nc\\n"));
+        assert!(activities[0].display_text().contains("◆ tool"));
+    }
+
+    #[test]
+    fn common_read_tools_keep_bounded_expandable_result_detail() {
+        let secret = "private-search-value";
+        let output = serde_json::json!({
+            "matches": [{"path": "src/lib.rs", "line": 4, "text": secret}],
+            "padding": "x".repeat(MAX_ACTIVITY_BODY_BYTES * 2)
+        });
+        let (status, summary, detail) = summarize_tool_result("grep", true, Some(&output), None);
+        assert_eq!(status, "ok");
+        assert_eq!(summary, "1 matches");
+        let body = bounded_activity_body(&detail, &[secret.to_string()]);
+        assert!(body.contains("[REDACTED]"));
+        assert!(!body.contains(secret));
+        assert!(body.len() <= MAX_ACTIVITY_BODY_BYTES);
     }
 
     #[test]
@@ -6875,9 +7240,11 @@ mod tests {
         let arguments = format!(
             r#"{{"command":"{command}","cwd":"/home/e/work/projects/nib","background":false}}"#
         );
+        let invocation_id = ToolInvocationId::new();
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCallChunk {
+                invocation_id,
                 index: 0,
                 name: Some("run_terminal".to_string()),
                 arguments: Some(arguments),
@@ -6909,6 +7276,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::TerminalOutput {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream: "stdout".to_string(),
                 chunk: "M changelog.md\n".to_string(),
@@ -6930,6 +7298,7 @@ mod tests {
         apply_stream_event(
             &mut activities,
             StreamEvent::ToolCompleted {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 success: true,
                 output: Some(serde_json::json!({"exit_code": 0, "stdout": "M changelog.md\n"})),
@@ -7002,6 +7371,8 @@ mod tests {
                 outcome: None,
                 attempts: 1,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         ));
         session.messages.push(crate::session::SessionMessage {
@@ -7067,6 +7438,7 @@ mod tests {
         apply_stream_event(
             &mut live,
             StreamEvent::ToolStarted {
+                invocation_id: ToolInvocationId::new(),
                 tool_name: "read_file".to_string(),
             },
             &mut state,
@@ -7125,6 +7497,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         );
         plan.approve();

@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -1318,6 +1318,87 @@ pub struct SessionMessage {
     pub attachments: Vec<PathAttachment>,
 }
 
+/// Durable provenance for a transcript entry. Provider roles describe wire-format
+/// ordering; they do not prove who supplied the underlying information.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    #[default]
+    Unknown,
+    HumanRequest,
+    HumanSteering,
+    HumanQuestionAnswer,
+    RuntimeContinuation,
+    ModelOutput,
+    ToolOutput,
+}
+
+impl MessageOrigin {
+    pub fn is_human(self) -> bool {
+        matches!(
+            self,
+            Self::HumanRequest | Self::HumanSteering | Self::HumanQuestionAnswer
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageProvenance {
+    pub message_index: usize,
+    pub origin: MessageOrigin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanIntentKind {
+    Request,
+    Steering,
+    QuestionAnswer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanIntentRecord {
+    pub kind: HumanIntentKind,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarificationStatus {
+    Pending,
+    Answered,
+    Unresolved,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClarificationRecord {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Worktree-relative scopes whose actions depend on this answer. An empty
+    /// collection is deliberately conservative and means the whole plan step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
+    pub status: ClarificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    pub question_event_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_event_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathAttachment {
     pub path: String,
@@ -1367,6 +1448,179 @@ pub struct PlanStep {
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_obligations: Vec<VerificationObligation>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub content_generation: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Pending,
+    Running,
+    Passed,
+    Failed,
+    Cancelled,
+    Stale,
+    Waived,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationAuthority {
+    Human,
+    Project,
+    #[default]
+    ApprovedPlan,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationExpectedOutcome {
+    #[default]
+    Success,
+    ProbeMiss,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationInvocationSpec {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub expected_outcome: VerificationExpectedOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationAttempt {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    pub status: VerificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationObligation {
+    pub id: String,
+    pub description: String,
+    #[serde(default = "default_required_verification")]
+    pub required: bool,
+    #[serde(default)]
+    pub authority: VerificationAuthority,
+    pub status: VerificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_invocation: Option<VerificationInvocationSpec>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<crate::tools::ToolInvocationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub content_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiver_source_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<VerificationAttempt>,
+}
+
+fn default_required_verification() -> bool {
+    true
+}
+
+impl VerificationObligation {
+    pub fn pending(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        affected_paths: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            required: true,
+            authority: VerificationAuthority::ApprovedPlan,
+            status: VerificationStatus::Pending,
+            expected_invocation: None,
+            plan_id: String::new(),
+            step_index: None,
+            source_message_index: None,
+            affected_paths,
+            invocation_id: None,
+            worktree_identity: None,
+            content_identity: None,
+            content_generation: 0,
+            reason: None,
+            updated_at: None,
+            waiver_source_message_index: None,
+            attempts: Vec::new(),
+        }
+    }
+
+    pub fn pending_tool(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        affected_paths: Vec<String>,
+        tool_name: impl Into<String>,
+        arguments: serde_json::Value,
+        expected_outcome: VerificationExpectedOutcome,
+    ) -> Result<Self, String> {
+        let mut obligation = Self::pending(id, description, affected_paths);
+        obligation.expected_invocation = Some(VerificationInvocationSpec {
+            tool_name: tool_name.into(),
+            arguments: normalize_verification_arguments(&arguments)?,
+            expected_outcome,
+        });
+        Ok(obligation)
+    }
+
+    pub fn is_unresolved_required(&self) -> bool {
+        self.required
+            && !matches!(
+                self.status,
+                VerificationStatus::Passed | VerificationStatus::Waived
+            )
+    }
+}
+
+pub fn normalize_verification_arguments(
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut normalized = arguments
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "verification arguments must be an object".to_string())?;
+    normalized.remove("verification_id");
+    normalized.remove("plan_id");
+    let normalized = serde_json::Value::Object(normalized);
+    if serde_json::to_vec(&normalized)
+        .map_err(|error| format!("serialize verification arguments: {error}"))?
+        .len()
+        > 64 * 1024
+    {
+        return Err("verification arguments exceed the 64 KiB persistence limit".to_string());
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1390,9 +1644,16 @@ pub fn normalize_plan_goal(goal: &str) -> String {
 }
 
 impl Plan {
-    pub fn new(goal: &str, steps: Vec<PlanStep>) -> Self {
+    pub fn new(goal: &str, mut steps: Vec<PlanStep>) -> Self {
+        let id = format!("plan-{}", Uuid::new_v4().simple());
+        for (step_index, step) in steps.iter_mut().enumerate() {
+            for obligation in &mut step.verification_obligations {
+                obligation.plan_id.clone_from(&id);
+                obligation.step_index = Some(step_index);
+            }
+        }
         Self {
-            id: format!("plan-{}", Uuid::new_v4().simple()),
+            id,
             goal: normalize_plan_goal(goal),
             steps,
             current_step_index: 0,
@@ -1422,9 +1683,14 @@ impl Plan {
                 .steps
                 .iter()
                 .any(|step| step.description.trim().is_empty())
-            || self.steps[..self.current_step_index]
-                .iter()
-                .any(|step| step.status != "Completed")
+            || self.validate_verification_metadata().is_err()
+            || self.steps[..self.current_step_index].iter().any(|step| {
+                step.status != "Completed"
+                    || step
+                        .verification_obligations
+                        .iter()
+                        .any(VerificationObligation::is_unresolved_required)
+            })
         {
             return false;
         }
@@ -1449,6 +1715,80 @@ impl Plan {
             && self.steps.iter().all(|step| step.status == "Completed")
     }
 
+    pub fn validate_verification_metadata(&self) -> Result<(), String> {
+        let mut obligation_ids = HashSet::new();
+        for (step_index, step) in self.steps.iter().enumerate() {
+            for obligation in &step.verification_obligations {
+                if obligation.id.trim().is_empty() || obligation.id.len() > 128 {
+                    return Err(format!(
+                        "plan step {step_index} has an invalid verification obligation id"
+                    ));
+                }
+                if obligation.description.trim().is_empty() {
+                    return Err(format!(
+                        "verification obligation {:?} has an empty description",
+                        obligation.id
+                    ));
+                }
+                if !obligation_ids.insert(obligation.id.clone()) {
+                    return Err(format!(
+                        "duplicate verification obligation id {:?}",
+                        obligation.id
+                    ));
+                }
+                if obligation.plan_id != self.id || obligation.step_index != Some(step_index) {
+                    return Err(format!(
+                        "verification obligation {:?} is not bound to its plan step",
+                        obligation.id
+                    ));
+                }
+                let Some(expected) = obligation.expected_invocation.as_ref() else {
+                    return Err(format!(
+                        "verification obligation {:?} has no independently persisted invocation contract",
+                        obligation.id
+                    ));
+                };
+                if expected.tool_name.trim().is_empty()
+                    || normalize_verification_arguments(&expected.arguments)? != expected.arguments
+                {
+                    return Err(format!(
+                        "verification obligation {:?} has an invalid invocation contract",
+                        obligation.id
+                    ));
+                }
+                if obligation.status == VerificationStatus::Waived
+                    && obligation.waiver_source_message_index.is_none()
+                {
+                    return Err(format!(
+                        "waived verification obligation {:?} has no human source message",
+                        obligation.id
+                    ));
+                }
+                if matches!(
+                    obligation.status,
+                    VerificationStatus::Running
+                        | VerificationStatus::Passed
+                        | VerificationStatus::Failed
+                        | VerificationStatus::Cancelled
+                        | VerificationStatus::Stale
+                ) && obligation.invocation_id.is_none()
+                {
+                    return Err(format!(
+                        "verification obligation {:?} has status {:?} without an invocation binding",
+                        obligation.id, obligation.status
+                    ));
+                }
+                if obligation.content_generation > step.content_generation {
+                    return Err(format!(
+                        "verification obligation {:?} refers to future content generation {}",
+                        obligation.id, obligation.content_generation
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn approve(&mut self) {
         self.approved = true;
         self.approved_at = Some(Utc::now());
@@ -1468,15 +1808,254 @@ impl Plan {
         let Some(step) = self.steps.get_mut(self.current_step_index) else {
             return;
         };
-        step.status = if success { "InProgress" } else { "Blocked" }.to_string();
-        step.outcome = Some(outcome.into());
+        let outcome = outcome.into();
+        let unresolved = step
+            .verification_obligations
+            .iter()
+            .any(VerificationObligation::is_unresolved_required);
+        step.status = if success && !unresolved {
+            "InProgress"
+        } else {
+            "Blocked"
+        }
+        .to_string();
+        step.outcome = Some(if success && unresolved {
+            format!("{outcome}; required verification remains unresolved")
+        } else {
+            outcome
+        });
         step.updated_at = Some(Utc::now());
+    }
+
+    pub fn begin_verification(
+        &mut self,
+        obligation_id: &str,
+        invocation_id: crate::tools::ToolInvocationId,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        worktree_identity: Option<String>,
+    ) -> Result<(), String> {
+        let step_index = self.current_step_index;
+        let step = self
+            .steps
+            .get_mut(step_index)
+            .ok_or_else(|| "verification has no active plan step".to_string())?;
+        let obligation = step
+            .verification_obligations
+            .iter_mut()
+            .find(|obligation| obligation.id == obligation_id)
+            .ok_or_else(|| {
+                format!(
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                )
+            })?;
+        if obligation.plan_id != self.id || obligation.step_index != Some(step_index) {
+            return Err(format!(
+                "verification obligation {obligation_id:?} is not bound to the active plan step"
+            ));
+        }
+        let actual_arguments = normalize_verification_arguments(arguments)?;
+        let expected = obligation.expected_invocation.as_ref().ok_or_else(|| {
+            format!("verification obligation {obligation_id:?} has no trusted invocation contract")
+        })?;
+        if expected.tool_name != tool_name || expected.arguments != actual_arguments {
+            return Err(format!(
+                "verification obligation {obligation_id:?} does not match the persisted tool invocation contract"
+            ));
+        }
+        obligation.status = VerificationStatus::Running;
+        obligation.invocation_id = Some(invocation_id);
+        obligation.worktree_identity = worktree_identity;
+        obligation.content_identity = None;
+        obligation.content_generation = step.content_generation;
+        obligation.reason = None;
+        obligation.updated_at = Some(Utc::now());
+        step.status = "InProgress".to_string();
+        step.updated_at = Some(Utc::now());
+        Ok(())
+    }
+
+    pub fn finish_verification(
+        &mut self,
+        obligation_id: &str,
+        invocation_id: crate::tools::ToolInvocationId,
+        worktree_identity: Option<&str>,
+        content_identity: Option<String>,
+        success: bool,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        let step_index = self.current_step_index;
+        let step = self
+            .steps
+            .get_mut(step_index)
+            .ok_or_else(|| "verification has no active plan step".to_string())?;
+        let obligation = step
+            .verification_obligations
+            .iter_mut()
+            .find(|obligation| obligation.id == obligation_id)
+            .ok_or_else(|| {
+                format!(
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                )
+            })?;
+        if obligation.invocation_id != Some(invocation_id)
+            || obligation.status != VerificationStatus::Running
+            || obligation
+                .worktree_identity
+                .as_deref()
+                .is_some_and(|expected| Some(expected) != worktree_identity)
+        {
+            return Err(format!(
+                "verification obligation {obligation_id:?} is not bound to invocation {invocation_id} in the active worktree"
+            ));
+        }
+        if success && worktree_identity.is_none() {
+            return Err(format!(
+                "successful verification obligation {obligation_id:?} has no audited worktree identity"
+            ));
+        }
+        if obligation.worktree_identity.is_none() {
+            obligation.worktree_identity = worktree_identity.map(str::to_string);
+        }
+        obligation.content_identity = content_identity.clone();
+        obligation.status = if success {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        };
+        obligation.content_generation = step.content_generation;
+        obligation.reason = reason;
+        obligation.updated_at = Some(Utc::now());
+        obligation.attempts.push(VerificationAttempt {
+            invocation_id,
+            status: obligation.status,
+            worktree_identity: obligation.worktree_identity.clone(),
+            content_identity,
+            reason: obligation.reason.clone(),
+            recorded_at: Utc::now(),
+        });
+        if !success {
+            step.status = "Blocked".to_string();
+        }
+        step.updated_at = Some(Utc::now());
+        Ok(())
+    }
+
+    pub fn invalidate_verification_after_mutation(
+        &mut self,
+        invocation_id: crate::tools::ToolInvocationId,
+    ) -> Vec<String> {
+        let Some(step) = self.steps.get_mut(self.current_step_index) else {
+            return Vec::new();
+        };
+        step.content_generation = step.content_generation.saturating_add(1);
+        let mut invalidated = Vec::new();
+        for obligation in &mut step.verification_obligations {
+            if obligation.status == VerificationStatus::Passed
+                && obligation.invocation_id != Some(invocation_id)
+            {
+                obligation.status = VerificationStatus::Stale;
+                obligation.reason = Some("relevant worktree content changed".to_string());
+                obligation.updated_at = Some(Utc::now());
+                invalidated.push(obligation.id.clone());
+            }
+        }
+        if !invalidated.is_empty() {
+            step.status = "Blocked".to_string();
+            step.outcome = Some("passed verification became stale after mutation".to_string());
+            step.updated_at = Some(Utc::now());
+        }
+        invalidated
+    }
+
+    pub fn cancel_running_verifications(&mut self, reason: &str) -> Vec<String> {
+        let Some(step) = self.steps.get_mut(self.current_step_index) else {
+            return Vec::new();
+        };
+        let mut cancelled = Vec::new();
+        for obligation in &mut step.verification_obligations {
+            if obligation.status == VerificationStatus::Running {
+                obligation.status = VerificationStatus::Cancelled;
+                obligation.reason = Some(reason.to_string());
+                obligation.updated_at = Some(Utc::now());
+                cancelled.push(obligation.id.clone());
+            }
+        }
+        cancelled
+    }
+
+    pub fn waive_verification(
+        &mut self,
+        expected_plan_id: &str,
+        obligation_id: &str,
+        source_message_index: usize,
+        reason: impl Into<String>,
+    ) -> Result<(), String> {
+        if self.id != expected_plan_id {
+            return Err("verification waiver does not match the active plan".to_string());
+        }
+        let step_index = self.current_step_index;
+        let step = self
+            .steps
+            .get_mut(step_index)
+            .ok_or_else(|| "verification waiver has no active plan step".to_string())?;
+        let obligation = step
+            .verification_obligations
+            .iter_mut()
+            .find(|obligation| obligation.id == obligation_id)
+            .ok_or_else(|| {
+                format!(
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                )
+            })?;
+        if obligation.authority == VerificationAuthority::Project {
+            return Err(format!(
+                "project verification obligation {obligation_id:?} cannot be waived by a task scope change"
+            ));
+        }
+        if matches!(
+            obligation.status,
+            VerificationStatus::Running | VerificationStatus::Passed | VerificationStatus::Failed
+        ) {
+            return Err(format!(
+                "verification obligation {obligation_id:?} with recorded execution evidence cannot be waived"
+            ));
+        }
+        obligation.status = VerificationStatus::Waived;
+        obligation.reason = Some(reason.into());
+        obligation.waiver_source_message_index = Some(source_message_index);
+        obligation.updated_at = Some(Utc::now());
+        Ok(())
+    }
+
+    pub fn unresolved_verification_ids(&self) -> Vec<String> {
+        self.steps
+            .get(self.current_step_index)
+            .map(|step| {
+                step.verification_obligations
+                    .iter()
+                    .filter(|obligation| obligation.is_unresolved_required())
+                    .map(|obligation| obligation.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn complete_current_step(&mut self, outcome: impl Into<String>) {
         let Some(step) = self.steps.get_mut(self.current_step_index) else {
             return;
         };
+        if step
+            .verification_obligations
+            .iter()
+            .any(VerificationObligation::is_unresolved_required)
+        {
+            step.status = "Blocked".to_string();
+            step.outcome = Some("required verification remains unresolved".to_string());
+            step.updated_at = Some(Utc::now());
+            self.outcome = Some("verification_unresolved".to_string());
+            return;
+        }
         step.status = "Completed".to_string();
         step.outcome = Some(outcome.into());
         step.updated_at = Some(Utc::now());
@@ -1520,6 +2099,12 @@ pub struct Session {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub messages: Vec<SessionMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_provenance: Vec<MessageProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_intent: Vec<HumanIntentRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clarifications: Vec<ClarificationRecord>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1566,6 +2151,15 @@ fn session_mismatch_field(expected: &Session, published: &Session) -> &'static s
     }
     if expected.messages != published.messages {
         return "messages";
+    }
+    if expected.message_provenance != published.message_provenance {
+        return "message_provenance";
+    }
+    if expected.human_intent != published.human_intent {
+        return "human_intent";
+    }
+    if expected.clarifications != published.clarifications {
+        return "clarifications";
     }
     if expected.tool_calls.len() != published.tool_calls.len() {
         return "tool_calls.length";
@@ -1654,6 +2248,9 @@ impl Session {
             revision: 0,
             started_at: Some(Utc::now()),
             messages: vec![],
+            message_provenance: vec![],
+            human_intent: vec![],
+            clarifications: vec![],
             tool_calls: vec![],
             plan: None,
             summary: None,
@@ -1685,6 +2282,10 @@ impl Session {
     pub fn validate(&self) -> Result<(), SessionError> {
         validate_session_id(&self.id)?;
         self.validate_message_sequence()?;
+        if let Some(plan) = &self.plan {
+            plan.validate_verification_metadata()
+                .map_err(SessionError::InvalidMutation)?;
+        }
         for (expected_index, event) in self.events.iter().enumerate() {
             if event.index != expected_index {
                 return Err(SessionError::InvalidEventIndex {
@@ -1699,7 +2300,106 @@ impl Session {
                 message_count: self.messages.len(),
             });
         }
+        let mut previous = None;
+        for provenance in &self.message_provenance {
+            if provenance.message_index >= self.messages.len()
+                || previous.is_some_and(|index| index >= provenance.message_index)
+            {
+                return Err(SessionError::InvalidMutation(
+                    "message provenance must be uniquely ordered and reference an existing message"
+                        .to_string(),
+                ));
+            }
+            validate_message_origin_role(
+                &self.messages[provenance.message_index].role,
+                provenance.origin,
+            )?;
+            previous = Some(provenance.message_index);
+        }
+        for intent in &self.human_intent {
+            if intent.text.trim().is_empty()
+                || intent
+                    .source_message_index
+                    .is_some_and(|index| index >= self.messages.len())
+                || intent
+                    .source_event_index
+                    .is_some_and(|index| index >= self.events.len())
+                || (intent.source_message_index.is_none() && intent.source_event_index.is_none())
+            {
+                return Err(SessionError::InvalidMutation(
+                    "human intent must have bounded content and an existing source".to_string(),
+                ));
+            }
+            if let Some(index) = intent.source_message_index {
+                if !self.message_origin(index).is_human() {
+                    return Err(SessionError::InvalidMutation(
+                        "human intent message source does not have human provenance".to_string(),
+                    ));
+                }
+            }
+            if let Some(index) = intent.source_event_index {
+                if !matches!(
+                    self.events[index].kind.as_str(),
+                    "steering_input" | "human_question_answer_received"
+                ) {
+                    return Err(SessionError::InvalidMutation(
+                        "human intent event source is not a trusted human-input boundary"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        for clarification in &self.clarifications {
+            let answer_source_is_human = clarification
+                .answer_message_index
+                .is_some_and(|index| self.message_origin(index).is_human())
+                || clarification.answer_event_index.is_some_and(|index| {
+                    self.events
+                        .get(index)
+                        .is_some_and(|event| event.kind == "human_question_answer_received")
+                });
+            if clarification.question.trim().is_empty()
+                || clarification.question_event_index >= self.events.len()
+                || clarification
+                    .answer_message_index
+                    .is_some_and(|index| index >= self.messages.len())
+                || clarification
+                    .answer_event_index
+                    .is_some_and(|index| index >= self.events.len())
+                || clarification.dependent_paths.len() > 32
+                || clarification
+                    .dependent_paths
+                    .iter()
+                    .any(|path| !valid_bounded_relative_path(path))
+                || (clarification.status == ClarificationStatus::Answered
+                    && (clarification.answer.as_deref().is_none_or(str::is_empty)
+                        || !answer_source_is_human))
+            {
+                return Err(SessionError::InvalidMutation(
+                    "clarification provenance is incomplete or inconsistent".to_string(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    pub fn message_origin(&self, index: usize) -> MessageOrigin {
+        self.message_provenance
+            .binary_search_by_key(&index, |provenance| provenance.message_index)
+            .ok()
+            .map(|position| self.message_provenance[position].origin)
+            .unwrap_or(MessageOrigin::Unknown)
+    }
+
+    pub fn has_unresolved_clarification(&self, plan_id: Option<&str>) -> bool {
+        self.clarifications.iter().any(|clarification| {
+            matches!(
+                clarification.status,
+                ClarificationStatus::Pending
+                    | ClarificationStatus::Unresolved
+                    | ClarificationStatus::Cancelled
+            ) && clarification.plan_id.as_deref() == plan_id
+        })
     }
 }
 
@@ -1766,6 +2466,40 @@ fn validate_role_transition(previous: Option<&str>, next: &str) -> Result<(), Se
             next: next.to_string(),
         })
     }
+}
+
+fn validate_message_origin_role(role: &str, origin: MessageOrigin) -> Result<(), SessionError> {
+    let valid = match origin {
+        MessageOrigin::Unknown => true,
+        MessageOrigin::HumanRequest
+        | MessageOrigin::HumanSteering
+        | MessageOrigin::HumanQuestionAnswer
+        | MessageOrigin::RuntimeContinuation => role == "user",
+        MessageOrigin::ModelOutput => role == "assistant",
+        // A subagent-directed message uses a provider `user` role, but its
+        // persisted origin remains non-human. Ordinary tool observations keep
+        // the provider `tool` role.
+        MessageOrigin::ToolOutput => matches!(role, "user" | "tool"),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidMutation(format!(
+            "message origin {origin:?} is incompatible with provider role {role}"
+        )))
+    }
+}
+
+fn valid_bounded_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
 }
 
 pub(crate) fn validate_session_id(id: &str) -> Result<(), SessionError> {
@@ -3186,8 +3920,19 @@ impl SessionStore {
         role: &str,
         content: &str,
     ) -> Result<Session, SessionError> {
+        self.try_append_message_with_origin(id, role, content, MessageOrigin::Unknown)
+    }
+
+    pub fn try_append_message_with_origin(
+        &self,
+        id: &str,
+        role: &str,
+        content: &str,
+        origin: MessageOrigin,
+    ) -> Result<Session, SessionError> {
         self.update_or_create_session(id, |session| {
             validate_role_transition(session.messages.last().map(|m| m.role.as_str()), role)?;
+            validate_message_origin_role(role, origin)?;
             let index = session.messages.len();
             session.messages.push(SessionMessage {
                 index,
@@ -3196,6 +3941,12 @@ impl SessionStore {
                 timestamp: Some(Utc::now()),
                 attachments: Vec::new(),
             });
+            if origin != MessageOrigin::Unknown {
+                session.message_provenance.push(MessageProvenance {
+                    message_index: index,
+                    origin,
+                });
+            }
             Ok(session.clone())
         })
     }
@@ -3947,7 +4698,25 @@ mod tests {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }
+    }
+
+    fn required_terminal_check(
+        id: &str,
+        description: &str,
+        paths: Vec<String>,
+    ) -> VerificationObligation {
+        VerificationObligation::pending_tool(
+            id,
+            description,
+            paths.clone(),
+            "run_terminal",
+            serde_json::json!({"command": "true", "affected_paths": paths}),
+            VerificationExpectedOutcome::Success,
+        )
+        .expect("valid verification contract")
     }
 
     #[test]
@@ -4033,6 +4802,183 @@ mod tests {
         assert!(!legacy.has_identity());
         assert!(!legacy.is_structured());
         assert!(!legacy.is_resumable_for("legacy goal"));
+        assert!(legacy.steps[0].verification_obligations.is_empty());
+        assert_eq!(legacy.steps[0].content_generation, 0);
+    }
+
+    #[test]
+    fn failed_required_verification_survives_unrelated_success_and_requires_exact_rerun() {
+        let mut step = plan_step("repair and verify");
+        step.verification_obligations.push(required_terminal_check(
+            "required-check",
+            "run the required check",
+            vec!["src".to_string()],
+        ));
+        let mut plan = Plan::new("repair", vec![step]);
+        plan.approve();
+        let failed_invocation = crate::tools::ToolInvocationId::new();
+        plan.begin_verification(
+            "required-check",
+            failed_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
+            Some("worktree-a".to_string()),
+        )
+        .expect("bind required check");
+        plan.finish_verification(
+            "required-check",
+            failed_invocation,
+            Some("worktree-a"),
+            None,
+            false,
+            Some("check failed".to_string()),
+        )
+        .expect("record failed check");
+
+        plan.record_tool_outcome(true, "unrelated read succeeded");
+        assert_eq!(plan.steps[0].status, "Blocked");
+        assert_eq!(
+            plan.steps[0].verification_obligations[0].status,
+            VerificationStatus::Failed
+        );
+        plan.complete_current_step("model claimed completion");
+        assert!(!plan.is_complete());
+        assert_eq!(plan.outcome.as_deref(), Some("verification_unresolved"));
+
+        let corrective_invocation = crate::tools::ToolInvocationId::new();
+        plan.begin_verification(
+            "required-check",
+            corrective_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
+            Some("worktree-a".to_string()),
+        )
+        .expect("bind corrective rerun");
+        assert!(plan
+            .finish_verification(
+                "required-check",
+                corrective_invocation,
+                Some("worktree-b"),
+                Some("sha256:other".to_string()),
+                true,
+                None,
+            )
+            .is_err());
+        plan.finish_verification(
+            "required-check",
+            corrective_invocation,
+            Some("worktree-a"),
+            Some("sha256:content".to_string()),
+            true,
+            None,
+        )
+        .expect("record corrective pass");
+        plan.record_tool_outcome(true, "required check passed");
+        plan.complete_current_step("verified");
+        assert!(plan.is_complete());
+    }
+
+    #[test]
+    fn mutation_stales_passed_verification_and_unknown_status_fails_closed() {
+        let mut step = plan_step("verify then edit");
+        step.verification_obligations.push(required_terminal_check(
+            "required-check",
+            "run the required check",
+            vec!["src".to_string()],
+        ));
+        let mut plan = Plan::new("repair", vec![step]);
+        plan.approve();
+        let check_invocation = crate::tools::ToolInvocationId::new();
+        plan.begin_verification(
+            "required-check",
+            check_invocation,
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
+            Some("worktree-a".to_string()),
+        )
+        .expect("bind check");
+        plan.finish_verification(
+            "required-check",
+            check_invocation,
+            Some("worktree-a"),
+            Some("sha256:content".to_string()),
+            true,
+            None,
+        )
+        .expect("record pass");
+        assert_eq!(
+            plan.invalidate_verification_after_mutation(crate::tools::ToolInvocationId::new()),
+            ["required-check"]
+        );
+        assert_eq!(
+            plan.steps[0].verification_obligations[0].status,
+            VerificationStatus::Stale
+        );
+        assert_eq!(plan.steps[0].content_generation, 1);
+        assert_eq!(plan.steps[0].status, "Blocked");
+
+        let mut encoded = serde_json::to_value(&plan).expect("serialize plan");
+        encoded["steps"][0]["verification_obligations"][0]["status"] =
+            serde_json::json!("future_unknown_status");
+        assert!(serde_json::from_value::<Plan>(encoded).is_err());
+    }
+
+    #[test]
+    fn cancellation_and_waiver_remain_distinct_and_project_gate_fails_closed() {
+        let mut step = plan_step("cancel or narrow scope");
+        let mut human = required_terminal_check(
+            "human-check",
+            "user-requested check",
+            vec!["src".to_string()],
+        );
+        human.authority = VerificationAuthority::Human;
+        let mut project = required_terminal_check(
+            "project-check",
+            "mandatory project gate",
+            vec![".".to_string()],
+        );
+        project.authority = VerificationAuthority::Project;
+        step.verification_obligations = vec![human, project];
+        let mut plan = Plan::new("verify", vec![step]);
+        plan.approve();
+        plan.begin_verification(
+            "human-check",
+            crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["src"]}),
+            None,
+        )
+        .expect("start human check");
+
+        assert_eq!(
+            plan.cancel_running_verifications("cancelled by user"),
+            ["human-check"]
+        );
+        assert_eq!(
+            plan.steps[0].verification_obligations[0].status,
+            VerificationStatus::Cancelled
+        );
+        let plan_id = plan.id.clone();
+        assert!(plan
+            .waive_verification("wrong-plan", "human-check", 7, "request scope changed")
+            .is_err());
+        plan.waive_verification(&plan_id, "human-check", 7, "request scope changed")
+            .expect("human requirement may become inapplicable");
+        assert_eq!(
+            plan.steps[0].verification_obligations[0].status,
+            VerificationStatus::Waived
+        );
+        assert_eq!(
+            plan.steps[0].verification_obligations[0].waiver_source_message_index,
+            Some(7)
+        );
+        assert!(plan
+            .waive_verification(&plan_id, "project-check", 7, "skip mandatory gate")
+            .is_err());
+        assert_eq!(
+            plan.steps[0].verification_obligations[1].status,
+            VerificationStatus::Pending
+        );
     }
 
     #[cfg(windows)]

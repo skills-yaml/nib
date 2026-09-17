@@ -1,11 +1,93 @@
-use crate::context::budget::{build_bounded_planning_input, PlanningPromptRequest};
+use crate::context::budget::{
+    build_bounded_planning_input, ensure_required_instructions_present, PlanningPromptRequest,
+};
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
 use crate::llm::{LlmClient, LlmResponse, LlmStream};
-use crate::session::{Plan, PlanStep};
+use crate::session::{Plan, PlanStep, VerificationExpectedOutcome, VerificationObligation};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+
+fn planning_tools() -> serde_json::Value {
+    let verification_obligation = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "required": {"type": "boolean", "default": true},
+            "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "arguments": {"type": "object"},
+            "expected_outcome": {
+                "type": "string",
+                "enum": ["success", "probe_miss"],
+                "default": "success"
+            },
+            "affected_paths": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+            }
+        },
+        "required": ["id", "description", "tool_name", "arguments"],
+        "additionalProperties": false
+    });
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "submit_plan",
+            "description": "Submit a structured plan",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": {
+                            "anyOf": [
+                                {"type": "string", "minLength": 1, "maxLength": 4096},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "description": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                        "verification_obligations": {
+                                            "type": "array",
+                                            "maxItems": 16,
+                                            "items": verification_obligation
+                                        }
+                                    },
+                                    "required": ["description"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
+                    }
+                },
+                "required": ["steps"]
+            }
+        }
+    }])
+}
+
+pub(crate) fn validate_planning_instruction_context(
+    goal: &str,
+    context: &RuntimeContextSections,
+    session: Option<&crate::session::Session>,
+    context_length: usize,
+) -> Result<(), String> {
+    let tools = planning_tools();
+    let bounded = build_bounded_planning_input(PlanningPromptRequest {
+        context,
+        session,
+        goal,
+        tools: tools
+            .as_array()
+            .expect("planning tool schema is always an array"),
+        context_length,
+    })?;
+    ensure_required_instructions_present(&bounded, &context.agents)
+}
 
 // Planning APIs preserve the canonical typed LLM failure (including retry/phase metadata) for
 // their callers. Boxing only these adapters would create a parallel error contract without
@@ -82,25 +164,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
         return Err("cannot plan an empty goal".into());
     }
 
-    let tools = json!([{
-        "type": "function",
-        "function": {
-            "name": "submit_plan",
-            "description": "Submit a structured plan",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "required": ["steps"]
-            }
-        }
-    }]);
+    let tools = planning_tools();
 
     let bounded = build_bounded_planning_input(PlanningPromptRequest {
         context,
@@ -109,6 +173,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
         tools: tools.as_array().unwrap(),
         context_length,
     })?;
+    ensure_required_instructions_present(&bounded, &context.agents)?;
     let scope = match scope {
         Some(scope) => scope,
         None => LlmRequestScope::new(
@@ -145,27 +210,135 @@ pub fn plan_from_tool_calls(goal: &str, calls: Vec<ToolCallRequest>) -> Result<P
         .get("steps")
         .and_then(|steps| steps.as_array())
         .ok_or_else(|| "structured plan is missing a steps array".to_string())?;
-    let plan_steps: Vec<PlanStep> = steps
+    let plan_steps = steps
         .iter()
-        .filter_map(|step| {
-            step.as_str()
-                .or_else(|| step.get("description").and_then(|value| value.as_str()))
-        })
-        .map(str::trim)
-        .filter(|step| !step.is_empty())
-        .map(|description| PlanStep {
-            description: description.to_string(),
-            status: "Pending".to_string(),
-            outcome: None,
-            attempts: 0,
-            updated_at: None,
-        })
-        .collect();
+        .map(parse_plan_step)
+        .collect::<Result<Vec<_>, _>>()?;
     let plan = Plan::new(goal, plan_steps);
     if !plan.is_structured() {
         return Err("planner submitted an empty or invalid plan".to_string());
     }
     Ok(plan)
+}
+
+fn parse_plan_step(step: &serde_json::Value) -> Result<PlanStep, String> {
+    let description = step
+        .as_str()
+        .or_else(|| step.get("description").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .ok_or_else(|| "planner submitted an empty or invalid plan".to_string())?;
+    let verification_values = step
+        .get("verification_obligations")
+        .map(|value| {
+            value
+                .as_array()
+                .cloned()
+                .ok_or_else(|| "verification_obligations must be an array".to_string())
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if verification_values.len() > 16 {
+        return Err("a plan step cannot declare more than 16 verification obligations".to_string());
+    }
+    let verification_obligations = verification_values
+        .into_iter()
+        .map(|obligation| {
+            let id = obligation
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "verification obligation is missing an id".to_string())?;
+            let obligation_description = obligation
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing a description")
+                })?;
+            let affected_paths = obligation
+                .get("affected_paths")
+                .map(|paths| {
+                    paths
+                        .as_array()
+                        .ok_or_else(|| {
+                            format!(
+                                "verification obligation {id:?} affected_paths must be an array"
+                            )
+                        })?
+                        .iter()
+                        .map(|path| {
+                            path.as_str()
+                                .map(str::trim)
+                                .filter(|path| !path.is_empty())
+                                .map(str::to_string)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "verification obligation {id:?} has an invalid affected path"
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let tool_name = obligation
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing a tool name")
+                })?;
+            let arguments = obligation
+                .get("arguments")
+                .ok_or_else(|| {
+                    format!("verification obligation {id:?} is missing tool arguments")
+                })?;
+            let expected_outcome = match obligation
+                .get("expected_outcome")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("success")
+            {
+                "success" => VerificationExpectedOutcome::Success,
+                "probe_miss" => VerificationExpectedOutcome::ProbeMiss,
+                value => {
+                    return Err(format!(
+                        "verification obligation {id:?} has unsupported expected outcome {value:?}"
+                    ))
+                }
+            };
+            if expected_outcome == VerificationExpectedOutcome::ProbeMiss && tool_name != "grep" {
+                return Err(format!(
+                    "verification obligation {id:?} may use probe_miss only with the typed grep tool"
+                ));
+            }
+            let mut parsed = VerificationObligation::pending_tool(
+                id,
+                obligation_description,
+                affected_paths,
+                tool_name,
+                arguments.clone(),
+                expected_outcome,
+            )?;
+            parsed.required = obligation
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            Ok(parsed)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PlanStep {
+        description: description.to_string(),
+        status: "Pending".to_string(),
+        outcome: None,
+        attempts: 0,
+        updated_at: None,
+        verification_obligations,
+        content_generation: 0,
+    })
 }
 
 #[cfg(test)]
@@ -191,6 +364,45 @@ mod tests {
         assert!(!plan.approved);
         assert_eq!(plan.goal, "inspect and verify");
         assert!(plan.id.starts_with("plan-"));
+    }
+
+    #[test]
+    fn parses_bounded_verification_obligations_into_the_plan() {
+        let plan = plan_from_tool_calls(
+            "repair and verify",
+            vec![ToolCallRequest::new(
+                "submit_plan",
+                json!({
+                    "steps": [{
+                        "description": "repair the defect",
+                        "verification_obligations": [{
+                            "id": "required-check",
+                            "description": "run the focused behavior test",
+                            "tool_name": "run_terminal",
+                            "arguments": {"command": "task test:agent-context", "affected_paths": ["."]},
+                            "affected_paths": ["src/agent", "tests/test_runtime_e2e.rs"]
+                        }]
+                    }]
+                }),
+            )],
+        )
+        .expect("structured verification plan");
+
+        let obligation = &plan.steps[0].verification_obligations[0];
+        assert_eq!(obligation.id, "required-check");
+        assert!(obligation.required);
+        assert_eq!(
+            obligation.status,
+            crate::session::VerificationStatus::Pending
+        );
+        assert_eq!(
+            obligation.affected_paths,
+            ["src/agent", "tests/test_runtime_e2e.rs"]
+        );
+        assert_eq!(
+            obligation.expected_invocation.as_ref().unwrap().tool_name,
+            "run_terminal"
+        );
     }
 
     #[test]

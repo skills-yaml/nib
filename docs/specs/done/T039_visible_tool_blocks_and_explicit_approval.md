@@ -1,6 +1,6 @@
 # T039: Visible Tool Blocks and Explicit Approval Card
 
-**Status:** Development
+**Status:** Done
 
 **Related:**
 [T038: TUI Block Transcript and Key Contract](T038_tui_block_transcript_and_key_contract.md),
@@ -11,7 +11,7 @@
 ## Summary
 
 Make live tool work and approval decisions unmistakable in the TUI. Tool blocks get a
-Grok-style diamond marker, argument summary, and status coloring. Approval, questions,
+Grok-style filled marker, argument summary, and status coloring. Approval, questions,
 and workspace permission use the same under-composer list as `/` options: the composer
 names the action and the choices sit under the input without covering the transcript
 or changing approval policy. Slash and path completion reserve rows under the composer
@@ -104,7 +104,7 @@ says `awaiting you`.
 
 ## Scope
 
-- Tool title composition with argument hints and diamond/accent rendering.
+- Tool title composition with argument hints and filled-marker/accent rendering.
 - Distinct thought / tool / speech transcript channels.
 - Approval choices under the composer, footer override, Enter/1/2 aliases.
 - Question choices under the composer, Enter/1-9/Esc, WAITING QUESTION footer.
@@ -129,61 +129,61 @@ says `awaiting you`.
 
 ## Acceptance Criteria
 
-- [ ] Live tool headers render as `● <name> <phase>` with an argument hint when
+- [x] Live tool headers render as `● <name> <phase>` with an argument hint when
       the stream provided path/command/pattern. No `tool` role label.
-- [ ] Collapsed completed `list_directory` still shows an entry count, not JSON.
-- [ ] Expanded tool bodies use a muted `·` result marker and remain bounded.
-- [ ] Failed tools are visually distinct without color (`failed` in the title) and red
+- [x] Collapsed completed `list_directory` still shows an entry count, not JSON.
+- [x] Expanded tool bodies use a muted `·` result marker and remain bounded.
+- [x] Failed tools are visually distinct without color (`failed` in the title) and red
       when color is available.
-- [ ] Approval uses the under-composer list: the composer states the intent
+- [x] Approval uses the under-composer list: the composer states the intent
       (`Run this command` / `Read this file` / …) and shows the command or path;
       `Y Approve once` and `N Deny` sit under the input even on a 40-column
       terminal. It does not render `command=` dumps.
-- [ ] Generated plans render as a live todo list (`Working on N to-dos`, `◐` /
+- [x] Generated plans render as a live todo list (`Working on N to-dos`, `◐` /
       `○` / `✓`) that advances on `step_completed`. `/plan` still shows every
       step. The user is asked only when the request is unclear or an action
       requires approval.
-- [ ] Transcript text above the composer remains visible at ordinary terminal sizes.
-- [ ] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
+- [x] Transcript text above the composer remains visible at ordinary terminal sizes.
+- [x] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
       Deny deny. Up/Down change the selected choice.
-- [ ] The footer shows `WAITING APPROVAL` and the approval keys while the list is
+- [x] The footer shows `WAITING APPROVAL` and the approval keys while the list is
       open; `NO_COLOR` still has the same words.
-- [ ] Focused interactive tests, `task docs:check`, `task check`, and
+- [x] Focused interactive tests, `task docs:check`, `task check`, and
       `task test:interactive` pass.
-- [ ] Slash completion options render under the composer; conversation text above the
+- [x] Slash completion options render under the composer; conversation text above the
       input remains visible and is not cleared. Option signatures start on the
       same column as the composer `/` and have no `>` caret. Session, model,
       history, and question lists use that same selected-row style.
-- [ ] The first user goal assigns `display_name` when unset; `/rename` is kept.
-- [ ] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
+- [x] The first user goal assigns `display_name` when unset; `/rename` is kept.
+- [x] The waiting meter shows spinner, job, step, elapsed time, tokens, and status
       while a run is active or the TUI is waiting.
-- [ ] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
+- [x] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
       an approval list is open; unmodified Up/Down select approval choices.
-- [ ] Click and drag selects chat text. `Ctrl+Y` / `Ctrl+Shift+C` copies the
+- [x] Click and drag selects chat text. `Ctrl+Y` / `Ctrl+Shift+C` copies the
       selection, or the selected block, or the last assistant reply. `Ctrl+A`
       selects the whole chat. Copy uses OSC 52.
-- [ ] The first row shows folder and branch on the left and model plus context
+- [x] The first row shows folder and branch on the left and model plus context
       usage on the right. The last row shows approval mode and agent mode.
       `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.
-- [ ] User and nib speech render markdown headings, lists, emphasis, inline code,
+- [x] User and nib speech render markdown headings, lists, emphasis, inline code,
       and fenced code; tool/thought channels are unchanged.
-- [ ] The runtime system prompt uses Codex-style communication: a short preamble
+- [x] The runtime system prompt uses Codex-style communication: a short preamble
       before tool calls that says what is happening and why, plus concise final
       answers. Speech does not dump tool arguments.
-- [ ] Chat has no `you` / `nib` / `thought` / `tool` / `system` role labels.
+- [x] Chat has no `you` / `nib` / `thought` / `tool` / `system` role labels.
       User and assistant speech are markdown with a `●` on the first line.
       Tools show `● read_file …`; results use `·`. Thinking shows the state
       (`planning`) without the word `thought`.
-- [ ] A question uses a Codex-style list: `› 1. label (y)`, further options as
+- [x] A question uses a Codex-style list: `› 1. label (y)`, further options as
       `N. label (N)`, and `Skip (esc)`. Enter/1-9/y/Esc still answer. The footer
       reads `WAITING QUESTION`.
-- [ ] An empty session welcome shows `Nib <version>`, the working directory,
+- [x] An empty session welcome shows `Nib <version>`, the working directory,
       `/new` and `/session` help, and the most-used keys. When an update is
       available it tells the user to run `nib update`.
-- [ ] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
+- [x] Idle empty `Ctrl+C` twice within 1000ms quits; a running `Ctrl+C` still
       cancels and a non-empty idle draft still clears. `/q` and `Ctrl+Q` still
       quit.
-- [ ] First TUI start without `workspace.allowed` asks to work in the working
+- [x] First TUI start without `workspace.allowed` asks to work in the working
       directory at the composer, with Allow/Decline under the input. `Y`/`Enter`
       persist the grant; `N`/`Esc` quit. `--run` waits until the grant. Later
       starts skip the prompt.
@@ -208,7 +208,7 @@ says `awaiting you`.
 ## Implementation Plan
 
 1. Compose tool titles with bounded argument hints across requested/running/terminal.
-2. Render diamond + accent tool blocks with status coloring.
+2. Render filled-marker + accent tool blocks with status coloring.
 3. Replace the approval dock dump with under-composer Y/N choices and status/footer.
    Plan approval lists numbered steps in the composer and live transcript.
 4. Add Enter/1/2 aliases; cover with TestBackend and key-dispatch tests.
@@ -223,12 +223,17 @@ says `awaiting you`.
 
 ## Validation Gates
 
-- Unit tests for argument hints and diamond display text.
+- Unit tests for argument hints and filled-marker display text.
 - Ratatui tests for under-composer approval choices, transcript visibility, and
   WAITING APPROVAL footer.
 - Tests for compact header/footer chrome and markdown speech (headings, lists, code).
 - Key tests for Enter/1 grant and 2 deny.
 - `task docs:check`, `task check`, `task test:interactive`.
+
+The merged development implementation and reconciliation passed these focused gates,
+then the complete `task verify` gate as part of the T041 integration merge. Tests cover
+plan-step approval, bounded omissions, text selection/copy, invocation correlation,
+redacted approval subjects, narrow terminals, and no-color presentation.
 
 ## Risks and Mitigations
 

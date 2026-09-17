@@ -297,13 +297,23 @@ enum CompletionKeyResult {
 struct ChromeCache {
     generation: u64,
     session_id: String,
+    session_revision: Option<u64>,
     origin: String,
     chrome: TuiChrome,
 }
 
 impl ChromeCache {
-    fn matches(&self, generation: u64, session_id: &str, origin: &str) -> bool {
-        self.generation == generation && self.session_id == session_id && self.origin == origin
+    fn matches(
+        &self,
+        generation: u64,
+        session_id: &str,
+        session_revision: Option<u64>,
+        origin: &str,
+    ) -> bool {
+        self.generation == generation
+            && self.session_id == session_id
+            && self.session_revision == session_revision
+            && self.origin == origin
     }
 }
 const MAX_SWITCHER_CANDIDATES: usize = 100;
@@ -2603,6 +2613,7 @@ fn prepare_tui_agent_worker(
                 let loop_cfg = crate::agent::AgentLoopConfig {
                     max_steps: 0,
                     mode: mode.as_str().to_string(),
+                    interactive_request: mode == InteractiveAgentMode::Execute,
                     approval_handler: Some(std::sync::Arc::new(TuiApprovalHandler {
                         tx: approval_tx,
                     })),
@@ -3294,11 +3305,12 @@ fn waiting_composer_rows(
     match waiting {
         WaitingKind::Approval => {
             let req = pending_approval?;
-            let prompt = approval_prompt(&req.call);
-            let mut extra = Vec::new();
-            if req.call.tool_name == "approve_plan" {
-                extra.extend(approval_plan_step_lines(&req.call));
-            }
+            let prompt = approval_prompt(&req.call, &req.context);
+            let mut extra = if req.call.tool_name == "approve_plan" {
+                req.context.details.clone()
+            } else {
+                Vec::new()
+            };
             if extra.is_empty() && !prompt.subject.is_empty() {
                 extra.push(prompt.subject);
             }
@@ -3851,16 +3863,7 @@ fn render_waiting_meter(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let spin = spinner_glyph(meter.tick, no_color);
-    let text = format!(
-        "{spin}  {}  ·  step {}  ·  {}  ·  {}  ·  {}",
-        meter.job,
-        meter.step,
-        format_elapsed(meter.elapsed),
-        meter.tokens,
-        meter.status
-    );
-    let text = truncate_completion_text(&text, usize::from(area.width));
+    let text = waiting_meter_text(meter, usize::from(area.width), no_color);
     let style = if no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -3871,10 +3874,39 @@ fn render_waiting_meter(
     frame.render_widget(Paragraph::new(Span::styled(text, style)), area);
 }
 
+fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: bool) -> String {
+    let spin = spinner_glyph(meter.tick, no_color);
+    let job = control_safe_text(&meter.job, false);
+    let step = truncate_display_cells(&control_safe_text(&meter.step, false), 10);
+    let elapsed = truncate_display_cells(&format_elapsed(meter.elapsed), 8);
+    let tokens = meter.tokens.strip_prefix("tok ").unwrap_or(&meter.tokens);
+    let tokens = truncate_display_cells(&control_safe_text(tokens, false), 8);
+    let token_label = format!("tok {tokens}");
+    let status = truncate_display_cells(&control_safe_text(&meter.status, false), 16);
+    let full = format!(
+        "{spin}  {job}  ·  step {step}  ·  {elapsed}  ·  {}  ·  {status}",
+        token_label
+    );
+    if unicode_display_width(&full) <= width {
+        return full;
+    }
+
+    // Keep every operational field visible on constrained terminals. The job is
+    // the only elastic field; labels become compact before any suffix is dropped.
+    let suffix = format!("s:{step} {elapsed} t:{tokens} {status}");
+    let fixed_width = unicode_display_width(&format!("{spin}  {suffix}"));
+    let job_budget = width.saturating_sub(fixed_width.saturating_add(1)).max(1);
+    let job = truncate_display_cells(&job, job_budget);
+    truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
+}
+
 fn copy_text_osc52(text: &str) {
-    let encoded = encode_base64(text.as_bytes());
-    let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
+    let _ = write!(io::stdout(), "{}", osc52_sequence(text));
     let _ = io::stdout().flush();
+}
+
+fn osc52_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", encode_base64(text.as_bytes()))
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -3910,36 +3942,6 @@ struct ApprovalPrompt {
     location: Option<String>,
 }
 
-fn approval_plan_step_lines(call: &ToolCall) -> Vec<String> {
-    call.arguments
-        .get("steps")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .filter_map(|(index, step)| {
-            let text = step.as_str()?.trim();
-            if text.is_empty() {
-                return None;
-            }
-            let safe = safe_approval_text(text);
-            (!safe.is_empty()).then(|| format!("{}. {safe}", index + 1))
-        })
-        .collect()
-}
-
-fn approval_arg(call: &ToolCall, key: &str) -> Option<String> {
-    call.arguments
-        .get(key)
-        .and_then(|value| {
-            value.as_str().map(ToString::to_string).or_else(|| {
-                (!value.is_null() && !value.is_object() && !value.is_array())
-                    .then(|| value.to_string())
-            })
-        })
-        .filter(|value| !value.is_empty())
-}
-
 fn safe_approval_text(value: &str) -> String {
     control_safe_text(&crate::tools::executor::redact_text(value), true)
 }
@@ -3953,101 +3955,22 @@ fn compact_approval_risk(value: &str) -> String {
         .to_string()
 }
 
-fn approval_prompt(call: &ToolCall) -> ApprovalPrompt {
-    let path = || {
-        ["path", "target_file", "file_path"]
-            .into_iter()
-            .find_map(|key| approval_arg(call, key))
+fn approval_prompt(call: &ToolCall, context: &ApprovalContext) -> ApprovalPrompt {
+    let statement = match call.tool_name.as_str() {
+        "run_terminal" => "Run this command".to_string(),
+        "read_file" => "Read this file".to_string(),
+        "list_directory" => "List this directory".to_string(),
+        "search_replace" => "Edit this file".to_string(),
+        "apply_patch" => "Apply a patch".to_string(),
+        "grep" => "Search files".to_string(),
+        "approve_plan" => "Approve this plan".to_string(),
+        "merge_subagent_worktree" => "Merge a subagent worktree".to_string(),
+        other => format!("Use {other}"),
     };
-    match call.tool_name.as_str() {
-        "run_terminal" => ApprovalPrompt {
-            statement: "Run this command".to_string(),
-            subject: approval_arg(call, "command")
-                .map(|command| safe_approval_text(&command))
-                .filter(|command| !command.is_empty())
-                .unwrap_or_else(|| "(missing command)".to_string()),
-            location: approval_arg(call, "cwd").map(|cwd| safe_approval_text(&cwd)),
-        },
-        "read_file" => ApprovalPrompt {
-            statement: "Read this file".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "list_directory" => ApprovalPrompt {
-            statement: "List this directory".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "search_replace" => ApprovalPrompt {
-            statement: "Edit this file".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "(missing path)".to_string()),
-            location: None,
-        },
-        "apply_patch" => ApprovalPrompt {
-            statement: "Apply a patch".to_string(),
-            subject: path()
-                .map(|path| safe_approval_text(&path))
-                .unwrap_or_else(|| "workspace files".to_string()),
-            location: None,
-        },
-        "grep" => {
-            let pattern = approval_arg(call, "pattern").or_else(|| approval_arg(call, "query"));
-            let path = path();
-            let subject = [pattern, path]
-                .into_iter()
-                .flatten()
-                .map(|part| safe_approval_text(&part))
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" in ");
-            ApprovalPrompt {
-                statement: "Search files".to_string(),
-                subject: if subject.is_empty() {
-                    "(missing pattern)".to_string()
-                } else {
-                    subject
-                },
-                location: None,
-            }
-        }
-        "approve_plan" => ApprovalPrompt {
-            statement: "Approve this plan".to_string(),
-            subject: approval_arg(call, "goal")
-                .or_else(|| approval_arg(call, "plan_id"))
-                .map(|goal| safe_approval_text(&goal))
-                .unwrap_or_else(|| "(missing plan)".to_string()),
-            location: None,
-        },
-        "merge_subagent_worktree" => ApprovalPrompt {
-            statement: "Merge a subagent worktree".to_string(),
-            subject: approval_arg(call, "subagent_id")
-                .map(|id| safe_approval_text(&id))
-                .unwrap_or_else(|| "(missing subagent)".to_string()),
-            location: None,
-        },
-        other => ApprovalPrompt {
-            statement: format!("Use {other}"),
-            subject: [
-                "command",
-                "path",
-                "query",
-                "pattern",
-                "url",
-                "action",
-                "target_file",
-            ]
-            .into_iter()
-            .find_map(|key| approval_arg(call, key))
-            .map(|value| safe_approval_text(&value))
-            .unwrap_or_else(|| other.to_string()),
-            location: None,
-        },
+    ApprovalPrompt {
+        statement,
+        subject: context.display_subject.clone(),
+        location: context.display_location.clone(),
     }
 }
 
@@ -4426,6 +4349,62 @@ fn ensure_selected_visible(viewport: &mut TranscriptViewport, owners: &[usize], 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceConsentAction {
+    Unhandled,
+    SelectionChanged,
+    Allow,
+    Decline,
+}
+
+fn workspace_consent_action_for_key(
+    selected: &mut usize,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> WorkspaceConsentAction {
+    match code {
+        KeyCode::Up => {
+            *selected = 0;
+            return WorkspaceConsentAction::SelectionChanged;
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            *selected = 1;
+            return WorkspaceConsentAction::SelectionChanged;
+        }
+        _ => {}
+    }
+    let control_quit = matches!(code, KeyCode::Char('c' | 'C' | 'q' | 'Q'))
+        && modifiers.contains(KeyModifiers::CONTROL);
+    let allow = (matches!(code, KeyCode::Char('y' | 'Y' | '1'))
+        || (code == KeyCode::Enter && *selected == 0))
+        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT);
+    let decline = control_quit
+        || matches!(code, KeyCode::Esc | KeyCode::Char('n' | 'N' | '2'))
+        || (code == KeyCode::Enter && *selected != 0);
+    if allow {
+        WorkspaceConsentAction::Allow
+    } else if decline {
+        WorkspaceConsentAction::Decline
+    } else {
+        WorkspaceConsentAction::Unhandled
+    }
+}
+
+fn pending_workspace_consent(project_root: &Path) -> Option<String> {
+    (!crate::config::workspace_access_is_granted(project_root).unwrap_or(false))
+        .then(|| crate::interactive::folder_label(project_root))
+}
+
+fn grant_workspace_access_and_release_goal(
+    project_root: &Path,
+    consent_directory: &mut Option<String>,
+    pending_goal: &mut Option<String>,
+) -> Result<Option<String>, crate::config::ConfigError> {
+    crate::config::grant_workspace_access(project_root)?;
+    *consent_directory = None;
+    Ok(pending_goal.take())
+}
+
 #[cfg(test)]
 fn render_current_session_view(
     frame: &mut ratatui::Frame<'_>,
@@ -4658,11 +4637,7 @@ fn render_session_activities(
     }
     let composer_area = layout.composer;
     if composer_area.width > 0 && composer_area.height > 0 {
-        let border_style = if focus == TuiFocus::Composer {
-            role_style(ActivityKind::User, no_color)
-        } else {
-            muted_style(no_color)
-        };
+        let border_style = composer_border_style(focus, no_color);
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(border_style);
@@ -4784,6 +4759,18 @@ fn render_session_activities(
     );
 }
 
+fn composer_border_style(focus: TuiFocus, no_color: bool) -> Style {
+    if focus == TuiFocus::Composer {
+        if no_color {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            role_style(ActivityKind::User, false)
+        }
+    } else {
+        muted_style(no_color)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_loop(
     mut terminal: DefaultTerminal,
@@ -4808,11 +4795,7 @@ fn draw_loop(
     if let Some(notice) = session_notice {
         timeline.push_status(notice);
     }
-    if crate::config::workspace_access_is_granted(project_root).unwrap_or(false) {
-        welcome.consent_directory = None;
-    } else {
-        welcome.consent_directory = Some(crate::interactive::folder_label(project_root));
-    }
+    welcome.consent_directory = pending_workspace_consent(project_root);
     let mut pending_goal = run_goal;
     if let Some(goal) = pending_goal.as_deref() {
         let _ = maybe_assign_session_display_name(&store, &active_session_id, goal);
@@ -4951,8 +4934,14 @@ fn draw_loop(
         if let Err(error) = terminal.size() {
             break Err(error);
         }
+        let session_revision = session.as_ref().map(|session| session.revision);
         let mut chrome = if chrome_cache.as_ref().is_some_and(|cache| {
-            cache.matches(chrome_generation, &timeline.session_id, &session_origin)
+            cache.matches(
+                chrome_generation,
+                &timeline.session_id,
+                session_revision,
+                &session_origin,
+            )
         }) {
             chrome_cache.as_ref().expect("checked").chrome.clone()
         } else {
@@ -4962,6 +4951,7 @@ fn draw_loop(
             chrome_cache = Some(ChromeCache {
                 generation: chrome_generation,
                 session_id: timeline.session_id.clone(),
+                session_revision,
                 origin: session_origin.clone(),
                 chrome: chrome.clone(),
             });
@@ -5149,67 +5139,51 @@ fn draw_loop(
                         transcript_viewport.apply(action);
                         continue;
                     }
-                    match key.code {
-                        KeyCode::Up => {
-                            welcome.consent_selected = 0;
-                            continue;
-                        }
-                        KeyCode::Down | KeyCode::Tab => {
-                            welcome.consent_selected = 1;
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    let allow = (matches!(
+                    match workspace_consent_action_for_key(
+                        &mut welcome.consent_selected,
                         key.code,
-                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1')
-                    ) || (key.code == KeyCode::Enter
-                        && welcome.consent_selected == 0))
-                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
-                    let decline = control_c
-                        || control_q
-                        || matches!(
-                            key.code,
-                            KeyCode::Esc
-                                | KeyCode::Char('n')
-                                | KeyCode::Char('N')
-                                | KeyCode::Char('2')
-                        )
-                        || (key.code == KeyCode::Enter && welcome.consent_selected != 0);
-                    if allow {
-                        match crate::config::grant_workspace_access(project_root) {
-                            Ok(()) => {
-                                welcome.consent_directory = None;
-                                timeline.push_status("Allowed work in this directory.".to_string());
-                                if let Some(goal) = pending_goal.take() {
-                                    match spawn_tui_agent_worker(
-                                        agent_profile_scope.clone(),
-                                        active_session_id.clone(),
-                                        goal,
-                                        InteractiveAgentMode::Execute,
-                                        approval_tx.clone(),
-                                        question_tx.clone(),
-                                        stream_tx.clone(),
-                                    ) {
-                                        Ok(next) => {
-                                            timeline.bind_run(Some(next.run_id.clone()));
-                                            worker = Some(next);
+                        key.modifiers,
+                    ) {
+                        WorkspaceConsentAction::SelectionChanged => continue,
+                        WorkspaceConsentAction::Allow => {
+                            match grant_workspace_access_and_release_goal(
+                                project_root,
+                                &mut welcome.consent_directory,
+                                &mut pending_goal,
+                            ) {
+                                Ok(released_goal) => {
+                                    timeline
+                                        .push_status("Allowed work in this directory.".to_string());
+                                    if let Some(goal) = released_goal {
+                                        match spawn_tui_agent_worker(
+                                            agent_profile_scope.clone(),
+                                            active_session_id.clone(),
+                                            goal,
+                                            InteractiveAgentMode::Execute,
+                                            approval_tx.clone(),
+                                            question_tx.clone(),
+                                            stream_tx.clone(),
+                                        ) {
+                                            Ok(next) => {
+                                                timeline.bind_run(Some(next.run_id.clone()));
+                                                worker = Some(next);
+                                            }
+                                            Err(error) => break Err(error),
                                         }
-                                        Err(error) => break Err(error),
                                     }
                                 }
+                                Err(error) => {
+                                    timeline.push_status(format!("[workspace error] {error}"))
+                                }
                             }
-                            Err(error) => {
-                                timeline.push_status(format!("[workspace error] {error}"))
-                            }
+                            continue;
                         }
-                        continue;
+                        WorkspaceConsentAction::Decline => {
+                            exit_requested = true;
+                            break Ok(());
+                        }
+                        WorkspaceConsentAction::Unhandled => continue,
                     }
-                    if decline {
-                        exit_requested = true;
-                        break Ok(());
-                    }
-                    continue;
                 }
                 let interaction_state = tui_interaction_state(
                     pending_approval.is_some(),
@@ -5959,6 +5933,14 @@ mod tests {
             Style::default().add_modifier(Modifier::BOLD)
         );
         assert_eq!(
+            composer_border_style(TuiFocus::Composer, true),
+            Style::default().add_modifier(Modifier::BOLD)
+        );
+        assert_ne!(
+            composer_border_style(TuiFocus::Composer, true),
+            composer_border_style(TuiFocus::Transcript, true)
+        );
+        assert_eq!(
             approval_dock_style(false),
             Style::default()
                 .add_modifier(Modifier::BOLD)
@@ -6087,13 +6069,15 @@ mod tests {
         let cache = ChromeCache {
             generation: 1,
             session_id: "abc".to_string(),
+            session_revision: Some(4),
             origin: "new".to_string(),
             chrome: TuiChrome::fixture(),
         };
-        assert!(cache.matches(1, "abc", "new"));
-        assert!(!cache.matches(1, "other", "new"));
-        assert!(!cache.matches(2, "abc", "new"));
-        assert!(!cache.matches(1, "abc", "resumed"));
+        assert!(cache.matches(1, "abc", Some(4), "new"));
+        assert!(!cache.matches(1, "abc", Some(5), "new"));
+        assert!(!cache.matches(1, "other", Some(4), "new"));
+        assert!(!cache.matches(2, "abc", Some(4), "new"));
+        assert!(!cache.matches(1, "abc", Some(4), "resumed"));
     }
 
     #[test]
@@ -6108,6 +6092,69 @@ mod tests {
         assert!(!entry.render_line().contains("README.md"));
         entry.folded = false;
         assert!(entry.render_line().contains("README.md"));
+    }
+
+    #[test]
+    fn osc52_copy_sequence_is_exact_and_utf8_safe() {
+        assert_eq!(osc52_sequence("hello"), "\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(osc52_sequence("🙂"), "\x1b]52;c;8J+Zgg==\x07");
+    }
+
+    #[test]
+    fn composer_border_is_visible_and_focus_changes_its_style() {
+        fn render_border_style(focus: TuiFocus) -> Style {
+            let backend = TestBackend::new(72, 18);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut viewport = TranscriptViewport::default();
+            terminal
+                .draw(|frame| {
+                    render_session_activities(
+                        frame,
+                        &TuiChrome::fixture(),
+                        &[ActivityEntry::new(ActivityKind::Assistant, "", "ready")],
+                        &Composer::default(),
+                        None,
+                        None,
+                        false,
+                        &mut viewport,
+                        focus,
+                        None,
+                        0,
+                        None,
+                        None,
+                        &StartupWelcome::fixture(),
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .expect("render");
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .find(|cell| cell.symbol() == "─")
+                .expect("composer top border")
+                .style()
+        }
+
+        let focused = render_border_style(TuiFocus::Composer);
+        let transcript = render_border_style(TuiFocus::Transcript);
+        assert_ne!(focused, transcript);
+    }
+
+    #[test]
+    fn selected_transcript_block_is_kept_inside_the_row_viewport() {
+        let owners = (0..12).flat_map(|owner| [owner, owner]).collect::<Vec<_>>();
+        let mut viewport = TranscriptViewport::default();
+        viewport.observe_layout(owners.len(), 5);
+        assert_eq!(viewport.top_row(), 19);
+
+        ensure_selected_visible(&mut viewport, &owners, 2);
+        assert_eq!(viewport.top_row(), 4);
+        ensure_selected_visible(&mut viewport, &owners, 11);
+        assert_eq!(viewport.top_row(), 19);
     }
 
     #[test]
@@ -6205,6 +6252,51 @@ mod tests {
             rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn workspace_consent_key_reducer_persists_the_gate_before_a_goal_can_start() {
+        let project = tempdir().expect("project");
+        let mut consent_directory = pending_workspace_consent(project.path());
+        let mut pending_goal = Some("inspect the project".to_string());
+        assert!(consent_directory.is_some());
+
+        let mut selected = 0;
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Down, KeyModifiers::NONE),
+            WorkspaceConsentAction::SelectionChanged
+        );
+        assert_eq!(selected, 1);
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Enter, KeyModifiers::NONE),
+            WorkspaceConsentAction::Decline
+        );
+        assert!(pending_workspace_consent(project.path()).is_some());
+        assert_eq!(pending_goal.as_deref(), Some("inspect the project"));
+
+        selected = 0;
+        assert_eq!(
+            workspace_consent_action_for_key(&mut selected, KeyCode::Char('y'), KeyModifiers::NONE),
+            WorkspaceConsentAction::Allow
+        );
+        let released = grant_workspace_access_and_release_goal(
+            project.path(),
+            &mut consent_directory,
+            &mut pending_goal,
+        )
+        .expect("persist workspace grant before releasing goal");
+        assert_eq!(released.as_deref(), Some("inspect the project"));
+        assert!(pending_goal.is_none());
+        assert!(consent_directory.is_none());
+        assert!(pending_workspace_consent(project.path()).is_none());
+        assert!(crate::config::workspace_access_is_granted(project.path()).expect("read grant"));
+        assert!(grant_workspace_access_and_release_goal(
+            project.path(),
+            &mut consent_directory,
+            &mut pending_goal,
+        )
+        .expect("reload persisted workspace grant")
+        .is_none());
     }
 
     #[test]
@@ -6693,6 +6785,13 @@ mod tests {
             "read_file · src/lib.rs"
         );
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1m15s");
+
+        let compact = waiting_meter_text(&meter, 40, true);
+        assert!(unicode_display_width(&compact) <= 40, "{compact}");
+        assert!(compact.contains("s:2/5"), "{compact}");
+        assert!(compact.contains("12s"), "{compact}");
+        assert!(compact.contains("t:8k"), "{compact}");
+        assert!(compact.contains("running"), "{compact}");
     }
 
     #[test]
@@ -7265,6 +7364,8 @@ mod tests {
     #[test]
     fn renders_every_agent_lifecycle_event() {
         let mut output = LiveOutput::default();
+        let read_invocation = crate::tools::ToolInvocationId::new();
+        let terminal_invocation = crate::tools::ToolInvocationId::new();
         let events = vec![
             StreamEvent::StateTransition {
                 state: "planning".to_string(),
@@ -7275,6 +7376,7 @@ mod tests {
             },
             StreamEvent::Content("Working".to_string()),
             StreamEvent::ToolCallChunk {
+                invocation_id: read_invocation,
                 index: 0,
                 name: Some("read_file".to_string()),
                 arguments: Some("{}".to_string()),
@@ -7287,21 +7389,25 @@ mod tests {
                 options: vec!["plan".to_string(), "execute".to_string()],
             },
             StreamEvent::ToolStarted {
+                invocation_id: read_invocation,
                 tool_name: "read_file".to_string(),
             },
             StreamEvent::TerminalOutput {
+                invocation_id: terminal_invocation,
                 tool_name: "run_terminal".to_string(),
                 stream: "stderr".to_string(),
                 chunk: "building\n".to_string(),
                 background_task_id: None,
             },
             StreamEvent::ToolCompleted {
+                invocation_id: read_invocation,
                 tool_name: "read_file".to_string(),
                 success: true,
                 output: Some(json!({"content": "nib"})),
                 error: None,
             },
             StreamEvent::ToolCompleted {
+                invocation_id: terminal_invocation,
                 tool_name: "run_terminal".to_string(),
                 success: false,
                 output: None,
@@ -8057,6 +8163,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         ));
         store.save(&mut session).expect("save pending plan");
@@ -8750,7 +8858,7 @@ mod tests {
 
     #[test]
     fn approval_prompt_states_the_command_without_a_metadata_dump() {
-        let prompt = approval_prompt(&ToolCall {
+        let call = ToolCall {
             invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({
@@ -8760,7 +8868,9 @@ mod tests {
             }),
             session_id: None,
             project_root: None,
-        });
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+        let prompt = approval_prompt(&call, &context);
         assert_eq!(prompt.statement, "Run this command");
         assert_eq!(prompt.subject, "git status --short --branch && task check");
         assert_eq!(
@@ -8772,11 +8882,48 @@ mod tests {
             compact_approval_risk("destructive / requires_approval"),
             "destructive"
         );
+
+        let raw_secret = "raw-command-secret";
+        let secret_call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({"command": format!("deploy --token={raw_secret}")}),
+            session_id: None,
+            project_root: None,
+        };
+        let mut safe_context =
+            ApprovalContext::compatibility(&secret_call, PermissionLevel::Destructive);
+        safe_context.display_subject = "deploy --token=[REDACTED]".to_string();
+        let safe_prompt = approval_prompt(&secret_call, &safe_context);
+        assert_eq!(safe_prompt.subject, "deploy --token=[REDACTED]");
+        assert!(!safe_prompt.subject.contains(raw_secret));
+    }
+
+    #[test]
+    fn approval_prompt_discloses_omitted_patch_targets() {
+        let patch = ["e.rs", "b.rs", "a.rs", "d.rs", "c.rs"]
+            .into_iter()
+            .map(|path| format!("*** Update File: {path}\n"))
+            .collect::<String>();
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({"dry_run": false, "patch": patch}),
+            session_id: None,
+            project_root: None,
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+
+        let prompt = approval_prompt(&call, &context);
+
+        assert_eq!(prompt.statement, "Apply a patch");
+        assert_eq!(prompt.subject, "5 files (+1 more): a.rs,b.rs,c.rs,d.rs");
+        assert!(!prompt.subject.contains("e.rs"));
     }
 
     #[test]
     fn plan_approval_card_lists_numbered_steps() {
-        let prompt = approval_prompt(&ToolCall {
+        let call = ToolCall {
             invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "approve_plan".to_string(),
             arguments: json!({
@@ -8786,18 +8933,12 @@ mod tests {
             }),
             session_id: None,
             project_root: None,
-        });
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Plan);
+        let prompt = approval_prompt(&call, &context);
         assert_eq!(prompt.statement, "Approve this plan");
         assert_eq!(
-            approval_plan_step_lines(&ToolCall {
-                invocation_id: crate::tools::ToolInvocationId::new(),
-                tool_name: "approve_plan".to_string(),
-                arguments: json!({
-                    "steps": ["inspect files", "change parser", "run tests"],
-                }),
-                session_id: None,
-                project_root: None,
-            }),
+            context.details,
             vec![
                 "1. inspect files".to_string(),
                 "2. change parser".to_string(),

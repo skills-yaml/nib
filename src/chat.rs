@@ -1262,6 +1262,7 @@ impl PreparedPlainAgentStep {
         let loop_cfg = nib::agent::AgentLoopConfig {
             max_steps: 0,
             mode: mode.as_str().to_string(),
+            interactive_request: mode == InteractiveAgentMode::Execute,
             provider: None,
             auto_approve: false,
             approval_handler: Some(Arc::new(BrokeredPlainApprovalHandler {
@@ -2161,6 +2162,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         );
         plan.approve();

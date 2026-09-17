@@ -74,7 +74,9 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                     "pattern": {"type": "string", "minLength": 1, "maxLength": 4096},
                     "path": {"type": "string", "minLength": 1, "maxLength": 4096, "default": "."},
                     "glob": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50}
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+                    "verification_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Exact active-plan typed probe obligation this invocation resolves."},
+                    "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -108,9 +110,17 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                 "properties": {
                     "command": {"type": "string", "minLength": 1, "maxLength": 65536},
                     "cwd": {"type": "string", "minLength": 1, "maxLength": 4096, "default": "."},
+                    "affected_paths": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "description": "Explicit worktree-relative paths affected by an opaque mutating command."
+                    },
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Overrides the configured terminal timeout."},
                     "background": {"type": "boolean", "default": false},
                     "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072, "description": "Maximum retained tail bytes for each of stdout and stderr."},
+                    "verification_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Exact active-plan verification obligation this invocation resolves."},
                     "plan_id": {"type": "string", "minLength": 1, "maxLength": 128}
                 },
                 "required": ["command"],
@@ -308,6 +318,13 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                         "items": {"type": "string", "minLength": 1, "maxLength": 1000},
                         "maxItems": 20,
                         "default": []
+                    },
+                    "dependent_paths": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "maxItems": 32,
+                        "default": [],
+                        "description": "Worktree-relative paths whose actions require this answer. Empty means the whole current plan step."
                     }
                 },
                 "required": ["question"],

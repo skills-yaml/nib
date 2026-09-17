@@ -2,7 +2,7 @@ use chrono::Utc;
 use nib::agent::CancellationSignal;
 use nib::config::{ExecutionConfig, TerminalConfig};
 use nib::sandbox::worktree::Worktree;
-use nib::session::SessionStore;
+use nib::session::{MessageOrigin, SessionStore};
 #[cfg(all(unix, debug_assertions))]
 use nib::tools::delegation::install_merge_interruption_test_barrier;
 #[cfg(unix)]
@@ -480,6 +480,7 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
     let environment = std::collections::HashMap::new();
     let bounded = nib::tools::core::dispatch(
         "invoke_subagent",
+        nib::tools::ToolInvocationId::new(),
         &json!({"prompt": "explore the project", "max_steps": 1}),
         root.path(),
         &ExecutionConfig::default(),
@@ -715,6 +716,11 @@ async fn subagent_merge_requires_successful_verification_and_preserves_result() 
         .join(".nib/profiles/default/sessions/child.json")
         .is_file());
     assert!(!worktree.path.join(".nib/sessions").exists());
+    let child_store = SessionStore::for_project(&worktree.path).expect("child session store");
+    let child = child_store.load("child").expect("child session");
+    assert_eq!(child.messages[0].role, "user");
+    assert_eq!(child.message_origin(0), MessageOrigin::ToolOutput);
+    assert!(child.human_intent.is_empty());
 
     let failed = execute_merge(&mut executor, root.path(), "parent", "sub-test", "false").await;
     assert!(!failed.success, "verification must gate merge");

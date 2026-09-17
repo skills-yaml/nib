@@ -9,7 +9,9 @@ use crate::context::{bounded_session_context, RuntimeContextSection, RuntimeCont
 use crate::session::Session;
 
 const MIN_RUNTIME_CONTEXT_TOKENS: usize = 64;
-const MIN_HISTORY_TOKENS: usize = 8;
+// Leave enough room for bounded head/tail evidence from both a compressed
+// summary and the latest message when fixed prompt instructions grow.
+const MIN_HISTORY_TOKENS: usize = 48;
 const MAX_PROJECT_ROOT_TOKENS: usize = 64;
 const MAX_TOOL_DESCRIPTION_TOKENS: usize = 128;
 const MAX_COMPACT_TOOL_DESCRIPTION_TOKENS: usize = 16;
@@ -54,6 +56,26 @@ pub fn approximate_llm_input_tokens(messages: &[Value], tools: Option<&[Value]>)
         None => json!({"messages": messages}),
     };
     approximate_tokens(&payload.to_string())
+}
+
+pub fn ensure_required_instructions_present(
+    input: &BoundedLlmInput,
+    instructions: &str,
+) -> Result<(), String> {
+    if instructions.is_empty() {
+        return Ok(());
+    }
+    let present = input.messages.iter().any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains(instructions))
+    });
+    if present {
+        Ok(())
+    } else {
+        Err("llm.context_length cannot fit the complete required project instructions; dependent work is blocked until the context budget or instruction scope changes".to_string())
+    }
 }
 
 pub fn bound_single_turn_input(
@@ -284,6 +306,18 @@ fn build_runtime_system_prompt(
     tool_count: usize,
 ) -> String {
     let root = truncate_to_tokens(&project_root.display().to_string(), MAX_PROJECT_ROOT_TOKENS);
+    if mode == "answer_only" {
+        let context = if context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{context}")
+        };
+        return format!(
+            "{}\n\n{}\nProject root: {root}{context}",
+            crate::agent::instructions::SHARED,
+            crate::agent::instructions::ANSWER_ONLY,
+        );
+    }
     let tool_instruction = if tool_use_enforcement && tool_count > 0 {
         "For any step that claims an observable inspection or change, use an available tool and ground the result in its returned artifact."
     } else {
@@ -838,6 +872,41 @@ mod tests {
     }
 
     #[test]
+    fn answer_only_prompt_exposes_only_the_routing_control_and_forbids_claimed_actions() {
+        let context = hostile_context();
+        let session = hostile_session();
+        let controls = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "request_plan",
+                "description": "Request normal planning",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })];
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: None,
+            tools: Some(&controls),
+            mode: "answer_only",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: false,
+            context_length: 2_400,
+        })
+        .expect("bounded answer-only input");
+
+        assert_eq!(bounded.included_tool_count, 1);
+        assert_eq!(
+            bounded.tools.as_ref().unwrap()[0]["function"]["name"],
+            "request_plan"
+        );
+        let system = bounded.messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("non-executable routing control"));
+        assert!(system.contains("no inspection, clarification, external lookup"));
+        assert!(!system.contains("current persisted, approved plan step"));
+    }
+
+    #[test]
     fn single_turn_payload_counts_system_tools_and_user_content_together() {
         let tools = vec![json!({
             "type": "function",
@@ -951,5 +1020,28 @@ mod tests {
         assert!(bounded.contains("AGENTS_COMPLETE_HEAD"));
         assert!(bounded.contains("TAIL_RULE_MUST_RECONCILE"));
         assert!(bounded.contains("...[bounded]..."));
+    }
+
+    #[test]
+    fn required_instruction_fit_check_rejects_a_bounded_policy_prompt() {
+        let mut context = hostile_context();
+        context.agents = format!(
+            "REQUIRED_POLICY_HEAD\n{}\nREQUIRED_POLICY_TAIL",
+            "mandatory scoped rule ".repeat(1_000)
+        );
+        let input = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &hostile_session(),
+            current_step: None,
+            tools: None,
+            mode: "execute",
+            project_root: Path::new("/workspace/nib"),
+            tool_use_enforcement: false,
+            context_length: 2_400,
+        })
+        .expect("ordinary aggregate bounding remains available");
+        let error = ensure_required_instructions_present(&input, &context.agents)
+            .expect_err("runtime must not claim a truncated required policy was followed");
+        assert!(error.contains("complete required project instructions"));
     }
 }

@@ -8520,7 +8520,12 @@ pub fn send_message_to_subagent(args: &Value, project_root: &Path) -> Result<Val
     validate_record_worktree(&canonical_project_root(project_root)?, &record)?;
     let store = crate::session::SessionStore::for_project(&record.worktree_path)?;
     store
-        .try_append_message(&record.child_session_id, "user", message)
+        .try_append_message_with_origin(
+            &record.child_session_id,
+            "user",
+            message,
+            crate::session::MessageOrigin::ToolOutput,
+        )
         .map_err(|error| error.to_string())?;
     Ok(json!({
         "status": "sent",
@@ -21078,7 +21083,10 @@ mod tests {
         }
 
         drop(held);
-        RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_millis(100))
+        // The timeout covers records-directory and lock-anchor validation as well as
+        // acquisition. Leave enough room for those bounded filesystem checks on a
+        // loaded CI host after the child-process probes exit.
+        RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(1))
             .await
             .expect("restored persistent lock identity remains usable");
     }

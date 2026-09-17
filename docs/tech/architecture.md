@@ -197,31 +197,53 @@ plans proportional, avoid repeated work, and ground implementation in verificati
 These are model instructions; tool permissions, exact plan binding, and reconciliation
 are enforced by Rust independently of model compliance.
 
-Planning still takes one model request, even for a simple question. It exposes only
-`submit_plan`, so a needed inspection or clarification becomes an approved plan step.
+Normal planning takes one model request and exposes only `submit_plan`, so a needed
+inspection or clarification becomes an approved plan step. The disabled-by-default
+`agent.answer_only` route may precede planning for a new interactive execute request
+when the project and caller do not require planning and no plan or run is active. Its
+single bounded request exposes only the typed, non-executable `request_plan` control.
+Plain content completes that activity without creating or advancing a plan; a valid
+control or unsupported result falls back once to normal planning. Invalid controls
+and provider failures terminate the route without also invoking the planner. Active
+plan state is left intact and receives no model or tool call from the new request.
 Execution can call `ask_question` alone, wait for the answer, and resume; skipped or
 unavailable input remains unresolved. Each tool batch continues the current step.
 A response without tools requests completion, but an unresolved tool failure keeps
 the step blocked. Three consecutive unchanged, fully failed batches stop with an
 audited failure instead of consuming the full turn allowance. Changed attempts or
 results and successful intervening work permit recovery.
-This status is deliberately coarse: a later successful batch clears the blocked
-status; it does not prove that an earlier failed test was repaired. The model must
-still verify the requested outcome. Likewise, the history reservation follows the
-latest `user` role, which can include a runtime-generated plan-continuation message.
 
-At startup nib loads one nearest supported project instruction file, selected skill
-bodies/references, fixed-root project documentation, profile memory, workload state,
-and attached files. It does not automatically merge nested instruction files or read
-every spec and project-memory document. The execution policy therefore calls for
-scoped reads of the relevant instructions, source, and specs before edits. Ordinary
-files, tool observations, remembered facts, and summaries supply evidence; they do
-not grant permission or replace the current user request.
+Required verification is persisted separately from coarse step status. Each obligation
+is bound to its plan and step, authority (`human`, `project`, or approved plan), exact
+tool and normalized arguments, expected result type, audited invocation, managed
+worktree, affected-content digest, and immutable attempt history. The executor rejects
+a mismatched tool call before side effects. Passing evidence becomes stale when later
+audited mutation or completion-time content revalidation finds changed content. Typed
+absence evidence is accepted only from an untruncated empty `grep` result. Project
+requirements such as `task verify` are derived independently from resolved
+instructions; exact human commands are derived from backticks or `$ ` command lines.
+A human may waive an unrun non-project obligation with
+`waive verification <id>: <reason>`; failed, running, passed, and project obligations
+cannot be relabeled as waived. `/status` and plan detail expose each requirement's
+state and authority. History reservation follows authoritative message provenance, so
+a runtime continuation or tool-origin `user` role cannot displace a later human
+correction.
 
-An explicit active-skill list on the profile selects by name; otherwise automatic
-selection matches names, tags, or description-word overlap with the goal. This can
-select broadly, and selected skills can contribute policy and after-tool hooks as
-well as text. Tighter automatic relevance filtering remains a separate improvement.
+At startup nib resolves bounded global and project-root instruction files, selected
+skill bodies/references, fixed-root project documentation, profile memory, workload
+state, and attached files. Before each tool batch it resolves every declared target
+scope, applies root-to-target and base/local precedence, and refreshes changed file
+identities. An opaque mutating terminal command must declare affected paths; a
+classified safe command may use its working-directory scope. Incomplete, linked,
+oversized, unreadable, or prompt-incompatible required instructions block dependent
+execution. Ordinary files, tool observations, remembered facts, and summaries supply
+evidence; they do not grant permission or replace the current user request.
+
+An explicit active-skill list on the profile selects by name and reports missing,
+ambiguous, or over-budget selections. Otherwise bounded automatic selection uses
+stable name, tag, and meaningful two-token description matches, ranks ties
+deterministically, and loads at most three skills. Only selected skills can contribute
+text, policy, references, or after-tool hooks; selection itself uses no model request.
 
 Fresh requests allocate an initial 45% of the configured window to context sections,
 30% to tools, and 25% to history, then shrink within an aggregate serialized-input
@@ -233,6 +255,22 @@ allocation, requests a bounded continuation summary, and retains the raw audit t
 The summary prioritizes intent, constraints, decisions, unanswered questions, failed
 approaches, verification evidence, and remaining work. Active provider continuations
 retain their separate bounded transport state and defer automatic compression.
+Each agent run also persists bounded `agent_resource_usage` evidence: logical
+generation requests, executable tool attempts, estimated input-token totals and
+maximum, compression requests, and repeated questions. The estimate uses the same
+provider-neutral approximation as prompt budgeting and is labeled approximate; raw
+prompt or question text is not copied into this accounting event.
+
+The added provenance, clarification, resource, and verification fields use serde
+defaults, so current nib reads pre-T041 sessions without inventing human authority or
+passing checks. A legacy plan with no obligations receives currently derivable human
+and project requirements before execution. A legacy obligation without an exact
+invocation contract remains untrusted and makes the plan non-resumable. Older nib
+binaries ignore the new object fields when reading, but would drop them if they write
+the session. Safe rollback therefore means stopping nib, backing up the profile
+session directory, and using the older binary read-only or starting a new session;
+do not resume and save a T041 session with an older binary. Restoring the backup and
+returning to the T041-or-newer binary preserves the evidence.
 
 Self-development uses the same flow as other implementation work: inspect nib's
 instructions/specs and source, edit within the managed worktree, run focused checks

@@ -16,7 +16,10 @@ use nib::llm::{
 };
 use nib::profile::ProfileRegistry;
 use nib::session::memory::MemoryStore;
-use nib::session::{Plan, PlanStep, Session, SessionError, SessionStore};
+use nib::session::{
+    MessageOrigin, Plan, PlanStep, Session, SessionError, SessionStore, VerificationAuthority,
+    VerificationExpectedOutcome, VerificationObligation, VerificationStatus,
+};
 #[cfg(target_os = "linux")]
 use nib::tools::delegation::get_subagent_record;
 use nib::tools::delegation::{write_subagent_record, SubagentRecord};
@@ -31,6 +34,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tempfile::{tempdir, TempDir};
+
+const T041_T040_BASELINE_REVISION: &str = "c64f953";
 
 fn mock_llm_config(context_length: usize) -> LlmConfig {
     LlmConfig {
@@ -169,6 +174,29 @@ fn serve_responses_sequence(responses: Vec<Value>) -> (String, std::sync::mpsc::
     (format!("http://{address}/v1"), request_rx)
 }
 
+fn serve_malformed_responses_stream_once() -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed Responses listener");
+    let address = listener.local_addr().expect("malformed Responses address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, request) =
+            accept_fixture_post(&listener, "malformed Responses fixture connection");
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("capture malformed Responses fixture request");
+        let body = "data: {not-json}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("malformed Responses fixture response");
+    });
+    (format!("http://{address}/v1"), request_rx)
+}
+
 fn failure_fixture_tool_turn(id: &str, calls: Vec<(&str, Value)>) -> Value {
     json!({
         "id": format!("response-{id}"),
@@ -196,10 +224,514 @@ fn failure_fixture_text_turn() -> Value {
     })
 }
 
+fn answer_fixture_text_turn(text: &str) -> Value {
+    json!({
+        "id": "response-answer-only",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }],
+    })
+}
+
+fn answer_fixture_refusal_turn() -> Value {
+    json!({
+        "id": "response-answer-refusal",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "fixture refusal"}],
+        }],
+    })
+}
+
+fn answer_fixture_planner_turn() -> Value {
+    failure_fixture_tool_turn(
+        "answer-planner",
+        vec![("submit_plan", json!({"steps": ["Answer the request"]}))],
+    )
+}
+
+fn configure_answer_fixture(
+    root: &Path,
+    base_url: &str,
+    answer_only: bool,
+    project_requires_planning: bool,
+) {
+    let mut config = mock_runtime_config();
+    config.agent.answer_only = answer_only;
+    config.execution.provider = "internal".to_string();
+    config.execution.plan_mode = project_requires_planning;
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers = HashMap::from([(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url.to_string()),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..Default::default()
+        },
+    )]);
+    save_nib_config_full(root, &mut config).expect("answer fixture config");
+}
+
+fn answer_resource_event(session: &Session) -> &Value {
+    &session
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "agent_resource_usage")
+        .expect("persisted resource evidence")
+        .details
+}
+
+async fn run_answer_fixture(
+    root: &Path,
+    responses: Vec<Value>,
+    answer_only: bool,
+    project_requires_planning: bool,
+    session_id: &str,
+    goal: &str,
+) -> (AgentRunSummary, Session, Vec<Value>) {
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    configure_answer_fixture(root, &base_url, answer_only, project_requires_planning);
+    let store = SessionStore::for_project(root).expect("answer fixture store");
+    store.create_session_with_id(session_id);
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_agent_loop(
+            root.to_path_buf(),
+            session_id,
+            goal,
+            AgentLoopConfig {
+                max_steps: 8,
+                interactive_request: true,
+                auto_approve: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("bounded answer fixture")
+    .expect("answer fixture run");
+    let persisted = store.load(session_id).expect("answer fixture session");
+    let requests = request_rx
+        .try_iter()
+        .map(|request| captured_json_body(&request))
+        .collect();
+    (summary, persisted, requests)
+}
+
+fn response_tool_names(request: &Value) -> Vec<&str> {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect()
+}
+
+#[tokio::test]
+async fn answer_only_success_uses_one_generation_and_no_executable_resources() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![answer_fixture_text_turn("The fixture answer is forty-two.")],
+        true,
+        false,
+        "answer-only-success",
+        "What is the fixture answer?",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.steps_taken, 1);
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(
+        summary.last_message.as_deref(),
+        Some("The fixture answer is forty-two.")
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    assert_eq!(requests[0]["tools"][0]["strict"], true);
+    assert!(persisted.plan.is_none());
+    assert!(persisted.tool_calls.is_empty());
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_started")
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_completed")
+            .count(),
+        1
+    );
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 1);
+    assert_eq!(resources["tool_attempts"], 0);
+    assert_eq!(resources["compression_requests"], 0);
+    assert_eq!(resources["repeated_questions"], 0);
+    assert!(resources["approximate_context_tokens_total"]
+        .as_u64()
+        .is_some_and(|tokens| tokens > 0));
+}
+
+#[tokio::test]
+async fn answer_only_request_plan_falls_back_once_to_the_normal_planner() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![
+            failure_fixture_tool_turn("request-normal-plan", vec![("request_plan", json!({}))]),
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("Normal planning completed the answer."),
+        ],
+        true,
+        false,
+        "answer-only-action-fallback",
+        "Inspect the project and answer from the result.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.steps_taken, 3);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    assert_eq!(response_tool_names(&requests[1]), ["submit_plan"]);
+    assert!(response_tool_names(&requests[2]).contains(&"read_file"));
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "answer_route_fallback")
+            .count(),
+        1
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "answer_route_completed"
+            && event.details["outcome"] == "fallback"
+            && event.details["reason"] == "request_plan"
+    }));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "plan_generated"));
+    assert!(!persisted
+        .tool_calls
+        .iter()
+        .any(|record| record.tool_name.as_deref() == Some("request_plan")));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 3);
+    assert_eq!(resources["tool_attempts"], 0);
+}
+
+#[tokio::test]
+async fn answer_only_refusal_is_one_unsupported_fallback_before_normal_planning() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![
+            answer_fixture_refusal_turn(),
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("Fallback answer."),
+        ],
+        true,
+        false,
+        "answer-only-refusal-fallback",
+        "Answer the fixture request.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(requests.len(), 3);
+    let fallbacks = persisted
+        .events
+        .iter()
+        .filter(|event| event.kind == "answer_route_fallback")
+        .collect::<Vec<_>>();
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].details["reason"], "model_refusal");
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "answer_route_completed"
+            && event.details["outcome"] == "fallback"
+            && event.details["reason"] == "model_refusal"
+    }));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 3);
+}
+
+#[tokio::test]
+async fn malformed_answer_only_control_reports_failure_without_invoking_the_planner() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "malformed-request-plan",
+            vec![("request_plan", json!({"unexpected": true}))],
+        )],
+        true,
+        false,
+        "answer-only-malformed",
+        "Answer or request a plan.",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "answer_only_failed");
+    assert!(summary.is_failure());
+    assert_eq!(
+        summary.failure.as_ref().unwrap().class,
+        LlmErrorClass::Protocol
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.plan.is_none());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn answer_only_transport_failure_reports_once_without_invoking_the_planner() {
+    let root = git_repository();
+    let (base_url, request_rx) = serve_malformed_responses_stream_once();
+    configure_answer_fixture(root.path(), &base_url, true, false);
+    let store = SessionStore::for_project(root.path()).expect("transport failure store");
+    let session = store.create_session_with_id("answer-only-transport-failure");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "Answer the fixture request.",
+        AgentLoopConfig {
+            max_steps: 8,
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("answer-only transport failure reconciles");
+    let persisted = store.load(&session.id).expect("transport failure session");
+    let requests = request_rx.try_iter().collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "answer_only_failed");
+    assert!(summary.is_failure());
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.plan.is_none());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_fallback"));
+    let completed = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "answer_route_completed")
+        .expect("failed route terminal event");
+    assert_eq!(completed.details["reason"], "transport_failed");
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn active_unrelated_plan_rejects_answer_only_without_model_or_plan_mutation() {
+    let root = git_repository();
+    let mut config = mock_runtime_config();
+    config.agent.answer_only = true;
+    config.execution.plan_mode = false;
+    save_nib_config_full(root.path(), &mut config).expect("active plan config");
+    let store = SessionStore::for_project(root.path()).expect("active plan store");
+    let mut session = store.create_session_with_id("answer-only-active-plan");
+    let plan = Plan::new(
+        "unrelated existing work",
+        vec![PlanStep {
+            description: "Preserve this exact pending step".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    );
+    session.plan = Some(plan);
+    store.save(&mut session).expect("active plan fixture");
+    let expected_plan = serde_json::to_value(session.plan.as_ref().unwrap()).unwrap();
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "What is two plus two?",
+        AgentLoopConfig {
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("active plan rejection");
+    let persisted = store.load(&session.id).expect("active plan session");
+
+    assert_eq!(summary.outcome, "planning_required_active_plan");
+    assert!(summary.is_failure());
+    assert_eq!(
+        serde_json::to_value(persisted.plan.as_ref().unwrap()).unwrap(),
+        expected_plan
+    );
+    assert!(!persisted.events.iter().any(|event| matches!(
+        event.kind.as_str(),
+        "answer_route_started" | "plan_invalidated" | "plan_generated"
+    )));
+    let resources = answer_resource_event(&persisted);
+    assert_eq!(resources["generation_requests"], 0);
+    assert_eq!(resources["tool_attempts"], 0);
+}
+
+#[tokio::test]
+async fn project_planning_requirement_and_disabled_default_bypass_answer_only() {
+    for (session_id, enabled, project_requires_planning) in [
+        ("answer-only-project-planning", true, true),
+        ("answer-only-disabled-default", false, false),
+    ] {
+        let root = git_repository();
+        let (summary, persisted, requests) = run_answer_fixture(
+            root.path(),
+            vec![
+                answer_fixture_planner_turn(),
+                answer_fixture_text_turn("Planned answer."),
+            ],
+            enabled,
+            project_requires_planning,
+            session_id,
+            "Answer through required planning.",
+        )
+        .await;
+        assert_eq!(summary.outcome, "completed");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
+        assert!(!persisted
+            .events
+            .iter()
+            .any(|event| event.kind.starts_with("answer_route_")));
+        assert_eq!(answer_resource_event(&persisted)["generation_requests"], 2);
+    }
+}
+
+#[tokio::test]
+async fn caller_plan_mode_bypasses_answer_only() {
+    let root = git_repository();
+    let (base_url, request_rx) = serve_responses_sequence(vec![answer_fixture_planner_turn()]);
+    configure_answer_fixture(root.path(), &base_url, true, false);
+    let store = SessionStore::for_project(root.path()).expect("plan-mode store");
+    let session = store.create_session_with_id("answer-only-caller-plan-mode");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "Prepare a plan for this request.",
+        AgentLoopConfig {
+            max_steps: 8,
+            mode: "plan".to_string(),
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("caller-required planning completes");
+    let persisted = store.load(&session.id).expect("plan-mode session");
+    let requests = request_rx
+        .try_iter()
+        .map(|request| captured_json_body(&request))
+        .collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "plan_ready");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
+    assert!(persisted.plan.is_some());
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind.starts_with("answer_route_")));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 1);
+}
+
+#[tokio::test]
+async fn identical_fixture_inputs_record_baseline_and_candidate_resource_counters() {
+    assert_eq!(T041_T040_BASELINE_REVISION, "c64f953");
+    let goal = "What is the fixture answer?";
+    let baseline_root = git_repository();
+    let (_, baseline, baseline_requests) = run_answer_fixture(
+        baseline_root.path(),
+        vec![
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("The fixture answer is forty-two."),
+        ],
+        false,
+        false,
+        "answer-resource-baseline",
+        goal,
+    )
+    .await;
+    let candidate_root = git_repository();
+    let (_, candidate, candidate_requests) = run_answer_fixture(
+        candidate_root.path(),
+        vec![answer_fixture_text_turn("The fixture answer is forty-two.")],
+        true,
+        false,
+        "answer-resource-candidate",
+        goal,
+    )
+    .await;
+
+    let baseline_resources = answer_resource_event(&baseline);
+    let candidate_resources = answer_resource_event(&candidate);
+    assert_eq!(baseline_requests.len(), 2);
+    assert_eq!(candidate_requests.len(), 1);
+    assert_eq!(baseline_resources["generation_requests"], 2);
+    assert_eq!(candidate_resources["generation_requests"], 1);
+    for field in [
+        "tool_attempts",
+        "compression_requests",
+        "repeated_questions",
+    ] {
+        assert_eq!(baseline_resources[field], 0, "baseline {field}");
+        assert_eq!(candidate_resources[field], 0, "candidate {field}");
+    }
+    for resource in [baseline_resources, candidate_resources] {
+        assert!(resource["approximate_context_tokens_total"]
+            .as_u64()
+            .is_some_and(|tokens| tokens > 0));
+        assert!(resource["approximate_context_tokens_max"]
+            .as_u64()
+            .is_some_and(|tokens| tokens > 0));
+    }
+}
+
 async fn run_failure_fixture(
     root: &Path,
     responses: Vec<Value>,
     question_handler: Option<Arc<dyn QuestionHandler>>,
+) -> (AgentRunSummary, Session, Vec<Value>) {
+    run_failure_fixture_with_obligations(root, responses, question_handler, Vec::new()).await
+}
+
+async fn run_failure_fixture_with_obligations(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
 ) -> (AgentRunSummary, Session, Vec<Value>) {
     let (base_url, request_rx) = serve_responses_sequence(responses);
     let mut config = mock_runtime_config();
@@ -227,6 +759,8 @@ async fn run_failure_fixture(
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations,
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -260,6 +794,518 @@ async fn run_failure_fixture(
     (summary, persisted, requests)
 }
 
+fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (SessionStore, String) {
+    let mut config = mock_runtime_config();
+    config.llm.context_length = context_length;
+    config.execution.provider = "internal".to_string();
+    save_nib_config_full(root, &mut config).expect("mock fixture config");
+    let store = SessionStore::for_project(root).expect("fixture store");
+    let mut session = store.create_session();
+    let mut plan = Plan::new(
+        goal,
+        vec![PlanStep {
+            description: "Perform the instruction-sensitive work".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("approved fixture plan");
+    (store, session.id)
+}
+
+fn required_check(command: &str) -> VerificationObligation {
+    required_terminal_check(
+        "required-check",
+        "run the required verification command",
+        command,
+        vec![".".to_string()],
+    )
+}
+
+fn required_terminal_check(
+    id: &str,
+    description: &str,
+    command: &str,
+    affected_paths: Vec<String>,
+) -> VerificationObligation {
+    VerificationObligation::pending_tool(
+        id,
+        description,
+        affected_paths.clone(),
+        "run_terminal",
+        json!({"command": command, "affected_paths": affected_paths}),
+        nib::session::VerificationExpectedOutcome::Success,
+    )
+    .expect("valid terminal verification contract")
+}
+
+#[tokio::test]
+async fn unrelated_success_cannot_clear_a_failed_required_verification() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "exit 7",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "unrelated-read",
+            vec![("read_file", json!({"path": "note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("exit 7")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(summary.is_failure());
+    assert_eq!(summary.tool_call_count, 2);
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Failed
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "step_completion_rejected"
+            && event.details["reason"] == "required_verification_unresolved"
+    }));
+}
+
+#[tokio::test]
+async fn exact_corrective_verification_resolves_the_failed_obligation() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "test -f verification-ready.txt",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "repair",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf ready > verification-ready.txt",
+                    "affected_paths": ["verification-ready.txt"]
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "verification-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "test -f verification-ready.txt",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("test -f verification-ready.txt")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert!(plan.is_complete());
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Passed
+    );
+    assert_eq!(
+        plan.steps[0].verification_obligations[0]
+            .attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        [VerificationStatus::Failed, VerificationStatus::Passed]
+    );
+    assert!(plan.steps[0].verification_obligations[0]
+        .worktree_identity
+        .is_some());
+    assert!(plan.steps[0].verification_obligations[0]
+        .content_identity
+        .is_some());
+}
+
+#[tokio::test]
+async fn self_development_failure_repair_verification_and_diff_share_one_worktree() {
+    let root = git_repository();
+    let cargo_command = "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet";
+    let patch = concat!(
+        "--- a/src/lib.rs\n",
+        "+++ b/src/lib.rs\n",
+        "@@ -1,3 +1,3 @@\n",
+        " pub fn answer() -> u32 {\n",
+        "-    41\n",
+        "+    42\n",
+        " }\n",
+    );
+    let affected_paths = json!(["Cargo.toml", "src/lib.rs"]);
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "behavior-test-fails",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": cargo_command,
+                    "affected_paths": affected_paths,
+                    "verification_id": "behavior-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "repair-source",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        ),
+        failure_fixture_tool_turn(
+            "behavior-test-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": cargo_command,
+                    "affected_paths": ["Cargo.toml", "src/lib.rs"],
+                    "verification_id": "behavior-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "review-diff",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "git diff -- src/lib.rs",
+                    "affected_paths": ["src/lib.rs"]
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let obligation = required_terminal_check(
+        "behavior-check",
+        "run the failing behavior test after repairing the Rust source",
+        cargo_command,
+        vec!["Cargo.toml".to_string(), "src/lib.rs".to_string()],
+    );
+    let (summary, persisted, requests) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![obligation]).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 4);
+    assert_eq!(requests.len(), 5);
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert!(plan.is_complete());
+    let verification = &plan.steps[0].verification_obligations[0];
+    assert_eq!(verification.status, VerificationStatus::Passed);
+    assert_eq!(
+        verification
+            .attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        [VerificationStatus::Failed, VerificationStatus::Passed]
+    );
+
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("repair audit");
+    let verification_records = persisted
+        .tool_calls
+        .iter()
+        .filter(|record| {
+            record.tool_name.as_deref() == Some("run_terminal")
+                && record.arguments["command"] == cargo_command
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(verification_records.len(), 2);
+    assert_eq!(
+        verification_records[0].result.as_ref().unwrap()["success"],
+        false
+    );
+    assert_eq!(
+        verification_records[1].result.as_ref().unwrap()["success"],
+        true
+    );
+    let diff_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.arguments["command"] == "git diff -- src/lib.rs")
+        .expect("diff review audit");
+    assert_eq!(diff_record.result.as_ref().unwrap()["risk"], "read_only");
+    assert!(diff_record.result.as_ref().unwrap()["output"]["stdout"]
+        .as_str()
+        .is_some_and(|stdout| stdout.contains("+    42")));
+
+    assert_eq!(
+        patch_record.worktree_path,
+        verification_records[0].worktree_path
+    );
+    assert_eq!(
+        patch_record.worktree_path,
+        verification_records[1].worktree_path
+    );
+    assert_eq!(patch_record.worktree_path, diff_record.worktree_path);
+    assert_eq!(verification.worktree_identity, patch_record.worktree_path);
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert!(std::fs::read_to_string(worktree.join("src/lib.rs"))
+        .expect("repaired source")
+        .contains("    42"));
+    assert!(std::fs::read_to_string(root.path().join("src/lib.rs"))
+        .expect("unchanged repository source")
+        .contains("    41"));
+}
+
+#[tokio::test]
+async fn mutation_after_a_passing_check_makes_its_evidence_stale() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "verification-passes",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "true",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "later-mutation",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf 'changed\\n' > note.txt",
+                    "affected_paths": ["note.txt"]
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Stale
+    );
+    assert!(plan.steps[0].content_generation >= 1);
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "verification_stale"));
+}
+
+#[tokio::test]
+async fn unknown_verification_binding_is_rejected_before_tool_side_effects() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "unknown-binding",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf hacked > unknown-binding.txt",
+                    "affected_paths": ["unknown-binding.txt"],
+                    "verification_id": "unknown-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(!root.path().join("unknown-binding.txt").exists());
+    assert!(persisted.tool_calls.iter().all(|record| {
+        record.invocation_id.is_none() || record.tool_name.as_deref() != Some("run_terminal")
+    }));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "verification_binding_rejected"));
+}
+
+#[tokio::test]
+async fn known_verification_id_cannot_credit_a_different_command() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "forged-binding",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "printf hacked > forged-verification.txt",
+                    "affected_paths": ["forged-verification.txt"],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(!root.path().join("forged-verification.txt").exists());
+    assert_eq!(
+        persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0].status,
+        VerificationStatus::Pending
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "verification_binding_rejected"
+            && event.details["verification_id"] == "required-check"
+    }));
+}
+
+#[tokio::test]
+async fn typed_untruncated_probe_miss_can_satisfy_an_absence_obligation() {
+    let root = git_repository();
+    let arguments = json!({"pattern": "forbidden-marker", "path": "note.txt"});
+    let obligation = VerificationObligation::pending_tool(
+        "absence-check",
+        "prove the forbidden marker is absent",
+        vec!["note.txt".to_string()],
+        "grep",
+        arguments.clone(),
+        VerificationExpectedOutcome::ProbeMiss,
+    )
+    .expect("valid typed absence contract");
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "absence-probe",
+            vec![(
+                "grep",
+                json!({
+                    "pattern": "forbidden-marker",
+                    "path": "note.txt",
+                    "verification_id": "absence-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, _) =
+        run_failure_fixture_with_obligations(root.path(), responses, None, vec![obligation]).await;
+
+    assert_eq!(summary.outcome, "completed");
+    let evidence = &persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0];
+    assert_eq!(evidence.status, VerificationStatus::Passed);
+    assert!(evidence.content_identity.is_some());
+}
+
+#[tokio::test]
+async fn authenticated_human_can_waive_only_an_unrun_non_project_obligation() {
+    let root = git_repository();
+    let mut config = mock_runtime_config();
+    save_nib_config_full(root.path(), &mut config).expect("waiver config");
+    let store = SessionStore::for_project(root.path()).expect("waiver store");
+    let mut session = store.create_session_with_id("verification-waiver");
+    let mut obligation = required_check("true");
+    obligation.authority = VerificationAuthority::Human;
+    let mut plan = Plan::new(
+        "original verified task",
+        vec![PlanStep {
+            description: "finish the original task".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: vec![obligation],
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("waiver fixture");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "waive verification required-check: the requested check is no longer applicable",
+        AgentLoopConfig::default(),
+    )
+    .await
+    .expect("authenticated waiver");
+
+    assert_eq!(summary.outcome, "verification_waived");
+    let persisted = store.load(&session.id).expect("waiver evidence");
+    let evidence = &persisted.plan.as_ref().unwrap().steps[0].verification_obligations[0];
+    assert_eq!(evidence.status, VerificationStatus::Waived);
+    let source = evidence.waiver_source_message_index.expect("human source");
+    assert_eq!(
+        persisted.message_origin(source),
+        MessageOrigin::HumanRequest
+    );
+    assert_eq!(persisted.messages.last().unwrap().role, "user");
+    assert!(persisted
+        .message_provenance
+        .iter()
+        .all(|source| source.origin != MessageOrigin::ModelOutput));
+}
+
 #[tokio::test]
 async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_duration() {
     let root = git_repository();
@@ -267,7 +1313,10 @@ async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_d
         .map(|index| {
             failure_fixture_tool_turn(
                 &format!("failed-{index}"),
-                vec![("run_terminal", json!({"command": "exit 7"}))],
+                vec![(
+                    "run_terminal",
+                    json!({"command": "exit 7", "affected_paths": ["."]}),
+                )],
             )
         })
         .collect();
@@ -314,6 +1363,289 @@ async fn repeated_terminal_failures_stop_after_three_attempts_despite_variable_d
     assert!(!serde_json::to_string(&persisted)
         .unwrap()
         .contains("private-failed-"));
+}
+
+#[tokio::test]
+async fn nested_instructions_are_loaded_before_the_scoped_tool_executes() {
+    let root = git_repository();
+    std::fs::create_dir_all(root.path().join("nested")).expect("nested directory");
+    std::fs::write(
+        root.path().join("nested/AGENTS.md"),
+        "NESTED_SCOPE_MARKER: reads here require the nested rule.\n",
+    )
+    .expect("nested instructions");
+    std::fs::write(root.path().join("nested/note.txt"), "nested evidence\n").expect("nested note");
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "nested-before-refresh",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_tool_turn(
+            "nested-after-refresh",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(
+        summary.tool_call_count, 1,
+        "deferred proposal is not execution"
+    );
+    assert_eq!(requests.len(), 3);
+    let first = requests[0].to_string();
+    let second = requests[1].to_string();
+    assert!(!first.contains("NESTED_SCOPE_MARKER"));
+    assert!(second.contains("NESTED_SCOPE_MARKER"));
+    let refresh = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "instruction_context_refreshed")
+        .expect("instruction refresh event");
+    assert_eq!(refresh.details["execution_deferred"], true);
+    assert_eq!(
+        persisted
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_name.as_deref() == Some("read_file"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn instructions_refresh_from_the_same_managed_worktree_used_by_mutations() {
+    let root = git_repository();
+    let patch = concat!(
+        "--- /dev/null\n",
+        "+++ b/nested/AGENTS.md\n",
+        "@@ -0,0 +1 @@\n",
+        "+WORKTREE_ONLY_INSTRUCTION: inspect the generated note before completion.\n",
+        "--- /dev/null\n",
+        "+++ b/nested/note.txt\n",
+        "@@ -0,0 +1 @@\n",
+        "+worktree evidence\n",
+    );
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "worktree-mutation",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        ),
+        failure_fixture_tool_turn(
+            "worktree-scoped-read",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .to_string()
+            .contains("WORKTREE_ONLY_INSTRUCTION"),
+        "the post-mutation request must use instruction content from the session worktree"
+    );
+    assert!(
+        !root.path().join("nested/AGENTS.md").exists(),
+        "the repository checkout must remain unchanged"
+    );
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("patch audit");
+    let read_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("read_file"))
+        .expect("read audit");
+    assert_eq!(patch_record.worktree_path, read_record.worktree_path);
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("nested/note.txt")).expect("worktree note"),
+        "worktree evidence\n"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_scoped_instruction_context_blocks_dependent_execution() {
+    let root = git_repository();
+    std::fs::create_dir_all(root.path().join("nested")).expect("nested directory");
+    std::fs::write(
+        root.path().join("nested/AGENTS.md"),
+        vec![b'x'; 64 * 1024 + 1],
+    )
+    .expect("oversized nested instructions");
+    std::fs::write(root.path().join("nested/note.txt"), "must not be read\n").expect("nested note");
+
+    let (summary, persisted, requests) = run_failure_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "nested-instruction-failure",
+            vec![("read_file", json!({"path": "nested/note.txt"}))],
+        )],
+        None,
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "instruction_context_missing"));
+    let plan = persisted.plan.expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert!(plan.steps[0]
+        .outcome
+        .as_deref()
+        .is_some_and(|outcome| outcome.contains("required project instructions")));
+}
+
+#[tokio::test]
+async fn unreadable_initial_instruction_context_reconciles_as_actionable_session_state() {
+    let root = git_repository();
+    let goal = "initial instruction failure fixture";
+    let (store, session_id) = approved_mock_session(root.path(), goal, 128_000);
+    std::fs::write(root.path().join("AGENTS.md"), vec![b'x'; 64 * 1024 + 1])
+        .expect("oversized root instructions");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session_id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("missing context is a reconciled outcome");
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    let persisted = store.load(&session_id).expect("persisted missing context");
+    let event = persisted
+        .events
+        .iter()
+        .find(|event| event.kind == "instruction_context_missing")
+        .expect("actionable event");
+    assert_eq!(event.details["stage"], "initial_resolution");
+    assert!(event.details["action"]
+        .as_str()
+        .is_some_and(|action| action.contains("retry the same plan")));
+    assert_eq!(
+        persisted.plan.as_ref().expect("blocked plan").steps[0].status,
+        "Blocked"
+    );
+    assert!(!persisted.events.iter().any(|event| {
+        event.kind == "run_terminal" && event.details["outcome"] == "local_error"
+    }));
+}
+
+#[tokio::test]
+async fn instruction_prompt_fit_failure_blocks_without_a_model_or_tool_attempt() {
+    let root = git_repository();
+    std::fs::write(
+        root.path().join("AGENTS.md"),
+        format!(
+            "REQUIRED_INSTRUCTION_HEAD\n{}\nREQUIRED_INSTRUCTION_TAIL\n",
+            "mandatory bounded rule ".repeat(1_500)
+        ),
+    )
+    .expect("large instructions");
+    let goal = "instruction prompt fit fixture";
+    let (store, session_id) = approved_mock_session(root.path(), goal, 1_200);
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session_id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("prompt fit is reconciled");
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.steps_taken, 0);
+    assert_eq!(summary.tool_call_count, 0);
+    let persisted = store.load(&session_id).expect("persisted prompt fit");
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "instruction_context_missing"
+            && event.details["stage"] == "runtime_prompt_fit"
+    }));
+    assert_eq!(
+        persisted.plan.as_ref().expect("blocked plan").steps[0].status,
+        "Blocked"
+    );
+}
+
+#[tokio::test]
+async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan() {
+    let root = git_repository();
+    let oversized = "x".repeat(64 * 1024 + 1);
+    let patch = format!(
+        "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1 +1 @@\n-Runtime fixture rule: preserve the physical verification record.\n+{oversized}\n"
+    );
+    let (summary, persisted, requests) = run_failure_fixture(
+        root.path(),
+        vec![failure_fixture_tool_turn(
+            "oversize-worktree-instructions",
+            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+        )],
+        None,
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "instruction_context_missing");
+    assert_eq!(summary.tool_call_count, 1);
+    assert_eq!(requests.len(), 1);
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "instruction_context_missing" && event.details["stage"] == "refresh"
+    }));
+    let plan = persisted.plan.as_ref().expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    let patch_record = persisted
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("apply_patch"))
+        .expect("patch audit");
+    let worktree = Path::new(
+        patch_record
+            .worktree_path
+            .as_deref()
+            .expect("managed session worktree"),
+    );
+    assert!(
+        std::fs::metadata(worktree.join("AGENTS.md"))
+            .expect("mutated instructions")
+            .len()
+            > 64 * 1024
+    );
+    assert!(
+        std::fs::metadata(root.path().join("AGENTS.md"))
+            .expect("original instructions")
+            .len()
+            < 64 * 1024
+    );
 }
 
 #[tokio::test]
@@ -426,6 +1758,123 @@ async fn answered_question_resets_repeated_failure_streak() {
     assert!(persisted.plan.as_ref().unwrap().is_complete());
 }
 
+struct UnavailableFixtureAnswer;
+
+#[async_trait]
+impl QuestionHandler for UnavailableFixtureAnswer {
+    async fn ask(&self, _question: &str, _options: &[String]) -> Result<String, String> {
+        Err("input unavailable".to_string())
+    }
+}
+
+#[tokio::test]
+async fn unanswered_clarification_blocks_a_dependent_read_without_side_effects() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "unanswered-question",
+            vec![(
+                "ask_question",
+                json!({
+                    "question": "Which file should I inspect?",
+                    "options": ["note.txt"],
+                    "dependent_paths": ["note.txt"]
+                }),
+            )],
+        ),
+        failure_fixture_tool_turn(
+            "dependent-read",
+            vec![("read_file", json!({"path": "note.txt"}))],
+        ),
+    ];
+
+    let (base_url, request_rx) = serve_responses_sequence(responses);
+    let mut config = mock_runtime_config();
+    config.execution.provider = "internal".to_string();
+    config.llm.active_provider = Some("openai".to_string());
+    config.llm.providers = HashMap::from([(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(base_url),
+            api: Some(nib::config::LlmApiMode::Responses),
+            ..Default::default()
+        },
+    )]);
+    save_nib_config_full(root.path(), &mut config).expect("clarification fixture config");
+    let store = SessionStore::for_project(root.path()).expect("clarification fixture store");
+    let mut session = store.create_session_with_id("clarification-dependency-fixture");
+    let goal = "resourceful failure fixture";
+    let mut plan = Plan::new(
+        goal,
+        vec![PlanStep {
+            description: "Inspect only after the required answer".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    session.plan = Some(plan);
+    store
+        .save(&mut session)
+        .expect("approved clarification plan");
+
+    let first = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 8,
+            auto_approve: true,
+            question_handler: Some(Arc::new(UnavailableFixtureAnswer)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("question run");
+    assert_eq!(first.outcome, "waiting_for_user_input");
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 8,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("dependent action run");
+    let persisted = store.load(&session.id).expect("clarification evidence");
+    let requests = request_rx.try_iter().collect::<Vec<_>>();
+
+    assert_eq!(summary.outcome, "unresolved_clarification");
+    assert_eq!(
+        summary.tool_call_count, 0,
+        "dependent read was not attempted"
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(persisted
+        .tool_calls
+        .iter()
+        .all(|record| record.tool_name.as_deref() != Some("read_file")));
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "tool_batch_rejected" && event.details["reason"] == "unresolved_clarification"
+    }));
+    let plan = persisted.plan.expect("blocked plan");
+    assert_eq!(plan.steps[0].status, "Blocked");
+    assert_eq!(
+        plan.steps[0].outcome.as_deref(),
+        Some("required clarification remains unresolved")
+    );
+}
+
 #[tokio::test]
 async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     let root = git_repository();
@@ -437,7 +1886,10 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
                     ("ask_question", json!({"question": "Proceed?"})),
                     (
                         "run_terminal",
-                        json!({"command": "echo fixture-key > mixed-side-effect.txt"}),
+                        json!({
+                            "command": "echo fixture-key > mixed-side-effect.txt",
+                            "affected_paths": ["mixed-side-effect.txt"]
+                        }),
                     ),
                 ],
             )
@@ -457,7 +1909,22 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    assert!(!root.path().join(".nib/worktrees").exists());
+    let worktrees = root.path().join(".nib/worktrees");
+    if worktrees.exists() {
+        let sessions = worktrees.join("sessions");
+        let entries = if sessions.exists() {
+            std::fs::read_dir(&sessions)
+                .expect("inspect rejected-batch session worktrees")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read rejected-batch session worktree entries")
+        } else {
+            Vec::new()
+        };
+        assert!(
+            entries.is_empty(),
+            "rejected mixed batch created a session worktree: {entries:?}"
+        );
+    }
     assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
     assert!(!serde_json::to_string(&persisted)
         .unwrap()
@@ -2164,6 +3631,68 @@ Do not inspect the repository without an explicit decision.
 }
 
 #[tokio::test]
+async fn non_selected_generic_skill_supplies_no_policy_or_after_tool_hook() {
+    let root = tempdir().expect("tempdir");
+    let skill_directory = root.path().join(".nib/skills/generic-policy");
+    std::fs::create_dir_all(&skill_directory).expect("skill directory");
+    std::fs::write(
+        skill_directory.join("SKILL.md"),
+        r#"---
+name: generic-policy
+description: Help manage repository files and project tasks
+tags: [project]
+constraints:
+  require_approval_tools: [list_directory]
+hooks:
+  after_tool:
+    - tool: list_directory
+      command: 'false'
+---
+GENERIC_POLICY_BODY_MUST_NOT_APPEAR
+"#,
+    )
+    .expect("skill fixture");
+    let mut config = mock_runtime_config();
+    save_nib_config_full(root.path(), &mut config).expect("runtime config");
+    let store = SessionStore::for_project(root.path()).expect("session store");
+    let session = store.create_session_with_id("generic-skill-isolation");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+
+    let summary = run_agent_loop(
+        root.path().to_path_buf(),
+        &session.id,
+        "explore the repository task",
+        AgentLoopConfig {
+            max_steps: 5,
+            approval_handler: Some(Arc::new(PlanThenDenyTool {
+                calls: Arc::clone(&calls),
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("unconstrained run completes");
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(*calls.lock().unwrap(), ["approve_plan".to_string()]);
+    let persisted = store.load(&session.id).expect("persisted run");
+    assert!(persisted.active_skills.is_empty());
+    assert!(persisted.skill_usage.is_empty());
+    assert_eq!(
+        persisted
+            .tool_calls
+            .iter()
+            .filter(|record| record.tool_name.as_deref() == Some("list_directory"))
+            .count(),
+        1
+    );
+    assert!(!persisted
+        .tool_calls
+        .iter()
+        .any(|record| record.tool_name.as_deref() == Some("run_terminal")));
+}
+
+#[tokio::test]
 async fn approved_patch_physically_changes_only_the_session_worktree_and_is_verified() {
     let root = git_repository();
     let store = SessionStore::new(root.path());
@@ -2176,6 +3705,8 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -2205,7 +3736,7 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
             tool_call(
                 root.path(),
                 "run_terminal",
-                json!({"command": "cat note.txt"}),
+                json!({"command": "cat note.txt", "affected_paths": ["note.txt"]}),
             ),
             Some(&session.id),
         )

@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 use thiserror::Error;
 
 const MAX_SKILL_FILE_BYTES: u64 = 131_072;
@@ -18,6 +21,62 @@ const MAX_DISCOVERED_SKILLS: usize = 256;
 const MAX_DISCOVERY_ENTRIES: usize = 4_096;
 const MAX_SKILL_DISCOVERY_DEPTH: usize = 4;
 const MAX_SKILL_ID_BYTES: usize = 128;
+const MAX_FRONTMATTER_CACHE_ENTRIES: usize = 512;
+const MAX_SELECTION_REASON_CHARS: usize = 256;
+pub const MAX_AUTOMATIC_SKILLS: usize = 3;
+pub const SKILL_SELECTION_STOPWORDS_VERSION: &str = "v1";
+
+const SKILL_SELECTION_STOPWORDS_V1: &[&str] = &[
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "code",
+    "file",
+    "files",
+    "for",
+    "from",
+    "has",
+    "have",
+    "help",
+    "helper",
+    "in",
+    "into",
+    "is",
+    "it",
+    "manage",
+    "management",
+    "of",
+    "on",
+    "or",
+    "perform",
+    "project",
+    "projects",
+    "repo",
+    "repository",
+    "run",
+    "skill",
+    "skills",
+    "support",
+    "task",
+    "tasks",
+    "that",
+    "the",
+    "this",
+    "to",
+    "use",
+    "used",
+    "using",
+    "with",
+    "work",
+    "working",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct SkillConstraints {
@@ -75,6 +134,25 @@ pub struct Skill {
 pub struct SkillReference {
     pub path: PathBuf,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSelectionSource {
+    Configured,
+    Automatic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSelectionRecord {
+    pub skill_name: String,
+    pub reason: String,
+    pub source: SkillSelectionSource,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillSelection {
+    pub skills: Vec<Skill>,
+    pub records: Vec<SkillSelectionRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +218,44 @@ pub enum SkillDiscoveryError {
     #[error("skill discovery was truncated at the {kind} limit ({limit})")]
     Truncated { kind: &'static str, limit: usize },
 }
+
+#[derive(Debug, Error)]
+pub enum SkillSelectionError {
+    #[error("invalid skill {path}: {source}")]
+    InvalidSkill {
+        path: PathBuf,
+        #[source]
+        source: SkillError,
+    },
+    #[error("configured active skill '{name}' was not found")]
+    MissingConfigured { name: String },
+    #[error("configured active skill '{name}' is ambiguous across: {paths}")]
+    AmbiguousConfigured { name: String, paths: String },
+    #[error(
+        "configured active skills exceed llm.context_length: require {required_tokens} approximate tokens, limit is {available_tokens}"
+    )]
+    ConfiguredOverBudget {
+        required_tokens: usize,
+        available_tokens: usize,
+    },
+    #[error("skill {path} changed while it was being selected")]
+    ChangedDuringSelection { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    frontmatter_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct CachedFrontmatter {
+    stamp: ManifestStamp,
+    frontmatter: SkillFrontmatter,
+}
+
+static FRONTMATTER_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedFrontmatter>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct SkillDiscoveryLimits {
@@ -442,7 +558,95 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill, SkillError> {
 /// Parses and bounds the manifest without requiring declared resources to exist yet.
 /// Git installation uses this before checking out the exact declared paths.
 pub fn parse_skill_frontmatter_file(path: &Path) -> Result<SkillFrontmatter, SkillError> {
-    parse_skill_document(path).map(|(frontmatter, _)| frontmatter)
+    let parent = path
+        .parent()
+        .ok_or_else(|| SkillError::InvalidResource(path.display().to_string()))?;
+    verify_skill_directory_components(parent, &path.display().to_string())?;
+    let metadata = fs::symlink_metadata(path)?;
+    validate_skill_manifest_metadata(path, &metadata)?;
+    let canonical = path.canonicalize()?;
+    let (yaml, frontmatter_digest) = read_skill_frontmatter_source(path)?;
+    let stamp = ManifestStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        frontmatter_digest,
+    };
+    let cache = FRONTMATTER_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&canonical)
+        .filter(|cached| cached.stamp == stamp)
+        .cloned()
+    {
+        return Ok(cached.frontmatter);
+    }
+
+    let after = fs::symlink_metadata(path)?;
+    validate_skill_manifest_metadata(path, &after)?;
+    let after_stamp = ManifestStamp {
+        len: after.len(),
+        modified: after.modified().ok(),
+        frontmatter_digest,
+    };
+    if after_stamp != stamp || path.canonicalize()? != canonical {
+        return Err(SkillError::InvalidResource(path.display().to_string()));
+    }
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MAX_FRONTMATTER_CACHE_ENTRIES && !cache.contains_key(&canonical) {
+        cache.clear();
+    }
+    let frontmatter: SkillFrontmatter = serde_yaml::from_str(&yaml)?;
+    let frontmatter = validate_skill_frontmatter(frontmatter)?;
+    cache.insert(
+        canonical,
+        CachedFrontmatter {
+            stamp,
+            frontmatter: frontmatter.clone(),
+        },
+    );
+    Ok(frontmatter)
+}
+
+fn read_skill_frontmatter_source(path: &Path) -> Result<(String, [u8; 32]), SkillError> {
+    let manifest = open_stable_skill_file(path, |metadata| {
+        validate_skill_manifest_metadata(path, metadata)
+    })?;
+    let opened_identity = crate::fs_security::FileIdentity::from_file(manifest.try_clone()?)?;
+    let mut reader = BufReader::new(manifest.take(MAX_SKILL_FILE_BYTES + 1));
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 || line.trim_end_matches(['\r', '\n']) != "---" {
+        return Err(SkillError::MissingFrontmatter);
+    }
+    let mut yaml = String::new();
+    let mut bytes = line.len() as u64;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(SkillError::UnterminatedFrontmatter);
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| SkillError::ManifestTooLarge(path.display().to_string()))?;
+        if bytes > MAX_SKILL_FILE_BYTES {
+            return Err(SkillError::ManifestTooLarge(path.display().to_string()));
+        }
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            break;
+        }
+        yaml.push_str(&line);
+    }
+    let after = open_skill_file_without_following_links(path)?;
+    validate_skill_manifest_metadata(path, &after.metadata()?)?;
+    let after_identity = crate::fs_security::FileIdentity::from_file(after)?;
+    if opened_identity != after_identity {
+        return Err(SkillError::InvalidResource(path.display().to_string()));
+    }
+    let digest = Sha256::digest(yaml.as_bytes()).into();
+    Ok((yaml, digest))
 }
 
 fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), SkillError> {
@@ -476,6 +680,13 @@ fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), Skill
         .trim()
         .to_string();
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml)?;
+    let frontmatter = validate_skill_frontmatter(frontmatter)?;
+    Ok((frontmatter, body))
+}
+
+fn validate_skill_frontmatter(
+    frontmatter: SkillFrontmatter,
+) -> Result<SkillFrontmatter, SkillError> {
     canonical_skill_id(&frontmatter.name)?;
     if frontmatter.references.len() > MAX_SKILL_REFERENCES {
         return Err(SkillError::TooManyResources {
@@ -498,7 +709,7 @@ fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), Skill
     {
         validated_skill_resource_path(configured)?;
     }
-    Ok((frontmatter, body))
+    Ok(frontmatter)
 }
 
 fn validate_skill_manifest_metadata(
@@ -697,42 +908,325 @@ pub fn parse_skill(path: &Path) -> Option<Skill> {
     parse_skill_file(path).ok()
 }
 
-fn task_tokens(task: &str) -> HashSet<String> {
-    task.split(|value: char| !value.is_ascii_alphanumeric() && value != '-' && value != '_')
-        .filter(|value| !value.is_empty())
+fn lexical_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
         .map(str::to_lowercase)
         .collect()
 }
 
-pub fn skill_matches_task(skill: &Skill, task: &str) -> bool {
-    let task_lower = task.to_lowercase();
-    let tokens = task_tokens(task);
-    let name = skill.frontmatter.name.to_lowercase();
+fn contains_token_phrase(task_tokens: &[String], phrase: &str) -> bool {
+    let phrase = lexical_tokens(phrase);
+    !phrase.is_empty()
+        && phrase.len() <= task_tokens.len()
+        && task_tokens
+            .windows(phrase.len())
+            .any(|window| window == phrase.as_slice())
+}
 
-    task_lower.contains(&name)
-        || skill
-            .frontmatter
-            .tags
+fn is_selection_stopword(token: &str) -> bool {
+    SKILL_SELECTION_STOPWORDS_V1.binary_search(&token).is_ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillMatchScore {
+    exact_name: bool,
+    matched_tags: Vec<String>,
+    matched_description_tokens: Vec<String>,
+}
+
+impl SkillMatchScore {
+    fn is_match(&self) -> bool {
+        self.exact_name
+            || !self.matched_tags.is_empty()
+            || self.matched_description_tokens.len() >= 2
+    }
+
+    fn reason(&self) -> String {
+        if self.exact_name {
+            return bounded_selection_reason("exact skill name phrase");
+        }
+        if !self.matched_tags.is_empty() {
+            return bounded_selection_reason(&format!(
+                "matched tags: {}",
+                self.matched_tags.join(", ")
+            ));
+        }
+        bounded_selection_reason(&format!(
+            "matched description tokens: {}",
+            self.matched_description_tokens.join(", ")
+        ))
+    }
+}
+
+fn skill_match_score(frontmatter: &SkillFrontmatter, task: &str) -> SkillMatchScore {
+    let task_tokens = lexical_tokens(task);
+    let task_distinct = task_tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let exact_name = contains_token_phrase(&task_tokens, &frontmatter.name);
+    let matched_tags = frontmatter
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let tag_tokens = lexical_tokens(tag);
+            let meaningful = tag_tokens.iter().any(|token| !is_selection_stopword(token));
+            (meaningful && contains_token_phrase(&task_tokens, tag)).then(|| tag_tokens.join(" "))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let matched_description_tokens = lexical_tokens(&frontmatter.description)
+        .into_iter()
+        .filter(|token| !is_selection_stopword(token) && task_distinct.contains(token))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    SkillMatchScore {
+        exact_name,
+        matched_tags,
+        matched_description_tokens,
+    }
+}
+
+fn bounded_selection_reason(reason: &str) -> String {
+    reason.chars().take(MAX_SELECTION_REASON_CHARS).collect()
+}
+
+pub fn skill_matches_task(skill: &Skill, task: &str) -> bool {
+    skill_match_score(&skill.frontmatter, task).is_match()
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredSkillMetadata {
+    path: PathBuf,
+    canonical_path: PathBuf,
+    frontmatter: SkillFrontmatter,
+}
+
+#[derive(Debug, Clone)]
+struct AutomaticCandidate {
+    metadata: DiscoveredSkillMetadata,
+    score: SkillMatchScore,
+}
+
+fn canonical_skill_files(
+    files: Vec<PathBuf>,
+) -> Result<Vec<(PathBuf, PathBuf)>, SkillSelectionError> {
+    let mut canonical = BTreeMap::new();
+    for path in files {
+        let identity = path
+            .canonicalize()
+            .map_err(|source| SkillSelectionError::InvalidSkill {
+                path: path.clone(),
+                source: SkillError::Io(source),
+            })?;
+        canonical.entry(identity).or_insert(path);
+    }
+    Ok(canonical
+        .into_iter()
+        .map(|(identity, path)| (path, identity))
+        .collect())
+}
+
+fn load_selected_skill(metadata: &DiscoveredSkillMetadata) -> Result<Skill, SkillSelectionError> {
+    let skill =
+        parse_skill_file(&metadata.path).map_err(|source| SkillSelectionError::InvalidSkill {
+            path: metadata.path.clone(),
+            source,
+        })?;
+    if skill.frontmatter != metadata.frontmatter
+        || skill.path.canonicalize().ok().as_ref() != Some(&metadata.canonical_path)
+    {
+        return Err(SkillSelectionError::ChangedDuringSelection {
+            path: metadata.path.clone(),
+        });
+    }
+    Ok(skill)
+}
+
+pub fn render_skill_content(skill: &Skill) -> String {
+    let mut content = format!("{}\n\n{}", skill.frontmatter.description, skill.body);
+    for reference in &skill.references {
+        content.push_str(&format!(
+            "\n\n#### Skill Reference: {}\n{}",
+            reference.path.display(),
+            reference.content
+        ));
+    }
+    if !skill.assets.is_empty() {
+        content.push_str("\n\nVerified skill assets:\n");
+        for asset in &skill.assets {
+            content.push_str(&format!("- {}\n", asset.display()));
+        }
+    }
+    content
+}
+
+fn skill_prompt_tokens(skill: &Skill) -> usize {
+    crate::context::compression::approximate_tokens(&format!(
+        "### Skill: {}\n{}",
+        skill.frontmatter.name,
+        render_skill_content(skill)
+    ))
+}
+
+/// The execution prompt initially reserves 45% of the aggregate window for runtime
+/// context. Skills have weight 20 beside the always-present agent/task weights 30/20,
+/// so automatic selection may occupy at most 9/70 of the complete request window.
+/// Other context groups can only reduce their eventual share.
+pub fn automatic_skill_token_budget(context_length: usize) -> usize {
+    context_length.saturating_mul(9) / 70
+}
+
+pub fn select_skill_files(
+    files: Vec<PathBuf>,
+    task: &str,
+    configured_names: &[String],
+    context_token_budget: usize,
+) -> Result<SkillSelection, SkillSelectionError> {
+    let metadata = canonical_skill_files(files)?
+        .into_iter()
+        .map(|(path, canonical_path)| {
+            let frontmatter = parse_skill_frontmatter_file(&path).map_err(|source| {
+                SkillSelectionError::InvalidSkill {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            Ok(DiscoveredSkillMetadata {
+                path,
+                canonical_path,
+                frontmatter,
+            })
+        })
+        .collect::<Result<Vec<_>, SkillSelectionError>>()?;
+
+    let mut configured = Vec::new();
+    let mut configured_ids = BTreeSet::new();
+    for configured_name in configured_names {
+        let normalized = configured_name.to_lowercase();
+        if !configured_ids.insert(normalized.clone()) {
+            continue;
+        }
+        let matches = metadata
             .iter()
-            .any(|tag| tokens.contains(&tag.to_lowercase()))
-        || skill
-            .frontmatter
-            .description
-            .split(|value: char| !value.is_ascii_alphanumeric())
-            .filter(|word| word.len() > 3)
-            .any(|word| tokens.contains(&word.to_lowercase()))
+            .filter(|candidate| candidate.frontmatter.name.to_lowercase() == normalized)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => {
+                return Err(SkillSelectionError::MissingConfigured {
+                    name: configured_name.clone(),
+                })
+            }
+            [selected] => configured.push((*selected).clone()),
+            duplicates => {
+                let paths = duplicates
+                    .iter()
+                    .map(|candidate| candidate.canonical_path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(SkillSelectionError::AmbiguousConfigured {
+                    name: configured_name.clone(),
+                    paths,
+                });
+            }
+        }
+    }
+
+    let mut selection = SkillSelection::default();
+    let mut used_tokens = 0usize;
+    for selected in configured {
+        let skill = load_selected_skill(&selected)?;
+        used_tokens = used_tokens.saturating_add(skill_prompt_tokens(&skill));
+        selection.records.push(SkillSelectionRecord {
+            skill_name: skill.frontmatter.name.clone(),
+            reason: bounded_selection_reason("profile active skill"),
+            source: SkillSelectionSource::Configured,
+        });
+        selection.skills.push(skill);
+    }
+    if used_tokens > context_token_budget {
+        return Err(SkillSelectionError::ConfiguredOverBudget {
+            required_tokens: used_tokens,
+            available_tokens: context_token_budget,
+        });
+    }
+    let automatic_token_budget = automatic_skill_token_budget(context_token_budget);
+
+    let mut automatic = metadata
+        .into_iter()
+        .filter(|candidate| !configured_ids.contains(&candidate.frontmatter.name.to_lowercase()))
+        .filter_map(|metadata| {
+            let score = skill_match_score(&metadata.frontmatter, task);
+            score
+                .is_match()
+                .then_some(AutomaticCandidate { metadata, score })
+        })
+        .collect::<Vec<_>>();
+    automatic.sort_by(|left, right| {
+        right
+            .score
+            .exact_name
+            .cmp(&left.score.exact_name)
+            .then_with(|| {
+                right
+                    .score
+                    .matched_tags
+                    .len()
+                    .cmp(&left.score.matched_tags.len())
+            })
+            .then_with(|| {
+                right
+                    .score
+                    .matched_description_tokens
+                    .len()
+                    .cmp(&left.score.matched_description_tokens.len())
+            })
+            .then_with(|| {
+                left.metadata
+                    .canonical_path
+                    .cmp(&right.metadata.canonical_path)
+            })
+    });
+
+    let mut automatic_names = BTreeSet::new();
+    for candidate in automatic {
+        let normalized_name = candidate.metadata.frontmatter.name.to_lowercase();
+        if !automatic_names.insert(normalized_name) {
+            continue;
+        }
+        let skill = load_selected_skill(&candidate.metadata)?;
+        let tokens = skill_prompt_tokens(&skill);
+        if used_tokens.saturating_add(tokens) > automatic_token_budget {
+            continue;
+        }
+        used_tokens = used_tokens.saturating_add(tokens);
+        selection.records.push(SkillSelectionRecord {
+            skill_name: skill.frontmatter.name.clone(),
+            reason: candidate.score.reason(),
+            source: SkillSelectionSource::Automatic,
+        });
+        selection.skills.push(skill);
+        if selection
+            .records
+            .iter()
+            .filter(|record| record.source == SkillSelectionSource::Automatic)
+            .count()
+            >= MAX_AUTOMATIC_SKILLS
+        {
+            break;
+        }
+    }
+    Ok(selection)
 }
 
 pub fn relevant_skills(project_path: &Path, task: Option<&str>) -> Vec<Skill> {
     let Some(task) = task.filter(|task| !task.trim().is_empty()) else {
         return Vec::new();
     };
-
-    find_skills(project_path)
-        .into_iter()
-        .filter_map(|path| parse_skill_file(&path).ok())
-        .filter(|skill| skill_matches_task(skill, task))
-        .collect()
+    select_skill_files(find_skills(project_path), task, &[], usize::MAX)
+        .map(|selection| selection.skills)
+        .unwrap_or_default()
 }
 
 pub fn policy_rules_for_skills(skills: &[Skill]) -> Vec<SkillPolicyRule> {
@@ -799,24 +1293,11 @@ pub fn load_relevant_skills(project_path: &Path, task: Option<&str>) -> String {
     let injected: Vec<String> = relevant_skills(project_path, task)
         .into_iter()
         .map(|skill| {
-            let mut rendered = format!(
-                "### Skill: {}\n{}\n\n{}",
-                skill.frontmatter.name, skill.frontmatter.description, skill.body
-            );
-            for reference in &skill.references {
-                rendered.push_str(&format!(
-                    "\n\n#### Skill Reference: {}\n{}",
-                    reference.path.display(),
-                    reference.content
-                ));
-            }
-            if !skill.assets.is_empty() {
-                rendered.push_str("\n\nVerified skill assets:\n");
-                for asset in &skill.assets {
-                    rendered.push_str(&format!("- {}\n", asset.display()));
-                }
-            }
-            rendered
+            format!(
+                "### Skill: {}\n{}",
+                skill.frontmatter.name,
+                render_skill_content(&skill)
+            )
         })
         .collect();
 
@@ -872,6 +1353,28 @@ Run the canonical Task gates after editing.
         path
     }
 
+    fn write_selection_skill(
+        root: &Path,
+        directory: &str,
+        name: &str,
+        description: &str,
+        tags: &[&str],
+        body: &str,
+    ) -> PathBuf {
+        let skill = root.join(directory);
+        fs::create_dir_all(&skill).expect("selection skill directory");
+        let path = skill.join("SKILL.md");
+        fs::write(
+            &path,
+            format!(
+                "---\nname: {name}\ndescription: {description}\ntags: [{}]\n---\n{body}\n",
+                tags.join(", ")
+            ),
+        )
+        .expect("selection skill manifest");
+        path
+    }
+
     #[test]
     fn parses_structured_frontmatter() {
         let dir = tempdir().expect("tempdir");
@@ -910,6 +1413,301 @@ Run the canonical Task gates after editing.
             rule.effect == SkillPolicyEffect::RequireApproval
                 && rule.tool_name.as_deref() == Some("apply_patch")
         }));
+    }
+
+    #[test]
+    fn configured_selection_is_authoritative_and_automatic_selection_is_ranked_and_limited() {
+        let directory = tempdir().expect("tempdir");
+        let configured = write_selection_skill(
+            directory.path(),
+            "00-configured",
+            "configured-only",
+            "Unrelated configured instructions",
+            &[],
+            "CONFIGURED_BODY",
+        );
+        let exact = write_selection_skill(
+            directory.path(),
+            "40-exact",
+            "precision-audit",
+            "Audit precise output",
+            &[],
+            "EXACT_BODY",
+        );
+        let two_tags = write_selection_skill(
+            directory.path(),
+            "30-tags",
+            "tag-ranked",
+            "Inspect dependencies",
+            &["rust", "security"],
+            "TAG_BODY",
+        );
+        let description = write_selection_skill(
+            directory.path(),
+            "20-description",
+            "description-ranked",
+            "Check migration checksum integrity",
+            &[],
+            "DESCRIPTION_BODY",
+        );
+        let lower = write_selection_skill(
+            directory.path(),
+            "10-lower",
+            "lower-ranked",
+            "Migration checksum brief",
+            &[],
+            "LOWER_BODY",
+        );
+        let files = vec![lower, configured, description, exact, two_tags];
+
+        let selection = select_skill_files(
+            files,
+            "Use Precision Audit for the Rust security migration checksum integrity",
+            &["configured-only".to_string()],
+            128_000,
+        )
+        .expect("ranked selection");
+
+        assert_eq!(
+            selection
+                .skills
+                .iter()
+                .map(|skill| skill.frontmatter.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "configured-only",
+                "precision-audit",
+                "tag-ranked",
+                "description-ranked"
+            ]
+        );
+        assert_eq!(
+            selection.records[0].source,
+            SkillSelectionSource::Configured
+        );
+        assert_eq!(selection.records[0].reason, "profile active skill");
+        assert_eq!(selection.records[1].reason, "exact skill name phrase");
+        assert_eq!(selection.records[2].reason, "matched tags: rust, security");
+        assert!(selection.records[3]
+            .reason
+            .starts_with("matched description tokens:"));
+        assert_eq!(
+            selection
+                .records
+                .iter()
+                .filter(|record| record.source == SkillSelectionSource::Automatic)
+                .count(),
+            MAX_AUTOMATIC_SKILLS
+        );
+    }
+
+    #[test]
+    fn automatic_ties_use_canonical_path_and_duplicate_paths_are_selected_once() {
+        let directory = tempdir().expect("tempdir");
+        let mut files = Vec::new();
+        for name in ["delta", "alpha", "charlie", "bravo"] {
+            files.push(write_selection_skill(
+                directory.path(),
+                name,
+                name,
+                "Specialized selector",
+                &["needle"],
+                name,
+            ));
+        }
+        files.push(directory.path().join("alpha/SKILL.md"));
+
+        let selection =
+            select_skill_files(files, "needle", &[], 128_000).expect("deterministic tie selection");
+        assert_eq!(
+            selection
+                .skills
+                .iter()
+                .map(|skill| skill.frontmatter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "bravo", "charlie"]
+        );
+    }
+
+    #[test]
+    fn generic_words_and_one_repeated_description_token_do_not_select_a_skill() {
+        let directory = tempdir().expect("tempdir");
+        let generic = write_selection_skill(
+            directory.path(),
+            "generic",
+            "general-assistant",
+            "Help manage repository files and project tasks",
+            &["project"],
+            "GENERIC_BODY",
+        );
+        let repeated = write_selection_skill(
+            directory.path(),
+            "repeated",
+            "database-helper",
+            "Database database task helper",
+            &[],
+            "REPEATED_BODY",
+        );
+
+        let selection = select_skill_files(
+            vec![generic, repeated],
+            "Manage a repository task with one database file",
+            &[],
+            128_000,
+        )
+        .expect("generic words are ignored");
+        assert!(selection.skills.is_empty());
+    }
+
+    #[test]
+    fn configured_selection_reports_missing_ambiguous_and_over_budget_skills() {
+        let directory = tempdir().expect("tempdir");
+        let first = write_selection_skill(
+            directory.path(),
+            "first",
+            "duplicate",
+            "First duplicate",
+            &[],
+            "body",
+        );
+        let second = write_selection_skill(
+            directory.path(),
+            "second",
+            "duplicate",
+            "Second duplicate",
+            &[],
+            "body",
+        );
+        let missing = select_skill_files(
+            vec![first.clone()],
+            "unrelated",
+            &["missing".to_string()],
+            128_000,
+        )
+        .expect_err("missing configured skill");
+        assert!(matches!(
+            missing,
+            SkillSelectionError::MissingConfigured { name } if name == "missing"
+        ));
+
+        let ambiguous = select_skill_files(
+            vec![second, first],
+            "unrelated",
+            &["duplicate".to_string()],
+            128_000,
+        )
+        .expect_err("ambiguous configured skill");
+        assert!(matches!(
+            ambiguous,
+            SkillSelectionError::AmbiguousConfigured { name, .. } if name == "duplicate"
+        ));
+
+        let oversized = write_selection_skill(
+            directory.path(),
+            "oversized",
+            "oversized",
+            "Configured oversized content",
+            &[],
+            &"large body ".repeat(200),
+        );
+        let over_budget =
+            select_skill_files(vec![oversized], "unrelated", &["oversized".to_string()], 32)
+                .expect_err("over-budget configured skill");
+        assert!(matches!(
+            over_budget,
+            SkillSelectionError::ConfiguredOverBudget {
+                available_tokens: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn automatic_selection_respects_its_aggregate_prompt_allocation() {
+        let directory = tempdir().expect("tempdir");
+        let skill = write_selection_skill(
+            directory.path(),
+            "large-auto",
+            "large-auto",
+            "Specialized automatic selector",
+            &["needle"],
+            &"automatic body ".repeat(80),
+        );
+        let context_length = 256;
+        assert!(automatic_skill_token_budget(context_length) < context_length);
+
+        let selection = select_skill_files(vec![skill], "needle", &[], context_length)
+            .expect("automatic over-allocation is skipped");
+        assert!(selection.skills.is_empty());
+    }
+
+    #[test]
+    fn non_selected_skill_does_not_load_its_missing_reference() {
+        let directory = tempdir().expect("tempdir");
+        let skill_dir = directory.path().join("lazy");
+        fs::create_dir(&skill_dir).expect("skill directory");
+        let manifest = skill_dir.join("SKILL.md");
+        fs::write(
+            &manifest,
+            "---\nname: lazy-skill\ndescription: Specialized lunar navigation\nreferences: [missing.md]\n---\nLAZY_BODY\n",
+        )
+        .expect("lazy manifest");
+
+        let unrelated = select_skill_files(
+            vec![manifest.clone()],
+            "ordinary repository task",
+            &[],
+            128_000,
+        )
+        .expect("non-selected references remain unloaded");
+        assert!(unrelated.skills.is_empty());
+
+        assert!(matches!(
+            select_skill_files(vec![manifest], "use lazy skill", &[], 128_000),
+            Err(SkillSelectionError::InvalidSkill { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frontmatter_cache_refreshes_same_length_replacement_with_restored_mtime() {
+        use std::fs::FileTimes;
+
+        let directory = tempdir().expect("tempdir");
+        let skill_dir = directory.path().join("cached");
+        fs::create_dir(&skill_dir).expect("skill directory");
+        let manifest = skill_dir.join("SKILL.md");
+        let first = "---\nname: alpha\ndescription: cached metadata\n---\nbody\n";
+        let second = "---\nname: bravo\ndescription: cached metadata\n---\nbody\n";
+        assert_eq!(first.len(), second.len());
+        fs::write(&manifest, first).expect("first manifest");
+        let modified = fs::metadata(&manifest)
+            .expect("first metadata")
+            .modified()
+            .expect("first mtime");
+        assert_eq!(
+            parse_skill_frontmatter_file(&manifest)
+                .expect("first frontmatter")
+                .name,
+            "alpha"
+        );
+
+        let replacement = skill_dir.join("replacement.md");
+        fs::write(&replacement, second).expect("replacement manifest");
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle")
+            .set_times(FileTimes::new().set_modified(modified))
+            .expect("restore replacement mtime");
+        fs::rename(&replacement, &manifest).expect("replace manifest");
+
+        assert_eq!(
+            parse_skill_frontmatter_file(&manifest)
+                .expect("refreshed frontmatter")
+                .name,
+            "bravo"
+        );
     }
 
     #[test]

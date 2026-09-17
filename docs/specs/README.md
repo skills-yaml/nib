@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **47 done, 4 development, and 2 backlog**.
+The current lifecycle is **49 done, 2 development, and 2 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -41,6 +41,10 @@ catalog/canary/selected/full evidence for all six provider groups. T036 complete
 conversation-first TUI hierarchy refinement with local verification and native PTY smoke.
 T037 closes a cancellation modal-cleanup race identified while qualifying the revised
 interaction on hosted macOS, with deterministic regression and native local evidence.
+T038 and T039 complete the block transcript, safe key contract, visible tool lifecycle,
+under-composer decisions, compact chrome, markdown speech, and startup workspace
+consent. Live tool blocks use exact invocation identity, so repeated same-name calls
+remain distinct through streaming and completion.
 FT-020 remains backlog for any future protected Windows/macOS production delegation
 authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
 bwrap containment; native non-Linux mechanism tests are complete and production use
@@ -86,10 +90,10 @@ work or narrower guarantees.
 - [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
 - [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
 - [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
-- [T038: TUI Block Transcript and Key Contract](development/T038_tui_block_transcript_and_key_contract.md)
-- [T039: Visible Tool Blocks and Explicit Approval Card](development/T039_visible_tool_blocks_and_explicit_approval.md)
+- [T038: TUI Block Transcript and Key Contract](done/T038_tui_block_transcript_and_key_contract.md)
+- [T039: Visible Tool Blocks and Explicit Approval Card](done/T039_visible_tool_blocks_and_explicit_approval.md)
 - [T040: Resourceful Agent Loop and Context](done/T040_resourceful_agent_loop_and_context.md)
-- [T041: Task-Aware Context and Verified Completion](development/T041_task_aware_context_and_verified_completion.md)
+- [T041: Task-Aware Context and Verified Completion](done/T041_task_aware_context_and_verified_completion.md)
 - [T042: Context Budgeting and Live Visibility](backlog/T042_context_budgeting_and_live_visibility.md)
 
 ### Feature specs

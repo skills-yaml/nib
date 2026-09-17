@@ -40,6 +40,7 @@ pub enum TerminalOutputStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalOutputEvent {
+    pub invocation_id: crate::tools::ToolInvocationId,
     pub tool_name: String,
     pub stream: TerminalOutputStream,
     pub chunk: Vec<u8>,
@@ -52,6 +53,7 @@ pub type TerminalOutputCallback = Arc<dyn Fn(TerminalOutputEvent) + Send + Sync>
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     tool_name: &str,
+    invocation_id: crate::tools::ToolInvocationId,
     args: &Value,
     cwd: &Path,
     config: &ExecutionConfig,
@@ -68,6 +70,7 @@ pub async fn dispatch(
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => {
             run_terminal(
+                invocation_id,
                 args,
                 cwd,
                 config,
@@ -600,7 +603,9 @@ async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_terminal(
+    invocation_id: crate::tools::ToolInvocationId,
     args: &Value,
     cwd: &Path,
     config: &ExecutionConfig,
@@ -683,7 +688,8 @@ async fn run_terminal(
     }
 
     let start = Instant::now();
-    let output_callback = sandbox_output_callback(terminal_output_callback.cloned(), None);
+    let output_callback =
+        sandbox_output_callback(terminal_output_callback.cloned(), invocation_id, None);
     let run = crate::sandbox::run_sandboxed_streaming_with_environment(
         command,
         &run_cwd,
@@ -696,7 +702,7 @@ async fn run_terminal(
     );
 
     let run_result = timeout(Duration::from_secs(timeout_secs), run).await;
-    flush_terminal_output_callback(terminal_output_callback, None);
+    flush_terminal_output_callback(terminal_output_callback, invocation_id, None);
     let (output, bwrap_args) = run_result
         .map_err(|_| format!("Command timed out after {timeout_secs}s"))?
         .map_err(|e| e.to_string())?;
@@ -760,6 +766,7 @@ pub(crate) fn terminal_output_limit(args: &Value) -> Result<usize, String> {
 
 fn sandbox_output_callback(
     callback: Option<TerminalOutputCallback>,
+    invocation_id: crate::tools::ToolInvocationId,
     background_task_id: Option<String>,
 ) -> Option<crate::sandbox::OutputCallback> {
     callback.map(|callback| {
@@ -769,6 +776,7 @@ fn sandbox_output_callback(
                 crate::sandbox::OutputStream::Stderr => TerminalOutputStream::Stderr,
             };
             callback(TerminalOutputEvent {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream,
                 chunk: bytes.to_vec(),
@@ -781,6 +789,7 @@ fn sandbox_output_callback(
 
 fn flush_terminal_output_callback(
     callback: Option<&TerminalOutputCallback>,
+    invocation_id: crate::tools::ToolInvocationId,
     background_task_id: Option<String>,
 ) {
     let Some(callback) = callback else {
@@ -788,6 +797,7 @@ fn flush_terminal_output_callback(
     };
     for stream in [TerminalOutputStream::Stdout, TerminalOutputStream::Stderr] {
         callback(TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream,
             chunk: Vec::new(),
@@ -2071,6 +2081,7 @@ mod tests {
         let _environment = EnvironmentGuard::set("NIB_MANAGED_PROCESS_SCOPE", "sub-fixture");
         let root = tempfile::tempdir().expect("project root");
         let terminal_error = run_terminal(
+            crate::tools::ToolInvocationId::new(),
             &json!({"command": "pwd", "background": true}),
             root.path(),
             &ExecutionConfig::default(),
@@ -2210,8 +2221,10 @@ mod tests {
             default_profile: "internal".to_string(),
             ..ExecutionConfig::default()
         };
+        let invocation_id = crate::tools::ToolInvocationId::new();
 
         let result = run_terminal(
+            invocation_id,
             &json!({
                 "command": "head -c 4096 /dev/zero | tr '\\0' x; printf 'STDOUT_TAIL'; head -c 4096 /dev/zero | tr '\\0' y >&2; printf 'STDERR_TAIL' >&2",
                 "max_output_bytes": 64
@@ -2240,9 +2253,13 @@ mod tests {
             assert!(events
                 .iter()
                 .any(|event| event.stream == TerminalOutputStream::Stderr));
+            assert!(events
+                .iter()
+                .all(|event| event.invocation_id == invocation_id));
         }
 
         let failed = run_terminal(
+            crate::tools::ToolInvocationId::new(),
             &json!({
                 "command": "head -c 4096 /dev/zero | tr '\\0' z >&2; printf 'FAILED_TAIL' >&2; exit 7",
                 "max_output_bytes": 64

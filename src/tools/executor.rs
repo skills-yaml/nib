@@ -15,7 +15,7 @@ use crate::tools::models::{
 use crate::tools::registry::get_tool_metadata;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -58,6 +58,10 @@ struct ResolvedExecutionConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalContext {
     pub action: String,
+    /// A short, already-redacted subject suitable for approval UIs.
+    pub display_subject: String,
+    /// An optional, already-redacted location suitable for approval UIs.
+    pub display_location: Option<String>,
     pub permission_and_risk: String,
     pub target_scope: String,
     pub network: String,
@@ -69,8 +73,11 @@ pub struct ApprovalContext {
 
 impl ApprovalContext {
     pub fn compatibility(call: &ToolCall, level: PermissionLevel) -> Self {
+        let (display_subject, display_location) = normalized_approval_display(call, &[]);
         Self {
             action: normalized_approval_action(call, &[]),
+            display_subject,
+            display_location,
             permission_and_risk: format!("{} / not classified", permission_label(level)),
             target_scope: "not available to compatibility handler".to_string(),
             network: "not available to compatibility handler".to_string(),
@@ -1327,6 +1334,7 @@ impl ToolExecutor {
         } else {
             core::dispatch(
                 &call.tool_name,
+                call.invocation_id,
                 &dispatch_arguments,
                 execution_root,
                 &effective_execution_config,
@@ -1637,6 +1645,7 @@ impl ToolExecutor {
             }
             if let Some(callback) = &callback {
                 callback(core::TerminalOutputEvent {
+                    invocation_id: event.invocation_id,
                     tool_name: event.tool_name,
                     stream: event.stream,
                     chunk: redacted,
@@ -1732,10 +1741,13 @@ impl ToolExecutor {
         effective_root: &Path,
         session_id: Option<&str>,
     ) -> Result<Option<PathBuf>, String> {
-        if !required {
-            return Ok(None);
-        }
-        let session_id = session_id.ok_or("mutating tools require a session id")?;
+        let Some(session_id) = session_id else {
+            return if required {
+                Err("mutating tools require a session id".to_string())
+            } else {
+                Ok(None)
+            };
+        };
         if self.project_root.join(".git").is_file() {
             return Ok(Some(effective_root.to_path_buf()));
         }
@@ -1747,9 +1759,16 @@ impl ToolExecutor {
             .worktree_manager
             .as_mut()
             .ok_or("worktree manager unavailable")?;
-        let worktree_root = manager
-            .create_for_session_cancellable(session_id, cancellation.as_ref())
-            .await?;
+        let worktree_root = if required {
+            manager
+                .create_for_session_cancellable(session_id, cancellation.as_ref())
+                .await?
+        } else {
+            let Some(existing) = manager.existing_for_session(session_id)? else {
+                return Ok(None);
+            };
+            existing
+        };
         let relative = effective_root
             .strip_prefix(&self.project_root)
             .map_err(|_| {
@@ -1767,6 +1786,18 @@ impl ToolExecutor {
             return Err("isolated execution root escaped its worktree".to_string());
         }
         Ok(Some(target))
+    }
+
+    /// Establishes the exact managed worktree that a later mutation will use so
+    /// instruction discovery can be resolved against the same filesystem view.
+    pub(crate) async fn prepare_session_worktree(
+        &mut self,
+        session_id: &str,
+    ) -> Result<PathBuf, String> {
+        let project_root = self.project_root.clone();
+        self.ensure_worktree(true, &project_root, Some(session_id))
+            .await?
+            .ok_or_else(|| "managed session worktree was not established".to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1882,8 +1913,11 @@ impl ToolExecutor {
         } else {
             "not required for this action"
         };
+        let (display_subject, display_location) = normalized_approval_display(call, &secrets);
         ApprovalContext {
             action: normalized_approval_action(call, &secrets),
+            display_subject,
+            display_location,
             permission_and_risk: bounded_approval_field(
                 &format!("{} / {}", permission_label(level), risk.as_str()),
                 &secrets,
@@ -2276,6 +2310,7 @@ fn bounded_approval_field(value: &str, secrets: &[String]) -> String {
 
 fn bounded_approval_field_with_limit(value: &str, secrets: &[String], limit: usize) -> String {
     let redacted = redact_text_with_encoded_secrets(value, secrets);
+    let redacted = crate::interactive::control_safe_text(&redacted, true);
     let mut normalized = String::new();
     let mut truncated = false;
     for character in redacted.chars() {
@@ -2308,6 +2343,143 @@ fn bounded_approval_field_with_limit(value: &str, secrets: &[String], limit: usi
 
 fn approval_argument_string<'a>(call: &'a ToolCall, field: &str) -> Option<&'a str> {
     call.arguments.get(field).and_then(Value::as_str)
+}
+
+fn normalized_patch_targets(call: &ToolCall, secrets: &[String]) -> (usize, Vec<String>) {
+    let patch = approval_argument_string(call, "patch").unwrap_or_default();
+    let mut targets = HashSet::new();
+    let mut in_hunk = false;
+    let mut pending_old_header = false;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+            pending_old_header = false;
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            pending_old_header = false;
+            continue;
+        }
+        let custom_path = line
+            .strip_prefix("*** Update File: ")
+            .or_else(|| line.strip_prefix("*** Add File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "));
+        let unified_path = (!in_hunk && pending_old_header)
+            .then(|| line.strip_prefix("+++ "))
+            .flatten();
+        if !in_hunk && line.starts_with("--- ") {
+            pending_old_header = true;
+            continue;
+        }
+        pending_old_header = false;
+        let Some(path) = custom_path.or(unified_path) else {
+            continue;
+        };
+        let path = path.trim().trim_start_matches("b/");
+        if path != "/dev/null" {
+            targets.insert(path.to_string());
+        }
+    }
+    let target_count = targets.len();
+    let mut targets = targets.into_iter().collect::<Vec<_>>();
+    targets.sort();
+    targets.truncate(4);
+    let targets = targets
+        .into_iter()
+        .map(|path| bounded_approval_field_with_limit(&path, secrets, 40))
+        .collect();
+    (target_count, targets)
+}
+
+fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, Option<String>) {
+    let path = || {
+        ["path", "target_file", "file_path"]
+            .into_iter()
+            .find_map(|field| approval_argument_string(call, field))
+    };
+    let bounded = |value: &str, limit| bounded_approval_field_with_limit(value, secrets, limit);
+    let display = match call.tool_name.as_str() {
+        "run_terminal" => (
+            bounded(
+                approval_argument_string(call, "command").unwrap_or("(missing command)"),
+                120,
+            ),
+            approval_argument_string(call, "cwd").map(|value| bounded(value, 48)),
+        ),
+        "read_file" | "list_directory" | "search_replace" => {
+            (bounded(path().unwrap_or("(missing path)"), 120), None)
+        }
+        "apply_patch" => {
+            let (target_count, targets) = normalized_patch_targets(call, secrets);
+            let subject = if targets.is_empty() {
+                "workspace files".to_string()
+            } else {
+                let omitted = target_count.saturating_sub(targets.len());
+                let omission = if omitted == 0 {
+                    String::new()
+                } else {
+                    format!(" (+{omitted} more)")
+                };
+                format!(
+                    "{target_count} {}{omission}: {}",
+                    if target_count == 1 { "file" } else { "files" },
+                    targets.join(",")
+                )
+            };
+            (bounded(&subject, 120), None)
+        }
+        "grep" => {
+            let pattern = approval_argument_string(call, "pattern")
+                .or_else(|| approval_argument_string(call, "query"));
+            let subject = [pattern, path()]
+                .into_iter()
+                .flatten()
+                .map(|value| bounded(value, 56))
+                .collect::<Vec<_>>()
+                .join(" in ");
+            (
+                if subject.is_empty() {
+                    "(missing pattern)".to_string()
+                } else {
+                    bounded(&subject, 120)
+                },
+                None,
+            )
+        }
+        "approve_plan" => (
+            bounded(
+                approval_argument_string(call, "goal")
+                    .or_else(|| approval_argument_string(call, "plan_id"))
+                    .unwrap_or("(missing plan)"),
+                120,
+            ),
+            None,
+        ),
+        "merge_subagent_worktree" => (
+            bounded(
+                approval_argument_string(call, "subagent_id").unwrap_or("(missing subagent)"),
+                96,
+            ),
+            None,
+        ),
+        other => {
+            let value = [
+                "command",
+                "path",
+                "query",
+                "pattern",
+                "url",
+                "action",
+                "target_file",
+            ]
+            .into_iter()
+            .find_map(|field| approval_argument_string(call, field))
+            .unwrap_or(other);
+            (bounded(value, 120), None)
+        }
+    };
+    display
 }
 
 fn approval_plan_step_details(call: &ToolCall, secrets: &[String]) -> Vec<String> {
@@ -2372,48 +2544,7 @@ fn normalized_approval_action(call: &ToolCall, secrets: &[String]) -> String {
             format!("run_terminal command={command} cwd={cwd} background={background}")
         }
         "apply_patch" => {
-            let patch = approval_argument_string(call, "patch").unwrap_or_default();
-            let mut targets = Vec::new();
-            let mut target_count = 0usize;
-            let mut in_hunk = false;
-            let mut pending_old_header = false;
-            for line in patch.lines() {
-                if line.starts_with("diff --git ") {
-                    in_hunk = false;
-                    pending_old_header = false;
-                    continue;
-                }
-                if line.starts_with("@@ ") {
-                    in_hunk = true;
-                    pending_old_header = false;
-                    continue;
-                }
-                let custom_path = line
-                    .strip_prefix("*** Update File: ")
-                    .or_else(|| line.strip_prefix("*** Add File: "))
-                    .or_else(|| line.strip_prefix("*** Delete File: "));
-                let unified_path = (!in_hunk && pending_old_header)
-                    .then(|| line.strip_prefix("+++ "))
-                    .flatten();
-                if !in_hunk && line.starts_with("--- ") {
-                    pending_old_header = true;
-                    continue;
-                }
-                pending_old_header = false;
-                let Some(path) = custom_path.or(unified_path) else {
-                    continue;
-                };
-                let path = path.trim().trim_start_matches("b/");
-                if path == "/dev/null" {
-                    continue;
-                }
-                target_count = target_count.saturating_add(1);
-                if targets.len() < 4 {
-                    targets.push(bounded_approval_field_with_limit(path, secrets, 40));
-                }
-            }
-            targets.sort();
-            targets.dedup();
+            let (target_count, targets) = normalized_patch_targets(call, secrets);
             let mode = if call
                 .arguments
                 .get("dry_run")
@@ -3173,7 +3304,7 @@ mod tests {
             invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
             arguments: json!({
-                "command": format!("{base64_secret} provider%2Dprivate%2Dsentinel {}LONG_ARGUMENT_SENTINEL", "x".repeat(5_000)),
+                "command": format!("safe\u{202e}spoof {base64_secret} provider%2Dprivate%2Dsentinel {}LONG_ARGUMENT_SENTINEL", "x".repeat(5_000)),
                 "token": "sk-privateapproval123456",
                 "control": "\u{1b}[2J\nraw-json-sentinel",
             }),
@@ -3183,7 +3314,7 @@ mod tests {
         let effective = executor
             .effective_execution_config(PermissionLevel::Destructive, ToolRisk::Destructive);
         let target = PathBuf::from(format!(
-            "/tmp/provider-private-sentinel/\u{1b}[2J\n{}LONG_TARGET_SENTINEL",
+            "/tmp/provider-private-sentinel/\u{202e}spoof/\u{1b}[2J\n{}LONG_TARGET_SENTINEL",
             "x".repeat(500)
         ));
         let decision = executor
@@ -3207,6 +3338,17 @@ mod tests {
             .clone()
             .expect("context captured");
         let rendered = context.render();
+        assert!(context.display_subject.contains("[REDACTED]"));
+        assert!(!context
+            .display_subject
+            .contains("provider-private-sentinel"));
+        assert!(!context.display_subject.contains(&base64_secret));
+        assert!(!context
+            .display_subject
+            .contains("provider%2Dprivate%2Dsentinel"));
+        assert!(context.display_subject.len() <= 120);
+        assert!(!context.display_subject.chars().any(char::is_control));
+        assert!(!context.display_subject.contains('\u{202e}'));
         assert_eq!(context.lines().len(), MAX_APPROVAL_LINES);
         assert!(context
             .lines()
@@ -3222,6 +3364,7 @@ mod tests {
         assert!(!rendered.contains(&base64_secret));
         assert!(!rendered.contains("sk-privateapproval"));
         assert!(!rendered.contains("raw-json-sentinel"));
+        assert!(!rendered.contains('\u{202e}'));
         assert!(!rendered.contains("LONG_ARGUMENT_SENTINEL"));
         assert!(!rendered.contains("LONG_TARGET_SENTINEL"));
         assert!(context
@@ -3289,6 +3432,37 @@ mod tests {
         assert!(context.action.contains("docs/a.md"));
         assert!(!context.render().contains("configured-patch-secret"));
         assert!(!context.render().contains("sk-privatepatch"));
+    }
+
+    #[test]
+    fn patch_approval_display_preserves_unique_target_count_and_omission() {
+        let patch = [
+            "docs/e.md",
+            "docs/b.md",
+            "docs/a.md",
+            "docs/d.md",
+            "docs/c.md",
+            "docs/a.md",
+        ]
+        .into_iter()
+        .map(|path| format!("*** Update File: {path}\n"))
+        .collect::<String>();
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({"dry_run": false, "patch": patch}),
+            session_id: None,
+            project_root: None,
+        };
+
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+
+        assert!(context.action.contains("files=5"), "{}", context.action);
+        assert_eq!(
+            context.display_subject,
+            "5 files (+1 more): docs/a.md,docs/b.md,docs/c.md,docs/d.md"
+        );
+        assert!(!context.display_subject.contains("docs/e.md"));
     }
 
     #[test]
@@ -4100,6 +4274,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_output_sender_is_bounded_and_redacted() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let environment = HashMap::from([(
             "DEPLOY_TOKEN".to_string(),
@@ -4113,6 +4288,7 @@ mod tests {
             .expect("terminal callback");
 
         callback(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: format!("sk-123456789 profile-secret-value{}", "x".repeat(64)).into_bytes(),
@@ -4120,6 +4296,7 @@ mod tests {
             eof: false,
         });
         callback(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: b"dropped when full".to_vec(),
@@ -4128,6 +4305,7 @@ mod tests {
         });
 
         let event = receiver.recv().await.expect("stream event");
+        assert_eq!(event.invocation_id, invocation_id);
         let output = String::from_utf8(event.chunk).expect("redacted UTF-8");
         assert!(output.starts_with("[REDACTED] [REDACTED]"));
         assert!(!output.contains("sk-123456789"));
@@ -4138,6 +4316,7 @@ mod tests {
     #[test]
     fn terminal_stream_redaction_hides_secrets_split_across_chunks() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let callback: core::TerminalOutputCallback = Arc::new(move |event| {
@@ -4159,6 +4338,7 @@ mod tests {
         ];
         for chunk in chunks {
             redacted(core::TerminalOutputEvent {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream: core::TerminalOutputStream::Stdout,
                 chunk: chunk.to_vec(),
@@ -4167,6 +4347,7 @@ mod tests {
             });
         }
         redacted(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: Vec::new(),
@@ -4197,6 +4378,7 @@ mod tests {
     #[test]
     fn terminal_stream_redaction_hides_percent_encoded_secrets_across_chunks() {
         let root = tempfile::tempdir().expect("root");
+        let invocation_id = crate::tools::ToolInvocationId::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let callback: core::TerminalOutputCallback = Arc::new(move |event| {
@@ -4215,6 +4397,7 @@ mod tests {
         let input = format!("before {percent_secret} middle {nested_secret} after url=a%20b");
         for chunk in input.as_bytes().chunks(137) {
             redacted(core::TerminalOutputEvent {
+                invocation_id,
                 tool_name: "run_terminal".to_string(),
                 stream: core::TerminalOutputStream::Stdout,
                 chunk: chunk.to_vec(),
@@ -4223,6 +4406,7 @@ mod tests {
             });
         }
         redacted(core::TerminalOutputEvent {
+            invocation_id,
             tool_name: "run_terminal".to_string(),
             stream: core::TerminalOutputStream::Stdout,
             chunk: Vec::new(),

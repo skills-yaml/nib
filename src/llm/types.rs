@@ -1000,6 +1000,7 @@ pub enum LlmStreamEvent {
 pub enum StreamEvent {
     Content(String),
     ToolCallChunk {
+        invocation_id: ToolInvocationId,
         index: usize,
         name: Option<String>,
         arguments: Option<String>,
@@ -1019,15 +1020,18 @@ pub enum StreamEvent {
         options: Vec<String>,
     },
     ToolStarted {
+        invocation_id: ToolInvocationId,
         tool_name: String,
     },
     TerminalOutput {
+        invocation_id: ToolInvocationId,
         tool_name: String,
         stream: String,
         chunk: String,
         background_task_id: Option<String>,
     },
     ToolCompleted {
+        invocation_id: ToolInvocationId,
         tool_name: String,
         success: bool,
         output: Option<Value>,

@@ -1,10 +1,13 @@
 //! Core agent loop: planned, approved, bounded LLM reasoning and tool execution.
 
 use crate::agent::state::AgentState;
-use crate::context::budget::{build_bounded_runtime_input, RuntimePromptRequest};
+use crate::context::agents::{tool_instruction_scopes, InstructionResolver};
+use crate::context::budget::{
+    build_bounded_runtime_input, ensure_required_instructions_present, RuntimePromptRequest,
+};
 use crate::context::skills::{Skill, SkillPolicyEffect};
 use crate::context::{
-    assemble_runtime_context_sections, attachment_context_sections, select_profile_skills,
+    assemble_runtime_context_sections, attachment_context_sections, select_profile_skill_selection,
     RuntimeContextSection,
 };
 use crate::llm::{
@@ -13,8 +16,10 @@ use crate::llm::{
     ToolResult as ProviderToolResult, ToolResultClass,
 };
 use crate::session::{
-    normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionRunLease, SessionStore,
-    ToolCallRecord,
+    normalize_plan_goal, ClarificationRecord, ClarificationStatus, HumanIntentKind,
+    HumanIntentRecord, MessageOrigin, MessageProvenance, Session, SessionEvent, SessionMessage,
+    SessionRunLease, SessionStore, ToolCallRecord, VerificationAuthority,
+    VerificationExpectedOutcome, VerificationObligation,
 };
 use crate::tools::executor::ApprovalHandler;
 #[cfg(test)]
@@ -25,7 +30,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, mpsc::Sender, Notify};
@@ -39,6 +44,186 @@ pub const MAX_STEERING_INPUT_BYTES: usize = 8 * 1024;
 const MAX_STEERING_INPUTS_PER_RUN: usize = 32;
 const MAX_STEERING_TOTAL_BYTES_PER_RUN: usize = 32 * 1024;
 const MAX_IDENTICAL_FAILED_TOOL_BATCHES: u8 = 3;
+
+/// Per-run resource evidence is deliberately provider-neutral and contains only
+/// bounded counters. Raw prompts, model output, and question text remain in their
+/// existing private/session boundaries.
+#[derive(Clone, Default)]
+struct AgentResourceTracker {
+    counters: Arc<AgentResourceCounters>,
+}
+
+#[derive(Default)]
+struct AgentResourceCounters {
+    generation_requests: AtomicU64,
+    tool_attempts: AtomicU64,
+    approximate_context_tokens_total: AtomicU64,
+    approximate_context_tokens_max: AtomicU64,
+    compression_requests: AtomicU64,
+    repeated_questions: AtomicU64,
+    question_fingerprints: std::sync::Mutex<std::collections::BTreeSet<[u8; 32]>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentResourceSnapshot {
+    generation_requests: u64,
+    tool_attempts: u64,
+    approximate_context_tokens_total: u64,
+    approximate_context_tokens_max: u64,
+    compression_requests: u64,
+    repeated_questions: u64,
+}
+
+impl AgentResourceTracker {
+    fn from_session(session: &Session) -> Self {
+        let tracker = Self::default();
+        {
+            let mut fingerprints = tracker
+                .counters
+                .question_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            fingerprints.extend(session.events.iter().filter_map(|event| {
+                (event.kind == "question_required")
+                    .then(|| event.details.get("question").and_then(Value::as_str))
+                    .flatten()
+                    .map(question_fingerprint)
+            }));
+        }
+        tracker
+    }
+
+    fn record_generation_request(&self, request: &LlmRequest<'_>) {
+        self.counters
+            .generation_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let messages = request
+            .messages
+            .iter()
+            .map(crate::llm::LlmMessage::to_openai_chat)
+            .collect::<Vec<_>>();
+        let tools = request.tools.map(|tools| {
+            tools
+                .iter()
+                .map(crate::llm::ToolDefinition::to_openai_tool)
+                .collect::<Vec<_>>()
+        });
+        let approximate = u64::try_from(crate::context::budget::approximate_llm_input_tokens(
+            &messages,
+            tools.as_deref(),
+        ))
+        .unwrap_or(u64::MAX);
+        self.counters
+            .approximate_context_tokens_total
+            .fetch_add(approximate, Ordering::Relaxed);
+        self.counters
+            .approximate_context_tokens_max
+            .fetch_max(approximate, Ordering::Relaxed);
+    }
+
+    fn record_tool_attempt(&self) {
+        self.counters.tool_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn generation_requests(&self) -> u64 {
+        self.counters.generation_requests.load(Ordering::Relaxed)
+    }
+
+    fn record_compression_requests_since(&self, previous_generation_requests: u64) {
+        let requested = self
+            .generation_requests()
+            .saturating_sub(previous_generation_requests);
+        self.counters
+            .compression_requests
+            .fetch_add(requested, Ordering::Relaxed);
+    }
+
+    fn observe_question(&self, question: &str) {
+        let repeated = !self
+            .counters
+            .question_fingerprints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(question_fingerprint(question));
+        if repeated {
+            self.counters
+                .repeated_questions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> AgentResourceSnapshot {
+        AgentResourceSnapshot {
+            generation_requests: self.generation_requests(),
+            tool_attempts: self.counters.tool_attempts.load(Ordering::Relaxed),
+            approximate_context_tokens_total: self
+                .counters
+                .approximate_context_tokens_total
+                .load(Ordering::Relaxed),
+            approximate_context_tokens_max: self
+                .counters
+                .approximate_context_tokens_max
+                .load(Ordering::Relaxed),
+            compression_requests: self.counters.compression_requests.load(Ordering::Relaxed),
+            repeated_questions: self.counters.repeated_questions.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn question_fingerprint(question: &str) -> [u8; 32] {
+    let normalized = question
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Sha256::digest(normalized.as_bytes()).into()
+}
+
+struct ResourceTrackingLlm {
+    inner: Arc<dyn LlmClient>,
+    resources: AgentResourceTracker,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ResourceTrackingLlm {
+    async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        self.resources.record_generation_request(&request);
+        self.inner.complete(request).await
+    }
+
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
+        self.resources.record_generation_request(&request);
+        self.inner.stream(request).await
+    }
+}
+
+fn persist_resource_evidence(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    outcome: &str,
+    resources: &AgentResourceTracker,
+) -> Result<(), String> {
+    let snapshot = resources.snapshot();
+    store
+        .record_event(
+            session_id,
+            "agent_resource_usage",
+            json!({
+                "version": 1,
+                "run_id": run_id,
+                "outcome": outcome,
+                "generation_requests": snapshot.generation_requests,
+                "tool_attempts": snapshot.tool_attempts,
+                "approximate_context_tokens_total": snapshot.approximate_context_tokens_total,
+                "approximate_context_tokens_max": snapshot.approximate_context_tokens_max,
+                "compression_requests": snapshot.compression_requests,
+                "repeated_questions": snapshot.repeated_questions,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|error| format!("failed to persist run resource evidence: {error}"))
+}
 
 /// Retains bounded comparison state, never raw requests or tool output. Invocation IDs
 /// identify executions rather than progress, so they are deliberately excluded.
@@ -289,6 +474,7 @@ impl ExactRunSteeringHandle {
                         ));
                     }
                     let sequence = accepted.len() + 1;
+                    let source_event_index = session.events.len();
                     append_session_event(
                         session,
                         "steering_input",
@@ -300,6 +486,12 @@ impl ExactRunSteeringHandle {
                             "text": text,
                         }),
                     );
+                    session.human_intent.push(HumanIntentRecord {
+                        kind: HumanIntentKind::Steering,
+                        text: text.clone(),
+                        source_message_index: None,
+                        source_event_index: Some(source_event_index),
+                    });
                     Ok(sequence)
                 })
                 .map_err(|error| error.to_string())?;
@@ -760,7 +952,21 @@ fn safe_question_arguments(arguments: &Value, sensitive_values: &[String]) -> Va
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({"question": question, "options": options})
+    let dependent_paths = arguments
+        .get("dependent_paths")
+        .and_then(Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|path| {
+                    crate::interactive::bounded_public_text(path, sensitive_values, 4_096, false)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({"question": question, "options": options, "dependent_paths": dependent_paths})
 }
 
 fn safe_question_execution_arguments(
@@ -797,6 +1003,256 @@ fn safe_question_execution_arguments(
         }
     }
     arguments
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReusedClarificationAnswer {
+    answer: String,
+    answer_message_index: Option<usize>,
+    answer_event_index: Option<usize>,
+}
+
+fn persist_question_required(
+    store: &SessionStore,
+    session_id: &str,
+    plan_id: Option<&str>,
+    invocation_id: crate::tools::ToolInvocationId,
+    question: &str,
+    options: &[String],
+    dependent_paths: &[String],
+) -> Result<Option<ReusedClarificationAnswer>, String> {
+    store
+        .update_session(session_id, |session| {
+            let prior = session
+                .clarifications
+                .iter()
+                .rev()
+                .find_map(|clarification| {
+                    (clarification.plan_id.as_deref() == plan_id
+                        && clarification.question == question
+                        && clarification.options == options
+                        && clarification.status == ClarificationStatus::Answered)
+                        .then(|| {
+                            Some(ReusedClarificationAnswer {
+                                answer: clarification.answer.clone()?,
+                                answer_message_index: clarification.answer_message_index,
+                                answer_event_index: clarification.answer_event_index,
+                            })
+                        })
+                        .flatten()
+                });
+            let event_index = session.events.len();
+            append_session_event(
+                session,
+                "question_required",
+                json!({
+                    "invocation_id": invocation_id,
+                    "question": question,
+                    "options": options,
+                    "answer_reused": prior.is_some(),
+                }),
+            );
+            session.clarifications.push(ClarificationRecord {
+                invocation_id,
+                plan_id: plan_id.map(str::to_string),
+                question: question.to_string(),
+                options: options.to_vec(),
+                dependent_paths: dependent_paths.to_vec(),
+                status: if prior.is_some() {
+                    ClarificationStatus::Answered
+                } else {
+                    ClarificationStatus::Pending
+                },
+                answer: prior.as_ref().map(|prior| prior.answer.clone()),
+                question_event_index: event_index,
+                answer_message_index: prior.as_ref().and_then(|prior| prior.answer_message_index),
+                answer_event_index: prior.as_ref().and_then(|prior| prior.answer_event_index),
+                reason: prior
+                    .as_ref()
+                    .map(|_| "reused exact answered question in the same plan".to_string()),
+            });
+            Ok(prior)
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn persist_question_observation(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+    observations: &[Value],
+    answer: &Result<String, String>,
+    reused_answer: bool,
+) -> Result<(), String> {
+    store
+        .try_append_message_with_origin(
+            session_id,
+            "tool",
+            &json!({"observations": observations}).to_string(),
+            MessageOrigin::ToolOutput,
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .update_session(session_id, |session| {
+            let target = session
+                .clarifications
+                .iter()
+                .rev()
+                .find(|clarification| clarification.invocation_id == invocation_id)
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(
+                        "question outcome has no persisted clarification".to_string(),
+                    )
+                })?
+                .clone();
+            match answer {
+                Ok(answer) => {
+                    let (answer_message_index, answer_event_index) = if reused_answer {
+                        (target.answer_message_index, target.answer_event_index)
+                    } else {
+                        let event_index = session.events.len();
+                        append_session_event(
+                            session,
+                            "human_question_answer_received",
+                            json!({
+                                "invocation_id": invocation_id,
+                                "question_event_index": target.question_event_index,
+                                "answer": answer,
+                            }),
+                        );
+                        session.human_intent.push(HumanIntentRecord {
+                            kind: HumanIntentKind::QuestionAnswer,
+                            text: answer.clone(),
+                            source_message_index: None,
+                            source_event_index: Some(event_index),
+                        });
+                        (None, Some(event_index))
+                    };
+                    for clarification in session.clarifications.iter_mut().filter(|candidate| {
+                        candidate.plan_id == target.plan_id
+                            && candidate.question == target.question
+                            && candidate.options == target.options
+                            && candidate.status != ClarificationStatus::Answered
+                    }) {
+                        clarification.status = ClarificationStatus::Answered;
+                        clarification.answer = Some(answer.clone());
+                        clarification.answer_message_index = answer_message_index;
+                        clarification.answer_event_index = answer_event_index;
+                        clarification.reason = (clarification.invocation_id != invocation_id)
+                            .then(|| {
+                                "resolved by a later valid answer to the same question and option set"
+                                    .to_string()
+                            });
+                    }
+                }
+                Err(error) => {
+                    let clarification = session
+                        .clarifications
+                        .iter_mut()
+                        .rev()
+                        .find(|clarification| clarification.invocation_id == invocation_id)
+                        .expect("target clarification was cloned above");
+                    clarification.status = if error.to_ascii_lowercase().contains("cancel") {
+                        ClarificationStatus::Cancelled
+                    } else {
+                        ClarificationStatus::Unresolved
+                    };
+                    clarification.reason = Some(error.clone());
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn bounded_clarification_dependency_paths(arguments: &Value) -> Result<Vec<String>, String> {
+    let Some(values) = arguments.get("dependent_paths") else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| "ask_question dependent_paths must be an array".to_string())?;
+    if values.len() > 32 {
+        return Err("ask_question dependent_paths exceeds the 32-path limit".to_string());
+    }
+    let mut paths = values
+        .iter()
+        .map(|value| {
+            let path = value
+                .as_str()
+                .ok_or_else(|| "ask_question dependent path must be a string".to_string())?;
+            let parsed = Path::new(path);
+            if path.is_empty()
+                || parsed.is_absolute()
+                || parsed.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "ask_question dependent path is not a bounded worktree-relative path: {path}"
+                ));
+            }
+            Ok(path.to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn scopes_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn unresolved_clarification_dependencies(
+    session: &Session,
+    plan_id: Option<&str>,
+    instruction_root: &Path,
+    tool_calls: &[ToolCallRequest],
+) -> Result<Vec<crate::tools::ToolInvocationId>, String> {
+    let unresolved = session
+        .clarifications
+        .iter()
+        .filter(|clarification| {
+            clarification.plan_id.as_deref() == plan_id
+                && matches!(
+                    clarification.status,
+                    ClarificationStatus::Pending
+                        | ClarificationStatus::Unresolved
+                        | ClarificationStatus::Cancelled
+                )
+        })
+        .collect::<Vec<_>>();
+    let mut blockers = Vec::new();
+    for clarification in unresolved {
+        let dependencies = clarification
+            .dependent_paths
+            .iter()
+            .map(|path| instruction_root.join(path))
+            .collect::<Vec<_>>();
+        let blocked = tool_calls
+            .iter()
+            .filter(|call| call.name != "ask_question")
+            .try_fold(false, |blocked, call| -> Result<bool, String> {
+                if blocked || dependencies.is_empty() {
+                    return Ok(true);
+                }
+                let scopes =
+                    tool_instruction_scopes(instruction_root, &call.name, &call.arguments)?;
+                Ok(scopes.iter().any(|scope| {
+                    dependencies
+                        .iter()
+                        .any(|dependency| scopes_overlap(scope, dependency))
+                }))
+            })?;
+        if blocked {
+            blockers.push(clarification.invocation_id);
+        }
+    }
+    Ok(blockers)
 }
 
 #[derive(Clone, Default)]
@@ -896,6 +1352,9 @@ pub struct AgentLoopConfig {
     /// A non-zero value overrides `agent.max_turns` for this run.
     pub max_steps: u32,
     pub mode: String,
+    /// True only for a newly submitted plain/TUI request. Non-interactive,
+    /// delegated, gateway, and durable callers retain mandatory planning.
+    pub interactive_request: bool,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub auto_approve: bool,
@@ -912,6 +1371,7 @@ impl Default for AgentLoopConfig {
         Self {
             max_steps: 0,
             mode: "execute".to_string(),
+            interactive_request: false,
             provider: None,
             model: None,
             auto_approve: false,
@@ -1131,6 +1591,13 @@ async fn run_agent_loop_with_runtime_and_recovery(
             .try_create_session_with_id(session_id.to_string())
             .map_err(|error| error.to_string())?;
     }
+    let resources = AgentResourceTracker::from_session(
+        &runtime
+            .session_store
+            .load_result(session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session disappeared before run resource setup".to_string())?,
+    );
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -1180,7 +1647,13 @@ async fn run_agent_loop_with_runtime_and_recovery(
                 if cancellation.is_cancelled() {
                     reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
                 } else {
-                    let mut running = Box::pin(run_agent_operation(runtime, session_id, goal, cfg));
+                    let mut running = Box::pin(run_agent_operation(
+                        runtime,
+                        session_id,
+                        goal,
+                        cfg,
+                        resources.clone(),
+                    ));
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => {
@@ -1201,7 +1674,14 @@ async fn run_agent_loop_with_runtime_and_recovery(
                     }
                 }
             } else {
-                Box::pin(run_agent_operation(runtime, session_id, goal, cfg)).await
+                Box::pin(run_agent_operation(
+                    runtime,
+                    session_id,
+                    goal,
+                    cfg,
+                    resources.clone(),
+                ))
+                .await
             }
         }
     };
@@ -1209,10 +1689,24 @@ async fn run_agent_loop_with_runtime_and_recovery(
         (Ok(mut summary), Ok(())) => {
             summary.run_id = run_id.clone();
             let outcome = summary.outcome.clone();
+            persist_resource_evidence(
+                &cancellation_store,
+                session_id,
+                &run_id,
+                &outcome,
+                &resources,
+            )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, &outcome)?;
             Ok(summary)
         }
         (Err(error), Ok(())) => {
+            persist_resource_evidence(
+                &cancellation_store,
+                session_id,
+                &run_id,
+                "local_error",
+                &resources,
+            )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, "local_error")?;
             Err(error)
         }
@@ -1255,11 +1749,15 @@ async fn run_agent_operation(
     session_id: &str,
     goal: &str,
     cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     if cfg.mode == "compact" {
-        Box::pin(run_explicit_compaction(runtime, session_id, cfg)).await
+        Box::pin(run_explicit_compaction(runtime, session_id, cfg, resources)).await
     } else {
-        Box::pin(run_agent_loop_inner(runtime, session_id, goal, cfg)).await
+        Box::pin(run_agent_loop_inner(
+            runtime, session_id, goal, cfg, resources,
+        ))
+        .await
     }
 }
 
@@ -1267,6 +1765,7 @@ async fn run_explicit_compaction(
     runtime: AgentLoopRuntime,
     session_id: &str,
     cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     let AgentLoopRuntime {
         nib_cfg,
@@ -1318,34 +1817,41 @@ async fn run_explicit_compaction(
     }
 
     let sensitive_values = nib_cfg.sensitive_values();
-    let llm: Arc<dyn LlmClient> = match crate::llm::factory::create_client_with_sensitive_values(
-        &nib_cfg.llm,
-        cfg.provider.as_deref(),
-        &sensitive_values,
-    ) {
-        Ok(llm) => llm,
-        Err(error) => {
-            let failure = llm_configuration_failure(
-                &nib_cfg,
-                cfg.provider.as_deref(),
-                &error,
-                &sensitive_values,
-            );
-            return reconcile_explicit_compression_failure(
-                &store,
-                session_id,
-                &cfg.stream_tx,
-                failure,
-                "configuration_failed",
-            );
-        }
-    };
+    let untracked_llm: Arc<dyn LlmClient> =
+        match crate::llm::factory::create_client_with_sensitive_values(
+            &nib_cfg.llm,
+            cfg.provider.as_deref(),
+            &sensitive_values,
+        ) {
+            Ok(llm) => llm,
+            Err(error) => {
+                let failure = llm_configuration_failure(
+                    &nib_cfg,
+                    cfg.provider.as_deref(),
+                    &error,
+                    &sensitive_values,
+                );
+                return reconcile_explicit_compression_failure(
+                    &store,
+                    session_id,
+                    &cfg.stream_tx,
+                    failure,
+                    "configuration_failed",
+                );
+            }
+        };
+    let llm: Arc<dyn LlmClient> = Arc::new(ResourceTrackingLlm {
+        inner: untracked_llm,
+        resources: resources.clone(),
+    });
+    let generation_requests_before = resources.generation_requests();
     match crate::context::compression::explicitly_compress_session(
         &store, session_id, &llm, &nib_cfg,
     )
     .await
     {
         Ok(Some(report)) => {
+            resources.record_compression_requests_since(generation_requests_before);
             emit_nonblocking(
                 &cfg.stream_tx,
                 StreamEvent::Compression {
@@ -1363,15 +1869,19 @@ async fn run_explicit_compaction(
                 1,
             )
         }
-        Ok(None) => finish_explicit_compaction(
-            &store,
-            session_id,
-            run_id,
-            &cfg.stream_tx,
-            "context_unchanged",
-            0,
-        ),
+        Ok(None) => {
+            resources.record_compression_requests_since(generation_requests_before);
+            finish_explicit_compaction(
+                &store,
+                session_id,
+                run_id,
+                &cfg.stream_tx,
+                "context_unchanged",
+                0,
+            )
+        }
         Err(error) => {
+            resources.record_compression_requests_since(generation_requests_before);
             let failure = redact_provider_failure(&nib_cfg, error);
             reconcile_explicit_compression_failure(
                 &store,
@@ -1503,6 +2013,7 @@ async fn run_agent_loop_inner(
     session_id: &str,
     goal: &str,
     mut cfg: AgentLoopConfig,
+    resources: AgentResourceTracker,
 ) -> Result<AgentRunSummary, String> {
     let AgentLoopRuntime {
         nib_cfg,
@@ -1534,7 +2045,46 @@ async fn run_agent_loop_inner(
         steering.verify_binding(&store, session_id, &run_id)?;
     }
     let steering_enabled = cfg.steering.is_some();
-    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
+    let session_before_request = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to inspect answer-only eligibility: {error}"))?
+        .ok_or_else(|| "session disappeared before answer-only eligibility".to_string())?;
+    if parse_verification_waiver(goal).is_some() {
+        prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+        let verification_id = apply_human_verification_waiver(&store, session_id, goal)?
+            .expect("waiver syntax was checked before authenticated application");
+        return finish_human_verification_waiver(
+            &store,
+            session_id,
+            &run_id,
+            &verification_id,
+            &cfg.stream_tx,
+        );
+    }
+    let answer_only_candidate =
+        nib_cfg.agent.answer_only && cfg.interactive_request && cfg.mode == "execute";
+    let active_plan = session_before_request
+        .plan
+        .as_ref()
+        .is_some_and(|plan| !plan.is_complete());
+    let active_prior_run = has_unterminated_prior_run(&session_before_request, &run_id);
+    if answer_only_candidate && (active_plan || active_prior_run) {
+        prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+        return finish_answer_only_planning_required(
+            &store,
+            session_id,
+            &run_id,
+            &cfg.stream_tx,
+            if active_plan {
+                "active_plan"
+            } else {
+                "active_run"
+            },
+        )
+        .await;
+    }
+    let answer_only_eligible =
+        answer_only_candidate && !nib_cfg.execution.plan_mode && !active_plan && !active_prior_run;
 
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
@@ -1545,32 +2095,94 @@ async fn run_agent_loop_inner(
     let max_transitions = max_turns.saturating_mul(10).saturating_add(10);
     let sensitive_values = nib_cfg.sensitive_values();
     let public_output_sensitive_values = nib_cfg.public_session_sensitive_values();
-    let llm: Arc<dyn LlmClient> = match crate::llm::factory::create_client_with_sensitive_values(
-        &nib_cfg.llm,
-        cfg.provider.as_deref(),
-        &sensitive_values,
-    ) {
-        Ok(llm) => llm,
-        Err(error) => {
-            let failure = llm_configuration_failure(
-                &nib_cfg,
-                cfg.provider.as_deref(),
-                &error,
-                &sensitive_values,
-            );
-            return reconcile_preflight_llm_failure(
-                &store,
-                session_id,
-                &normalized_goal,
-                failure,
-                &cfg.stream_tx,
-            )
-            .await;
+    let untracked_llm: Arc<dyn LlmClient> =
+        match crate::llm::factory::create_client_with_sensitive_values(
+            &nib_cfg.llm,
+            cfg.provider.as_deref(),
+            &sensitive_values,
+        ) {
+            Ok(llm) => llm,
+            Err(error) => {
+                let failure = llm_configuration_failure(
+                    &nib_cfg,
+                    cfg.provider.as_deref(),
+                    &error,
+                    &sensitive_values,
+                );
+                return reconcile_preflight_llm_failure(
+                    &store,
+                    session_id,
+                    &normalized_goal,
+                    failure,
+                    &cfg.stream_tx,
+                )
+                .await;
+            }
+        };
+    let llm: Arc<dyn LlmClient> = Arc::new(ResourceTrackingLlm {
+        inner: untracked_llm,
+        resources: resources.clone(),
+    });
+    let skill_selection = select_profile_skill_selection(&project_root, &nib_cfg, &profile, goal)?;
+    let active_skills = &skill_selection.skills;
+    let policy_rules = skill_policy_rules(active_skills);
+    let after_tool_hooks = skill_after_tool_hooks(active_skills);
+    prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+    for record in &skill_selection.records {
+        store
+            .record_skill_usage(session_id, &record.skill_name, Some(record.reason.clone()))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut answer_route_requests = 0u32;
+    if answer_only_eligible {
+        let memory = if nib_cfg.memory.enabled {
+            profile.memory_store().load_result()?
+        } else {
+            crate::session::memory::MemoryStoreData::default()
+        };
+        let mut answer_context =
+            assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
+        if let Some(session) = store
+            .load_result(session_id)
+            .map_err(|error| format!("failed to load answer-only attachments: {error}"))?
+        {
+            let attachments = session
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| message.attachments.as_slice())
+                .unwrap_or(&[]);
+            answer_context.attachments = attachment_context_sections(&project_root, attachments);
         }
-    };
-    let active_skills = select_profile_skills(&project_root, &nib_cfg, &profile, goal)?;
-    let policy_rules = skill_policy_rules(&active_skills);
-    let after_tool_hooks = skill_after_tool_hooks(&active_skills);
+        let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
+            profile.daemon_dir().to_path_buf(),
+        )?;
+        answer_context.workload = workload_context_sections(&workload_store.list()?);
+        answer_route_requests = 1;
+        match run_answer_only_route(
+            &store,
+            session_id,
+            &run_id,
+            &project_root,
+            &answer_context,
+            &llm,
+            &nib_cfg,
+            &public_output_sensitive_values,
+            &request_scope,
+            &cfg.stream_tx,
+        )
+        .await?
+        {
+            AnswerOnlyRoute::Completed(summary) | AnswerOnlyRoute::Failed(summary) => {
+                return Ok(summary)
+            }
+            AnswerOnlyRoute::Fallback => {}
+        }
+    }
+
+    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
     let mcp_manager = if nib_cfg.mcp.client_enabled && !nib_cfg.mcp.servers.is_empty() {
         Some(Arc::new(
             crate::integrations::mcp::McpManager::new(
@@ -1604,6 +2216,7 @@ async fn run_agent_loop_inner(
                 };
                 let _ = stream_tx
                     .send(StreamEvent::TerminalOutput {
+                        invocation_id: event.invocation_id,
                         tool_name: event.tool_name,
                         stream: stream.to_string(),
                         chunk: String::from_utf8_lossy(&event.chunk).into_owned(),
@@ -1618,26 +2231,6 @@ async fn run_agent_loop_inner(
     }
     if let Some(handler) = cfg.approval_handler.clone() {
         executor = executor.with_approval_handler(handler);
-    }
-
-    prepare_user_turn(&store, session_id, goal, profile.root_path())?;
-    for skill in &active_skills {
-        let reason = if profile
-            .active_skills()
-            .iter()
-            .any(|active| active.eq_ignore_ascii_case(&skill.frontmatter.name))
-        {
-            "profile active skill"
-        } else {
-            "matched current goal"
-        };
-        store
-            .record_skill_usage(
-                session_id,
-                &skill.frontmatter.name,
-                Some(reason.to_string()),
-            )
-            .map_err(|error| error.to_string())?;
     }
 
     if nib_cfg.daemons.cron_enabled && nib_cfg.daemons.curator_enabled {
@@ -1684,7 +2277,9 @@ async fn run_agent_loop_inner(
         crate::session::memory::MemoryStoreData::default()
     };
     let mut context_sections =
-        assemble_runtime_context_sections(&project_root, goal, &active_skills, &memory);
+        assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
+    let mut instruction_root = project_root.clone();
+    let mut instruction_scopes = vec![instruction_root.clone()];
     if let Ok(Some(session)) = store.load_result(session_id) {
         let attachments = session
             .messages
@@ -1693,8 +2288,52 @@ async fn run_agent_loop_inner(
             .find(|message| message.role == "user")
             .map(|message| message.attachments.as_slice())
             .unwrap_or(&[]);
+        instruction_scopes.extend(
+            attachments
+                .iter()
+                .map(|attachment| instruction_root.join(&attachment.path)),
+        );
         context_sections.attachments = attachment_context_sections(&project_root, attachments);
     }
+    instruction_scopes.sort();
+    instruction_scopes.dedup();
+    let mut instruction_resolver = match InstructionResolver::new(&instruction_root) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return reconcile_preflight_instruction_failure(
+                &store,
+                session_id,
+                &normalized_goal,
+                "initial_resolution",
+                format!("required project instructions are unavailable: {error}"),
+                &cfg.stream_tx,
+            )
+            .await;
+        }
+    };
+    let resolved_instructions =
+        match instruction_resolver.resolve_for_scopes(instruction_scopes.iter()) {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                return reconcile_preflight_instruction_failure(
+                    &store,
+                    session_id,
+                    &normalized_goal,
+                    "initial_resolution",
+                    format!("required project instructions are unavailable: {error}"),
+                    &cfg.stream_tx,
+                )
+                .await;
+            }
+        };
+    let mut instruction_identity = resolved_instructions.identity.clone();
+    context_sections.agents = resolved_instructions.render();
+    derive_active_plan_verification_requirements(
+        &store,
+        session_id,
+        goal,
+        &context_sections.agents,
+    )?;
     let workload_store = crate::daemons::workload::DurableTaskStore::at_daemon_dir(
         profile.daemon_dir().to_path_buf(),
     )?;
@@ -1946,13 +2585,43 @@ async fn run_agent_loop_inner(
                     {
                         continue;
                     }
-                    llm_turns += 1;
                     let planning_session = store
                         .load_result(session_id)
                         .map_err(|error| {
                             format!("failed to load session context for planning: {error}")
                         })?
                         .ok_or_else(|| "session disappeared before planning".to_string())?;
+                    if let Err(error) = crate::agent::planner::validate_planning_instruction_context(
+                        goal,
+                        &context_sections,
+                        Some(&planning_session),
+                        nib_cfg.llm.context_length,
+                    ) {
+                        let error = format!(
+                            "required project instructions cannot fit the planning request: {error}"
+                        );
+                        persist_instruction_context_block(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            "planning_prompt_fit",
+                            &error,
+                        )?;
+                        reconciliation_reason = Some("instruction_context_missing".to_string());
+                        state = transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    llm_turns += 1;
                     match crate::agent::planner::generate_plan_with_context_events_bounded_scoped(
                         &llm,
                         goal,
@@ -1965,6 +2634,18 @@ async fn run_agent_loop_inner(
                     .await
                     {
                         Ok(mut plan) => {
+                            let source_message_index = planning_session
+                                .message_provenance
+                                .iter()
+                                .rev()
+                                .find(|source| source.origin.is_human())
+                                .map(|source| source.message_index);
+                            add_independent_verification_requirements(
+                                &mut plan,
+                                goal,
+                                &context_sections.agents,
+                                source_message_index,
+                            )?;
                             sanitize_provider_plan(&mut plan, &public_output_sensitive_values);
                             let step_count = plan.steps.len();
                             let plan_id = plan.id.clone();
@@ -2222,6 +2903,50 @@ async fn run_agent_loop_inner(
                 }
             }
             AgentState::BuildContext => {
+                let refreshed =
+                    match instruction_resolver.resolve_for_scopes(instruction_scopes.iter()) {
+                        Ok(refreshed) => refreshed,
+                        Err(error) => {
+                            let error =
+                                format!("required project instructions are unavailable: {error}");
+                            persist_instruction_context_block(
+                                &store,
+                                session_id,
+                                active_plan_id.as_deref(),
+                                &normalized_goal,
+                                "refresh",
+                                &error,
+                            )?;
+                            reconciliation_reason = Some("instruction_context_missing".to_string());
+                            state = transition_state(
+                                &store,
+                                session_id,
+                                state,
+                                AgentState::Reconciliation,
+                                &mut trace,
+                                &mut transition_count,
+                                &cfg.stream_tx,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                if refreshed.identity != instruction_identity {
+                    let previous_identity =
+                        std::mem::replace(&mut instruction_identity, refreshed.identity.clone());
+                    context_sections.agents = refreshed.render();
+                    store
+                        .record_event(
+                            session_id,
+                            "instruction_context_refreshed",
+                            json!({
+                                "previous_identity": previous_identity,
+                                "identity": instruction_identity,
+                                "scope_count": instruction_scopes.len(),
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 if verify_bound_plan(
                     &store,
                     session_id,
@@ -2287,11 +3012,13 @@ async fn run_agent_loop_inner(
                     let compression = if llm_turns.saturating_add(1) >= max_turns {
                         None
                     } else {
-                        match crate::context::compression::maybe_compress_session(
+                        let generation_requests_before = resources.generation_requests();
+                        let result = crate::context::compression::maybe_compress_session(
                             &store, session_id, &llm, &nib_cfg,
                         )
-                        .await
-                        {
+                        .await;
+                        resources.record_compression_requests_since(generation_requests_before);
+                        match result {
                             Ok(compression) => compression,
                             Err(error) => {
                                 reconciliation_failure =
@@ -2376,16 +3103,51 @@ async fn run_agent_loop_inner(
                             .as_ref()
                             .and_then(|plan| plan.steps.get(plan.current_step_index))
                             .map(|step| format!("{}\nStatus: {}", step.description, step.status));
-                        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+                        let bounded = match build_bounded_runtime_input(RuntimePromptRequest {
                             context: &context_sections,
                             session: &session,
                             current_step: current_step.as_deref(),
                             tools: tools_ref,
                             mode: &cfg.mode,
-                            project_root: &project_root,
+                            project_root: &instruction_root,
                             tool_use_enforcement: nib_cfg.agent.tool_use_enforcement,
                             context_length: nib_cfg.llm.context_length,
-                        })?;
+                        })
+                        .and_then(|bounded| {
+                            ensure_required_instructions_present(
+                                &bounded,
+                                &context_sections.agents,
+                            )?;
+                            Ok(bounded)
+                        }) {
+                            Ok(bounded) => bounded,
+                            Err(error) => {
+                                let error = format!(
+                                    "required project instructions cannot fit the runtime request: {error}"
+                                );
+                                persist_instruction_context_block(
+                                    &store,
+                                    session_id,
+                                    active_plan_id.as_deref(),
+                                    &normalized_goal,
+                                    "runtime_prompt_fit",
+                                    &error,
+                                )?;
+                                reconciliation_reason =
+                                    Some("instruction_context_missing".to_string());
+                                state = transition_state(
+                                    &store,
+                                    session_id,
+                                    state,
+                                    AgentState::Reconciliation,
+                                    &mut trace,
+                                    &mut transition_count,
+                                    &cfg.stream_tx,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
                         store
                             .record_event(
                                 session_id,
@@ -2574,14 +3336,66 @@ async fn run_agent_loop_inner(
                     continue;
                 }
                 if tool_calls.is_empty() {
-                    if let Some(content) = response_content.as_deref() {
+                    revalidate_plan_verification_content(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                    )?;
+                    let unresolved_verifications = store
+                        .update_session(session_id, |session| {
+                            let matches = session.plan.as_ref().is_some_and(|plan| {
+                                active_plan_id.as_deref() == Some(plan.id.as_str())
+                                    && plan.is_structured()
+                                    && plan.matches_goal(&normalized_goal)
+                                    && plan.approved
+                            });
+                            if !matches {
+                                return Err(crate::session::SessionError::InvalidMutation(
+                                    "completion verification does not match the active approved plan"
+                                        .to_string(),
+                                ));
+                            }
+                            let plan = session
+                                .plan
+                                .as_mut()
+                                .expect("plan presence was checked above");
+                            let unresolved = plan.unresolved_verification_ids();
+                            if !unresolved.is_empty() {
+                                plan.record_tool_outcome(
+                                    false,
+                                    "required verification remains unresolved",
+                                );
+                                plan.outcome =
+                                    Some("required_verification_unresolved".to_string());
+                                append_session_event(
+                                    session,
+                                    "step_completion_rejected",
+                                    json!({
+                                        "reason": "required_verification_unresolved",
+                                        "verification_ids": unresolved,
+                                    }),
+                                );
+                            }
+                            Ok(unresolved)
+                        })
+                        .map_err(|error| error.to_string())?;
+                    if !unresolved_verifications.is_empty() {
+                        response_content = None;
+                        reconciliation_reason =
+                            Some("required_verification_unresolved".to_string());
+                    } else if let Some(content) = response_content.as_deref() {
                         let content = safe_persisted_provider_message(
                             content,
                             &public_output_sensitive_values,
                             true,
                         );
                         store
-                            .try_append_message(session_id, "assistant", &content)
+                            .try_append_message_with_origin(
+                                session_id,
+                                "assistant",
+                                &content,
+                                MessageOrigin::ModelOutput,
+                            )
                             .map_err(|error| error.to_string())?;
                         reconciliation_reason = Some("model_response".to_string());
                     } else {
@@ -2625,7 +3439,12 @@ async fn run_agent_loop_inner(
                         false,
                     );
                     store
-                        .try_append_message(session_id, "assistant", &persisted_intent)
+                        .try_append_message_with_origin(
+                            session_id,
+                            "assistant",
+                            &persisted_intent,
+                            MessageOrigin::ModelOutput,
+                        )
                         .map_err(|error| error.to_string())?;
                     transition_state(
                         &store,
@@ -2661,6 +3480,279 @@ async fn run_agent_loop_inner(
                     .await?;
                     continue;
                 }
+                let question_count = tool_calls
+                    .iter()
+                    .filter(|request| request.name == "ask_question")
+                    .count();
+                if question_count > 0 && tool_calls.len() != 1 {
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::ToolExecute,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                let clarification_blockers = store
+                    .load_result(session_id)
+                    .map_err(|error| error.to_string())?
+                    .map(|session| {
+                        unresolved_clarification_dependencies(
+                            &session,
+                            active_plan_id.as_deref(),
+                            &instruction_root,
+                            &tool_calls,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                if !clarification_blockers.is_empty() {
+                    store
+                        .record_event(
+                            session_id,
+                            "tool_batch_rejected",
+                            json!({
+                                "reason": "unresolved_clarification",
+                                "tool_calls": tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                                "clarification_invocation_ids": clarification_blockers,
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    update_plan_tool_outcome(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                        &normalized_goal,
+                        false,
+                        "required clarification remains unresolved",
+                    )?;
+                    tool_calls.clear();
+                    response_content = None;
+                    reconciliation_reason = Some("unresolved_clarification".to_string());
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                let batch_requires_worktree = tool_calls.iter().any(|call| {
+                    crate::tools::registry::get_tool_metadata(&call.name)
+                        .is_some_and(|metadata| metadata.requires_worktree)
+                });
+                let mut instruction_root_rebound = false;
+                if batch_requires_worktree {
+                    let managed_root = executor.prepare_session_worktree(session_id).await?;
+                    if managed_root != instruction_root {
+                        let translated_scopes = instruction_scopes
+                            .iter()
+                            .map(|scope| {
+                                scope
+                                    .strip_prefix(&instruction_root)
+                                    .map(|relative| managed_root.join(relative))
+                                    .map_err(|_| {
+                                        "instruction scope cannot be rebound to the managed session worktree"
+                                            .to_string()
+                                    })
+                        })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        instruction_root = managed_root;
+                        instruction_scopes = translated_scopes;
+                        instruction_root_rebound = true;
+                        instruction_resolver = match InstructionResolver::new(&instruction_root) {
+                            Ok(resolver) => resolver,
+                            Err(error) => {
+                                let error = format!(
+                                    "required project instructions are unavailable in the managed session worktree: {error}"
+                                );
+                                persist_instruction_context_block(
+                                    &store,
+                                    session_id,
+                                    active_plan_id.as_deref(),
+                                    &normalized_goal,
+                                    "managed_worktree_resolution",
+                                    &error,
+                                )?;
+                                tool_calls.clear();
+                                response_content = None;
+                                reconciliation_reason =
+                                    Some("instruction_context_missing".to_string());
+                                state = transition_state(
+                                    &store,
+                                    session_id,
+                                    state,
+                                    AgentState::Reconciliation,
+                                    &mut trace,
+                                    &mut transition_count,
+                                    &cfg.stream_tx,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
+                    }
+                }
+                let mut proposed_scopes = instruction_scopes.clone();
+                let scoped_resolution = (|| {
+                    for call in &tool_calls {
+                        proposed_scopes.extend(tool_instruction_scopes(
+                            &instruction_root,
+                            &call.name,
+                            &call.arguments,
+                        )?);
+                    }
+                    proposed_scopes.sort();
+                    proposed_scopes.dedup();
+                    instruction_resolver.resolve_for_scopes(proposed_scopes.iter())
+                })();
+                let resolved = match scoped_resolution {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let error = format!(
+                            "required project instructions are unavailable for the proposed tool scope: {error}"
+                        );
+                        persist_instruction_context_block(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            "tool_scope",
+                            &error,
+                        )?;
+                        if provider_continuation.take().is_some() {
+                            record_provider_continuation_lifecycle(
+                                &store,
+                                session_id,
+                                "provider_continuation_abandoned",
+                                &run_id,
+                            )?;
+                        }
+                        let observations = tool_calls
+                            .iter()
+                            .map(|call| {
+                                json!({
+                                    "invocation_id": call.invocation_id,
+                                    "tool": call.name,
+                                    "success": false,
+                                    "error": error,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        store
+                            .try_append_message_with_origin(
+                                session_id,
+                                "tool",
+                                &json!({"observations": observations}).to_string(),
+                                MessageOrigin::ToolOutput,
+                            )
+                            .map_err(|append_error| append_error.to_string())?;
+                        tool_calls.clear();
+                        response_content = None;
+                        reconciliation_reason = Some("instruction_context_missing".to_string());
+                        state = transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                derive_active_plan_verification_requirements(
+                    &store,
+                    session_id,
+                    goal,
+                    &resolved.render(),
+                )?;
+                if resolved.identity != instruction_identity {
+                    if provider_continuation.take().is_some() {
+                        record_provider_continuation_lifecycle(
+                            &store,
+                            session_id,
+                            "provider_continuation_abandoned",
+                            &run_id,
+                        )?;
+                    }
+                    let previous_identity =
+                        std::mem::replace(&mut instruction_identity, resolved.identity.clone());
+                    context_sections.agents = resolved.render();
+                    instruction_scopes = proposed_scopes;
+                    let explanation =
+                        "applicable project instructions were refreshed before execution; reconsider the proposed action under the updated scoped rules";
+                    let observations = tool_calls
+                        .iter()
+                        .map(|call| {
+                            json!({
+                                "invocation_id": call.invocation_id,
+                                "tool": call.name,
+                                "success": false,
+                                "error": explanation,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    store
+                        .try_append_message_with_origin(
+                            session_id,
+                            "tool",
+                            &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    store
+                        .record_event(
+                            session_id,
+                            "instruction_context_refreshed",
+                            json!({
+                                "previous_identity": previous_identity,
+                                "identity": instruction_identity,
+                                "scope_count": instruction_scopes.len(),
+                                "execution_deferred": true,
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    tool_calls.clear();
+                    response_content = None;
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::BuildContext,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
+                if instruction_root_rebound {
+                    context_sections.agents = resolved.render();
+                    store
+                        .record_event(
+                            session_id,
+                            "instruction_context_rebound",
+                            json!({
+                                "identity": instruction_identity,
+                                "scope_count": proposed_scopes.len(),
+                                "instruction_root": instruction_root,
+                                "execution_deferred": false,
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                instruction_scopes = proposed_scopes;
                 for call in &tool_calls {
                     let tool_call = ToolCall {
                         invocation_id: call.invocation_id,
@@ -2749,6 +3841,7 @@ async fn run_agent_loop_inner(
                         emit(
                             &cfg.stream_tx,
                             StreamEvent::ToolCompleted {
+                                invocation_id: request.invocation_id,
                                 tool_name: request.name.clone(),
                                 success: false,
                                 output: None,
@@ -2771,10 +3864,11 @@ async fn run_agent_loop_inner(
                         )
                         .map_err(|error| error.to_string())?;
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     let stalled = failed_tool_batches.observe(&tool_calls, &observations, false);
@@ -2861,6 +3955,7 @@ async fn run_agent_loop_inner(
                         emit(
                             &cfg.stream_tx,
                             StreamEvent::ToolCallChunk {
+                                invocation_id: request.invocation_id,
                                 index: 0,
                                 name: Some(request.name.clone()),
                                 arguments: Some(request.arguments.to_string()),
@@ -2871,6 +3966,7 @@ async fn run_agent_loop_inner(
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::ToolStarted {
+                            invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
                         },
                     )
@@ -2885,19 +3981,97 @@ async fn run_agent_loop_inner(
                         pending_question = Some(request.clone());
                         continue;
                     }
-                    let result = executor
-                        .execute(
-                            ToolCall {
-                                invocation_id: request.invocation_id,
-                                tool_name: request.name.clone(),
-                                arguments: request.arguments.clone(),
-                                session_id: Some(session_id.to_string()),
-                                project_root: Some(project_root.clone()),
-                            },
-                            Some(session_id),
-                        )
-                        .await;
+                    resources.record_tool_attempt();
+                    let verification_id = request
+                        .arguments
+                        .get("verification_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    let verification_started = match verification_id {
+                        Some(obligation_id) => match begin_plan_verification(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            obligation_id,
+                            request,
+                        ) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                store
+                                    .record_event(
+                                        session_id,
+                                        "verification_binding_rejected",
+                                        json!({
+                                            "invocation_id": request.invocation_id,
+                                            "verification_id": obligation_id,
+                                            "reason": error,
+                                        }),
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                    let result = if verification_id.is_some() && !verification_started {
+                        crate::tools::ToolResult {
+                            invocation_id: request.invocation_id,
+                            tool_name: request.name.clone(),
+                            success: false,
+                            output: None,
+                            error: Some(
+                                "verification binding was rejected before execution".to_string(),
+                            ),
+                            duration_seconds: 0.0,
+                            approval_granted: false,
+                            approval_source: Some("verification".to_string()),
+                        }
+                    } else {
+                        executor
+                            .execute(
+                                ToolCall {
+                                    invocation_id: request.invocation_id,
+                                    tool_name: request.name.clone(),
+                                    arguments: request.arguments.clone(),
+                                    session_id: Some(session_id.to_string()),
+                                    project_root: Some(project_root.clone()),
+                                },
+                                Some(session_id),
+                            )
+                            .await
+                    };
                     tool_call_count += 1;
+                    let (mutated_content, mut worktree_identity) =
+                        if result.success || verification_started {
+                            audited_tool_evidence(&store, session_id, request.invocation_id)?
+                        } else {
+                            (false, None)
+                        };
+                    if verification_started && worktree_identity.is_none() {
+                        worktree_identity = Some(project_root.to_string_lossy().into_owned());
+                    }
+                    if mutated_content {
+                        invalidate_plan_verification_after_mutation(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            request.invocation_id,
+                        )?;
+                    }
+                    if verification_started {
+                        finish_plan_verification(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            verification_id.expect("started verification has an id"),
+                            worktree_identity.as_deref(),
+                            &result,
+                        )?;
+                    }
                     batch_success &= result.success;
                     batch_denied |= !result.approval_granted
                         && (result.approval_source.as_deref() == Some("denied")
@@ -2925,6 +4099,7 @@ async fn run_agent_loop_inner(
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::ToolCompleted {
+                            invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
                             success: result.success,
                             output: output.clone(),
@@ -2967,10 +4142,11 @@ async fn run_agent_loop_inner(
                 };
                 if let Some(error) = continuation_failure {
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     tool_calls.clear();
@@ -3011,10 +4187,11 @@ async fn run_agent_loop_inner(
                     .await?
                 } else {
                     store
-                        .try_append_message(
+                        .try_append_message_with_origin(
                             session_id,
                             "tool",
                             &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
                         )
                         .map_err(|error| error.to_string())?;
                     for (task, error) in prepared_tasks.start_all() {
@@ -3146,6 +4323,7 @@ async fn run_agent_loop_inner(
                     MAX_QUESTION_BYTES,
                     false,
                 );
+                resources.observe_question(&question);
                 let options = request
                     .arguments
                     .get("options")
@@ -3165,52 +4343,62 @@ async fn run_agent_loop_inner(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                emit(
-                    &cfg.stream_tx,
-                    StreamEvent::QuestionRequired {
-                        question: question.clone(),
-                        options: options.clone(),
-                    },
-                )
-                .await;
-                store
-                    .record_event(
-                        session_id,
-                        "question_required",
-                        json!({"invocation_id": request.invocation_id, "question": question, "options": options}),
+                let dependent_paths = bounded_clarification_dependency_paths(&request.arguments)?;
+                let reused = persist_question_required(
+                    &store,
+                    session_id,
+                    active_plan_id.as_deref(),
+                    request.invocation_id,
+                    &question,
+                    &options,
+                    &dependent_paths,
+                )?;
+                if reused.is_none() {
+                    emit(
+                        &cfg.stream_tx,
+                        StreamEvent::QuestionRequired {
+                            question: question.clone(),
+                            options: options.clone(),
+                        },
                     )
-                    .map_err(|error| error.to_string())?;
-
-                let answer = match cfg.question_handler.as_ref() {
-                    Some(handler) => handler.ask(&question, &options).await,
-                    None => Err("no question handler configured".to_string()),
+                    .await;
                 }
-                .and_then(|answer| {
-                    if answer.trim().is_empty() {
-                        Err("question handler returned an empty answer".to_string())
-                    } else {
-                        Ok(crate::interactive::bounded_public_text(
-                            &answer,
+
+                let reused_answer = reused.is_some();
+                let answer = match reused {
+                    Some(prior) => Ok(prior.answer),
+                    None => match cfg.question_handler.as_ref() {
+                        Some(handler) => handler.ask(&question, &options).await,
+                        None => Err("no question handler configured".to_string()),
+                    }
+                    .and_then(|answer| {
+                        if answer.trim().is_empty() {
+                            Err("question handler returned an empty answer".to_string())
+                        } else {
+                            Ok(crate::interactive::bounded_public_text(
+                                &answer,
+                                &public_output_sensitive_values,
+                                MAX_QUESTION_BYTES,
+                                false,
+                            ))
+                        }
+                    })
+                    .map_err(|error| {
+                        crate::interactive::bounded_public_text(
+                            &error,
                             &public_output_sensitive_values,
                             MAX_QUESTION_BYTES,
                             false,
-                        ))
-                    }
-                })
-                .map_err(|error| {
-                    crate::interactive::bounded_public_text(
-                        &error,
-                        &public_output_sensitive_values,
-                        MAX_QUESTION_BYTES,
-                        false,
-                    )
-                });
+                        )
+                    }),
+                };
 
                 let arguments = safe_question_execution_arguments(
                     &request.arguments,
                     &answer,
                     &public_output_sensitive_values,
                 );
+                resources.record_tool_attempt();
                 let result = executor
                     .execute(
                         ToolCall {
@@ -3224,18 +4412,19 @@ async fn run_agent_loop_inner(
                     )
                     .await;
                 tool_call_count += 1;
-                let (question_success, question_output, question_error) = match answer {
+                let (question_success, question_output, question_error) = match &answer {
                     Ok(answer) if result.success => (
                         true,
                         Some(json!({"question": question, "answer": answer})),
                         None,
                     ),
-                    Ok(_) => (false, result.output, result.error),
-                    Err(error) => (false, result.output, Some(error)),
+                    Ok(_) => (false, result.output.clone(), result.error.clone()),
+                    Err(error) => (false, result.output.clone(), Some(error.clone())),
                 };
                 emit(
                     &cfg.stream_tx,
                     StreamEvent::ToolCompleted {
+                        invocation_id: request.invocation_id,
                         tool_name: request.name.clone(),
                         success: question_success,
                         output: question_output.clone(),
@@ -3275,13 +4464,14 @@ async fn run_agent_loop_inner(
                 if batch_success {
                     failed_tool_batches.reset();
                 }
-                store
-                    .try_append_message(
-                        session_id,
-                        "tool",
-                        &json!({"observations": pending_observations}).to_string(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                persist_question_observation(
+                    &store,
+                    session_id,
+                    request.invocation_id,
+                    &pending_observations,
+                    &answer,
+                    reused_answer,
+                )?;
                 let plan_updated = update_plan_tool_outcome(
                     &store,
                     session_id,
@@ -3456,10 +4646,11 @@ async fn run_agent_loop_inner(
                             let next_step =
                                 next_step.as_deref().unwrap_or("the next approved step");
                             store
-                                .try_append_message(
+                                .try_append_message_with_origin(
                                     session_id,
                                     "user",
                                     &format!("Continue with approved plan step: {next_step}"),
+                                    MessageOrigin::RuntimeContinuation,
                                 )
                                 .map_err(|error| error.to_string())?;
                             "step_completed".to_string()
@@ -3485,7 +4676,12 @@ async fn run_agent_loop_inner(
                         "plan_approval_denied".to_string()
                     }
                     other => {
-                        if is_agent_failure_outcome(other) {
+                        if is_agent_failure_outcome(other)
+                            && !matches!(
+                                other,
+                                "instruction_context_missing" | "unresolved_clarification"
+                            )
+                        {
                             block_active_plan_for_failure(
                                 &store,
                                 session_id,
@@ -3558,7 +4754,7 @@ async fn run_agent_loop_inner(
     Ok(AgentRunSummary {
         session_id: session_id.to_string(),
         run_id: run_id.clone(),
-        steps_taken: llm_turns,
+        steps_taken: llm_turns.saturating_add(answer_route_requests),
         last_message: final_session
             .as_ref()
             .and_then(|session| session.messages.last())
@@ -3569,6 +4765,508 @@ async fn run_agent_loop_inner(
         failure: reconciliation_failure,
         bound_reached,
         trace,
+    })
+}
+
+enum AnswerOnlyRoute {
+    Completed(AgentRunSummary),
+    Failed(AgentRunSummary),
+    Fallback,
+}
+
+fn has_unterminated_prior_run(session: &Session, current_run_id: &str) -> bool {
+    let terminal = session
+        .events
+        .iter()
+        .filter(|event| event.kind == "run_terminal")
+        .filter_map(|event| event.details.get("run_id").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    session.events.iter().any(|event| {
+        if event.kind != "run_started" {
+            return false;
+        }
+        event
+            .details
+            .get("run_id")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| run_id != current_run_id && !terminal.contains(run_id))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_answer_only_route(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    project_root: &Path,
+    context: &crate::context::RuntimeContextSections,
+    llm: &Arc<dyn LlmClient>,
+    config: &crate::config::NibConfig,
+    sensitive_values: &[String],
+    request_scope: &LlmRequestScope,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AnswerOnlyRoute, String> {
+    store
+        .record_event(
+            session_id,
+            "answer_route_started",
+            json!({"run_id": run_id, "route": "answer_only"}),
+        )
+        .map_err(|error| format!("failed to audit answer-only route start: {error}"))?;
+
+    let control = json!({
+        "type": "function",
+        "function": {
+            "name": "request_plan",
+            "description": "Request the normal approved planning path because the current request needs inspection, clarification, or action.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    });
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load answer-only session context: {error}"))?
+        .ok_or_else(|| "session disappeared before answer-only context assembly".to_string())?;
+    let bounded = match build_bounded_runtime_input(RuntimePromptRequest {
+        context,
+        session: &session,
+        current_step: None,
+        tools: Some(std::slice::from_ref(&control)),
+        mode: "answer_only",
+        project_root,
+        tool_use_enforcement: false,
+        context_length: config.llm.context_length,
+    }) {
+        Ok(bounded) => bounded,
+        Err(error) => {
+            let failure = LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error);
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                failure,
+                "context_rejected",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed);
+        }
+    };
+    store
+        .record_event(
+            session_id,
+            "context_bounded",
+            json!({
+                "run_id": run_id,
+                "route": "answer_only",
+                "context_length": config.llm.context_length,
+                "approximate_input_tokens": bounded.approximate_tokens,
+                "raw_message_count": bounded.raw_message_count,
+                "raw_tool_count": bounded.raw_tool_count,
+                "included_tool_count": bounded.included_tool_count,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+    let typed_messages = match crate::llm::LlmMessage::from_openai_values(&bounded.messages) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error),
+                "request_rejected",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+    let mut typed_tools =
+        match crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref()) {
+            Ok(tools) => tools,
+            Err(error) => {
+                return finish_answer_only_failure(
+                    store,
+                    session_id,
+                    run_id,
+                    stream_tx,
+                    LlmError::local(LlmErrorClass::Protocol, LlmErrorPhase::Request, error),
+                    "request_rejected",
+                )
+                .await
+                .map(AnswerOnlyRoute::Failed)
+            }
+        };
+    if let Some(tools) = typed_tools.as_mut() {
+        for tool in tools.iter_mut() {
+            *tool = tool.clone().with_strict(true);
+        }
+    }
+    let request =
+        LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(request_scope.clone());
+    let stream = match llm.stream(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                redact_provider_failure(config, error),
+                "transport_failed",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+    let (response, projected) = match finish_private_provider_stream(stream, sensitive_values).await
+    {
+        Ok(completed) => completed,
+        Err(error) => {
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                redact_provider_failure(config, error),
+                "transport_failed",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed)
+        }
+    };
+
+    if response.terminal_status == LlmTerminalStatus::Refused {
+        record_answer_only_fallback(store, session_id, run_id, "model_refusal")?;
+        return Ok(AnswerOnlyRoute::Fallback);
+    }
+
+    let calls = response.tool_calls.as_deref().unwrap_or_default();
+    if calls.is_empty() {
+        let Some(content) = response
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        else {
+            record_answer_only_fallback(store, session_id, run_id, "empty_response")?;
+            return Ok(AnswerOnlyRoute::Fallback);
+        };
+        if response.continuation.is_some() {
+            let failure = LlmError::local(
+                LlmErrorClass::Protocol,
+                LlmErrorPhase::TerminalValidation,
+                "answer-only content unexpectedly retained provider continuation state",
+            );
+            return finish_answer_only_failure(
+                store,
+                session_id,
+                run_id,
+                stream_tx,
+                failure,
+                "malformed_control",
+            )
+            .await
+            .map(AnswerOnlyRoute::Failed);
+        }
+        for event in projected {
+            emit(stream_tx, event).await;
+        }
+        let content = safe_persisted_provider_message(content, sensitive_values, true);
+        return finish_answer_only_success(store, session_id, run_id, stream_tx, &content)
+            .await
+            .map(AnswerOnlyRoute::Completed);
+    }
+
+    let valid_request_plan = calls.len() == 1
+        && calls[0].name == "request_plan"
+        && calls[0]
+            .arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty);
+    if valid_request_plan {
+        record_answer_only_fallback(store, session_id, run_id, "request_plan")?;
+        return Ok(AnswerOnlyRoute::Fallback);
+    }
+
+    finish_answer_only_failure(
+        store,
+        session_id,
+        run_id,
+        stream_tx,
+        LlmError::local(
+            LlmErrorClass::Protocol,
+            LlmErrorPhase::TerminalValidation,
+            "answer-only response contained a malformed routing control",
+        ),
+        "malformed_control",
+    )
+    .await
+    .map(AnswerOnlyRoute::Failed)
+}
+
+fn record_answer_only_fallback(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_fallback",
+                json!({"run_id": run_id, "route": "answer_only", "reason": reason}),
+            );
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({
+                    "run_id": run_id,
+                    "route": "answer_only",
+                    "outcome": "fallback",
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| format!("failed to audit answer-only fallback: {error}"))
+}
+
+async fn finish_answer_only_success(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    content: &str,
+) -> Result<AgentRunSummary, String> {
+    let content = content.to_string();
+    let persisted_content = content.clone();
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Idle.as_str()}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Idle.as_str(), "to": AgentState::InspectLlm.as_str()}),
+            );
+            let message_index = session.messages.len();
+            session.messages.push(SessionMessage {
+                index: message_index,
+                role: "assistant".to_string(),
+                content: persisted_content.clone(),
+                timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
+            });
+            session.message_provenance.push(MessageProvenance {
+                message_index,
+                origin: MessageOrigin::ModelOutput,
+            });
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({"run_id": run_id, "route": "answer_only", "outcome": "completed"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::InspectLlm.as_str(), "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({"outcome": "completed", "continue": false, "route": "answer_only"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to commit answer-only response: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "completed".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 1,
+        last_message: Some(content),
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "completed".to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Idle.as_str().to_string(),
+            AgentState::InspectLlm.as_str().to_string(),
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+async fn finish_answer_only_failure(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    failure: LlmError,
+    reason: &str,
+) -> Result<AgentRunSummary, String> {
+    let persisted_failure = failure.clone();
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_completed",
+                json!({
+                    "run_id": run_id,
+                    "route": "answer_only",
+                    "outcome": "failed",
+                    "reason": reason,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({
+                    "outcome": "answer_only_failed",
+                    "continue": false,
+                    "route": "answer_only",
+                    "failure": persisted_failure,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to reconcile answer-only failure: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "answer_only_failed".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 1,
+        last_message: None,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "answer_only_failed".to_string(),
+        failure: Some(failure),
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+async fn finish_answer_only_planning_required(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    reason: &str,
+) -> Result<AgentRunSummary, String> {
+    let outcome = if reason == "active_plan" {
+        "planning_required_active_plan"
+    } else {
+        "planning_required_active_run"
+    };
+    let tool_call_count = store
+        .update_session(session_id, |session| {
+            append_session_event(
+                session,
+                "answer_route_bypassed",
+                json!({"run_id": run_id, "route": "answer_only", "reason": reason}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": Value::Null, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({"outcome": outcome, "continue": false, "route": "answer_only"}),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": AgentState::Reconciliation.as_str(), "to": AgentState::Done.as_str()}),
+            );
+            Ok(session.tool_calls.len())
+        })
+        .map_err(|error| format!("failed to reconcile answer-only planning requirement: {error}"))?;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: outcome.to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 0,
+        last_message: None,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: outcome.to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
     })
 }
 
@@ -3668,7 +5366,10 @@ async fn reconcile_cancelled_run(
                 );
             }
 
+            let mut cancelled_verifications = Vec::new();
             if let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) {
+                cancelled_verifications =
+                    plan.cancel_running_verifications("agent run cancelled by user");
                 plan.outcome = Some("cancelled_by_user".to_string());
                 if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
                     if step.status != "Completed" {
@@ -3677,6 +5378,16 @@ async fn reconcile_cancelled_run(
                         step.updated_at = Some(Utc::now());
                     }
                 }
+            }
+            if !cancelled_verifications.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_cancelled",
+                    json!({
+                        "verification_ids": cancelled_verifications,
+                        "reason": "cancelled_by_user",
+                    }),
+                );
             }
             append_session_event(
                 session,
@@ -3865,6 +5576,129 @@ async fn reconcile_preflight_llm_failure(
         final_state: AgentState::Done,
         outcome: "configuration_failed".to_string(),
         failure: Some(failure),
+        bound_reached: false,
+        trace: vec![
+            AgentState::Reconciliation.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+fn persist_instruction_context_block(
+    store: &SessionStore,
+    session_id: &str,
+    active_plan_id: Option<&str>,
+    normalized_goal: &str,
+    stage: &str,
+    error: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            if let Some(plan) = session.plan.as_mut().filter(|plan| {
+                plan.matches_goal(normalized_goal)
+                    && !plan.is_complete()
+                    && active_plan_id.is_none_or(|expected| plan.id == expected)
+            }) {
+                plan.outcome = Some("instruction_context_missing".to_string());
+                if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
+                    if step.status != "Completed" {
+                        step.status = "Blocked".to_string();
+                        step.outcome = Some(error.to_string());
+                        step.updated_at = Some(Utc::now());
+                    }
+                }
+            }
+            append_session_event(
+                session,
+                "instruction_context_missing",
+                json!({
+                    "stage": stage,
+                    "error": error,
+                    "action": "restore readable bounded project instructions or increase the context budget, then retry the same plan",
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|audit_error| {
+            format!("failed to persist missing instruction context: {audit_error}")
+        })
+}
+
+async fn reconcile_preflight_instruction_failure(
+    store: &SessionStore,
+    session_id: &str,
+    normalized_goal: &str,
+    stage: &str,
+    error: String,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AgentRunSummary, String> {
+    persist_instruction_context_block(store, session_id, None, normalized_goal, stage, &error)?;
+    let (last_message, tool_call_count) = store
+        .update_session(session_id, |session| {
+            let previous_state = last_persisted_state(session);
+            append_session_event(
+                session,
+                "state_transition",
+                json!({"from": previous_state, "to": AgentState::Reconciliation.as_str()}),
+            );
+            append_session_event(
+                session,
+                "reconciliation",
+                json!({
+                    "outcome": "instruction_context_missing",
+                    "continue": false,
+                    "reason": error,
+                }),
+            );
+            append_session_event(
+                session,
+                "state_transition",
+                json!({
+                    "from": AgentState::Reconciliation.as_str(),
+                    "to": AgentState::Done.as_str(),
+                }),
+            );
+            Ok((
+                session
+                    .messages
+                    .last()
+                    .map(|message| message.content.clone()),
+                session.tool_calls.len(),
+            ))
+        })
+        .map_err(|audit_error| {
+            format!("failed to reconcile missing instruction context: {audit_error}")
+        })?;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Reconciliation.as_str().to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "instruction_context_missing".to_string(),
+        },
+    )
+    .await;
+    emit(
+        stream_tx,
+        StreamEvent::StateTransition {
+            state: AgentState::Done.as_str().to_string(),
+        },
+    )
+    .await;
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: String::new(),
+        steps_taken: 0,
+        last_message,
+        tool_call_count,
+        final_state: AgentState::Done,
+        outcome: "instruction_context_missing".to_string(),
+        failure: None,
         bound_reached: false,
         trace: vec![
             AgentState::Reconciliation.as_str().to_string(),
@@ -4078,6 +5912,7 @@ fn is_llm_failure_outcome(outcome: &str) -> bool {
         "provider_continuation_failed:",
         "compression_failed:",
         "configuration_failed:",
+        "answer_only_failed:",
     ]
     .iter()
     .any(|prefix| outcome.starts_with(prefix))
@@ -4089,6 +5924,7 @@ fn is_llm_failure_outcome(outcome: &str) -> bool {
                 | "provider_continuation_failed"
                 | "compression_failed"
                 | "configuration_failed"
+                | "answer_only_failed"
         )
 }
 
@@ -4101,9 +5937,14 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "tool_execution_failed"
                 | "repeated_tool_failure"
                 | "blocked_step_unresolved"
+                | "required_verification_unresolved"
                 | "transition_limit_reached"
                 | "turn_limit_reached"
                 | "provider_continuation_interrupted"
+                | "instruction_context_missing"
+                | "unresolved_clarification"
+                | "planning_required_active_plan"
+                | "planning_required_active_run"
         )
 }
 
@@ -4188,17 +6029,262 @@ fn prepare_user_turn(
         crate::interactive::resolve_path_attachments(project_root, content)?;
     store
         .update_session(session_id, |session| {
+            let message_index = session.messages.len();
             session.messages.push(SessionMessage {
-                index: session.messages.len(),
+                index: message_index,
                 role: "user".to_string(),
-                content,
+                content: content.clone(),
                 timestamp: Some(Utc::now()),
                 attachments,
+            });
+            session.message_provenance.push(MessageProvenance {
+                message_index,
+                origin: MessageOrigin::HumanRequest,
+            });
+            session.human_intent.push(HumanIntentRecord {
+                kind: HumanIntentKind::Request,
+                text: content,
+                source_message_index: Some(message_index),
+                source_event_index: None,
             });
             Ok(())
         })
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn parse_verification_waiver(content: &str) -> Option<(&str, &str)> {
+    let request = content.trim().strip_prefix("waive verification ")?;
+    let (id, reason) = request.split_once(':')?;
+    let id = id.trim();
+    let reason = reason.trim();
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && !reason.is_empty())
+    .then_some((id, reason))
+}
+
+fn apply_human_verification_waiver(
+    store: &SessionStore,
+    session_id: &str,
+    content: &str,
+) -> Result<Option<String>, String> {
+    let Some((obligation_id, reason)) = parse_verification_waiver(content) else {
+        return Ok(None);
+    };
+    let obligation_id = obligation_id.to_string();
+    let reason = reason.to_string();
+    store
+        .update_session(session_id, |session| {
+            let source_message_index = session.messages.len().checked_sub(1).ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification waiver has no source message".to_string(),
+                )
+            })?;
+            if session.message_origin(source_message_index) != MessageOrigin::HumanRequest {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification waiver source is not an authenticated human request".to_string(),
+                ));
+            }
+            let plan = session.plan.as_mut().ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification waiver has no active plan".to_string(),
+                )
+            })?;
+            let plan_id = plan.id.clone();
+            plan.waive_verification(
+                &plan_id,
+                &obligation_id,
+                source_message_index,
+                reason.clone(),
+            )
+            .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_waived",
+                json!({
+                    "plan_id": plan_id,
+                    "verification_id": obligation_id,
+                    "source_message_index": source_message_index,
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(Some(obligation_id))
+}
+
+fn finish_human_verification_waiver(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    verification_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+) -> Result<AgentRunSummary, String> {
+    let message =
+        format!("Verification requirement {verification_id} was waived for the active plan.");
+    store
+        .record_event(
+            session_id,
+            "reconciliation",
+            json!({"run_id": run_id, "outcome": "verification_waived", "continue": false}),
+        )
+        .map_err(|error| error.to_string())?;
+    emit_nonblocking(
+        stream_tx,
+        StreamEvent::Reconciled {
+            outcome: "verification_waived".to_string(),
+        },
+    );
+    Ok(AgentRunSummary {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        steps_taken: 0,
+        last_message: Some(message),
+        tool_call_count: 0,
+        final_state: AgentState::Done,
+        outcome: "verification_waived".to_string(),
+        failure: None,
+        bound_reached: false,
+        trace: vec![
+            AgentState::Idle.as_str().to_string(),
+            AgentState::Done.as_str().to_string(),
+        ],
+    })
+}
+
+fn command_verification_obligation(
+    command: &str,
+    authority: VerificationAuthority,
+    source_message_index: Option<usize>,
+) -> Result<VerificationObligation, String> {
+    let fingerprint = format!("{:x}", Sha256::digest(command.as_bytes()));
+    let mut obligation = VerificationObligation::pending_tool(
+        format!("required-command-{}", &fingerprint[..16]),
+        format!("Run the required command: {command}"),
+        vec![".".to_string()],
+        "run_terminal",
+        json!({"command": command, "affected_paths": ["."]}),
+        VerificationExpectedOutcome::Success,
+    )?;
+    obligation.authority = authority;
+    obligation.source_message_index = source_message_index;
+    Ok(obligation)
+}
+
+fn explicit_human_verification_commands(goal: &str) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "task verify",
+        "task check",
+        "task test",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+    ];
+    let mut exact_segments = goal
+        .split('`')
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, segment)| segment.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    exact_segments.extend(goal.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("$ ")
+            .map(|command| command.trim().to_ascii_lowercase())
+    }));
+    KNOWN
+        .iter()
+        .filter(|command| exact_segments.iter().any(|segment| segment == **command))
+        .map(|command| (*command).to_string())
+        .collect()
+}
+
+fn add_independent_verification_requirements(
+    plan: &mut crate::session::Plan,
+    goal: &str,
+    project_instructions: &str,
+    source_message_index: Option<usize>,
+) -> Result<Vec<String>, String> {
+    if plan.steps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let step_index = plan.steps.len() - 1;
+    let mut candidates = explicit_human_verification_commands(goal)
+        .into_iter()
+        .map(|command| {
+            command_verification_obligation(
+                &command,
+                VerificationAuthority::Human,
+                source_message_index,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if project_instructions
+        .to_ascii_lowercase()
+        .contains("task verify")
+    {
+        candidates.push(command_verification_obligation(
+            "task verify",
+            VerificationAuthority::Project,
+            None,
+        )?);
+    }
+    let step = &mut plan.steps[step_index];
+    let mut added = Vec::new();
+    for mut obligation in candidates {
+        let duplicate = step
+            .verification_obligations
+            .iter()
+            .any(|existing| existing.expected_invocation == obligation.expected_invocation);
+        if duplicate {
+            continue;
+        }
+        obligation.plan_id.clone_from(&plan.id);
+        obligation.step_index = Some(step_index);
+        added.push(obligation.id.clone());
+        step.verification_obligations.push(obligation);
+    }
+    Ok(added)
+}
+
+fn derive_active_plan_verification_requirements(
+    store: &SessionStore,
+    session_id: &str,
+    goal: &str,
+    project_instructions: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let source_message_index = session
+                .message_provenance
+                .iter()
+                .rev()
+                .find(|source| source.origin.is_human())
+                .map(|source| source.message_index);
+            let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) else {
+                return Ok(());
+            };
+            let added = add_independent_verification_requirements(
+                plan,
+                goal,
+                project_instructions,
+                source_message_index,
+            )
+            .map_err(crate::session::SessionError::InvalidMutation)?;
+            if !added.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_requirements_derived",
+                    json!({"verification_ids": added, "source": "resolved_human_and_project_requirements"}),
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn plan_invalidation_reason(
@@ -4424,6 +6510,472 @@ fn record_repeated_tool_failure(
         .map_err(|error| error.to_string())
 }
 
+fn begin_plan_verification(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    obligation_id: &str,
+    request: &ToolCallRequest,
+) -> Result<(), String> {
+    let invocation_id = request.invocation_id;
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification binding does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .begin_verification(
+                    obligation_id,
+                    invocation_id,
+                    &request.name,
+                    &request.arguments,
+                    None,
+                )
+                .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_started",
+                json!({
+                    "plan_id": expected_plan_id,
+                    "step_index": step_index,
+                    "verification_id": obligation_id,
+                    "invocation_id": invocation_id,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn audited_tool_evidence(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Result<(bool, Option<String>), String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session disappeared after tool invocation {invocation_id}"))?;
+    let record = session
+        .tool_calls
+        .iter()
+        .rev()
+        .find(|record| record.invocation_id == Some(invocation_id));
+    let mutates_content = record.is_some_and(|record| match record.tool_name.as_deref() {
+        Some("apply_patch" | "merge_subagent_worktree") => true,
+        Some("run_terminal") => {
+            record
+                .result
+                .as_ref()
+                .and_then(|result| result.get("risk"))
+                .and_then(Value::as_str)
+                != Some("read_only")
+        }
+        // The remaining built-in tools do not edit the active worktree. Unknown
+        // audited tools fail conservatively when their recorded permission can
+        // mutate local state.
+        Some(
+            "read_file" | "list_directory" | "grep" | "write_plan" | "spawn_subagent"
+            | "invoke_subagent" | "manage_subagents" | "send_message" | "search_web"
+            | "read_url_content" | "manage_task" | "manage_memory" | "schedule" | "ask_question",
+        ) => false,
+        _ => record
+            .result
+            .as_ref()
+            .and_then(|result| result.get("permission_level"))
+            .and_then(Value::as_str)
+            .is_some_and(|permission| matches!(permission, "safe" | "destructive")),
+    });
+    let worktree_identity = record.and_then(|record| record.worktree_path.clone());
+    Ok((mutates_content, worktree_identity))
+}
+
+fn compute_verification_content_identity(
+    worktree_root: &Path,
+    affected_paths: &[String],
+) -> Result<String, String> {
+    use std::io::Read;
+    const MAX_ENTRIES: usize = 4_096;
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    let root = worktree_root
+        .canonicalize()
+        .map_err(|error| format!("resolve verification worktree: {error}"))?;
+    let requested = if affected_paths.is_empty() {
+        vec![".".to_string()]
+    } else {
+        affected_paths.to_vec()
+    };
+    let mut pending = Vec::new();
+    for relative in requested {
+        let relative_path = Path::new(&relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "verification affected path {relative:?} is not worktree-relative"
+            ));
+        }
+        pending.push(root.join(relative_path));
+    }
+
+    let mut entries = Vec::new();
+    while let Some(path) = pending.pop() {
+        if entries.len() >= MAX_ENTRIES {
+            return Err("verification content identity exceeds 4096 entries".to_string());
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| "verification path escaped the worktree".to_string())?
+            .to_path_buf();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "verification content identity rejects linked path {:?}",
+                    relative
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                entries.push((relative.clone(), None));
+                let mut children = std::fs::read_dir(&path)
+                    .map_err(|error| format!("read verification directory: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("read verification directory entry: {error}"))?;
+                children.sort_by_key(std::fs::DirEntry::file_name);
+                for child in children.into_iter().rev() {
+                    let name = child.file_name();
+                    if matches!(name.to_str(), Some(".git" | ".nib" | "target")) {
+                        continue;
+                    }
+                    pending.push(child.path());
+                }
+            }
+            Ok(metadata) if metadata.is_file() => {
+                entries.push((relative, Some((path, metadata.len()))));
+            }
+            Ok(_) => {
+                return Err("verification content identity encountered a special file".to_string())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                entries.push((relative, Some((path, u64::MAX))));
+            }
+            Err(error) => return Err(format!("inspect verification content: {error}")),
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    let mut bytes_read = 0u64;
+    for (relative, file) in entries {
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        match file {
+            None => digest.update(b"directory\0"),
+            Some((_, u64::MAX)) => digest.update(b"missing\0"),
+            Some((path, size)) => {
+                bytes_read = bytes_read.saturating_add(size);
+                if bytes_read > MAX_BYTES {
+                    return Err("verification content identity exceeds 64 MiB".to_string());
+                }
+                digest.update(b"file\0");
+                digest.update(size.to_le_bytes());
+                let mut file = std::fs::File::open(path)
+                    .map_err(|error| format!("open verification content: {error}"))?;
+                let mut buffer = [0u8; 16 * 1024];
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|error| format!("read verification content: {error}"))?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                }
+            }
+        }
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn revalidate_plan_verification_content(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let snapshot = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session disappeared before verification revalidation".to_string())?;
+    let Some(plan) = snapshot.plan.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if expected_plan_id != Some(plan.id.as_str()) {
+        return Err("verification revalidation does not match the active plan".to_string());
+    }
+    let Some(step) = plan.steps.get(plan.current_step_index) else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for obligation in &step.verification_obligations {
+        if obligation.status != crate::session::VerificationStatus::Passed {
+            continue;
+        }
+        let current = obligation
+            .worktree_identity
+            .as_deref()
+            .ok_or_else(|| format!("verification {:?} has no worktree", obligation.id))
+            .and_then(|root| {
+                compute_verification_content_identity(Path::new(root), &obligation.affected_paths)
+            });
+        let mismatch = match &current {
+            Ok(identity) => Some(identity.as_str()) != obligation.content_identity.as_deref(),
+            Err(_) => true,
+        };
+        if mismatch {
+            stale.push((
+                obligation.id.clone(),
+                current.err().unwrap_or_else(|| {
+                    "verified content no longer matches its recorded identity".to_string()
+                }),
+            ));
+        }
+    }
+    if stale.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stale_ids = stale.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    store
+        .update_session(session_id, |session| {
+            let plan = session.plan.as_mut().ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification revalidation lost its plan".to_string(),
+                )
+            })?;
+            if expected_plan_id != Some(plan.id.as_str()) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification revalidation plan changed".to_string(),
+                ));
+            }
+            let step = plan.steps.get_mut(plan.current_step_index).ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "verification revalidation has no active step".to_string(),
+                )
+            })?;
+            for (id, reason) in &stale {
+                if let Some(obligation) = step
+                    .verification_obligations
+                    .iter_mut()
+                    .find(|obligation| obligation.id == *id)
+                {
+                    obligation.status = crate::session::VerificationStatus::Stale;
+                    obligation.reason = Some(reason.clone());
+                    obligation.updated_at = Some(Utc::now());
+                }
+            }
+            step.status = "Blocked".to_string();
+            step.outcome = Some("verified worktree content changed".to_string());
+            append_session_event(
+                session,
+                "verification_stale",
+                json!({"verification_ids": stale_ids.clone(), "reason": "content_identity_changed"}),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(stale_ids)
+}
+
+fn finish_plan_verification(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    obligation_id: &str,
+    worktree_identity: Option<&str>,
+    result: &crate::tools::ToolResult,
+) -> Result<(), String> {
+    let invocation_id = result.invocation_id;
+    let snapshot = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session disappeared before verification reconciliation".to_string())?;
+    let obligation = snapshot
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.steps.get(plan.current_step_index))
+        .and_then(|step| {
+            step.verification_obligations
+                .iter()
+                .find(|obligation| obligation.id == obligation_id)
+        })
+        .ok_or_else(|| format!("verification obligation {obligation_id:?} disappeared"))?;
+    let expected_outcome = obligation
+        .expected_invocation
+        .as_ref()
+        .map(|expected| expected.expected_outcome)
+        .ok_or_else(|| {
+            format!("verification obligation {obligation_id:?} has no expected outcome")
+        })?;
+    let success = match expected_outcome {
+        VerificationExpectedOutcome::Success => result.success,
+        VerificationExpectedOutcome::ProbeMiss => {
+            result.success
+                && result.output.as_ref().is_some_and(|output| {
+                    output
+                        .get("matches")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                        && output.get("truncated").and_then(Value::as_bool) == Some(false)
+                })
+        }
+    };
+    let reason = if success {
+        None
+    } else {
+        result.error.clone().or_else(|| {
+            Some(match expected_outcome {
+                VerificationExpectedOutcome::Success => {
+                    "verification tool did not report success".to_string()
+                }
+                VerificationExpectedOutcome::ProbeMiss => {
+                    "typed absence probe returned matches or incomplete evidence".to_string()
+                }
+            })
+        })
+    };
+    let content_identity = if success {
+        let root = worktree_identity.ok_or_else(|| {
+            format!("successful verification obligation {obligation_id:?} has no worktree")
+        })?;
+        Some(compute_verification_content_identity(
+            Path::new(root),
+            &obligation.affected_paths,
+        )?)
+    } else {
+        None
+    };
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "verification result does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .finish_verification(
+                    obligation_id,
+                    invocation_id,
+                    worktree_identity,
+                    content_identity.clone(),
+                    success,
+                    reason.clone(),
+                )
+                .map_err(crate::session::SessionError::InvalidMutation)?;
+            append_session_event(
+                session,
+                "verification_finished",
+                json!({
+                    "plan_id": expected_plan_id,
+                    "step_index": step_index,
+                    "verification_id": obligation_id,
+                    "invocation_id": invocation_id,
+                    "worktree_identity": worktree_identity,
+                    "content_identity": content_identity,
+                    "status": if success { "passed" } else { "failed" },
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn invalidate_plan_verification_after_mutation(
+    store: &SessionStore,
+    session_id: &str,
+    expected_plan_id: Option<&str>,
+    normalized_goal: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let matches = session.plan.as_ref().is_some_and(|plan| {
+                expected_plan_id == Some(plan.id.as_str())
+                    && plan.is_structured()
+                    && plan.matches_goal(normalized_goal)
+                    && plan.approved
+            });
+            if !matches {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "mutation does not match the active approved plan".to_string(),
+                ));
+            }
+            let step_index = session
+                .plan
+                .as_ref()
+                .expect("plan presence was checked above")
+                .current_step_index;
+            let invalidated = session
+                .plan
+                .as_mut()
+                .expect("plan presence was checked above")
+                .invalidate_verification_after_mutation(invocation_id);
+            if !invalidated.is_empty() {
+                append_session_event(
+                    session,
+                    "verification_stale",
+                    json!({
+                        "plan_id": expected_plan_id,
+                        "step_index": step_index,
+                        "invocation_id": invocation_id,
+                        "verification_ids": invalidated,
+                        "reason": "relevant_worktree_content_changed",
+                    }),
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn update_plan_tool_outcome(
     store: &SessionStore,
     session_id: &str,
@@ -4547,6 +7099,7 @@ fn project_validated_llm_response(
     if let Some(tool_calls) = response.tool_calls.as_ref() {
         events.extend(tool_calls.iter().enumerate().map(|(index, call)| {
             StreamEvent::ToolCallChunk {
+                invocation_id: call.invocation_id,
                 index,
                 name: Some(crate::interactive::bounded_public_text(
                     &call.name,
@@ -4654,6 +7207,299 @@ mod tests {
     }
 
     #[test]
+    fn completion_revalidation_stales_content_changed_outside_the_tool_audit() {
+        let directory = tempdir().expect("verification root");
+        std::fs::write(directory.path().join("note.txt"), "verified\n").expect("fixture");
+        let store = SessionStore::new(&directory.path().join("sessions"));
+        let mut session = store.create_session_with_id("content-revalidation");
+        let obligation = VerificationObligation::pending_tool(
+            "content-check",
+            "verify note content",
+            vec!["note.txt".to_string()],
+            "run_terminal",
+            json!({"command": "true", "affected_paths": ["note.txt"]}),
+            VerificationExpectedOutcome::Success,
+        )
+        .expect("verification contract");
+        let mut plan = crate::session::Plan::new(
+            "verify content",
+            vec![crate::session::PlanStep {
+                description: "verify the note".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: vec![obligation],
+                content_generation: 0,
+            }],
+        );
+        plan.approve();
+        let plan_id = plan.id.clone();
+        let invocation_id = crate::tools::ToolInvocationId::new();
+        let root = directory.path().to_string_lossy().into_owned();
+        plan.begin_verification(
+            "content-check",
+            invocation_id,
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["note.txt"]}),
+            Some(root.clone()),
+        )
+        .expect("begin verification");
+        let identity =
+            compute_verification_content_identity(directory.path(), &["note.txt".to_string()])
+                .expect("content identity");
+        plan.finish_verification(
+            "content-check",
+            invocation_id,
+            Some(&root),
+            Some(identity),
+            true,
+            None,
+        )
+        .expect("finish verification");
+        session.plan = Some(plan);
+        store.save(&mut session).expect("persist evidence");
+
+        std::fs::write(directory.path().join("note.txt"), "changed externally\n")
+            .expect("external change");
+        assert_eq!(
+            revalidate_plan_verification_content(&store, &session.id, Some(&plan_id))
+                .expect("revalidate"),
+            ["content-check"]
+        );
+        let persisted = store.load(&session.id).expect("stale evidence");
+        assert_eq!(
+            persisted.plan.unwrap().steps[0].verification_obligations[0].status,
+            crate::session::VerificationStatus::Stale
+        );
+    }
+
+    #[test]
+    fn clarification_answer_and_unresolved_state_persist_with_sources() {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::new(directory.path());
+        let session = store.create_session_with_id("clarification-provenance");
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "user",
+                "implement the selected mode",
+                MessageOrigin::HumanRequest,
+            )
+            .expect("request");
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "question intent",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant intent");
+
+        let first = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            first,
+            "Which verification mode?",
+            &["fast".to_string(), "full".to_string()],
+            &["src".to_string()],
+        )
+        .expect("persist question")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            first,
+            &[json!({"tool": "ask_question", "success": true})],
+            &Ok("full".to_string()),
+            false,
+        )
+        .expect("persist answer");
+
+        let reloaded = store.load(&session.id).expect("reload answer");
+        let answered = reloaded.clarifications.last().expect("clarification");
+        assert_eq!(answered.status, ClarificationStatus::Answered);
+        assert_eq!(answered.answer.as_deref(), Some("full"));
+        assert!(answered.answer_message_index.is_none());
+        let source = answered.answer_event_index.expect("answer source");
+        assert_eq!(
+            reloaded.events[source].kind,
+            "human_question_answer_received"
+        );
+        assert_eq!(
+            reloaded.message_origin(reloaded.messages.len() - 1),
+            MessageOrigin::ToolOutput
+        );
+        assert_eq!(
+            reloaded.human_intent.last().expect("human answer").text,
+            "full"
+        );
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "same question attempted again",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant retry");
+        let second = crate::tools::ToolInvocationId::new();
+        let reused = persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            second,
+            "Which verification mode?",
+            &["fast".to_string(), "full".to_string()],
+            &["src".to_string()],
+        )
+        .expect("reuse question")
+        .expect("prior answer");
+        assert_eq!(reused.answer, "full");
+        assert_eq!(reused.answer_event_index, Some(source));
+
+        let third = crate::tools::ToolInvocationId::new();
+        persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            third,
+            "Which target file?",
+            &[],
+            &[],
+        )
+        .expect("new question");
+        persist_question_observation(
+            &store,
+            &session.id,
+            third,
+            &[json!({"tool": "ask_question", "success": false})],
+            &Err("input unavailable".to_string()),
+            false,
+        )
+        .expect("persist unresolved");
+        let unresolved = store.load(&session.id).expect("reload unresolved");
+        assert!(unresolved.has_unresolved_clarification(Some("plan-a")));
+        assert_eq!(
+            unresolved.clarifications.last().expect("unresolved").status,
+            ClarificationStatus::Unresolved
+        );
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "retry the unanswered question",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant retry after unresolved input");
+        let fourth = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            fourth,
+            "Which target file?",
+            &[],
+            &[],
+        )
+        .expect("repeat unresolved question")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            fourth,
+            &[json!({"tool": "ask_question", "success": true})],
+            &Ok("src/lib.rs".to_string()),
+            false,
+        )
+        .expect("persist later valid answer");
+        let resolved = store.load(&session.id).expect("reload resolved records");
+        assert!(!resolved.has_unresolved_clarification(Some("plan-a")));
+        assert!(resolved.clarifications.iter().rev().take(2).all(|record| {
+            record.status == ClarificationStatus::Answered
+                && record.answer.as_deref() == Some("src/lib.rs")
+        }));
+
+        store
+            .try_append_message_with_origin(
+                &session.id,
+                "assistant",
+                "ask a materially different choice set",
+                MessageOrigin::ModelOutput,
+            )
+            .expect("assistant changed options");
+        let fifth = crate::tools::ToolInvocationId::new();
+        assert!(persist_question_required(
+            &store,
+            &session.id,
+            Some("plan-a"),
+            fifth,
+            "Which verification mode?",
+            &["fast".to_string(), "release".to_string()],
+            &["src".to_string()],
+        )
+        .expect("changed option set")
+        .is_none());
+        persist_question_observation(
+            &store,
+            &session.id,
+            fifth,
+            &[json!({"tool": "ask_question", "success": false})],
+            &Err("input unavailable".to_string()),
+            false,
+        )
+        .expect("persist changed-option unresolved state");
+        let reloaded = store.load(&session.id).expect("reload option identity");
+        assert!(reloaded.has_unresolved_clarification(Some("plan-a")));
+        reloaded.validate().expect("valid persisted provenance");
+    }
+
+    #[test]
+    fn unresolved_clarification_blocks_overlapping_scope_and_allows_disjoint_scope() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "clarification-dependency",
+            "events": [{"index": 0, "kind": "question_required", "details": {}}],
+            "clarifications": [{
+                "invocation_id": crate::tools::ToolInvocationId::new(),
+                "plan_id": "plan-a",
+                "question": "Which target?",
+                "options": [],
+                "dependent_paths": ["src"],
+                "status": "unresolved",
+                "question_event_index": 0,
+                "reason": "input unavailable"
+            }]
+        }))
+        .expect("session fixture");
+        let root = Path::new("/workspace");
+        let blocked = unresolved_clarification_dependencies(
+            &session,
+            Some("plan-a"),
+            root,
+            &[ToolCallRequest::new(
+                "read_file",
+                json!({"path": "src/lib.rs"}),
+            )],
+        )
+        .expect("dependency check");
+        assert_eq!(blocked.len(), 1);
+        let independent = unresolved_clarification_dependencies(
+            &session,
+            Some("plan-a"),
+            root,
+            &[ToolCallRequest::new(
+                "read_file",
+                json!({"path": "docs/README.md"}),
+            )],
+        )
+        .expect("independent check");
+        assert!(independent.is_empty());
+    }
+
+    #[test]
     fn unchanged_failure_batches_ignore_new_invocation_ids() {
         let mut guard = FailedToolBatchGuard::default();
         for expected in [false, false, true] {
@@ -4732,6 +7578,18 @@ mod tests {
         assert!(!content.contains(r"stream\/output-secret"));
         assert!(!content.contains("c3RyZWFtL291dHB1dC1zZWNyZXQ"));
         assert!(!content.contains('\u{1b}'));
+
+        let tool = ToolCallRequest::new("read_file", json!({"path": "README.md"}));
+        let invocation_id = tool.invocation_id;
+        let projected = project_validated_llm_response(&LlmResponse::with_tools(vec![tool]), &[]);
+        assert!(matches!(
+            projected.as_slice(),
+            [StreamEvent::ToolCallChunk {
+                invocation_id: projected_id,
+                name: Some(name),
+                ..
+            }] if *projected_id == invocation_id && name == "read_file"
+        ));
     }
 
     #[test]
@@ -4786,6 +7644,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         );
         sanitize_provider_plan(&mut plan, std::slice::from_ref(&secret));
@@ -4926,6 +7786,8 @@ mod tests {
                 outcome: None,
                 attempts: 0,
                 updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
             }],
         )
     }
@@ -6963,6 +9825,7 @@ mod tests {
     async fn exact_run_steering_stays_closed_when_the_final_provider_turn_starts_a_tool() {
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let goal = "exact run steering tool smoke final turn";
@@ -6999,7 +9862,7 @@ mod tests {
             loop {
                 if matches!(
                     stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name }) if tool_name == "run_terminal"
+                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
                 ) {
                     break;
                 }
@@ -7066,7 +9929,7 @@ mod tests {
             loop {
                 if matches!(
                     stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name }) if tool_name == "run_terminal"
+                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
                 ) {
                     loop {
                         if store
@@ -7139,12 +10002,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn exact_run_steering_drained_in_compression_abandons_the_tool_continuation() {
-        #[cfg(windows)]
         const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-        #[cfg(not(windows))]
-        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
+        initialize_git_repository(directory.path());
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let goal = "exact run steering tool smoke compression race";
@@ -7619,6 +10480,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_question_batch_is_rejected_before_any_side_effect() {
         let dir = tempdir().unwrap();
+        initialize_git_repository(dir.path());
         save_config(dir.path(), &mock_config()).unwrap();
         let store = SessionStore::for_project(dir.path()).unwrap();
         let session = store.create_session();
@@ -7988,6 +10850,62 @@ mod tests {
             )
             .expect("terminal stream event");
         assert!(reconciled < ended);
+    }
+
+    #[tokio::test]
+    async fn cancellation_marks_running_verification_cancelled_without_passing_it() {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::new(directory.path());
+        let mut session = store.create_session_with_id("cancel-running-verification");
+        let mut plan = pending_plan("verify before completion", "run the required check");
+        let mut obligation = crate::session::VerificationObligation::pending_tool(
+            "required-check",
+            "run the required check",
+            vec!["src/".to_string()],
+            "run_terminal",
+            json!({"command": "true", "affected_paths": ["src/"]}),
+            crate::session::VerificationExpectedOutcome::Success,
+        )
+        .expect("valid verification contract");
+        obligation.plan_id.clone_from(&plan.id);
+        obligation.step_index = Some(0);
+        plan.steps[0].verification_obligations.push(obligation);
+        plan.begin_verification(
+            "required-check",
+            crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["src/"]}),
+            Some("worktree-a".to_string()),
+        )
+        .expect("start required verification");
+        plan.approve();
+        session.plan = Some(plan);
+        store
+            .save(&mut session)
+            .expect("persist running verification");
+
+        let summary = reconcile_cancelled_run(&store, &session.id, &None)
+            .await
+            .expect("reconcile cancellation");
+
+        assert_eq!(summary.outcome, "cancelled_by_user");
+        let persisted = store.load(&session.id).expect("cancelled session");
+        let obligation =
+            &persisted.plan.as_ref().expect("plan").steps[0].verification_obligations[0];
+        assert_eq!(
+            obligation.status,
+            crate::session::VerificationStatus::Cancelled
+        );
+        assert_eq!(
+            obligation.reason.as_deref(),
+            Some("agent run cancelled by user")
+        );
+        let event = persisted
+            .events
+            .iter()
+            .find(|event| event.kind == "verification_cancelled")
+            .expect("verification cancellation audit");
+        assert_eq!(event.details["verification_ids"], json!(["required-check"]));
     }
 
     #[test]
