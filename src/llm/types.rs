@@ -1010,6 +1010,7 @@ pub enum StreamEvent {
     },
     PlanGenerated {
         step_count: usize,
+        steps: Vec<String>,
     },
     ApprovalRequired {
         tool_name: String,

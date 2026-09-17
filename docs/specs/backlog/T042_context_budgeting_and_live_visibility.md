@@ -25,12 +25,14 @@ intent, scoped instructions, skill relevance, and verification obligations. T042
 consume those contracts rather than create a second task or permission model.
 
 The original source audit is pinned to development commit `bceb3eb`. T040 and T041
-are now integrated; T041's production implementation ends at `888febf`. That baseline
-adds a compact history estimate and an idle-only `/context [details]` projection as a
-compatibility scaffold. It does not implement T042's complete-request snapshot,
-response reserve, continuation accounting, active/modal-safe inspection, provider
-usage totals, or latency contract. Re-audit each affected surface at development start
-and preserve the existing command shape while replacing its incomplete accounting.
+are now integrated; T041's feature implementation slices end at `888febf`, and merge
+reconciliation reserves a 48-token minimum history allocation under fixed-instruction
+pressure. That baseline adds a compact history estimate and an idle-only `/context
+[details]` projection as a compatibility scaffold. It does not implement T042's
+complete-request snapshot, response reserve, continuation accounting, active/modal-safe
+inspection, provider usage totals, or latency contract. Re-audit each affected surface
+at development start and preserve the existing command shape while replacing its
+incomplete accounting.
 
 ## Source Review and Findings
 

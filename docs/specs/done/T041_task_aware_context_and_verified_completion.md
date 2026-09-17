@@ -28,7 +28,9 @@ completion claims.
 This spec covers the remaining findings from the T040 review. The verified integrated
 T040 baseline is `c64f953`. This spec entered development on 2026-09-15 for design and
 test preparation, was reconciled on 2026-09-16 after T040 integration, and completed
-on 2026-09-17. The production implementation ends at `888febf`; live-model
+on 2026-09-17. The feature implementation slices end at `888febf`; reconciliation
+with the current T039 prompt keeps a 48-token minimum history allocation so bounded
+summary and latest-message evidence survive fixed-instruction growth. Live-model
 qualification remains separate under T023.
 
 ## Scope
@@ -314,9 +316,11 @@ Persistence, filesystem, or process changes also require relevant native CI evid
 Focused gates passed through implementation head `888febf`: `task check`,
 `task test:agent-context` (57 context, 73 agent, and 2 build-metadata tests),
 `task test:runtime-e2e` (47 tests), and `task test:interactive` (all focused shared,
-plain, TUI, CLI, and installer groups). Closure also runs `task test:delegation`,
-`task docs:check`, `git diff --check`, and the canonical `task verify` on the reconciled
-tree.
+plain, TUI, CLI, and installer groups). The T039 integration reconciliation reran those
+focused gates after combining communication guidance with the T041 execution contract;
+the aggregate context-pressure fixture verifies that the summary and latest-message
+edges still survive. Closure also runs `task test:delegation`, `task docs:check`,
+`git diff --check`, and the canonical `task verify` on the reconciled tree.
 
 The offline matrix must cover success, failure, correction, changed scope, cancellation,
 resume, legacy state, context pressure, policy denial, and misleading file/tool text.

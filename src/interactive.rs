@@ -874,6 +874,7 @@ pub enum SelectorDetailKind {
 pub enum TranscriptViewportAction {
     PageUp,
     PageDown,
+    JumpToStart,
     JumpToEnd,
     Lines(i32),
 }
@@ -918,6 +919,10 @@ impl TranscriptViewport {
             }
             TranscriptViewportAction::PageDown => {
                 self.scroll_lines(i32::try_from(self.page_rows).unwrap_or(i32::MAX));
+            }
+            TranscriptViewportAction::JumpToStart => {
+                self.pinned_to_tail = false;
+                self.top_row = 0;
             }
             TranscriptViewportAction::JumpToEnd => self.pin_to_tail(),
             TranscriptViewportAction::Lines(delta) => self.scroll_lines(delta),
@@ -1691,16 +1696,12 @@ impl ActivityEntry {
     }
 
     pub fn copy_text(&self) -> String {
-        if self.title.is_empty() {
-            if self.body.is_empty() {
-                self.kind.role_label().to_string()
-            } else {
-                format!("{}  {}", self.kind.role_label(), self.body)
-            }
-        } else if self.body.is_empty() {
-            format!("{}  {}", self.kind.role_label(), self.title)
+        if self.title.is_empty() || self.title == "live" {
+            self.body.clone()
+        } else if self.body.is_empty() || self.folded {
+            self.title.clone()
         } else {
-            format!("{}  {}\n{}", self.kind.role_label(), self.title, self.body)
+            format!("{}\n{}", self.title, self.body)
         }
     }
 
@@ -2483,7 +2484,11 @@ pub fn project_session_activities(
     });
     activities.extend(persisted.into_iter().map(|entry| entry.activity));
     if let Some(plan) = &session.plan {
-        activities.push(plan_summary_activity(plan, sensitive_values));
+        activities.push(if plan.approved {
+            plan_summary_activity(plan, sensitive_values)
+        } else {
+            plan_activity(plan, sensitive_values)
+        });
     }
     if let Some(summary) = &session.summary {
         activities.push(
@@ -2620,13 +2625,15 @@ pub fn apply_stream_event(
             )
         }
         StreamEvent::ToolCallChunk { .. } => {}
-        StreamEvent::PlanGenerated { step_count } => {
+        StreamEvent::PlanGenerated { step_count, steps } => {
             let noun = if step_count == 1 { "step" } else { "steps" };
-            activities.push(ActivityEntry::new(
+            let mut activity = ActivityEntry::new(
                 ActivityKind::Plan,
                 format!("generated {step_count} {noun}"),
-                String::new(),
-            ));
+                numbered_plan_step_body(&steps, sensitive_values),
+            );
+            sanitize_activity(&mut activity, sensitive_values);
+            activities.push(activity);
         }
         StreamEvent::ApprovalRequired { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
@@ -2964,6 +2971,18 @@ pub fn summarize_tool_result(
         }
     }
     (status.to_string(), summary, detail)
+}
+
+fn numbered_plan_step_body(steps: &[String], sensitive_values: &[String]) -> String {
+    let body = steps
+        .iter()
+        .map(|step| step.trim())
+        .filter(|step| !step.is_empty())
+        .enumerate()
+        .map(|(index, step)| format!("{}. {step}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bounded_activity_body(&body, sensitive_values)
 }
 
 fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> ActivityEntry {
@@ -4092,7 +4111,7 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
         StreamEvent::StateTransition { state } => {
             StreamDisplay::Status(format!("[state] {state}"))
         }
-        StreamEvent::PlanGenerated { step_count } => {
+        StreamEvent::PlanGenerated { step_count, .. } => {
             let noun = if step_count == 1 { "step" } else { "steps" };
             StreamDisplay::Status(format!("[plan] generated {step_count} {noun}"))
         }
@@ -6843,7 +6862,11 @@ mod tests {
         assert!(projected
             .iter()
             .find(|activity| activity.kind == ActivityKind::Plan)
-            .is_some_and(|activity| activity.body.is_empty()));
+            .is_some_and(|activity| {
+                !activity.body.contains(&secret)
+                    && activity.body.contains("[REDACTED]")
+                    && activity.body.len() <= MAX_ACTIVITY_BODY_BYTES
+            }));
         assert!(projected
             .iter()
             .chain(live.iter())
@@ -7131,8 +7154,8 @@ mod tests {
         let plan = projected
             .iter()
             .find(|entry| entry.kind == ActivityKind::Plan && entry.title.starts_with("0/1"))
-            .expect("plan summary");
-        assert!(plan.body.is_empty());
+            .expect("unapproved plan");
+        assert!(plan.body.contains("1. [InProgress] write tests"));
         assert!(projected.iter().any(|entry| {
             entry.kind == ActivityKind::Plan
                 && entry.title == "continuing approved step"
@@ -7160,6 +7183,18 @@ mod tests {
         assert_eq!(live[0].kind, ActivityKind::Thinking);
         assert_eq!(live[0].title, "planning");
         assert!(live[0].display_text().starts_with("thought"));
+        apply_stream_event(
+            &mut live,
+            StreamEvent::PlanGenerated {
+                step_count: 2,
+                steps: vec!["inspect wrap".to_string(), "write tests".to_string()],
+            },
+            &mut state,
+            &[],
+        );
+        assert_eq!(live[1].kind, ActivityKind::Plan);
+        assert_eq!(live[1].title, "generated 2 steps");
+        assert_eq!(live[1].body, "1. inspect wrap\n2. write tests");
         apply_stream_event(
             &mut live,
             StreamEvent::Content("hello".to_string()),
@@ -7192,9 +7227,10 @@ mod tests {
             &[],
         );
         assert_eq!(live[0].kind, ActivityKind::Thinking);
-        assert_eq!(live[1].kind, ActivityKind::Assistant);
-        assert_eq!(live[2].kind, ActivityKind::Tool);
-        assert_eq!(live[3].kind, ActivityKind::Reconcile);
+        assert_eq!(live[1].kind, ActivityKind::Plan);
+        assert_eq!(live[2].kind, ActivityKind::Assistant);
+        assert_eq!(live[3].kind, ActivityKind::Tool);
+        assert_eq!(live[4].kind, ActivityKind::Reconcile);
         assert_eq!(
             live.iter()
                 .filter(|entry| entry.kind == ActivityKind::Reconcile)
@@ -7210,6 +7246,35 @@ mod tests {
         );
         assert_eq!(unreconciled[0].kind, ActivityKind::System);
         assert_eq!(unreconciled[0].title, "local_error");
+    }
+
+    #[test]
+    fn approved_plan_projection_stays_one_line() {
+        let directory = tempdir().expect("dir");
+        let mut session = SessionStore::at_dir(directory.path().join("s"))
+            .try_create_session()
+            .expect("session");
+        let mut plan = crate::session::Plan::new(
+            "inspect wrap",
+            vec![crate::session::PlanStep {
+                description: "write tests".to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            }],
+        );
+        plan.approve();
+        session.plan = Some(plan);
+        let projected = project_session_activities(&session, &[]);
+        let summary = projected
+            .iter()
+            .find(|entry| entry.kind == ActivityKind::Plan)
+            .expect("approved plan summary");
+        assert!(summary.title.contains("write tests"));
+        assert!(summary.body.is_empty());
     }
 
     #[test]

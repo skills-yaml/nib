@@ -24,7 +24,7 @@ use crate::llm::types::StreamEvent;
 use crate::session::SessionStore;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
@@ -143,6 +143,62 @@ enum TuiFocus {
     #[default]
     Composer,
     Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointerSelection {
+    anchor_row: usize,
+    anchor_col: usize,
+    focus_row: usize,
+    focus_col: usize,
+    moved: bool,
+}
+
+impl PointerSelection {
+    fn at(row: usize, col: usize) -> Self {
+        Self {
+            anchor_row: row,
+            anchor_col: col,
+            focus_row: row,
+            focus_col: col,
+            moved: false,
+        }
+    }
+
+    fn drag_to(&mut self, row: usize, col: usize) {
+        if row != self.anchor_row || col != self.anchor_col {
+            self.moved = true;
+        }
+        self.focus_row = row;
+        self.focus_col = col;
+    }
+
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        let start = (self.anchor_row, self.anchor_col);
+        let end = (self.focus_row, self.focus_col);
+        if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        }
+    }
+
+    fn covers_row(&self, row: usize) -> bool {
+        if !self.moved {
+            return false;
+        }
+        let ((start_row, _), (end_row, _)) = self.ordered();
+        row >= start_row && row <= end_row
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TranscriptView {
+    area: Rect,
+    composer_area: Rect,
+    top_row: usize,
+    plain_rows: Vec<String>,
+    owners: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2854,6 +2910,9 @@ fn transcript_action_for_key(
     match code {
         KeyCode::PageUp => Some(TranscriptViewportAction::PageUp),
         KeyCode::PageDown => Some(TranscriptViewportAction::PageDown),
+        KeyCode::Home if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewportAction::JumpToStart)
+        }
         KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TranscriptViewportAction::JumpToEnd)
         }
@@ -2879,6 +2938,125 @@ fn transcript_action_for_mouse(kind: MouseEventKind) -> Option<TranscriptViewpor
         MouseEventKind::ScrollDown => Some(TranscriptViewportAction::Lines(3)),
         _ => None,
     }
+}
+
+fn point_in_rect(area: Rect, x: u16, y: u16) -> bool {
+    x >= area.x
+        && y >= area.y
+        && x < area.x.saturating_add(area.width)
+        && y < area.y.saturating_add(area.height)
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn slice_display_cells(text: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for grapheme in text.graphemes(true) {
+        let width = unicode_display_width(grapheme);
+        if col >= end {
+            break;
+        }
+        if col >= start {
+            out.push_str(grapheme);
+        }
+        col = col.saturating_add(width);
+    }
+    out
+}
+
+fn extract_pointer_text(rows: &[String], selection: PointerSelection) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+    let start_row = start_row.min(rows.len().saturating_sub(1));
+    let end_row = end_row.min(rows.len().saturating_sub(1));
+    if start_row == end_row {
+        let end = end_col.max(start_col.saturating_add(1));
+        return slice_display_cells(&rows[start_row], start_col, end);
+    }
+    let mut parts = Vec::new();
+    parts.push(slice_display_cells(&rows[start_row], start_col, usize::MAX));
+    parts.extend(
+        rows.iter()
+            .take(end_row)
+            .skip(start_row.saturating_add(1))
+            .cloned(),
+    );
+    parts.push(slice_display_cells(&rows[end_row], 0, end_col.max(1)));
+    parts.join("\n")
+}
+
+fn last_assistant_copy(activities: &[ActivityEntry]) -> Option<String> {
+    activities.iter().rev().find_map(|entry| {
+        if entry.kind == ActivityKind::Assistant {
+            let text = entry.copy_text();
+            (!text.trim().is_empty()).then_some(text)
+        } else {
+            None
+        }
+    })
+}
+
+fn copy_chat_content(
+    pointer: Option<PointerSelection>,
+    view: &TranscriptView,
+    selected: Option<usize>,
+    activities: &[ActivityEntry],
+) -> Option<(String, &'static str)> {
+    if let Some(selection) = pointer.filter(|selection| selection.moved) {
+        let text = extract_pointer_text(&view.plain_rows, selection);
+        if !text.trim().is_empty() {
+            return Some((text, "Copied selection."));
+        }
+    }
+    if let Some(index) = selected {
+        if let Some(entry) = activities.get(index) {
+            let text = entry.copy_text();
+            if !text.is_empty() {
+                return Some((text, "Copied."));
+            }
+        }
+    }
+    if let Some(text) = last_assistant_copy(activities) {
+        return Some((text, "Copied last reply."));
+    }
+    let joined = view
+        .plain_rows
+        .iter()
+        .filter(|row| !row.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some((joined, "Copied chat."))
+    }
+}
+
+fn transcript_hit(view: &TranscriptView, mouse: MouseEvent) -> Option<(usize, usize)> {
+    if view.area.width == 0 || view.area.height == 0 || view.plain_rows.is_empty() {
+        return None;
+    }
+    if !point_in_rect(view.area, mouse.column, mouse.row) {
+        return None;
+    }
+    let row = view
+        .top_row
+        .saturating_add(usize::from(mouse.row.saturating_sub(view.area.y)));
+    if row >= view.plain_rows.len() {
+        return None;
+    }
+    let col = usize::from(mouse.column.saturating_sub(view.area.x))
+        .min(unicode_display_width(&view.plain_rows[row]));
+    Some((row, col))
 }
 
 fn restore_terminal_to(output: &mut impl io::Write, raw_result: io::Result<()>) -> io::Result<()> {
@@ -2985,17 +3163,46 @@ fn composer_visual_rows(composer: &Composer, width: u16) -> Vec<String> {
 }
 
 fn overlay_visual_rows(first: &str, extra: &[String], width: u16) -> Vec<String> {
-    let mut rows = wrapped_display_rows(&format!("> {first}"), width.max(1));
+    const MAX_ROWS: usize = 6;
+    let width = width.max(1);
+    let mut rows = wrapped_display_rows(&format!("> {first}"), width);
     let inner = width.saturating_sub(COMPOSER_PROMPT_CELLS).max(1);
-    for line in extra {
-        for wrapped in wrapped_display_rows(line, inner) {
-            rows.push(format!("  {wrapped}"));
+    let extras: Vec<&str> = extra
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut used = 0usize;
+    while used < extras.len() {
+        let remaining = extras.len() - used;
+        let item_rows: Vec<String> = wrapped_display_rows(extras[used], inner)
+            .into_iter()
+            .map(|wrapped| format!("  {wrapped}"))
+            .collect();
+        let limit = if remaining > 1 {
+            MAX_ROWS.saturating_sub(1)
+        } else {
+            MAX_ROWS
+        };
+        if rows.len().saturating_add(item_rows.len()) > limit {
+            if used == 0 {
+                let room = limit.saturating_sub(rows.len());
+                rows.extend(item_rows.into_iter().take(room));
+                if remaining > 1 && rows.len() < MAX_ROWS {
+                    rows.push(format!("  … {} more", remaining.saturating_sub(1)));
+                }
+            } else {
+                rows.push(format!("  … {remaining} more"));
+            }
+            break;
         }
+        rows.extend(item_rows);
+        used += 1;
     }
     if rows.len() < 2 {
         rows.resize(2, String::new());
     }
-    rows.truncate(6);
+    rows.truncate(MAX_ROWS);
     rows
 }
 
@@ -3010,15 +3217,24 @@ fn waiting_composer_rows(
         WaitingKind::Approval => {
             let req = pending_approval?;
             let prompt = approval_prompt(&req.call, &req.context);
-            let mut extra = vec![prompt.subject];
-            if let Some(location) =
-                usable_approval_location(prompt.location.clone(), &req.context.target_scope)
-            {
-                extra.push(format!("in {location}"));
+            let mut extra = if req.call.tool_name == "approve_plan" {
+                req.context.details.clone()
+            } else {
+                Vec::new()
+            };
+            if extra.is_empty() && !prompt.subject.is_empty() {
+                extra.push(prompt.subject);
             }
-            let risk = compact_approval_risk(&req.context.permission_and_risk);
-            if !risk.is_empty() {
-                extra.push(format!("Risk: {risk}"));
+            if req.call.tool_name != "approve_plan" {
+                if let Some(location) =
+                    usable_approval_location(prompt.location.clone(), &req.context.target_scope)
+                {
+                    extra.push(format!("in {location}"));
+                }
+                let risk = compact_approval_risk(&req.context.permission_and_risk);
+                if !risk.is_empty() {
+                    extra.push(format!("Risk: {risk}"));
+                }
             }
             Some((overlay_visual_rows(&prompt.statement, &extra, width), false))
         }
@@ -3130,18 +3346,23 @@ fn thought_body_style(no_color: bool) -> Style {
     ink_style(ChannelInk::Thought, no_color)
 }
 
-fn channel_label_for(kind: ActivityKind) -> &'static str {
-    match kind {
-        ActivityKind::Thinking | ActivityKind::Plan => "thought",
-        other => other.role_label(),
-    }
-}
-
 fn fold_prefix(entry: &ActivityEntry) -> &'static str {
     if entry.folded && !entry.body.is_empty() {
         "› "
     } else {
         ""
+    }
+}
+
+fn header_body_style(kind: ActivityKind, rest: &str, no_color: bool) -> Style {
+    if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan) {
+        thought_body_style(no_color)
+    } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
+        speech_body_style(no_color)
+    } else if kind == ActivityKind::Tool {
+        tool_status_style(kind, rest, no_color)
+    } else {
+        ink_style(channel_ink(kind), no_color)
     }
 }
 
@@ -3152,19 +3373,24 @@ fn dotted_header_lines(
     width: u16,
     no_color: bool,
 ) -> Vec<Line<'static>> {
-    let label = channel_label_for(kind);
     let fold_width = unicode_display_width(fold);
     let dot_width = unicode_display_width(CHANNEL_DOT);
     let inner = usize::from(width.max(1))
         .saturating_sub(fold_width)
         .saturating_sub(dot_width)
         .max(1);
-    let content = if rest.is_empty() {
-        label.to_string()
-    } else {
-        format!("{label}  {rest}")
-    };
-    wrapped_display_rows(&content, u16::try_from(inner).unwrap_or(u16::MAX))
+    if rest.is_empty() {
+        let mut spans = Vec::new();
+        if !fold.is_empty() {
+            spans.push(Span::styled(fold.to_string(), muted_style(no_color)));
+        }
+        spans.push(Span::styled(
+            CHANNEL_DOT.to_string(),
+            ink_style(channel_ink(kind), no_color),
+        ));
+        return vec![Line::from(spans)];
+    }
+    wrapped_display_rows(rest, u16::try_from(inner).unwrap_or(u16::MAX))
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
@@ -3177,27 +3403,12 @@ fn dotted_header_lines(
                     CHANNEL_DOT.to_string(),
                     ink_style(channel_ink(kind), no_color),
                 ));
-                if let Some(after) = row.strip_prefix(&format!("{label}  ")) {
-                    spans.push(Span::styled(label.to_string(), muted_style(no_color)));
-                    let body_style = if matches!(kind, ActivityKind::Thinking | ActivityKind::Plan)
-                    {
-                        thought_body_style(no_color)
-                    } else if matches!(kind, ActivityKind::Assistant | ActivityKind::User) {
-                        speech_body_style(no_color)
-                    } else if kind == ActivityKind::Tool {
-                        tool_status_style(kind, after, no_color)
-                    } else {
-                        ink_style(channel_ink(kind), no_color)
-                    };
-                    spans.push(Span::styled(format!("  {after}"), body_style));
-                } else {
-                    spans.push(Span::styled(row, muted_style(no_color)));
-                }
+                spans.push(Span::styled(row, header_body_style(kind, rest, no_color)));
                 Line::from(spans)
             } else {
                 Line::from(Span::styled(
                     format!("{}{}{row}", fold, " ".repeat(dot_width)),
-                    muted_style(no_color),
+                    header_body_style(kind, rest, no_color),
                 ))
             }
         })
@@ -3877,19 +4088,43 @@ fn speech_source(entry: &ActivityEntry) -> String {
     }
 }
 
+fn prefix_speech_dot(
+    mut lines: Vec<Line<'static>>,
+    kind: ActivityKind,
+    no_color: bool,
+) -> Vec<Line<'static>> {
+    let dot = Span::styled(
+        CHANNEL_DOT.to_string(),
+        ink_style(channel_ink(kind), no_color),
+    );
+    if lines.is_empty() {
+        return vec![Line::from(dot)];
+    }
+    let indent = markdown::speech_indent();
+    let first = &mut lines[0];
+    if let Some(span) = first.spans.first_mut() {
+        if span.content.as_ref() == indent {
+            first.spans.remove(0);
+        } else if let Some(rest) = span.content.strip_prefix(indent) {
+            span.content = rest.to_string().into();
+        }
+    }
+    let rest = std::mem::take(&mut first.spans);
+    first.spans.push(dot);
+    first.spans.extend(rest);
+    lines
+}
+
 fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
-    let mut lines = dotted_header_lines(entry.kind, "", "", width, no_color);
     let source = speech_source(entry);
     if source.is_empty() {
-        return lines;
+        return dotted_header_lines(entry.kind, "", "", width, no_color);
     }
-    lines.extend(markdown::render_markdown(
-        &source,
-        width,
-        markdown::speech_indent(),
+    prefix_speech_dot(
+        markdown::render_markdown(&source, width, markdown::speech_indent(), no_color),
+        entry.kind,
         no_color,
-    ));
-    lines
+    )
 }
 
 fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
@@ -3966,21 +4201,19 @@ fn flatten_activity_lines(
     let mut owners = Vec::new();
     let mut previous_channel = None;
     for (index, entry) in activities.iter().enumerate() {
+        let wrapped = activity_lines(entry, width, no_color);
+        if wrapped.is_empty() {
+            continue;
+        }
         let channel = visual_channel(entry.kind);
         if previous_channel.is_some_and(|previous| previous != channel) {
             rows.push(Line::from(""));
             owners.push(index);
         }
         previous_channel = Some(channel);
-        let wrapped = activity_lines(entry, width, no_color);
-        if wrapped.is_empty() {
-            rows.push(Line::from(""));
+        for row in wrapped {
+            rows.push(row);
             owners.push(index);
-        } else {
-            for row in wrapped {
-                rows.push(row);
-                owners.push(index);
-            }
         }
     }
     (rows, owners)
@@ -4115,6 +4348,8 @@ fn render_current_session_view_with_viewport(
         None,
         &welcome,
         None,
+        None,
+        None,
     );
 }
 
@@ -4149,6 +4384,8 @@ fn render_session_view_with_completion(
         meter,
         &welcome,
         None,
+        None,
+        None,
     );
 }
 
@@ -4169,6 +4406,8 @@ fn render_session_activities(
     meter: Option<&WaitingMeter>,
     welcome: &StartupWelcome,
     band: Option<&InteractionBand<'_>>,
+    pointer: Option<PointerSelection>,
+    view: Option<&mut TranscriptView>,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let waiting = if pending_approval.is_some() {
@@ -4239,6 +4478,13 @@ fn render_session_activities(
     if let Some(selected) = selected {
         ensure_selected_visible(viewport, &owners, selected);
     }
+    if let Some(view) = view {
+        view.area = body[0];
+        view.composer_area = layout.composer;
+        view.top_row = viewport.top_row();
+        view.plain_rows = rendered_rows.iter().map(line_plain_text).collect();
+        view.owners = owners.clone();
+    }
     if empty {
         let welcome_lines = empty_state_lines(welcome, no_color);
         let welcome_height = u16::try_from(welcome_lines.len()).unwrap_or(1);
@@ -4261,14 +4507,15 @@ fn render_session_activities(
             .iter()
             .enumerate()
             .map(|(offset, row)| {
-                let activity_index = owners.get(visible_start + offset).copied();
-                apply_selection(
-                    row.clone(),
-                    selected.is_some()
-                        && activity_index == selected
-                        && focus == TuiFocus::Transcript,
-                    no_color,
-                )
+                let row_index = visible_start + offset;
+                let activity_index = owners.get(row_index).copied();
+                let pointer_selected =
+                    pointer.is_some_and(|selection| selection.covers_row(row_index));
+                let activity_selected = selected.is_some()
+                    && activity_index == selected
+                    && focus == TuiFocus::Transcript
+                    && !pointer.is_some_and(|selection| selection.moved);
+                apply_selection(row.clone(), pointer_selected || activity_selected, no_color)
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), body[0]);
@@ -4470,6 +4717,8 @@ fn draw_loop(
     let mut transcript_viewport = TranscriptViewport::default();
     let mut tui_focus = TuiFocus::Composer;
     let mut selected_activity: Option<usize> = None;
+    let mut pointer_selection: Option<PointerSelection> = None;
+    let mut transcript_view = TranscriptView::default();
     let mut clear_armed_at: Option<Instant> = None;
     let mut quit_armed_at: Option<Instant> = None;
     let spinner_origin = Instant::now();
@@ -4665,6 +4914,8 @@ fn draw_loop(
                 meter.as_ref(),
                 &welcome,
                 interaction_band.as_ref(),
+                pointer_selection,
+                Some(&mut transcript_view),
             );
             render_interaction_overlay(
                 f,
@@ -4724,6 +4975,38 @@ fn draw_loop(
             if let Event::Mouse(mouse) = input {
                 if let Some(action) = transcript_action_for_mouse(mouse.kind) {
                     transcript_viewport.apply(action);
+                    continue;
+                }
+                if let Some((row, col)) = transcript_hit(&transcript_view, mouse) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            pointer_selection = Some(PointerSelection::at(row, col));
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            if let Some(selection) = pointer_selection.as_mut() {
+                                selection.drag_to(row, col);
+                            } else {
+                                pointer_selection = Some(PointerSelection::at(row, col));
+                            }
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            if let Some(selection) = pointer_selection.as_mut() {
+                                selection.drag_to(row, col);
+                                if !selection.moved {
+                                    pointer_selection = None;
+                                }
+                            }
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        _ => {}
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    tui_focus = TuiFocus::Composer;
                 }
                 continue;
             }
@@ -4732,7 +5015,11 @@ fn draw_loop(
                     continue;
                 }
                 let control_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT);
+                let control_shift_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT);
                 let control_q = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
                     && key.modifiers.contains(KeyModifiers::CONTROL);
                 if welcome.consent_directory.is_some() {
@@ -4861,17 +5148,35 @@ fn draw_loop(
                     }
                     continue;
                 }
-                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && tui_focus == TuiFocus::Transcript
+                if (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || control_shift_c
                 {
-                    if let Some(index) = selected_activity {
-                        if let Some(entry) = timeline.activities.get(index) {
-                            copy_text_osc52(&entry.copy_text());
-                            timeline
-                                .push_status(format!("Copied {} block.", entry.kind.role_label()));
-                        }
+                    if let Some((text, status)) = copy_chat_content(
+                        pointer_selection,
+                        &transcript_view,
+                        selected_activity,
+                        &timeline.activities,
+                    ) {
+                        copy_text_osc52(&text);
+                        timeline.push_status(status.to_string());
                     }
+                    continue;
+                }
+                if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !transcript_view.plain_rows.is_empty()
+                {
+                    let last = transcript_view.plain_rows.len().saturating_sub(1);
+                    pointer_selection = Some(PointerSelection {
+                        anchor_row: 0,
+                        anchor_col: 0,
+                        focus_row: last,
+                        focus_col: unicode_display_width(&transcript_view.plain_rows[last]),
+                        moved: true,
+                    });
+                    tui_focus = TuiFocus::Transcript;
+                    timeline.push_status("Chat selected.".to_string());
                     continue;
                 }
                 if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
@@ -5707,6 +6012,8 @@ mod tests {
                         None,
                         &StartupWelcome::fixture(),
                         None,
+                        None,
+                        None,
                     )
                 })
                 .expect("render");
@@ -5806,6 +6113,8 @@ mod tests {
                     None,
                     None,
                     &welcome,
+                    None,
+                    None,
                     None,
                 )
             })
@@ -5987,21 +6296,28 @@ mod tests {
                     None,
                     &welcome,
                     None,
+                    None,
+                    None,
                 )
             })
             .expect("render channels");
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
         assert!(joined.contains("inspect wrap"), "{joined}");
-        assert!(joined.contains("thought"), "{joined}");
         assert!(joined.contains("planning"), "{joined}");
         assert!(joined.contains("●"), "{joined}");
-        assert!(joined.contains("tool"), "{joined}");
         assert!(joined.contains("read_file"), "{joined}");
         assert!(joined.contains("Here is the answer"), "{joined}");
-        let you = row_index_containing(&rows, "you").expect("you");
-        let thought = row_index_containing(&rows, "thought").expect("thought");
-        let tool = row_index_containing(&rows, "tool").expect("tool");
+        assert!(!joined.contains("● you"), "no you role label: {joined}");
+        assert!(!joined.contains("● nib"), "no nib role label: {joined}");
+        assert!(!joined.contains("thought"), "{joined}");
+        assert!(
+            !rows.iter().any(|row| row.contains("● tool")),
+            "tool rows use the tool name, not a tool role label: {rows:?}"
+        );
+        let you = row_index_containing(&rows, "inspect wrap").expect("user");
+        let thought = row_index_containing(&rows, "planning").expect("planning");
+        let tool = row_index_containing(&rows, "read_file").expect("tool");
         let speech = rows
             .iter()
             .position(|row| row.contains("Here is the answer"))
@@ -6016,7 +6332,7 @@ mod tests {
         );
         assert!(
             rows[thought].contains('●'),
-            "system thought is marked with a colored dot: {}",
+            "planning is marked with a colored dot: {}",
             rows[thought]
         );
         assert!(
@@ -6025,18 +6341,13 @@ mod tests {
             rows[tool]
         );
         assert!(
-            rows.iter()
-                .any(|row| row.contains("●") && row.contains("nib")),
-            "system speech is marked with a colored dot: {rows:?}"
-        );
-        assert!(
-            rows[speech].contains("  Here is the answer"),
-            "speech body is indented, not a log label: {}",
+            rows[speech].contains('●'),
+            "assistant speech starts with a colored dot: {}",
             rows[speech]
         );
         assert!(
-            !rows[speech].contains('●'),
-            "user-facing speech body is not a header row: {}",
+            !rows[speech].contains("nib"),
+            "assistant speech has no nib label: {}",
             rows[speech]
         );
         let result = rows
@@ -6112,12 +6423,13 @@ mod tests {
                     None,
                     &welcome,
                     None,
+                    None,
+                    None,
                 )
             })
             .expect("render markdown speech");
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
-        assert!(joined.contains("nib"), "{joined}");
         assert!(joined.contains("# Fix"), "{joined}");
         assert!(joined.contains("task check"), "{joined}");
         assert!(joined.contains("fn main()"), "{joined}");
@@ -6136,9 +6448,8 @@ mod tests {
             .next()
             .expect("header");
         assert_eq!(line.spans[0].content, "● ");
-        assert_eq!(line.spans[1].content, "nib");
         assert_eq!(line.spans[0].style.fg, None);
-        assert_eq!(line.spans[1].style.fg, None);
+        assert!(line.spans.get(1).is_none_or(|span| span.content != "nib"));
         let tool = dotted_header_lines(
             ActivityKind::Tool,
             "read_file ok · src/lib.rs",
@@ -6150,7 +6461,7 @@ mod tests {
         .next()
         .expect("tool header");
         assert_eq!(tool.spans[0].content, "● ");
-        assert_eq!(tool.spans[1].content, "tool");
+        assert_eq!(tool.spans[1].content, "read_file ok · src/lib.rs");
         let result = dotted_result_lines("line one", 40, ChannelInk::ToolResult, true);
         assert_eq!(result[0].spans[0].content, "· ");
         assert_eq!(result[0].spans[1].content, "line one");
@@ -6874,6 +7185,8 @@ mod tests {
                     None,
                     &welcome,
                     Some(&band),
+                    None,
+                    None,
                 )
             })
             .expect("render under-composer sessions");
@@ -6945,7 +7258,10 @@ mod tests {
             StreamEvent::StateTransition {
                 state: "planning".to_string(),
             },
-            StreamEvent::PlanGenerated { step_count: 2 },
+            StreamEvent::PlanGenerated {
+                step_count: 2,
+                steps: vec!["inspect wrap".to_string(), "write tests".to_string()],
+            },
             StreamEvent::Content("Working".to_string()),
             StreamEvent::ToolCallChunk {
                 invocation_id: read_invocation,
@@ -8475,6 +8791,98 @@ mod tests {
     }
 
     #[test]
+    fn plan_approval_card_lists_numbered_steps() {
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "approve_plan".to_string(),
+            arguments: json!({
+                "plan_id": "plan-123",
+                "goal": "inspect wrap",
+                "steps": ["inspect files", "change parser", "run tests"],
+            }),
+            session_id: None,
+            project_root: None,
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Plan);
+        let prompt = approval_prompt(&call, &context);
+        assert_eq!(prompt.statement, "Approve this plan");
+        assert_eq!(
+            context.details,
+            vec![
+                "1. inspect files".to_string(),
+                "2. change parser".to_string(),
+                "3. run tests".to_string(),
+            ]
+        );
+        assert!(!prompt.subject.contains("plan_id="));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let composer = Composer::default();
+        let (approval_tx, _approval_rx) = oneshot::channel();
+        let approval = approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "approve_plan".to_string(),
+                arguments: json!({
+                    "plan_id": "plan-123",
+                    "goal": "inspect wrap",
+                    "steps": ["inspect files", "change parser", "run tests"],
+                }),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Plan,
+            approval_tx,
+        );
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace  ·  sess dock-session  ·  local  ·  -",
+                    "awaiting you  ·  mock/mock-model  ·  queue 0",
+                    "you  inspect wrap\n\nthought  generated 3 steps\n1. inspect files\n2. change parser\n3. run tests",
+                    &composer,
+                    Some(&approval),
+                    None,
+                )
+            })
+            .expect("render plan approval");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Approve this plan"), "{rendered}");
+        assert!(rendered.contains("1. inspect files"), "{rendered}");
+        assert!(rendered.contains("2. change parser"), "{rendered}");
+        assert!(rendered.contains("3. run tests"), "{rendered}");
+        assert!(rendered.contains("generated 3 steps"), "{rendered}");
+        assert!(rendered.contains("Approve once"), "{rendered}");
+        assert!(rendered.contains("Deny"), "{rendered}");
+        assert!(!rendered.contains("plan_id="), "{rendered}");
+        assert!(!rendered.contains("command="), "{rendered}");
+    }
+
+    #[test]
+    fn plan_approval_card_marks_omitted_steps() {
+        let rows = overlay_visual_rows(
+            "Approve this plan",
+            &(1..=8)
+                .map(|index| format!("{index}. step {index}"))
+                .collect::<Vec<_>>(),
+            40,
+        );
+        assert!(rows.iter().any(|row| row.contains("Approve this plan")));
+        assert!(rows.iter().any(|row| row.contains("1. step 1")));
+        assert!(rows.iter().any(|row| row.contains("more")), "{rows:?}");
+        assert_eq!(rows.len(), 6);
+        assert!(!rows.iter().any(|row| row.contains("8. step 8")));
+    }
+
+    #[test]
     fn ledger_keeps_transcript_visible_under_approval_and_question_docks() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -8808,6 +9216,77 @@ mod tests {
         assert_eq!(viewport.top_row(), 32);
         viewport.apply(TranscriptViewportAction::PageUp);
         assert_eq!(viewport.top_row(), 27);
+        assert_eq!(
+            transcript_action_for_key(KeyCode::Home, KeyModifiers::CONTROL),
+            Some(TranscriptViewportAction::JumpToStart)
+        );
+    }
+
+    #[test]
+    fn pointer_selection_copies_chat_rows_and_falls_back_to_the_last_reply() {
+        let rows = vec![
+            "● inspect wrap".to_string(),
+            "● read_file running · src/lib.rs".to_string(),
+            "● Here is the answer".to_string(),
+        ];
+        let mut selection = PointerSelection::at(0, 2);
+        selection.drag_to(0, 14);
+        assert_eq!(extract_pointer_text(&rows, selection), "inspect wrap");
+        selection = PointerSelection::at(0, 0);
+        selection.drag_to(2, 20);
+        let copied = extract_pointer_text(&rows, selection);
+        assert!(copied.contains("inspect wrap"), "{copied}");
+        assert!(copied.contains("Here is the answer"), "{copied}");
+
+        let view = TranscriptView {
+            plain_rows: rows,
+            ..TranscriptView::default()
+        };
+        let activities = vec![
+            ActivityEntry::new(ActivityKind::User, "", "inspect wrap"),
+            ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer"),
+        ];
+        let (text, status) =
+            copy_chat_content(None, &view, None, &activities).expect("copy fallback");
+        assert_eq!(text, "Here is the answer");
+        assert_eq!(status, "Copied last reply.");
+        let (block, block_status) =
+            copy_chat_content(None, &view, Some(0), &activities).expect("copy block");
+        assert_eq!(block, "inspect wrap");
+        assert_eq!(block_status, "Copied.");
+    }
+
+    #[test]
+    fn transcript_hit_maps_mouse_cells_to_plain_rows() {
+        let view = TranscriptView {
+            area: Rect::new(0, 1, 40, 10),
+            top_row: 0,
+            plain_rows: vec!["● inspect wrap".to_string(), "● reply".to_string()],
+            owners: vec![0, 1],
+            ..TranscriptView::default()
+        };
+        let hit = transcript_hit(
+            &view,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(hit, Some((0, 2)));
+        assert_eq!(
+            transcript_hit(
+                &view,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 2,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
@@ -9009,6 +9488,8 @@ mod tests {
                     None,
                     &welcome,
                     Some(&band),
+                    None,
+                    None,
                 );
             })
             .expect("render history list");

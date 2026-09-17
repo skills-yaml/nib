@@ -11,7 +11,7 @@
 ## Summary
 
 Make live tool work and approval decisions unmistakable in the TUI. Tool blocks get a
-filled channel marker, argument summary, and status coloring. Approval, questions,
+Grok-style filled marker, argument summary, and status coloring. Approval, questions,
 and workspace permission use the same under-composer list as `/` options: the composer
 names the action and the choices sit under the input without covering the transcript
 or changing approval policy. Slash and path completion reserve rows under the composer
@@ -28,10 +28,15 @@ says `awaiting you`.
 
 ## Product Decisions
 
-- Transcript channels use a filled `●` with a soft muted color plus a text label so
-  they stay readable without color: dusty teal for user input, sage for system
-  speech, stone for thought, sand for tool calls. Tool results use a muted slate
-  `·` instead of the call marker.
+- Transcript channels use a filled `●` and Grok-style structure, not role labels.
+  User and assistant speech are markdown with a muted colored dot on the first
+  line (dusty teal vs sage). Thought is stone italic. Tool calls show the tool
+  name and hint, not the word `tool`. Tool results use a muted slate `·`.
+  Role words `you`, `nib`, `thought`, `tool`, and `system` are not printed.
+- Chat speech follows Codex communication style: concise, direct, and friendly.
+  Before tool calls the model writes a short preamble that says what it is about
+  to do and why. Tool blocks still show the call itself; speech does not dump
+  arguments. Final answers lead with the outcome.
 - Requested/running titles include a bounded argument hint (path, command, pattern).
 - Completed titles keep that hint and a result summary (`N lines`, `N entries`,
   `exit N`). Failed tools stay red even when folded.
@@ -41,7 +46,10 @@ says `awaiting you`.
   `/` options: no covering overlay, no caret, selected-row emphasis, two-column
   signature plus description. The composer shows the prompt (statement, question, or
   directory). Choices sit under the input. It does not dump `command=` metadata,
-  network essays, or classifier reasons.
+  network essays, or classifier reasons. Plan approval lists numbered steps in the
+  composer; the live transcript shows those same steps when the plan is generated.
+  After approval, the persisted ledger stays one-line plan progress; `/plan` still
+  shows every step.
 - `Y`, `Enter` on Approve, and `1` approve once. `N`, `Esc`, `2`, and `Enter` on Deny
   deny. Up/Down move the selected choice. Policy is unchanged: one-shot grant or
   deny; no always-allow in this slice.
@@ -65,7 +73,8 @@ says `awaiting you`.
   time, a token estimate, and status.
 - The conversation stays scrollable while an approval list is open. Wheel, PageUp,
   PageDown, and Shift/Ctrl+Up/Down move the transcript; Y/N still answer. Unmodified
-  Up/Down select the under-composer choice.
+  Up/Down select the under-composer choice. Click-drag selects chat text; Ctrl+Y
+  copies the selection, the selected block, or the last reply.
 - The first chrome row shows the working directory and git branch on the left
   (branch colored when color is available) and the current model plus context
   usage on the right. The last row shows the command approval mode and the
@@ -75,10 +84,10 @@ says `awaiting you`.
 - User and nib speech blocks render markdown: headings, emphasis, lists, links,
   inline code, and fenced code with lightweight language coloring. Tool and
   thought blocks stay as structured transcript channels, not markdown.
-- The transcript has visually distinct channels marked with muted colored dots:
-  user input (`● you`), system speech (`● nib`), internal thought (`● thought`),
-  tool calls (`● tool`), and tool results (`·`). Channels are separated by a
-  blank row.
+- The transcript has visually distinct channels marked with muted colored dots
+  and Grok-style structure, not role labels. User and assistant speech are
+  markdown with a `●` on the first line. Tools show the tool name. Results use
+  `·`. Channels are separated by a blank row.
 - An empty session starts with a left-aligned welcome: `Nib <version>`, the
   working directory, an update notice with `nib update` when a channel update is
   available, `/new` for a new session and worktree, `/session` to switch, and
@@ -92,7 +101,7 @@ says `awaiting you`.
 
 ## Scope
 
-- Tool title composition with argument hints and channel/accent rendering.
+- Tool title composition with argument hints and filled-marker/accent rendering.
 - Distinct thought / tool / speech transcript channels.
 - Approval choices under the composer, footer override, Enter/1/2 aliases.
 - Question choices under the composer, Enter/1-9/Esc, WAITING QUESTION footer.
@@ -117,8 +126,8 @@ says `awaiting you`.
 
 ## Acceptance Criteria
 
-- [x] Live tool headers render as `● tool  <name> <phase>` with an argument hint when
-      the stream provided path/command/pattern.
+- [x] Live tool headers render as `● <name> <phase>` with an argument hint when
+      the stream provided path/command/pattern. No `tool` role label.
 - [x] Collapsed completed `list_directory` still shows an entry count, not JSON.
 - [x] Expanded tool bodies use a muted `·` result marker and remain bounded.
 - [x] Failed tools are visually distinct without color (`failed` in the title) and red
@@ -127,6 +136,11 @@ says `awaiting you`.
       (`Run this command` / `Read this file` / …) and shows the command or path;
       `Y Approve once` and `N Deny` sit under the input even on a 40-column
       terminal. It does not render `command=` dumps.
+- [x] Plan approval lists numbered steps in the composer and in the live
+      `PlanGenerated` transcript activity. It does not show only the goal or
+      `plan_id=`. Extra steps that cannot fit the six-row composer end with
+      `… N more`. After approval, persisted ledger projection stays one-line
+      progress; `/plan` still shows every step.
 - [x] Transcript text above the composer remains visible at ordinary terminal sizes.
 - [x] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
       Deny deny. Up/Down change the selected choice.
@@ -143,14 +157,21 @@ says `awaiting you`.
       while a run is active or the TUI is waiting.
 - [x] Wheel, PageUp/PageDown, and Shift/Ctrl+Up/Down scroll the transcript even while
       an approval list is open; unmodified Up/Down select approval choices.
+- [x] Click and drag selects chat text. `Ctrl+Y` / `Ctrl+Shift+C` copies the
+      selection, or the selected block, or the last assistant reply. `Ctrl+A`
+      selects the whole chat. Copy uses OSC 52.
 - [x] The first row shows folder and branch on the left and model plus context
       usage on the right. The last row shows approval mode and agent mode.
       `WAITING APPROVAL` replaces the agent-mode token, not the folder/model fields.
 - [x] User and nib speech render markdown headings, lists, emphasis, inline code,
       and fenced code; tool/thought channels are unchanged.
-- [x] Internal thinking renders as `● thought` (stone/italic), tool calls as
-      `● tool`, tool results as `·` body lines, user input as `● you`, and
-      user-facing replies as `● nib` with indented body text.
+- [x] The runtime system prompt uses Codex-style communication: a short preamble
+      before tool calls that says what is happening and why, plus concise final
+      answers. Speech does not dump tool arguments.
+- [x] Chat has no `you` / `nib` / `thought` / `tool` / `system` role labels.
+      User and assistant speech are markdown with a `●` on the first line.
+      Tools show `● read_file …`; results use `·`. Thinking shows the state
+      (`planning`) without the word `thought`.
 - [x] A question uses the under-composer list: the composer shows the question,
       numbered options sit under the input, and Enter/1-9/Esc still answer. The
       footer reads `WAITING QUESTION`.
@@ -169,13 +190,12 @@ says `awaiting you`.
 
 - `src/interactive.rs` — tool argument hints, title composition, display_text,
   compact `TuiChrome`.
-- `src/llm/types.rs`, `src/agent/loop.rs`, `src/tools/core.rs`, and
-  `src/tools/executor.rs` — exact invocation identity from provider projection through
-  terminal output and completion.
 - `src/tui/mod.rs` — tool row styling, under-composer approval/question/workspace
   lists, header/footer chrome, keys, below-composer completion layout, waiting
   meter, transcript wheel/key scroll, startup welcome, idle Ctrl+C quit.
 - `src/tui/markdown.rs` — speech markdown and fenced-code rendering.
+- `src/context/budget.rs` — Codex-style communication instructions in the runtime
+  system prompt.
 - `src/config/mod.rs` — `workspace.allowed` grant.
 - `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
   plain-mode TTY workspace consent.
@@ -188,6 +208,7 @@ says `awaiting you`.
 1. Compose tool titles with bounded argument hints across requested/running/terminal.
 2. Render filled-marker + accent tool blocks with status coloring.
 3. Replace the approval dock dump with under-composer Y/N choices and status/footer.
+   Plan approval lists numbered steps in the composer and live transcript.
 4. Add Enter/1/2 aliases; cover with TestBackend and key-dispatch tests.
 5. Reserve completion rows under the composer and stop overlaying the transcript.
 6. Add the waiting meter row for job, step, time, tokens, and status.
@@ -200,12 +221,17 @@ says `awaiting you`.
 
 ## Validation Gates
 
-- Unit tests for argument hints and tool-channel display text.
+- Unit tests for argument hints and filled-marker display text.
 - Ratatui tests for under-composer approval choices, transcript visibility, and
   WAITING APPROVAL footer.
 - Tests for compact header/footer chrome and markdown speech (headings, lists, code).
 - Key tests for Enter/1 grant and 2 deny.
 - `task docs:check`, `task check`, `task test:interactive`.
+
+The merged development implementation and reconciliation passed these focused gates,
+then the complete `task verify` gate as part of the T041 integration merge. Tests cover
+plan-step approval, bounded omissions, text selection/copy, invocation correlation,
+redacted approval subjects, narrow terminals, and no-color presentation.
 
 ## Risks and Mitigations
 
@@ -216,34 +242,5 @@ says `awaiting you`.
 
 ## Rollout Notes
 
-T038 remains the base block-transcript and key-contract owner. T039 owns the final
-channel styling, under-composer decisions, compact chrome, markdown speech, startup
-workspace consent, and waiting-meter presentation. T038 owns exact live tool-call
-correlation; T039 relies on that identity when applying its final channel presentation.
-No approval authority, sandbox boundary, provider request contract, or session
-persistence schema changed. T023, T041, and FT-020 stay out of scope.
-
-## Final Reconciliation (2026-09-16)
-
-The delivered TUI uses the filled `●` marker for tool headers and the muted `·` marker
-for expanded results; the line-oriented shared projection retains its compact `◆ tool`
-marker. Both are textual signals that remain meaningful without color. Completion,
-approval, question, session, model, history, and workspace choices share one reserved
-band under the composer. Approval and workspace reducers keep their existing one-shot
-authority, while modified scroll keys and the wheel continue to control the transcript.
-
-Workspace consent is evaluated before an initial `--run` worker is spawned. Allow
-persists `workspace.allowed`, releases the pending goal once, and later starts skip the
-prompt; decline exits without starting it. A deterministic reducer/persistence test
-covers selection, decline, allow, and reloading the grant. Tool lifecycle events now
-carry `ToolInvocationId` through provider projection, executor terminal output, and UI
-reduction, so same-name calls cannot overwrite one another.
-
-## Completion Evidence (2026-09-16)
-
-`task check` passed formatting, installer syntax, and warning-denying Clippy. The
-focused `task test:interactive` gate passed 16 steering, 58 shared-interaction, 95 TUI,
-6 console, 26 plain-chat, 6 CLI, and one smoke-contract test, including compact chrome,
-markdown, narrow approval, `NO_COLOR`, scroll, key, consent, OSC 52, and same-name tool
-regressions. `task docs:check`, the complete `task verify` gate, and `git diff --check`
-passed on the reconciled closure branch before handoff.
+Presentation and TUI key aliases only. T038 remains the interaction-contract owner.
+T023 and FT-020 stay out of scope.

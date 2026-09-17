@@ -68,6 +68,7 @@ pub struct ApprovalContext {
     pub worktree: String,
     pub reason: String,
     pub choices: String,
+    pub details: Vec<String>,
 }
 
 impl ApprovalContext {
@@ -83,11 +84,12 @@ impl ApprovalContext {
             worktree: "not available to compatibility handler".to_string(),
             reason: "interactive approval requested".to_string(),
             choices: "approve once or deny".to_string(),
+            details: approval_plan_step_details(call, &[]),
         }
     }
 
     pub fn lines(&self) -> Vec<String> {
-        let lines = vec![
+        let mut lines = vec![
             format!("Action: {}", self.action),
             format!("Permission / risk: {}", self.permission_and_risk),
             format!("Target scope: {}", self.target_scope),
@@ -99,6 +101,11 @@ impl ApprovalContext {
         .map(|line| bounded_approval_field_with_limit(&line, &[], MAX_APPROVAL_LINE_BYTES))
         .collect::<Vec<_>>();
         debug_assert_eq!(lines.len(), MAX_APPROVAL_LINES);
+        lines.extend(
+            self.details.iter().map(|detail| {
+                bounded_approval_field_with_limit(detail, &[], MAX_APPROVAL_LINE_BYTES)
+            }),
+        );
         lines
     }
 
@@ -1923,6 +1930,7 @@ impl ToolExecutor {
             worktree: bounded_approval_field(worktree, &secrets),
             reason: bounded_approval_field(reason, &secrets),
             choices: "approve once or deny".to_string(),
+            details: approval_plan_step_details(call, &secrets),
         }
     }
 
@@ -2472,6 +2480,28 @@ fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, 
         }
     };
     display
+}
+
+fn approval_plan_step_details(call: &ToolCall, secrets: &[String]) -> Vec<String> {
+    if call.tool_name != "approve_plan" {
+        return Vec::new();
+    }
+    call.arguments
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            let text = step.as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let bounded =
+                bounded_approval_field_with_limit(text, secrets, MAX_APPROVAL_FIELD_BYTES);
+            (!bounded.is_empty()).then(|| format!("{}. {bounded}", index + 1))
+        })
+        .collect()
 }
 
 fn normalized_approval_action(call: &ToolCall, secrets: &[String]) -> String {
@@ -3464,6 +3494,18 @@ mod tests {
         assert!(context.action.contains("approve_plan plan_id=plan-123"));
         assert!(context.action.contains("steps=3"));
         assert!(context.action.contains("goal=inspect [REDACTED]"));
+        assert_eq!(
+            context.details,
+            vec![
+                "1. inspect".to_string(),
+                "2. change".to_string(),
+                "3. verify".to_string(),
+            ]
+        );
+        let rendered = context.render();
+        assert!(rendered.contains("1. inspect"));
+        assert!(rendered.contains("2. change"));
+        assert!(rendered.contains("3. verify"));
         assert!(!context.action.contains("private-plan-secret"));
         assert!(!context.action.contains("PLAN_GOAL_SENTINEL"));
         assert!(!context.action.chars().any(char::is_control));
