@@ -243,7 +243,8 @@ impl InteractionBand<'_> {
             }
             Self::History(search) => search.search.matches.len().max(1).saturating_add(1),
             Self::Approval(_) | Self::Workspace { .. } => 2,
-            Self::Question(question) => question.request.options.len().max(1),
+            Self::Question(question) if question.request.options.is_empty() => 1,
+            Self::Question(question) => question.request.options.len().saturating_add(1),
         }
     }
 
@@ -1427,10 +1428,21 @@ fn submit_question_answer(question: &PendingQuestion, answer: &str) -> QuestionA
     }
 }
 
+fn question_choice_count(question: &PendingQuestion) -> usize {
+    if question.request.options.is_empty() {
+        0
+    } else {
+        question.request.options.len().saturating_add(1)
+    }
+}
+
 fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> QuestionAction {
     match code {
         KeyCode::Char(digit) if digit.is_ascii_digit() && !question.request.options.is_empty() => {
             submit_question_answer(question, &digit.to_string())
+        }
+        KeyCode::Char('y' | 'Y') if !question.request.options.is_empty() => {
+            submit_question_answer(question, "1")
         }
         KeyCode::Char(character)
             if question.request.options.is_empty()
@@ -1452,13 +1464,22 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
             QuestionAction::Pending
         }
         KeyCode::Down | KeyCode::Tab => {
-            if !question.request.options.is_empty() {
-                question.selected_option = (question.selected_option + 1)
-                    .min(question.request.options.len().saturating_sub(1));
+            let count = question_choice_count(question);
+            if count > 0 {
+                question.selected_option =
+                    (question.selected_option + 1).min(count.saturating_sub(1));
             }
             QuestionAction::Pending
         }
-        KeyCode::Enter => submit_question_answer(question, &question.response),
+        KeyCode::Enter => {
+            if !question.request.options.is_empty()
+                && question.selected_option >= question.request.options.len()
+            {
+                QuestionAction::Cancel
+            } else {
+                submit_question_answer(question, &question.response)
+            }
+        }
         KeyCode::Esc => QuestionAction::Cancel,
         _ => QuestionAction::Pending,
     }
@@ -2070,6 +2091,62 @@ fn band_hint_line(text: &str, width: u16, no_color: bool) -> Line<'static> {
     ))
 }
 
+fn numbered_choice_line(
+    index: usize,
+    text: &str,
+    shortcut: &str,
+    selected: bool,
+    width: u16,
+    no_color: bool,
+) -> Line<'static> {
+    let marker = if selected { "› " } else { "  " };
+    let body = format!("{}. {text} ({shortcut})", index + 1);
+    let line = truncate_completion_text(&format!("{marker}{body}"), usize::from(width.max(1)));
+    let style = if selected {
+        selected_option_style(no_color)
+    } else if no_color {
+        Style::default()
+    } else {
+        speech_body_style(false)
+    };
+    Line::from(Span::styled(line, style))
+}
+
+fn render_numbered_choice_band(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    choices: &[(String, String)],
+    selected: usize,
+    hint: &str,
+) {
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let hint_rows = u16::from(inner.height > 1);
+    let capacity = usize::from(inner.height.saturating_sub(hint_rows)).max(1);
+    let (start, end) = visible_option_range(selected, choices.len(), capacity);
+    let mut lines = choices[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, (text, shortcut))| {
+            numbered_choice_line(
+                start + offset,
+                text,
+                shortcut,
+                start + offset == selected,
+                inner.width,
+                no_color,
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() || hint_rows > 0 {
+        lines.push(band_hint_line(hint, inner.width, no_color));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_choice_band(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -2105,10 +2182,13 @@ fn render_choice_band(
 }
 
 fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApprovalRequest) {
-    render_choice_band(
+    render_numbered_choice_band(
         frame,
         area,
-        &[("Y", "Approve once"), ("N", "Deny")],
+        &[
+            ("Approve once".to_string(), "y".to_string()),
+            ("Deny".to_string(), "esc".to_string()),
+        ],
         req.selected_option.min(1),
         "Up/Down select · Enter choose · Esc deny",
     );
@@ -2125,23 +2205,29 @@ fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, question: &P
         );
         return;
     }
-    let numbered = question
+    let mut choices = question
         .request
         .options
         .iter()
         .enumerate()
-        .map(|(index, option)| (format!("{}", index + 1), option.as_str()))
+        .map(|(index, option)| {
+            let shortcut = if index == 0 {
+                "y".to_string()
+            } else {
+                (index + 1).to_string()
+            };
+            (option.clone(), shortcut)
+        })
         .collect::<Vec<_>>();
-    let options = numbered
-        .iter()
-        .map(|(number, option)| (number.as_str(), *option))
-        .collect::<Vec<_>>();
-    render_choice_band(
+    choices.push(("Skip".to_string(), "esc".to_string()));
+    render_numbered_choice_band(
         frame,
         area,
-        &options,
-        question.selected_option,
-        "Up/Down select · Enter / 1-9 choose · Esc skip",
+        &choices,
+        question
+            .selected_option
+            .min(choices.len().saturating_sub(1)),
+        "Up/Down select · Enter / 1-9 / y choose · Esc skip",
     );
 }
 
@@ -2151,10 +2237,13 @@ fn render_workspace_band(
     _directory: &str,
     selected: usize,
 ) {
-    render_choice_band(
+    render_numbered_choice_band(
         frame,
         area,
-        &[("Y", "Allow"), ("N", "Decline and quit")],
+        &[
+            ("Allow".to_string(), "y".to_string()),
+            ("Decline and quit".to_string(), "esc".to_string()),
+        ],
         selected.min(1),
         "Up/Down select · Enter choose · Esc decline",
     );
@@ -4204,6 +4293,28 @@ fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'
     )
 }
 
+fn plan_todo_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+    let mut lines = dotted_header_lines(entry.kind, &entry.title, "", width, no_color);
+    let indent = "  ";
+    let inner = width.saturating_sub(2).max(1);
+    for line in entry.body.lines() {
+        let style = if line.starts_with('◐') {
+            ink_style(ChannelInk::ToolCall, no_color)
+        } else if line.starts_with('✓') {
+            muted_style(no_color)
+        } else {
+            thought_body_style(no_color)
+        };
+        for wrapped in wrapped_display_rows(line, inner) {
+            lines.push(Line::from(vec![
+                Span::raw(indent.to_string()),
+                Span::styled(wrapped, style),
+            ]));
+        }
+    }
+    lines
+}
+
 fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
     let mut lines = dotted_header_lines(
         entry.kind,
@@ -4263,7 +4374,8 @@ fn log_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'sta
 fn activity_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
     match entry.kind {
         ActivityKind::User | ActivityKind::Assistant => speech_lines(entry, width, no_color),
-        ActivityKind::Thinking | ActivityKind::Plan => thought_lines(entry, width, no_color),
+        ActivityKind::Thinking => thought_lines(entry, width, no_color),
+        ActivityKind::Plan => plan_todo_lines(entry, width, no_color),
         ActivityKind::Tool => tool_lines(entry, width, no_color),
         _ => log_lines(entry, width, no_color),
     }
@@ -7863,6 +7975,29 @@ mod tests {
         assert!(handle_question_key(&mut pending, KeyCode::Char('1')));
         assert_eq!(reply_rx.try_recv().unwrap(), Ok("plan".to_string()));
         assert!(pending.is_none());
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Mode?".to_string(),
+            options: vec!["plan".to_string(), "execute".to_string()],
+            reply: reply_tx,
+        }));
+        assert!(handle_question_key(&mut pending, KeyCode::Char('y')));
+        assert_eq!(reply_rx.try_recv().unwrap(), Ok("plan".to_string()));
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Mode?".to_string(),
+            options: vec!["plan".to_string(), "execute".to_string()],
+            reply: reply_tx,
+        }));
+        handle_question_key(&mut pending, KeyCode::Down);
+        handle_question_key(&mut pending, KeyCode::Down);
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            Err("question cancelled by user".to_string())
+        );
     }
 
     #[test]
@@ -7912,12 +8047,12 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         save_config(directory.path(), &mock_config()).expect("save mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
-        let goal = "wait for plan approval";
+        let goal = "ask a question";
         let mut session = store.create_session();
         session.plan = Some(crate::session::Plan::new(
             goal,
             vec![crate::session::PlanStep {
-                description: "wait for approval".to_string(),
+                description: "ask a question".to_string(),
                 status: "Pending".to_string(),
                 outcome: None,
                 attempts: 0,
@@ -7945,12 +8080,11 @@ mod tests {
             )
             .expect("spawn TUI worker"),
         );
-        let request = approval_rx
+        let question = question_rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("worker reached plan approval");
-        assert_eq!(request.call.tool_name, "approve_plan");
-        let mut pending_approval = Some(request);
-        let mut pending_question = None;
+            .expect("worker reached a blocking question");
+        let mut pending_approval = None;
+        let mut pending_question = Some(PendingQuestion::new(question));
         let mut timeline = ActiveTimeline::load(&store, &session.id).expect("active timeline");
         timeline.active_run_id = worker.as_ref().map(|worker| worker.run_id.clone());
 
@@ -8577,7 +8711,7 @@ mod tests {
         save_config(directory.path(), &mock_config()).expect("save mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let session = store.create_session();
-        let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
+        let (approval_tx, _approval_rx) = mpsc::channel::<TuiApprovalRequest>();
         let (question_tx, _question_rx) = mpsc::channel::<TuiQuestionRequest>();
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
 
@@ -8596,12 +8730,9 @@ mod tests {
                 stream_tx.clone(),
             )
             .expect("spawn TUI worker");
-            let request = approval_rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .expect("worker reached plan approval");
-            assert_eq!(request.call.tool_name, "approve_plan");
-            request.reply.send(ApprovalDecision::denied()).unwrap();
-            while !worker.is_finished() {
+            let started = std::time::Instant::now();
+            while !worker.is_finished() && started.elapsed() < std::time::Duration::from_secs(10) {
+                while stream_rx.try_recv().is_ok() {}
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             worker.join().expect("join TUI worker");
@@ -8822,8 +8953,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Choose a mode"), "{rendered}");
-        assert!(rendered.contains("plan"), "{rendered}");
-        assert!(rendered.contains("execute"), "{rendered}");
+        assert!(rendered.contains("1. plan (y)"), "{rendered}");
+        assert!(rendered.contains("2. execute (2)"), "{rendered}");
+        assert!(rendered.contains("3. Skip (esc)"), "{rendered}");
+        assert!(rendered.contains("›"), "{rendered}");
         assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
         assert!(rendered.contains("Enter"), "{rendered}");
         assert!(rendered.contains("Esc"), "{rendered}");

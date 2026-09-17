@@ -350,9 +350,9 @@ nib run "Refactor the parser and run the canonical checks"
 
 Useful options include `--session <id>` to resume, `--provider <name>`, `--mode plan`,
 `--model <name>`, and `--max-steps <count>`. Omitting `--max-steps` uses
-`agent.max_turns`. Normal execution creates and persists a structured plan before
-mutating tools are allowed. Default manual mode prompts for the plan and calls not
-auto-classified as safe. `--yes` bypasses interactive plan and tool approval; use it
+`agent.max_turns`. Normal execution creates and persists a structured plan, prints it, and continues.
+Default manual mode prompts only when the request is unclear or a call is not
+auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
 When the agent calls `ask_question`, the CLI prints the available options and accepts
 either an option number or free-form text on the same input stream. Closed or empty
@@ -536,16 +536,19 @@ footer without adding transcript noise; their exact records remain in the persis
 session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
-The normal ledger shows one-line plan progress after a plan is approved, while
-`/plan` shows every step. Until you approve, the live transcript and the approval
-composer list the numbered steps so you can read the plan before granting it.
+The plan is a live todo list in the transcript (`Working on N to-dos`, with `◐`
+in progress, `○` pending, and `✓` done). It updates as each step finishes so
+you can follow the multi-step work. `/plan` still shows the full list. Execution
+continues without waiting for you to approve the plan. nib asks only when the
+request is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
-options. The composer states what nib wants to do and shows the command, path, or
-plan steps; `Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
+options. The composer states what nib wants to do and shows the command or path;
+`Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
 `N`/`Esc`/`2` deny. Up/Down change the selected choice. The conversation stays
 visible. While approval is open the footer reads `WAITING APPROVAL`. When nib asks a
-question, the composer shows the question and numbered choices sit under the input.
-Press `Enter` or `1`-`9` to answer, or `Esc` to skip. While a question is open the
+question, the composer shows the question and choices sit under the input in Codex
+form: `› 1. option (y)`, `2. option (2)`, `3. Skip (esc)`. Press `Enter` or `1`-`9`
+or `y` to answer, or `Esc` to skip. While a question is open the
 footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
@@ -584,7 +587,8 @@ The transcript uses Grok-style structure instead of role labels. User and
 assistant speech are markdown with a muted colored `●` on the first line (dusty
 teal vs sage). There is no `you`, `nib`, or `system` tag on each block. Tool
 calls show the tool name, phase, and path or command (`● read_file running ·
-src/lib.rs`). Expanded results use a slate `·`. Thinking is stone italic
+src/lib.rs`). `run_terminal` shows the command (and directory) in the title and
+the full command in the expanded body while it runs. Expanded results use a slate `·`. Thinking is stone italic
 (`planning`) without a `thought` label. Speech follows Codex communication
 style: a short preamble before tools that says what it is about to do and why,
 then a concise final answer. Speech renders markdown, including headings, lists,

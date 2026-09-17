@@ -342,7 +342,7 @@ const MAX_QUEUE_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DISPLAY_NAME_BYTES: usize = 128;
 const MAX_ACTIVITY_BODY_BYTES: usize = 8 * 1024;
 const MAX_PROJECTED_SESSION_EVENTS: usize = 200;
-const MAX_ACTIVITY_LABEL_BYTES: usize = 96;
+const MAX_ACTIVITY_LABEL_BYTES: usize = 192;
 const MAX_DIFF_BYTES: usize = 32 * 1024;
 const MAX_DIFF_REDACTION_INPUT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INTERACTIVE_BACKGROUND_TASKS: usize = 100;
@@ -1583,7 +1583,8 @@ impl ActivityEntry {
     pub fn display_text(&self) -> String {
         match self.kind {
             ActivityKind::Tool => self.tool_display_text(),
-            ActivityKind::Thinking | ActivityKind::Plan => self.thought_display_text(),
+            ActivityKind::Thinking => self.thought_display_text(),
+            ActivityKind::Plan => self.plan_display_text(),
             ActivityKind::Assistant | ActivityKind::User => self.speech_display_text(),
             _ => self.log_display_text(),
         }
@@ -1629,6 +1630,18 @@ impl ActivityEntry {
             return header;
         }
         format!("{header}\n{}", indent_activity_lines(&self.body, "┊ "))
+    }
+
+    fn plan_display_text(&self) -> String {
+        if self.body.is_empty() {
+            self.title.clone()
+        } else {
+            format!(
+                "{}\n{}",
+                self.title,
+                indent_activity_lines(&self.body, "  ")
+            )
+        }
     }
 
     fn log_display_text(&self) -> String {
@@ -2379,15 +2392,10 @@ pub fn project_session_activities(
         if is_transport_only_message(message) {
             continue;
         }
-        let activity = if let Some(step) = approved_plan_continuation(session, message) {
-            ActivityEntry::new(
-                ActivityKind::Plan,
-                "continuing approved step",
-                bounded_activity_body(step, sensitive_values),
-            )
-        } else {
-            project_session_message(message, sensitive_values)
-        };
+        if approved_plan_continuation(session, message).is_some() {
+            continue;
+        }
+        let activity = project_session_message(message, sensitive_values);
         persisted.push(PersistedActivity {
             timestamp: message.timestamp,
             source_rank: 0,
@@ -2459,11 +2467,7 @@ pub fn project_session_activities(
     });
     activities.extend(persisted.into_iter().map(|entry| entry.activity));
     if let Some(plan) = &session.plan {
-        activities.push(if plan.approved {
-            plan_summary_activity(plan, sensitive_values)
-        } else {
-            plan_activity(plan, sensitive_values)
-        });
+        activities.push(plan_activity(plan, sensitive_values));
     }
     if let Some(summary) = &session.summary {
         activities.push(
@@ -2589,15 +2593,15 @@ pub fn apply_stream_event(
             ..
         } if !name.is_empty() => {
             let hint = tool_argument_summary(&name, arguments.as_deref());
-            upsert_tool_activity(activities, &name, "requested", String::new(), &hint)
+            let detail = tool_argument_detail(&name, arguments.as_deref());
+            upsert_tool_activity(activities, &name, "requested", detail, &hint)
         }
         StreamEvent::ToolCallChunk { .. } => {}
         StreamEvent::PlanGenerated { step_count, steps } => {
-            let noun = if step_count == 1 { "step" } else { "steps" };
             let mut activity = ActivityEntry::new(
                 ActivityKind::Plan,
-                format!("generated {step_count} {noun}"),
-                numbered_plan_step_body(&steps, sensitive_values),
+                todo_plan_title(step_count, false),
+                todo_plan_body_from_descriptions(&steps, 0, sensitive_values),
             );
             sanitize_activity(&mut activity, sensitive_values);
             activities.push(activity);
@@ -2635,7 +2639,7 @@ pub fn apply_stream_event(
                 }
                 last.body.push_str(chunk.trim_end_matches(['\r', '\n']));
                 last.body = bounded_activity_body(&last.body, sensitive_values);
-                last.folded = true;
+                last.folded = false;
             }
         }
         StreamEvent::ToolCompleted {
@@ -2650,9 +2654,7 @@ pub fn apply_stream_event(
             if let Some(existing) = find_tool_activity_mut(activities, &tool_name, true) {
                 let hint = tool_arg_hint_from_title(&existing.title);
                 existing.title = compose_tool_title(&tool_name, &status, &hint, &summary);
-                if !body.is_empty() {
-                    existing.body = body;
-                }
+                existing.body = merge_tool_body(&existing.body, &body);
                 existing.folded = !existing.body.is_empty();
             } else {
                 activities.push(
@@ -2677,7 +2679,15 @@ pub fn apply_stream_event(
             )
             .folded(),
         ),
-        StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {}
+        StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {
+            if let Some(plan) = activities
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.kind == ActivityKind::Plan)
+            {
+                advance_todo_plan(plan, sensitive_values);
+            }
+        }
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
                 &InteractionState::default(),
@@ -2774,6 +2784,21 @@ fn compose_tool_title(name: &str, phase: &str, hint: &str, result: &str) -> Stri
     title
 }
 
+const TOOL_TITLE_HINT_CELLS: usize = 96;
+const RUN_TERMINAL_TITLE_HINT_CELLS: usize = 120;
+
+fn json_arg(value: &serde_json::Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| {
+            value.get(*key).and_then(|item| {
+                item.as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| (!item.is_null()).then(|| item.to_string()))
+            })
+        })
+        .unwrap_or_default()
+}
+
 pub fn tool_argument_summary(tool_name: &str, arguments: Option<&str>) -> String {
     let Some(raw) = arguments.filter(|value| !value.is_empty()) else {
         return String::new();
@@ -2781,41 +2806,108 @@ pub fn tool_argument_summary(tool_name: &str, arguments: Option<&str>) -> String
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return String::new();
     };
-    let pick = |keys: &[&str]| -> String {
-        keys.iter()
-            .find_map(|key| {
-                value.get(*key).and_then(|item| {
-                    item.as_str()
-                        .map(ToString::to_string)
-                        .or_else(|| (!item.is_null()).then(|| item.to_string()))
-                })
-            })
-            .unwrap_or_default()
-    };
-    let hint = match tool_name {
-        "read_file" | "list_directory" | "search_replace" => {
-            pick(&["path", "target_file", "file_path"])
+    let (hint, max_cells) = match tool_name {
+        "read_file" | "list_directory" | "search_replace" => (
+            json_arg(&value, &["path", "target_file", "file_path"]),
+            TOOL_TITLE_HINT_CELLS,
+        ),
+        "run_terminal" => {
+            let command = json_arg(&value, &["command"]);
+            let cwd = json_arg(&value, &["cwd", "working_directory", "workdir"]);
+            let hint = if cwd.is_empty() {
+                command
+            } else if command.is_empty() {
+                format!("in {cwd}")
+            } else {
+                format!("{command}  in {cwd}")
+            };
+            (hint, RUN_TERMINAL_TITLE_HINT_CELLS)
         }
-        "run_terminal" => pick(&["command"]),
         "grep" => {
-            let pattern = pick(&["pattern", "query"]);
-            let path = pick(&["path"]);
-            [pattern, path]
+            let pattern = json_arg(&value, &["pattern", "query"]);
+            let path = json_arg(&value, &["path"]);
+            let hint = [pattern, path]
                 .into_iter()
                 .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join(" ");
+            (hint, TOOL_TITLE_HINT_CELLS)
         }
-        "apply_patch" => "patch".to_string(),
-        _ => pick(&["path", "command", "query", "pattern", "url"]),
+        "apply_patch" => ("patch".to_string(), TOOL_TITLE_HINT_CELLS),
+        _ => (
+            json_arg(&value, &["path", "command", "query", "pattern", "url"]),
+            TOOL_TITLE_HINT_CELLS,
+        ),
     };
     if hint.is_empty() {
         return String::new();
     }
     truncate_display_cells(
         &bounded_status_value(&crate::tools::executor::redact_text(&hint)),
-        40,
+        max_cells,
     )
+}
+
+fn tool_argument_detail(tool_name: &str, arguments: Option<&str>) -> String {
+    let Some(raw) = arguments.filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return String::new();
+    };
+    if tool_name != "run_terminal" {
+        return String::new();
+    }
+    let command = crate::tools::executor::redact_text(&json_arg(&value, &["command"]));
+    let cwd = crate::tools::executor::redact_text(&json_arg(
+        &value,
+        &["cwd", "working_directory", "workdir"],
+    ));
+    let background = value
+        .get("background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut lines = Vec::new();
+    if !command.is_empty() {
+        lines.push(command);
+    }
+    if !cwd.is_empty() {
+        lines.push(format!("in {cwd}"));
+    }
+    if background {
+        lines.push("background".to_string());
+    }
+    lines.join("\n")
+}
+
+fn tool_body_prefix(body: &str) -> String {
+    let mut prefix = Vec::new();
+    for line in body.lines() {
+        if prefix.is_empty() || line.starts_with("in ") || line == "background" {
+            prefix.push(line);
+        } else {
+            break;
+        }
+    }
+    prefix.join("\n")
+}
+
+fn merge_tool_body(existing: &str, output: &str) -> String {
+    let prefix = tool_body_prefix(existing);
+    if prefix.is_empty() {
+        return output.to_string();
+    }
+    if output.is_empty() {
+        return prefix;
+    }
+    if output.starts_with(&prefix) || existing.contains(output) {
+        return if existing.len() >= output.len() {
+            existing.to_string()
+        } else {
+            output.to_string()
+        };
+    }
+    format!("{prefix}\n{output}")
 }
 
 fn upsert_tool_activity(
@@ -2833,9 +2925,9 @@ fn upsert_tool_activity(
         };
         existing.title = compose_tool_title(tool_name, phase, &hint, "");
         if !body.is_empty() {
-            existing.body = body;
-            existing.folded = true;
+            existing.body = merge_tool_body(&existing.body, &body);
         }
+        existing.folded = !matches!(phase, "requested" | "running") && !existing.body.is_empty();
         return;
     }
     activities.push(ActivityEntry::new(
@@ -2933,46 +3025,110 @@ pub fn summarize_tool_result(
     (status.to_string(), summary, detail)
 }
 
-fn numbered_plan_step_body(steps: &[String], sensitive_values: &[String]) -> String {
+const TODO_PENDING: char = '○';
+const TODO_ACTIVE: char = '◐';
+const TODO_DONE: char = '✓';
+
+fn todo_plan_title(count: usize, complete: bool) -> String {
+    let noun = if count == 1 { "to-do" } else { "to-dos" };
+    if complete {
+        format!("Completed {count} {noun}")
+    } else {
+        format!("Working on {count} {noun}")
+    }
+}
+
+fn todo_marker_for_step(status: &str, index: usize, current: usize, complete: bool) -> char {
+    if complete || status.eq_ignore_ascii_case("Completed") || index < current {
+        TODO_DONE
+    } else if status.eq_ignore_ascii_case("InProgress") || index == current {
+        TODO_ACTIVE
+    } else {
+        TODO_PENDING
+    }
+}
+
+fn todo_plan_body_from_descriptions(
+    steps: &[String],
+    current: usize,
+    sensitive_values: &[String],
+) -> String {
     let body = steps
         .iter()
         .map(|step| step.trim())
         .filter(|step| !step.is_empty())
         .enumerate()
-        .map(|(index, step)| format!("{}. {step}", index + 1))
+        .map(|(index, step)| {
+            let marker = todo_marker_for_step("Pending", index, current, false);
+            format!("{marker} {step}")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     bounded_activity_body(&body, sensitive_values)
 }
 
+fn parse_todo_line(line: &str) -> Option<(char, &str)> {
+    let mut chars = line.chars();
+    let mark = chars.next()?;
+    if chars.next() != Some(' ') || !matches!(mark, TODO_PENDING | TODO_ACTIVE | TODO_DONE) {
+        return None;
+    }
+    Some((mark, chars.as_str()))
+}
+
+fn advance_todo_plan(activity: &mut ActivityEntry, sensitive_values: &[String]) {
+    let mut items = activity
+        .body
+        .lines()
+        .filter_map(parse_todo_line)
+        .map(|(mark, text)| (mark, text.to_string()))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return;
+    }
+    let mut activate_next = false;
+    for item in &mut items {
+        if item.0 == TODO_ACTIVE {
+            item.0 = TODO_DONE;
+            activate_next = true;
+        } else if activate_next && item.0 == TODO_PENDING {
+            item.0 = TODO_ACTIVE;
+            break;
+        }
+    }
+    let complete = items.iter().all(|(mark, _)| *mark == TODO_DONE);
+    activity.title = todo_plan_title(items.len(), complete);
+    let body = items
+        .into_iter()
+        .map(|(mark, text)| format!("{mark} {text}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    activity.body = bounded_activity_body(&body, sensitive_values);
+    activity.folded = false;
+}
+
 fn plan_activity(plan: &crate::session::Plan, sensitive_values: &[String]) -> ActivityEntry {
     let current = plan.current_step_index.min(plan.steps.len());
-    let title = plan
-        .steps
-        .get(plan.current_step_index)
-        .map(|step| step.description.as_str())
-        .unwrap_or("complete");
+    let complete = plan.is_complete()
+        || plan
+            .steps
+            .iter()
+            .all(|step| step.status.eq_ignore_ascii_case("Completed"));
     let body = plan
         .steps
         .iter()
         .enumerate()
-        .map(|(index, step)| format!("{}. [{}] {}", index + 1, step.status, step.description))
+        .map(|(index, step)| {
+            let marker = todo_marker_for_step(&step.status, index, current, complete);
+            format!("{marker} {}", step.description.trim())
+        })
         .collect::<Vec<_>>()
         .join("\n");
     ActivityEntry::new(
         ActivityKind::Plan,
-        format!("{current}/{} {title}", plan.steps.len()),
+        todo_plan_title(plan.steps.len(), complete),
         bounded_activity_body(&body, sensitive_values),
     )
-}
-
-fn plan_summary_activity(
-    plan: &crate::session::Plan,
-    sensitive_values: &[String],
-) -> ActivityEntry {
-    let mut activity = plan_activity(plan, sensitive_values);
-    activity.body.clear();
-    activity
 }
 
 fn bounded_activity_body(content: &str, sensitive_values: &[String]) -> String {
@@ -6712,6 +6868,94 @@ mod tests {
     }
 
     #[test]
+    fn run_terminal_titles_and_bodies_keep_the_full_command() {
+        let mut activities = Vec::new();
+        let mut state = None;
+        let command = "git add workspace/agents/memory/changelog.md workspace/agents/memory/decisions.md && git status --short";
+        let arguments = format!(
+            r#"{{"command":"{command}","cwd":"/home/e/work/projects/nib","background":false}}"#
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCallChunk {
+                index: 0,
+                name: Some("run_terminal".to_string()),
+                arguments: Some(arguments),
+            },
+            &mut state,
+            &[],
+        );
+        assert!(
+            activities[0]
+                .title
+                .contains("git add workspace/agents/memory/changelog.md"),
+            "title should keep the command: {}",
+            activities[0].title
+        );
+        assert!(
+            activities[0].body.contains(command),
+            "{}",
+            activities[0].body
+        );
+        assert!(
+            activities[0].body.contains("in /home/e/work/projects/nib"),
+            "{}",
+            activities[0].body
+        );
+        assert!(
+            !activities[0].folded,
+            "running command stays expanded so the command is visible"
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::TerminalOutput {
+                tool_name: "run_terminal".to_string(),
+                stream: "stdout".to_string(),
+                chunk: "M changelog.md\n".to_string(),
+                background_task_id: None,
+            },
+            &mut state,
+            &[],
+        );
+        assert!(
+            activities[0].body.contains(command),
+            "{}",
+            activities[0].body
+        );
+        assert!(
+            activities[0].body.contains("M changelog.md"),
+            "{}",
+            activities[0].body
+        );
+        apply_stream_event(
+            &mut activities,
+            StreamEvent::ToolCompleted {
+                tool_name: "run_terminal".to_string(),
+                success: true,
+                output: Some(serde_json::json!({"exit_code": 0, "stdout": "M changelog.md\n"})),
+                error: None,
+            },
+            &mut state,
+            &[],
+        );
+        assert!(
+            activities[0].title.contains("exit 0"),
+            "{}",
+            activities[0].title
+        );
+        assert!(
+            activities[0].body.contains(command),
+            "{}",
+            activities[0].body
+        );
+        assert!(
+            activities[0].body.contains("M changelog.md"),
+            "{}",
+            activities[0].body
+        );
+    }
+
+    #[test]
     fn speech_thought_and_tool_blocks_use_distinct_presentation() {
         let speech = ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer");
         assert_eq!(speech.display_text(), "nib\n  Here is the answer");
@@ -6719,8 +6963,13 @@ mod tests {
         assert_eq!(user.display_text(), "you\n  inspect wrap");
         let thought = ActivityEntry::new(ActivityKind::Thinking, "planning", "next files");
         assert_eq!(thought.display_text(), "thought  planning\n┊ next files");
-        let plan = ActivityEntry::new(ActivityKind::Plan, "0/1 write tests", String::new());
-        assert!(plan.display_text().starts_with("thought  0/1 write tests"));
+        let plan = ActivityEntry::new(
+            ActivityKind::Plan,
+            "Working on 1 to-do",
+            "◐ write tests".to_string(),
+        );
+        assert!(plan.display_text().starts_with("Working on 1 to-do"));
+        assert!(plan.display_text().contains("◐ write tests"));
         let tool = ActivityEntry::new(
             ActivityKind::Tool,
             "read_file running · src/lib.rs",
@@ -6771,19 +7020,15 @@ mod tests {
             .any(|entry| entry.kind == ActivityKind::Plan));
         let plan = projected
             .iter()
-            .find(|entry| entry.kind == ActivityKind::Plan && entry.title.starts_with("0/1"))
-            .expect("unapproved plan");
-        assert!(plan.body.contains("1. [InProgress] write tests"));
-        assert!(projected.iter().any(|entry| {
-            entry.kind == ActivityKind::Plan
-                && entry.title == "continuing approved step"
-                && entry.body == "write tests"
-        }));
+            .find(|entry| entry.kind == ActivityKind::Plan && entry.title.contains("to-do"))
+            .expect("plan todo list");
+        assert!(plan.body.contains("◐ write tests"), "{}", plan.body);
         assert!(projected.iter().all(|entry| {
-            !(entry.kind == ActivityKind::User
-                && entry.body.starts_with("Continue with approved plan step:"))
+            entry.title != "continuing approved step"
+                && !(entry.kind == ActivityKind::User
+                    && entry.body.starts_with("Continue with approved plan step:"))
         }));
-        assert!(format_current_plan(Some(&session), &[]).contains("1. [InProgress] write tests"));
+        assert!(format_current_plan(Some(&session), &[]).contains("◐ write tests"));
         assert_eq!(ActivityKind::Assistant.role_label(), "nib");
 
         let mut live = Vec::new();
@@ -6811,8 +7056,8 @@ mod tests {
             &[],
         );
         assert_eq!(live[1].kind, ActivityKind::Plan);
-        assert_eq!(live[1].title, "generated 2 steps");
-        assert_eq!(live[1].body, "1. inspect wrap\n2. write tests");
+        assert_eq!(live[1].title, "Working on 2 to-dos");
+        assert_eq!(live[1].body, "◐ inspect wrap\n○ write tests");
         apply_stream_event(
             &mut live,
             StreamEvent::Content("hello".to_string()),
@@ -6835,6 +7080,7 @@ mod tests {
             &mut state,
             &[],
         );
+        assert_eq!(live[1].body, "✓ inspect wrap\n◐ write tests");
         apply_stream_event(
             &mut live,
             StreamEvent::Reconciled {
@@ -6866,7 +7112,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_plan_projection_stays_one_line() {
+    fn approved_plan_projection_keeps_the_todo_list() {
         let directory = tempdir().expect("dir");
         let mut session = SessionStore::at_dir(directory.path().join("s"))
             .try_create_session()
@@ -6887,9 +7133,9 @@ mod tests {
         let summary = projected
             .iter()
             .find(|entry| entry.kind == ActivityKind::Plan)
-            .expect("approved plan summary");
-        assert!(summary.title.contains("write tests"));
-        assert!(summary.body.is_empty());
+            .expect("plan todo list");
+        assert_eq!(summary.title, "Working on 1 to-do");
+        assert!(summary.body.contains("◐ write tests"), "{}", summary.body);
     }
 
     #[test]

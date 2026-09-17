@@ -16,9 +16,10 @@ use crate::session::{
     normalize_plan_goal, Session, SessionEvent, SessionMessage, SessionRunLease, SessionStore,
     ToolCallRecord,
 };
-use crate::tools::classifier::ToolRisk;
-use crate::tools::executor::{ApprovalHandler, StdinApprovalHandler};
-use crate::tools::models::{AfterToolHook, PermissionLevel, PolicyEffect, PolicyRule, ToolCall};
+use crate::tools::executor::ApprovalHandler;
+#[cfg(test)]
+use crate::tools::models::PermissionLevel;
+use crate::tools::models::{AfterToolHook, PolicyEffect, PolicyRule, ToolCall};
 use crate::tools::ToolExecutor;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -2140,63 +2141,9 @@ async fn run_agent_loop_inner(
                     )? {
                         continue;
                     }
-                    let arguments = json!({
-                        "plan_id": plan.id,
-                        "goal": plan.goal,
-                        "steps": plan.steps.iter().map(|step| &step.description).collect::<Vec<_>>(),
-                    });
-                    emit(
-                        &cfg.stream_tx,
-                        StreamEvent::ApprovalRequired {
-                            tool_name: "approve_plan".to_string(),
-                        },
-                    )
-                    .await;
-                    store
-                        .record_event(
-                            session_id,
-                            "approval_required",
-                            json!({
-                                "kind": "plan",
-                                "plan_id": plan.id.clone(),
-                                "step_count": plan.steps.len(),
-                            }),
-                        )
-                        .map_err(|error| error.to_string())?;
-
-                    let approved = if cfg.auto_approve {
-                        true
-                    } else {
-                        let handler: Arc<dyn ApprovalHandler> = cfg
-                            .approval_handler
-                            .clone()
-                            .unwrap_or_else(|| Arc::new(StdinApprovalHandler));
-                        let approval_call = ToolCall {
-                            invocation_id: crate::tools::ToolInvocationId::new(),
-                            tool_name: "approve_plan".to_string(),
-                            arguments: arguments.clone(),
-                            session_id: Some(session_id.to_string()),
-                            project_root: Some(project_root.clone()),
-                        };
-                        let context = executor.approval_context(
-                            &approval_call,
-                            PermissionLevel::Plan,
-                            ToolRisk::RequiresApproval,
-                            &project_root,
-                            &executor.execution_config,
-                            false,
-                            Some(session_id),
-                            "approve the persisted structured plan for later gated execution",
-                        );
-                        handler
-                            .handle_approval_with_context(
-                                &approval_call,
-                                PermissionLevel::Plan,
-                                &context,
-                            )
-                            .await
-                            .granted
-                    };
+                    // Print-and-continue: the plan is already in the transcript via
+                    // PlanGenerated. Ask the user only for unclear requests or action
+                    // approvals, not to rubber-stamp the plan.
                     let decision_applied = store
                         .update_session(session_id, |session| {
                             if session.plan.as_ref() != Some(&plan) {
@@ -2212,7 +2159,8 @@ async fn run_agent_loop_inner(
                                         "expected_goal": normalized_goal,
                                         "current_plan_id": current_plan_id,
                                         "current_goal": current_goal,
-                                        "approved": approved,
+                                        "approved": true,
+                                        "auto": true,
                                     }),
                                 );
                                 return Ok(false);
@@ -2222,11 +2170,7 @@ async fn run_agent_loop_inner(
                                     "plan disappeared while applying approval".to_string(),
                                 )
                             })?;
-                            if approved {
-                                current.approve();
-                            } else {
-                                current.reject("plan approval denied");
-                            }
+                            current.approve();
                             let plan_id = current.id.clone();
                             let plan_goal = current.goal.clone();
                             append_session_event(
@@ -2235,7 +2179,8 @@ async fn run_agent_loop_inner(
                                 json!({
                                     "plan_id": plan_id,
                                     "goal": plan_goal,
-                                    "approved": approved,
+                                    "approved": true,
+                                    "auto": true,
                                 }),
                             );
                             Ok(true)
@@ -2253,7 +2198,7 @@ async fn run_agent_loop_inner(
                             &cfg.stream_tx,
                         )
                         .await?
-                    } else if approved {
+                    } else {
                         if llm_turns < max_turns {
                             open_steering_admission(
                                 steering_enabled,
@@ -2268,18 +2213,6 @@ async fn run_agent_loop_inner(
                             session_id,
                             state,
                             AgentState::BuildContext,
-                            &mut trace,
-                            &mut transition_count,
-                            &cfg.stream_tx,
-                        )
-                        .await?
-                    } else {
-                        reconciliation_reason = Some("plan_approval_denied".to_string());
-                        transition_state(
-                            &store,
-                            session_id,
-                            state,
-                            AgentState::Reconciliation,
                             &mut trace,
                             &mut transition_count,
                             &cfg.stream_tx,
@@ -2924,6 +2857,17 @@ async fn run_agent_loop_inner(
                             )
                             .map_err(|error| error.to_string())?;
                     }
+                    if !request.arguments.is_null() {
+                        emit(
+                            &cfg.stream_tx,
+                            StreamEvent::ToolCallChunk {
+                                index: 0,
+                                name: Some(request.name.clone()),
+                                arguments: Some(request.arguments.to_string()),
+                            },
+                        )
+                        .await;
+                    }
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::ToolStarted {
@@ -3528,7 +3472,7 @@ async fn run_agent_loop_inner(
                         append_assistant_if_allowed(
                             &store,
                             session_id,
-                            "Structured plan generated and awaiting execution approval.",
+                            "Structured plan generated.",
                         )?;
                         "plan_ready".to_string()
                     }
@@ -5755,10 +5699,9 @@ mod tests {
     impl ApprovalHandler for ControlledApproval {
         async fn handle_approval(
             &self,
-            call: &ToolCall,
+            _call: &ToolCall,
             _level: PermissionLevel,
         ) -> ApprovalDecision {
-            assert_eq!(call.tool_name, "approve_plan");
             self.entered.notify_one();
             self.release.notified().await;
             if self.granted {
@@ -7460,7 +7403,7 @@ mod tests {
             .expect("replanned run completed")
             .expect("agent task joined")
             .expect("agent run succeeded");
-        assert_eq!(summary.outcome, "plan_approval_denied");
+        assert_ne!(summary.outcome, "plan_approval_denied");
         let persisted = store.load(&session.id).expect("replanned session");
         assert_eq!(
             persisted
@@ -7470,14 +7413,11 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(
-            persisted
-                .events
-                .iter()
-                .filter(|event| event.kind == "approval_required")
-                .count(),
-            1,
-            "the obsolete plan must never reach approval"
+        assert!(
+            !persisted.events.iter().any(|event| {
+                event.kind == "approval_required" && event.details["kind"] == "plan"
+            }),
+            "plans are printed and auto-approved; they must not wait for Y/N"
         );
         assert!(persisted
             .events
@@ -7487,10 +7427,6 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == "steering_intake"));
-        assert!(persisted
-            .tool_calls
-            .iter()
-            .all(|record| { !matches!(record.tool_name.as_deref(), Some("list_directory")) }));
     }
 
     #[tokio::test]
@@ -7556,27 +7492,21 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(summary.outcome, "plan_approval_denied");
-        assert_eq!(summary.tool_call_count, 0);
+        assert_ne!(summary.outcome, "plan_approval_denied");
         let persisted = store.load(&session.id).unwrap();
-        assert!(persisted
-            .tool_calls
-            .iter()
-            .all(|call| call.tool_name.as_deref() == Some("daemon_curator")));
-        let approval_event = persisted
+        assert!(persisted.plan.as_ref().is_some_and(|plan| plan.approved));
+        assert!(!persisted
             .events
             .iter()
-            .find(|event| event.kind == "approval_required")
-            .expect("approval event");
-        assert!(approval_event.details.get("arguments").is_none());
-        assert!(!approval_event
-            .details
-            .to_string()
-            .contains("RAW_APPROVAL_LIFECYCLE_SENTINEL"));
+            .any(|event| { event.kind == "approval_required" && event.details["kind"] == "plan" }));
         let stream = std::iter::from_fn(|| stream_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(stream
             .iter()
-            .any(|event| matches!(event, StreamEvent::ApprovalRequired { tool_name } if tool_name == "approve_plan")));
+            .any(|event| matches!(event, StreamEvent::PlanGenerated { .. })));
+        assert!(!stream.iter().any(|event| matches!(
+            event,
+            StreamEvent::ApprovalRequired { tool_name } if tool_name == "approve_plan"
+        )));
         assert!(!format!("{stream:?}").contains("RAW_APPROVAL_LIFECYCLE_SENTINEL"));
     }
 
@@ -7800,7 +7730,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.outcome, "completed");
-        assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(approval_calls.load(Ordering::SeqCst), 0);
         let loaded = store.load(&session.id).unwrap();
         assert!(!loaded
             .events
@@ -7852,7 +7782,7 @@ mod tests {
             run_agent_loop(
                 run_root,
                 &run_session_id,
-                "hold the session lease",
+                "recover from terminal failure",
                 AgentLoopConfig {
                     max_steps: 6,
                     approval_handler: Some(Arc::new(ControlledApproval {
@@ -7868,7 +7798,7 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
             .await
-            .expect("first run reached plan approval");
+            .expect("first run reached tool approval");
         let before_conflict = store.load(&session_id).expect("blocked session");
         let conflict = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -7902,7 +7832,7 @@ mod tests {
             .expect("first run completed after release")
             .expect("first run joined")
             .expect("first run reconciled");
-        assert_eq!(first_summary.outcome, "plan_approval_denied");
+        assert_eq!(first_summary.outcome, "tool_execution_failed");
 
         let lease = store
             .try_acquire_run_lease(&session_id)
@@ -7911,77 +7841,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_plan_approval_cannot_approve_a_replacement_plan() {
+    async fn generated_plans_are_printed_and_auto_approved() {
         let directory = tempdir().unwrap();
         save_config(directory.path(), &mock_config()).unwrap();
         let store = SessionStore::for_project(directory.path()).unwrap();
         let session = store.create_session();
-        let session_id = session.id.clone();
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let run_root = directory.path().to_path_buf();
-        let run_session_id = session_id.clone();
-        let run_entered = entered.clone();
-        let run_release = release.clone();
-        let run = tokio::spawn(async move {
-            run_agent_loop(
-                run_root,
-                &run_session_id,
-                "approve only the generated plan",
-                AgentLoopConfig {
-                    max_steps: 6,
-                    approval_handler: Some(Arc::new(ControlledApproval {
-                        entered: run_entered,
-                        release: run_release,
-                        granted: true,
-                    })),
-                    ..Default::default()
-                },
-            )
-            .await
-        });
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
-            .await
-            .expect("run reached plan approval");
-        let shown_plan_id = store
-            .load(&session_id)
-            .expect("approval session")
-            .plan
-            .expect("generated plan")
-            .id;
-        let replacement = pending_plan("replacement goal", "do not approve this plan");
-        let replacement_id = replacement.id.clone();
-        store
-            .update_session(&session_id, |session| {
-                session.plan = Some(replacement);
-                Ok(())
-            })
-            .expect("replace plan while approval is pending");
-        release.notify_one();
+        let summary = run_agent_loop(
+            directory.path().to_path_buf(),
+            &session.id,
+            "explore the project",
+            AgentLoopConfig {
+                max_steps: 4,
+                approval_handler: Some(Arc::new(DenyApproval)),
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
-        let summary = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("stale approval run completed")
-            .expect("stale approval run joined")
-            .expect("stale approval run reconciled");
-        assert_eq!(summary.outcome, "plan_binding_changed");
-        assert_eq!(summary.tool_call_count, 0);
-        let persisted = store.load(&session_id).expect("replacement plan session");
-        let current = persisted.plan.as_ref().expect("replacement plan remains");
-        assert_eq!(current.id, replacement_id);
-        assert_eq!(current.goal, "replacement goal");
-        assert!(!current.approved);
-        let stale = persisted
+        assert_ne!(summary.outcome, "plan_approval_denied");
+        let persisted = store.load(&session.id).expect("auto-approved session");
+        let plan = persisted.plan.expect("structured plan");
+        assert!(plan.approved);
+        let approved = persisted
             .events
             .iter()
-            .find(|event| event.kind == "stale_plan_approval_ignored")
-            .expect("stale approval audit");
-        assert_eq!(stale.details["expected_plan_id"], shown_plan_id);
-        assert_eq!(stale.details["current_plan_id"], replacement_id);
-        assert!(persisted.events.iter().all(|event| {
-            event.kind != "plan_approved" || event.details["plan_id"] != replacement_id
-        }));
+            .find(|event| event.kind == "plan_approved")
+            .expect("plan_approved");
+        assert_eq!(approved.details["auto"], true);
+        assert!(!persisted
+            .events
+            .iter()
+            .any(|event| { event.kind == "approval_required" && event.details["kind"] == "plan" }));
+        let stream = std::iter::from_fn(|| stream_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(stream
+            .iter()
+            .any(|event| matches!(event, StreamEvent::PlanGenerated { .. })));
+        assert!(!stream.iter().any(|event| matches!(
+            event,
+            StreamEvent::ApprovalRequired { tool_name } if tool_name == "approve_plan"
+        )));
     }
 
     #[tokio::test]
@@ -8002,7 +7904,7 @@ mod tests {
             run_agent_loop(
                 run_root,
                 &run_session_id,
-                "wait for plan approval",
+                "recover from terminal failure",
                 AgentLoopConfig {
                     max_steps: 6,
                     approval_handler: Some(Arc::new(BlockingApproval {

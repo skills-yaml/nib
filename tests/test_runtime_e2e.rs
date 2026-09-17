@@ -2135,10 +2135,7 @@ Do not inspect the repository without an explicit decision.
     assert_eq!(summary.outcome, "tool_execution_failed");
     assert_eq!(summary.tool_call_count, 1);
     assert!(!summary.bound_reached);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        ["approve_plan".to_string(), "list_directory".to_string()]
-    );
+    assert_eq!(*calls.lock().unwrap(), ["list_directory".to_string()]);
     assert!(!root.path().join(".nib/worktrees").exists());
 
     let persisted = store.load(&session.id).expect("denial audit");
