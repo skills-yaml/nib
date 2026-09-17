@@ -24,7 +24,7 @@ use crate::llm::types::StreamEvent;
 use crate::session::SessionStore;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
@@ -143,6 +143,62 @@ enum TuiFocus {
     #[default]
     Composer,
     Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointerSelection {
+    anchor_row: usize,
+    anchor_col: usize,
+    focus_row: usize,
+    focus_col: usize,
+    moved: bool,
+}
+
+impl PointerSelection {
+    fn at(row: usize, col: usize) -> Self {
+        Self {
+            anchor_row: row,
+            anchor_col: col,
+            focus_row: row,
+            focus_col: col,
+            moved: false,
+        }
+    }
+
+    fn drag_to(&mut self, row: usize, col: usize) {
+        if row != self.anchor_row || col != self.anchor_col {
+            self.moved = true;
+        }
+        self.focus_row = row;
+        self.focus_col = col;
+    }
+
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        let start = (self.anchor_row, self.anchor_col);
+        let end = (self.focus_row, self.focus_col);
+        if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        }
+    }
+
+    fn covers_row(&self, row: usize) -> bool {
+        if !self.moved {
+            return false;
+        }
+        let ((start_row, _), (end_row, _)) = self.ordered();
+        row >= start_row && row <= end_row
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TranscriptView {
+    area: Rect,
+    composer_area: Rect,
+    top_row: usize,
+    plain_rows: Vec<String>,
+    owners: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2843,6 +2899,9 @@ fn transcript_action_for_key(
     match code {
         KeyCode::PageUp => Some(TranscriptViewportAction::PageUp),
         KeyCode::PageDown => Some(TranscriptViewportAction::PageDown),
+        KeyCode::Home if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewportAction::JumpToStart)
+        }
         KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TranscriptViewportAction::JumpToEnd)
         }
@@ -2868,6 +2927,125 @@ fn transcript_action_for_mouse(kind: MouseEventKind) -> Option<TranscriptViewpor
         MouseEventKind::ScrollDown => Some(TranscriptViewportAction::Lines(3)),
         _ => None,
     }
+}
+
+fn point_in_rect(area: Rect, x: u16, y: u16) -> bool {
+    x >= area.x
+        && y >= area.y
+        && x < area.x.saturating_add(area.width)
+        && y < area.y.saturating_add(area.height)
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn slice_display_cells(text: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for grapheme in text.graphemes(true) {
+        let width = unicode_display_width(grapheme);
+        if col >= end {
+            break;
+        }
+        if col >= start {
+            out.push_str(grapheme);
+        }
+        col = col.saturating_add(width);
+    }
+    out
+}
+
+fn extract_pointer_text(rows: &[String], selection: PointerSelection) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+    let start_row = start_row.min(rows.len().saturating_sub(1));
+    let end_row = end_row.min(rows.len().saturating_sub(1));
+    if start_row == end_row {
+        let end = end_col.max(start_col.saturating_add(1));
+        return slice_display_cells(&rows[start_row], start_col, end);
+    }
+    let mut parts = Vec::new();
+    parts.push(slice_display_cells(&rows[start_row], start_col, usize::MAX));
+    parts.extend(
+        rows.iter()
+            .take(end_row)
+            .skip(start_row.saturating_add(1))
+            .cloned(),
+    );
+    parts.push(slice_display_cells(&rows[end_row], 0, end_col.max(1)));
+    parts.join("\n")
+}
+
+fn last_assistant_copy(activities: &[ActivityEntry]) -> Option<String> {
+    activities.iter().rev().find_map(|entry| {
+        if entry.kind == ActivityKind::Assistant {
+            let text = entry.copy_text();
+            (!text.trim().is_empty()).then_some(text)
+        } else {
+            None
+        }
+    })
+}
+
+fn copy_chat_content(
+    pointer: Option<PointerSelection>,
+    view: &TranscriptView,
+    selected: Option<usize>,
+    activities: &[ActivityEntry],
+) -> Option<(String, &'static str)> {
+    if let Some(selection) = pointer.filter(|selection| selection.moved) {
+        let text = extract_pointer_text(&view.plain_rows, selection);
+        if !text.trim().is_empty() {
+            return Some((text, "Copied selection."));
+        }
+    }
+    if let Some(index) = selected {
+        if let Some(entry) = activities.get(index) {
+            let text = entry.copy_text();
+            if !text.is_empty() {
+                return Some((text, "Copied."));
+            }
+        }
+    }
+    if let Some(text) = last_assistant_copy(activities) {
+        return Some((text, "Copied last reply."));
+    }
+    let joined = view
+        .plain_rows
+        .iter()
+        .filter(|row| !row.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some((joined, "Copied chat."))
+    }
+}
+
+fn transcript_hit(view: &TranscriptView, mouse: MouseEvent) -> Option<(usize, usize)> {
+    if view.area.width == 0 || view.area.height == 0 || view.plain_rows.is_empty() {
+        return None;
+    }
+    if !point_in_rect(view.area, mouse.column, mouse.row) {
+        return None;
+    }
+    let row = view
+        .top_row
+        .saturating_add(usize::from(mouse.row.saturating_sub(view.area.y)));
+    if row >= view.plain_rows.len() {
+        return None;
+    }
+    let col = usize::from(mouse.column.saturating_sub(view.area.x))
+        .min(unicode_display_width(&view.plain_rows[row]));
+    Some((row, col))
 }
 
 fn restore_terminal_to(output: &mut impl io::Write, raw_result: io::Result<()>) -> io::Result<()> {
@@ -4191,6 +4369,8 @@ fn render_current_session_view_with_viewport(
         None,
         &welcome,
         None,
+        None,
+        None,
     );
 }
 
@@ -4225,6 +4405,8 @@ fn render_session_view_with_completion(
         meter,
         &welcome,
         None,
+        None,
+        None,
     );
 }
 
@@ -4245,6 +4427,8 @@ fn render_session_activities(
     meter: Option<&WaitingMeter>,
     welcome: &StartupWelcome,
     band: Option<&InteractionBand<'_>>,
+    pointer: Option<PointerSelection>,
+    view: Option<&mut TranscriptView>,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let waiting = if pending_approval.is_some() {
@@ -4315,6 +4499,13 @@ fn render_session_activities(
     if let Some(selected) = selected {
         ensure_selected_visible(viewport, &owners, selected);
     }
+    if let Some(view) = view {
+        view.area = body[0];
+        view.composer_area = layout.composer;
+        view.top_row = viewport.top_row();
+        view.plain_rows = rendered_rows.iter().map(line_plain_text).collect();
+        view.owners = owners.clone();
+    }
     if empty {
         let welcome_lines = empty_state_lines(welcome, no_color);
         let welcome_height = u16::try_from(welcome_lines.len()).unwrap_or(1);
@@ -4337,14 +4528,15 @@ fn render_session_activities(
             .iter()
             .enumerate()
             .map(|(offset, row)| {
-                let activity_index = owners.get(visible_start + offset).copied();
-                apply_selection(
-                    row.clone(),
-                    selected.is_some()
-                        && activity_index == selected
-                        && focus == TuiFocus::Transcript,
-                    no_color,
-                )
+                let row_index = visible_start + offset;
+                let activity_index = owners.get(row_index).copied();
+                let pointer_selected =
+                    pointer.is_some_and(|selection| selection.covers_row(row_index));
+                let activity_selected = selected.is_some()
+                    && activity_index == selected
+                    && focus == TuiFocus::Transcript
+                    && !pointer.is_some_and(|selection| selection.moved);
+                apply_selection(row.clone(), pointer_selected || activity_selected, no_color)
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), body[0]);
@@ -4542,6 +4734,8 @@ fn draw_loop(
     let mut transcript_viewport = TranscriptViewport::default();
     let mut tui_focus = TuiFocus::Composer;
     let mut selected_activity: Option<usize> = None;
+    let mut pointer_selection: Option<PointerSelection> = None;
+    let mut transcript_view = TranscriptView::default();
     let mut clear_armed_at: Option<Instant> = None;
     let mut quit_armed_at: Option<Instant> = None;
     let spinner_origin = Instant::now();
@@ -4730,6 +4924,8 @@ fn draw_loop(
                 meter.as_ref(),
                 &welcome,
                 interaction_band.as_ref(),
+                pointer_selection,
+                Some(&mut transcript_view),
             );
             render_interaction_overlay(
                 f,
@@ -4789,6 +4985,38 @@ fn draw_loop(
             if let Event::Mouse(mouse) = input {
                 if let Some(action) = transcript_action_for_mouse(mouse.kind) {
                     transcript_viewport.apply(action);
+                    continue;
+                }
+                if let Some((row, col)) = transcript_hit(&transcript_view, mouse) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            pointer_selection = Some(PointerSelection::at(row, col));
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            if let Some(selection) = pointer_selection.as_mut() {
+                                selection.drag_to(row, col);
+                            } else {
+                                pointer_selection = Some(PointerSelection::at(row, col));
+                            }
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            tui_focus = TuiFocus::Transcript;
+                            if let Some(selection) = pointer_selection.as_mut() {
+                                selection.drag_to(row, col);
+                                if !selection.moved {
+                                    pointer_selection = None;
+                                }
+                            }
+                            selected_activity = transcript_view.owners.get(row).copied();
+                        }
+                        _ => {}
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    tui_focus = TuiFocus::Composer;
                 }
                 continue;
             }
@@ -4797,7 +5025,11 @@ fn draw_loop(
                     continue;
                 }
                 let control_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT);
+                let control_shift_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT);
                 let control_q = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
                     && key.modifiers.contains(KeyModifiers::CONTROL);
                 if welcome.consent_directory.is_some() {
@@ -4942,17 +5174,35 @@ fn draw_loop(
                     }
                     continue;
                 }
-                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && tui_focus == TuiFocus::Transcript
+                if (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || control_shift_c
                 {
-                    if let Some(index) = selected_activity {
-                        if let Some(entry) = timeline.activities.get(index) {
-                            copy_text_osc52(&entry.copy_text());
-                            timeline
-                                .push_status(format!("Copied {} block.", entry.kind.role_label()));
-                        }
+                    if let Some((text, status)) = copy_chat_content(
+                        pointer_selection,
+                        &transcript_view,
+                        selected_activity,
+                        &timeline.activities,
+                    ) {
+                        copy_text_osc52(&text);
+                        timeline.push_status(status.to_string());
                     }
+                    continue;
+                }
+                if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !transcript_view.plain_rows.is_empty()
+                {
+                    let last = transcript_view.plain_rows.len().saturating_sub(1);
+                    pointer_selection = Some(PointerSelection {
+                        anchor_row: 0,
+                        anchor_col: 0,
+                        focus_row: last,
+                        focus_col: unicode_display_width(&transcript_view.plain_rows[last]),
+                        moved: true,
+                    });
+                    tui_focus = TuiFocus::Transcript;
+                    timeline.push_status("Chat selected.".to_string());
                     continue;
                 }
                 if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
@@ -5817,6 +6067,8 @@ mod tests {
                     None,
                     &welcome,
                     None,
+                    None,
+                    None,
                 )
             })
             .expect("render workspace consent");
@@ -5952,6 +6204,8 @@ mod tests {
                     None,
                     &welcome,
                     None,
+                    None,
+                    None,
                 )
             })
             .expect("render channels");
@@ -6076,6 +6330,8 @@ mod tests {
                     None,
                     None,
                     &welcome,
+                    None,
+                    None,
                     None,
                 )
             })
@@ -6830,6 +7086,8 @@ mod tests {
                     None,
                     &welcome,
                     Some(&band),
+                    None,
+                    None,
                 )
             })
             .expect("render under-composer sessions");
@@ -8817,6 +9075,77 @@ mod tests {
         assert_eq!(viewport.top_row(), 32);
         viewport.apply(TranscriptViewportAction::PageUp);
         assert_eq!(viewport.top_row(), 27);
+        assert_eq!(
+            transcript_action_for_key(KeyCode::Home, KeyModifiers::CONTROL),
+            Some(TranscriptViewportAction::JumpToStart)
+        );
+    }
+
+    #[test]
+    fn pointer_selection_copies_chat_rows_and_falls_back_to_the_last_reply() {
+        let rows = vec![
+            "● inspect wrap".to_string(),
+            "● read_file running · src/lib.rs".to_string(),
+            "● Here is the answer".to_string(),
+        ];
+        let mut selection = PointerSelection::at(0, 2);
+        selection.drag_to(0, 14);
+        assert_eq!(extract_pointer_text(&rows, selection), "inspect wrap");
+        selection = PointerSelection::at(0, 0);
+        selection.drag_to(2, 20);
+        let copied = extract_pointer_text(&rows, selection);
+        assert!(copied.contains("inspect wrap"), "{copied}");
+        assert!(copied.contains("Here is the answer"), "{copied}");
+
+        let view = TranscriptView {
+            plain_rows: rows,
+            ..TranscriptView::default()
+        };
+        let activities = vec![
+            ActivityEntry::new(ActivityKind::User, "", "inspect wrap"),
+            ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer"),
+        ];
+        let (text, status) =
+            copy_chat_content(None, &view, None, &activities).expect("copy fallback");
+        assert_eq!(text, "Here is the answer");
+        assert_eq!(status, "Copied last reply.");
+        let (block, block_status) =
+            copy_chat_content(None, &view, Some(0), &activities).expect("copy block");
+        assert_eq!(block, "inspect wrap");
+        assert_eq!(block_status, "Copied.");
+    }
+
+    #[test]
+    fn transcript_hit_maps_mouse_cells_to_plain_rows() {
+        let view = TranscriptView {
+            area: Rect::new(0, 1, 40, 10),
+            top_row: 0,
+            plain_rows: vec!["● inspect wrap".to_string(), "● reply".to_string()],
+            owners: vec![0, 1],
+            ..TranscriptView::default()
+        };
+        let hit = transcript_hit(
+            &view,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(hit, Some((0, 2)));
+        assert_eq!(
+            transcript_hit(
+                &view,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 2,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
@@ -9018,6 +9347,8 @@ mod tests {
                     None,
                     &welcome,
                     Some(&band),
+                    None,
+                    None,
                 );
             })
             .expect("render history list");

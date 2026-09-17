@@ -858,6 +858,7 @@ pub enum SelectorDetailKind {
 pub enum TranscriptViewportAction {
     PageUp,
     PageDown,
+    JumpToStart,
     JumpToEnd,
     Lines(i32),
 }
@@ -902,6 +903,10 @@ impl TranscriptViewport {
             }
             TranscriptViewportAction::PageDown => {
                 self.scroll_lines(i32::try_from(self.page_rows).unwrap_or(i32::MAX));
+            }
+            TranscriptViewportAction::JumpToStart => {
+                self.pinned_to_tail = false;
+                self.top_row = 0;
             }
             TranscriptViewportAction::JumpToEnd => self.pin_to_tail(),
             TranscriptViewportAction::Lines(delta) => self.scroll_lines(delta),
@@ -1666,16 +1671,12 @@ impl ActivityEntry {
     }
 
     pub fn copy_text(&self) -> String {
-        if self.title.is_empty() {
-            if self.body.is_empty() {
-                self.kind.role_label().to_string()
-            } else {
-                format!("{}  {}", self.kind.role_label(), self.body)
-            }
-        } else if self.body.is_empty() {
-            format!("{}  {}", self.kind.role_label(), self.title)
+        if self.title.is_empty() || self.title == "live" {
+            self.body.clone()
+        } else if self.body.is_empty() || self.folded {
+            self.title.clone()
         } else {
-            format!("{}  {}\n{}", self.kind.role_label(), self.title, self.body)
+            format!("{}\n{}", self.title, self.body)
         }
     }
 
