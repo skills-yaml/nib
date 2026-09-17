@@ -93,7 +93,7 @@ work or narrower guarantees.
 - [T038: TUI Block Transcript and Key Contract](done/T038_tui_block_transcript_and_key_contract.md)
 - [T039: Visible Tool Blocks and Explicit Approval Card](done/T039_visible_tool_blocks_and_explicit_approval.md)
 - [T040: Resourceful Agent Loop and Context](done/T040_resourceful_agent_loop_and_context.md)
-- [T041: Task-Aware Context and Verified Completion](development/T041_task_aware_context_and_verified_completion.md)
+- [T041: Task-Aware Context and Verified Completion](done/T041_task_aware_context_and_verified_completion.md)
 - [T042: Context Budgeting and Live Visibility](backlog/T042_context_budgeting_and_live_visibility.md)
 
 ### Feature specs

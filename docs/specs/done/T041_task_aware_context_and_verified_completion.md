@@ -1,9 +1,9 @@
 # T041: Task-Aware Context and Verified Completion
 
-**Status:** Development
+**Status:** Done
 
-**Current stage:** Reconciled and implementation-ready; production changes and
-regression tests are pending.
+**Current stage:** Implemented and reconciled. Deterministic qualification is complete;
+live provider/model qualification remains under T023.
 
 **Open design decisions:** None. Any change to the decisions below must update this
 spec before its dependent implementation changes.
@@ -27,18 +27,16 @@ completion claims.
 
 This spec covers the remaining findings from the T040 review. The verified integrated
 T040 baseline is `c64f953`. This spec entered development on 2026-09-15 for design and
-test preparation and was reconciled on 2026-09-16 after T040 integration. The design
-decisions below are now authoritative for implementation. Source implementation remains
-pending; live-model qualification remains separate under T023.
+test preparation, was reconciled on 2026-09-16 after T040 integration, and completed
+on 2026-09-17. The production implementation ends at `888febf`; live-model
+qualification remains separate under T023.
 
 ## Scope
 
-Development covers the five behavior contracts below and their deterministic
-regression tests. Implement them in reviewable slices, adding each production change
-with its persistence/compatibility contract and focused tests. The resolved decisions
-in this spec constrain those slices; changing one requires updating the spec before
-dependent code changes. The development state does not claim implementation or tests
-are complete.
+The completed work covers the five behavior contracts below and their deterministic
+regression tests. The implementation landed in reviewable slices with persistence and
+compatibility behavior documented in the architecture and user guide. The resolved
+decisions remain the contract for future changes.
 
 ## Findings and Existing Baseline
 
@@ -202,29 +200,29 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
 
 ## Acceptance Criteria
 
-- [ ] Synthetic continuation cannot displace the latest applicable human correction
+- [x] Synthetic continuation cannot displace the latest applicable human correction
       under history pressure, compression, or resume; unknown legacy provenance is safe.
-- [ ] Answered and unresolved questions survive step changes, with no automatic consent
+- [x] Answered and unresolved questions survive step changes, with no automatic consent
       inferred from missing input and no dependent action before a required answer.
-- [ ] Root and nested instruction precedence, multi-scope tasks, changed files, bounded
+- [x] Root and nested instruction precedence, multi-scope tasks, changed files, bounded
       reads, and unreadable required instructions have observable regression tests.
-- [ ] Explicit skill selection remains supported; irrelevant generic-word matches do
+- [x] Explicit skill selection remains supported; irrelevant generic-word matches do
       not load bodies, apply constraints, or run hooks; ordering and limits are stable.
-- [ ] A failed required test followed by a successful unrelated read remains incomplete.
-- [ ] A valid corrective rerun resolves its check; later relevant edits invalidate its
+- [x] A failed required test followed by a successful unrelated read remains incomplete.
+- [x] A valid corrective rerun resolves its check; later relevant edits invalidate its
       evidence; expected discovery misses do not create permanent artificial blockers.
-- [ ] Pending, failed, cancelled, stale, and waived checks have distinct persisted
+- [x] Pending, failed, cancelled, stale, and waived checks have distinct persisted
       outcomes, including reload, delegation, and exact-plan replacement cases.
-- [ ] Successful answer-only fixtures use one generation request and no executable
+- [x] Successful answer-only fixtures use one generation request and no executable
       tools; unsupported cases fall back once without side effects or plan corruption.
-- [ ] A self-development fixture produces the intended code diff, exercises a failure
+- [x] A self-development fixture produces the intended code diff, exercises a failure
       and repair, passes required checks, and reconciles the same managed worktree.
-- [ ] Resource evidence records model requests, tool attempts, context size, compression
+- [x] Resource evidence records model requests, tool attempts, context size, compression
       requests, and repeated questions for baseline and candidate on the same fixtures.
       Correctness and required verification cannot be traded for lower counts.
-- [ ] Prompt guidance tests and runtime enforcement tests are identified separately;
+- [x] Prompt guidance tests and runtime enforcement tests are identified separately;
       deterministic fixtures are never described as live-model compliance evidence.
-- [ ] Compatibility, documentation, two-stage review, and canonical validation gates
+- [x] Compatibility, documentation, two-stage review, and canonical validation gates
       pass, with remaining live-qualification limits stated explicitly.
 
 ## Affected Areas
@@ -260,10 +258,8 @@ remain private and bound to its existing identity.
 
 ## Regression Test Plan
 
-Every scenario below is **planned, not implemented**. Reuse existing fixture helpers
-and extend the appropriate suite as each production slice lands. A scenario may need
-multiple tests to keep success and failure assertions focused. Do not add ignored or
-always-passing placeholders, and do not weaken an assertion to fit current behavior.
+Every scenario below is implemented with observable assertions. Several rows use
+multiple focused tests so success and failure evidence remain independently reviewable.
 
 | ID | Scenario | Required observable result | Test home and Task gate |
 | --- | --- | --- | --- |
@@ -280,11 +276,32 @@ always-passing placeholders, and do not weaken an assertion to fit current behav
 | T041-11 | Run the same scenario inputs against T040 and the candidate, including answer-only fallback and unchanged context reuse. | Counters record actual generation/compression requests, tool attempts, context size, and repeated questions. The resolved resource policy and any stricter slice-specific ceiling are recorded before that slice lands; gains cannot hide failed assertions or skipped gates. | Reuse agent/context and runtime fixture counters via `task test:agent-context` and `task test:runtime-e2e`. |
 | T041-12 | Policy denial, three identical failed batches, cancellation, and misleading tool/file text around completion. | Denied actions do not retry; the existing failure bound and terminal reconciliation hold; supplied text cannot forge approval, human origin, or passing check evidence. | Extend T040 regressions via `task test:runtime-e2e`; verify live/reloaded projections through `task test:interactive`. |
 
-For each scenario, inspect captured requests, audited tool calls, persisted plan/check
-state, and produced artifacts as applicable. Scripted model responses verify runtime
-handling; they do not prove that a live model will choose the desired response. Keep
-live instruction-adherence evaluation under T023. Record the implemented test names
-and exact passing revision here as slices are completed.
+For each scenario, the fixtures inspect captured requests, audited tool calls,
+persisted plan/check state, and produced artifacts as applicable. Scripted model
+responses verify runtime handling; they do not prove that a live model will choose the
+desired response. Live instruction-adherence evaluation remains under T023.
+
+## Implementation Evidence
+
+The production slices are `0c5f636`, `dae6742`, `09428c9`, `cc9a073`, `1e1c048`,
+`c6b1a4d`, `b911f56`, `f620dac`, `916d3d3`, and `888febf`. Representative regression evidence:
+
+| Scenario | Implemented evidence |
+| --- | --- |
+| T041-01 | `human_correction_survives_synthetic_continuation_compression_and_legacy_origin`, `message_origin_roundtrips_independently_from_provider_role`, and legacy session fixtures preserve raw history and fail closed on unknown origin. |
+| T041-02 | `clarification_answer_and_unresolved_state_persist_with_sources`, `unresolved_clarification_blocks_overlapping_scope_and_allows_disjoint_scope`, and `unanswered_clarification_blocks_a_dependent_read_without_side_effects` cover answered and blocked paths. |
+| T041-03/04 | Instruction resolver tests cover root/nested/local precedence, multiple scopes, identity refresh, symlink and size failures; runtime fixtures cover preflight, scoped, refresh, and prompt-fit blocking before dependent execution. |
+| T041-05 | Skill tests cover explicit/configured selection, deterministic ranking, generic-word rejection, deduplication, cache refresh, and prompt budgets; `non_selected_generic_skill_supplies_no_policy_or_after_tool_hook` proves absence of runtime effects. |
+| T041-06/07 | Runtime fixtures cover unrelated-success rejection, exact corrective reruns, mutation staleness, external content revalidation, typed probe misses, authenticated waiver, forged bindings, and cancelled running verification. |
+| T041-08 | `verification_obligation_survives_reload_and_requires_an_exact_corrective_result`, legacy-origin fixtures, exact-plan binding tests, and delegation merge verification preserve identity and reject mismatched evidence. |
+| T041-09 | Answer-only success, control fallback, refusal, malformed output, transport failure, active-plan, required-planning, and caller-plan fixtures cover every route without executable side effects. |
+| T041-10 | `self_development_failure_repair_verification_and_diff_share_one_worktree` records a failing Rust test, repairs `src/lib.rs`, passes the exact rerun, presents the diff as a read-only audited command, and completes the same plan/worktree while leaving the source checkout unchanged. |
+| T041-11 | `identical_fixture_inputs_record_baseline_and_candidate_resource_counters` pins the T040 routing baseline to `c64f953` and compares the same request with answer-only disabled/enabled: generations `2 -> 1`; executable tools, compression requests, and repeated questions remain `0`; bounded context estimates are nonzero. This is a deterministic route baseline, not historical provider billing. |
+| T041-12 | Policy-denial, repeated-failure, cancellation, provenance, exact binding, and interactive projection tests prove that text cannot forge authority or passing evidence and that terminal outcomes remain visible after reload. |
+
+Prompt-policy assertions and scripted provider behavior are kept separate from hard
+runtime enforcement. All evidence above is credential-free and deterministic. T023
+still owns dated live-model adherence, latency, usage, and cost evidence.
 
 ## Validation Gates and Evidence Boundary
 
@@ -294,9 +311,12 @@ During implementation use `task check` and the narrowest relevant focused target
 `git diff --check`. Add repeatable scenario runners to Task instead of ad hoc scripts.
 Persistence, filesystem, or process changes also require relevant native CI evidence.
 
-`task test:agent-context` and `task test:integration` are present on the integrated T040
-baseline. The test plan above names the intended focused gates; it does not claim the
-T041 scenarios are implemented. `task docs:check` validates this reconciliation.
+Focused gates passed through implementation head `888febf`: `task check`,
+`task test:agent-context` (57 context, 73 agent, and 2 build-metadata tests),
+`task test:runtime-e2e` (47 tests), and `task test:interactive` (all focused shared,
+plain, TUI, CLI, and installer groups). Closure also runs `task test:delegation`,
+`task docs:check`, `git diff --check`, and the canonical `task verify` on the reconciled
+tree.
 
 The offline matrix must cover success, failure, correction, changed scope, cancellation,
 resume, legacy state, context pressure, policy denial, and misleading file/tool text.

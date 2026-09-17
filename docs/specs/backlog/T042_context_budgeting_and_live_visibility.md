@@ -5,7 +5,7 @@
 **User decision (2026-09-15):** A compact live context indicator with an on-demand
 `/context` breakdown, rather than a permanently open detailed panel.
 
-**Related:** [T041: Task-Aware Context and Verified Completion](../development/T041_task_aware_context_and_verified_completion.md),
+**Related:** [T041: Task-Aware Context and Verified Completion](../done/T041_task_aware_context_and_verified_completion.md),
 [T003: Context Engine](../done/T003_context_engine_with_dynamic_compression_and_session_management.md),
 [T022: Provider Contract](../done/T022_provider_neutral_llm_contract_and_adapter_conformance.md),
 [T032: Explicit Compaction](../done/T032_ft019_explicit_compaction_and_session_background_commands.md),
@@ -24,12 +24,13 @@ usage reporting, and live monitoring. T041 owns the meaning and provenance of hu
 intent, scoped instructions, skill relevance, and verification obligations. T042 must
 consume those contracts rather than create a second task or permission model.
 
-The source audit is pinned to development commit `bceb3eb`. T040's reviewed local
-implementation, `4234be8` on `feat/t040-resourceful-agent-loop`, is not integrated at
-that revision. It fixes attachment inclusion/reads, the initial history/compression
-threshold mismatch, summary output bounds, and some instruction/history retention.
-Integrate and re-audit those changes before dependent implementation; do not count
-them as shipped behavior or duplicate their implementation in this spec.
+The original source audit is pinned to development commit `bceb3eb`. T040 and T041
+are now integrated; T041's production implementation ends at `888febf`. That baseline
+adds a compact history estimate and an idle-only `/context [details]` projection as a
+compatibility scaffold. It does not implement T042's complete-request snapshot,
+response reserve, continuation accounting, active/modal-safe inspection, provider
+usage totals, or latency contract. Re-audit each affected surface at development start
+and preserve the existing command shape while replacing its incomplete accounting.
 
 ## Source Review and Findings
 
@@ -39,8 +40,8 @@ fixture. No token savings percentage has yet been measured.
 
 | Finding | Evidence at the audited revision | Consequence |
 | --- | --- | --- |
-| The displayed percentage is not the request footprint. | `src/interactive.rs::persisted_context_usage` measures bounded history; `format_tui_interaction_chrome` divides it by the full configured window. | Instructions, tools, native continuation, and response allowance are absent; the display may mislead in either direction. |
-| Inspection is unavailable at important moments. | `/status` is `RequiresIdle`; no interactive `/context` exists. `src/context_cmd.rs` prints assembled project/profile context, not a live session request. The narrow TUI status fallback omits context. | Users cannot consistently inspect context while work is active or the terminal is narrow. |
+| The displayed percentage is not the request footprint. | `src/interactive.rs::persisted_context_usage` measures bounded history; the compact header and `/context` divide it by the full configured window. | Instructions, tools, native continuation, and response allowance are absent; the display may mislead in either direction. |
+| Inspection is unavailable at important moments. | Interactive `/context` exists but is `RequiresIdle` and reads session history/resource counters rather than the dispatched request. `src/context_cmd.rs` still prints assembled project/profile context, not a live session request. | Users cannot consistently inspect context while work is active, modal input owns the UI, or a second terminal needs the live request snapshot. |
 | Input can consume the whole configured window. | `src/context/budget.rs` bounds input against `context_length`; planner and loop requests leave `max_output_tokens` unset. | No coordinated room is reserved for generation or reasoning. |
 | Continuations bypass normal budgeting. | `src/agent/loop.rs` skips rebuilding/compression while a provider continuation exists. `src/llm/types.rs` caps continuation at 256 items/4 MiB, independently of the token window. | The last `context_bounded` event becomes stale; a tool chain can exceed the intended request allowance. |
 | Earlier native tool rounds may disappear. | The loop reuses base messages while Chat, Anthropic, and Gemini replacement continuations store the latest response. Responses retains an accumulated replay tail. | Source tracing suggests different retention behavior across adapters; existing native runtime tests cover only one tool round after planning. |
