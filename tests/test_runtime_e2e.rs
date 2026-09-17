@@ -3602,10 +3602,7 @@ Do not inspect the repository without an explicit decision.
     assert_eq!(summary.outcome, "tool_execution_failed");
     assert_eq!(summary.tool_call_count, 1);
     assert!(!summary.bound_reached);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        ["approve_plan".to_string(), "list_directory".to_string()]
-    );
+    assert_eq!(*calls.lock().unwrap(), ["list_directory".to_string()]);
     assert!(!root.path().join(".nib/worktrees").exists());
 
     let persisted = store.load(&session.id).expect("denial audit");
@@ -3677,7 +3674,10 @@ GENERIC_POLICY_BODY_MUST_NOT_APPEAR
     .expect("unconstrained run completes");
 
     assert_eq!(summary.outcome, "completed");
-    assert_eq!(*calls.lock().unwrap(), ["approve_plan".to_string()]);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "plans are auto-approved and this skill is not selected, so no approval handler calls"
+    );
     let persisted = store.load(&session.id).expect("persisted run");
     assert!(persisted.active_skills.is_empty());
     assert!(persisted.skill_usage.is_empty());

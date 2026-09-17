@@ -381,7 +381,7 @@ sequenceDiagram
   Explicit `/compact` is an exact-session leased, non-steerable maintenance run that
   bypasses only the automatic compression threshold, preserves raw history, and emits
   the same typed compression evidence without synthesizing chat messages.
-- Structured plans are persisted, approved before execution, and advanced from verified tool outcomes.
+- Structured plans are persisted, printed, auto-approved for execution, and advanced from verified tool outcomes. The user is asked only when a request is unclear or an action requires approval.
 - Compression preserves raw transcripts while bounding model context; profile memory persists environment and user facts.
 - The `manage_memory` tool provides bounded list/get/set/delete operations. Reads are
   read-only, writes require approval or an explicit allow policy, deletes are

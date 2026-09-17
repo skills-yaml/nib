@@ -38,6 +38,8 @@ says `awaiting you`.
   to do and why. Tool blocks still show the call itself; speech does not dump
   arguments. Final answers lead with the outcome.
 - Requested/running titles include a bounded argument hint (path, command, pattern).
+  `run_terminal` keeps a long command hint in the title and the full command,
+  working directory, and background flag in the expanded body while it runs.
 - Completed titles keep that hint and a result summary (`N lines`, `N entries`,
   `exit N`). Failed tools stay red even when folded.
 - Expanded tool bodies use a muted `·` result marker. Folded tools remain one line
@@ -46,20 +48,21 @@ says `awaiting you`.
   `/` options: no covering overlay, no caret, selected-row emphasis, two-column
   signature plus description. The composer shows the prompt (statement, question, or
   directory). Choices sit under the input. It does not dump `command=` metadata,
-  network essays, or classifier reasons. Plan approval lists numbered steps in the
-  composer; the live transcript shows those same steps when the plan is generated.
-  After approval, the persisted ledger stays one-line plan progress; `/plan` still
-  shows every step.
+  network essays, or classifier reasons. Generated plans appear as a live todo
+  list (`◐` in progress, `○` pending, `✓` done) that updates as steps complete.
+  `/plan` still shows the full list. nib asks the user only when the request is
+  unclear or an action requires approval.
 - `Y`, `Enter` on Approve, and `1` approve once. `N`, `Esc`, `2`, and `Enter` on Deny
   deny. Up/Down move the selected choice. Policy is unchanged: one-shot grant or
   deny; no always-allow in this slice.
 - While an approval is pending, the TUI footer reads `WAITING APPROVAL` and
   shows the approval keys next to the approval mode.
-- Agent questions use that same list. The composer shows the question. Numbered
-  choices sit under the input. Number keys submit the matching option. Free-form
-  questions type the answer in the composer. `Enter` submits; `Esc` skips. The
-  transcript stays visible. While a question is pending the footer reads
-  `WAITING QUESTION`.
+- Agent questions use a Codex-style numbered list under the composer: `›` marks
+  the selected row, each choice is `N. label (shortcut)`, the first option is
+  `(y)`, and Skip is `(esc)`. Number keys submit the matching option. `Y`
+  submits the first option. Free-form questions type the answer in the composer.
+  `Enter` submits; `Esc` skips. The transcript stays visible. While a question is
+  pending the footer reads `WAITING QUESTION`.
 - `/` and `@` completion is a reserved band under the composer, not a `Clear` overlay
   over the transcript. The conversation stays visible and the composer stays above the
   option list. Slash option signatures start on the same column as the composer `/`
@@ -136,11 +139,10 @@ says `awaiting you`.
       (`Run this command` / `Read this file` / …) and shows the command or path;
       `Y Approve once` and `N Deny` sit under the input even on a 40-column
       terminal. It does not render `command=` dumps.
-- [x] Plan approval lists numbered steps in the composer and in the live
-      `PlanGenerated` transcript activity. It does not show only the goal or
-      `plan_id=`. Extra steps that cannot fit the six-row composer end with
-      `… N more`. After approval, persisted ledger projection stays one-line
-      progress; `/plan` still shows every step.
+- [x] Generated plans render as a live todo list (`Working on N to-dos`, `◐` /
+      `○` / `✓`) that advances on `step_completed`. `/plan` still shows every
+      step. The user is asked only when the request is unclear or an action
+      requires approval.
 - [x] Transcript text above the composer remains visible at ordinary terminal sizes.
 - [x] `Y`, `Enter` on Approve, and `1` grant once; `N`, `Esc`, `2`, and `Enter` on
       Deny deny. Up/Down change the selected choice.
@@ -172,9 +174,9 @@ says `awaiting you`.
       User and assistant speech are markdown with a `●` on the first line.
       Tools show `● read_file …`; results use `·`. Thinking shows the state
       (`planning`) without the word `thought`.
-- [x] A question uses the under-composer list: the composer shows the question,
-      numbered options sit under the input, and Enter/1-9/Esc still answer. The
-      footer reads `WAITING QUESTION`.
+- [x] A question uses a Codex-style list: `› 1. label (y)`, further options as
+      `N. label (N)`, and `Skip (esc)`. Enter/1-9/y/Esc still answer. The footer
+      reads `WAITING QUESTION`.
 - [x] An empty session welcome shows `Nib <version>`, the working directory,
       `/new` and `/session` help, and the most-used keys. When an update is
       available it tells the user to run `nib update`.
