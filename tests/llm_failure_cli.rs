@@ -208,7 +208,6 @@ fn configure_interactive_failure(project: &Path, base_url: String) {
     save_nib_config_full(project, &mut config).expect("interactive fixture config");
 }
 
-#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
     command
@@ -259,27 +258,23 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let approval_ready = store
+        let recovery_completed = store
             .load_result(RECOVERY_SESSION_ID)
             .expect("read plain recovery session")
             .is_some_and(|session| {
-                session
-                    .events
-                    .iter()
-                    .any(|event| event.kind == "approval_required")
+                session.events.iter().any(|event| {
+                    event.kind == "reconciliation" && event.details["outcome"] == "completed"
+                })
             });
-        if approval_ready {
+        if recovery_completed {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "plain recovery did not reach approval"
+            "plain recovery did not complete after the auto-approved plan"
         );
         std::thread::yield_now();
     }
-    stdin
-        .write_all(b"y\n\n")
-        .expect("plain recovery approval frame");
     drop(stdin);
     let mut output = child.wait_with_output().expect("plain recovery output");
 

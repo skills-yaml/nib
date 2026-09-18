@@ -3374,7 +3374,6 @@ Observe the approved plan and verify each tool result.
         .collect::<Vec<_>>();
     for required in [
         "plan_generated",
-        "approval_required",
         "plan_approved",
         "tool_started",
         "tool_completed",
@@ -3385,6 +3384,13 @@ Observe the approved plan and verify each tool result.
             "missing runtime event {required}"
         );
     }
+    assert!(
+        !persisted
+            .events
+            .iter()
+            .any(|event| { event.kind == "approval_required" && event.details["kind"] == "plan" }),
+        "generated plans are auto-approved and must not prompt for Y/N"
+    );
     assert_eq!(
         persisted
             .events
