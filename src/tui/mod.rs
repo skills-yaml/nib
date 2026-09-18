@@ -8,14 +8,15 @@ use crate::interactive::{
     apply_stream_event, claim_next_queued_follow_up_after_startup,
     display_stream_event_with_sensitive_values, execute_interactive_command_in_state,
     format_tui_interaction_chrome, interactive_completions, interactive_session_candidate,
-    interactive_session_selection, maybe_assign_session_display_name, path_completions,
-    persist_queued_follow_up, project_session_activities, queue_disposition_message,
-    reduce_interaction, resolve_session, restore_queued_follow_up_after_start_failure,
-    set_active_model, truncate_display_cells, unicode_display_width,
-    validate_interactive_session_target, wrapped_display_rows, ActivityEntry, ActivityKind,
-    DraftHistory, DraftHistorySearch, InteractionConsumer, InteractionDecision, InteractionInput,
-    InteractionReduction, InteractionRunState, InteractionState, InteractionTerminalOutcome,
-    InteractiveAgentMode, InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
+    interactive_session_selection, is_legacy_thought_title, maybe_assign_session_display_name,
+    meter_token_label, path_completions, persist_queued_follow_up, project_session_activities,
+    queue_disposition_message, reduce_interaction, resolve_session,
+    restore_queued_follow_up_after_start_failure, set_active_model, thought_header_title,
+    truncate_display_cells, unicode_display_width, validate_interactive_session_target,
+    wrapped_display_rows, ActivityEntry, ActivityKind, DraftHistory, DraftHistorySearch,
+    InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
+    InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
+    InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
     InteractiveSessionSelection, ModelSelection, SelectorDetailKind, StreamDisplay,
     TranscriptViewport, TranscriptViewportAction, TuiChrome, MAX_DRAFT_HISTORY_QUERY_BYTES,
 };
@@ -3445,10 +3446,68 @@ fn thought_body_style(no_color: bool) -> Style {
 }
 
 fn fold_prefix(entry: &ActivityEntry) -> &'static str {
-    if entry.folded && !entry.body.is_empty() {
+    if entry.kind == ActivityKind::Thinking {
+        return "";
+    }
+    if entry.folded && !entry.body.is_empty() && !tool_is_live(entry) {
         "› "
     } else {
         ""
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptLive {
+    elapsed: Duration,
+    tokens: Option<String>,
+    tick: u128,
+}
+
+fn tool_phase(title: &str) -> &str {
+    title
+        .split_once(' ')
+        .map(|(_, rest)| {
+            rest.split_once(" · ")
+                .map(|(phase, _)| phase)
+                .unwrap_or(rest)
+        })
+        .unwrap_or("")
+}
+
+fn tool_is_live(entry: &ActivityEntry) -> bool {
+    entry.kind == ActivityKind::Tool && matches!(tool_phase(&entry.title), "running" | "requested")
+}
+
+fn quiet_tool_title(title: &str) -> String {
+    let Some((name, rest)) = title.split_once(' ') else {
+        return title.to_string();
+    };
+    let (phase, remainder) = rest.split_once(" · ").unwrap_or((rest, ""));
+    match phase {
+        "running" | "requested" | "ok" => {
+            if remainder.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}  {remainder}")
+            }
+        }
+        _ => title.to_string(),
+    }
+}
+
+fn thought_row_title(entry: &ActivityEntry, live: Option<&TranscriptLive>) -> String {
+    if let Some(started) = entry.live_since {
+        thought_header_title(
+            started.elapsed(),
+            live.and_then(|value| value.tokens.as_deref()),
+        )
+    } else if entry.title.starts_with("Thought") {
+        entry.title.clone()
+    } else if entry.title.is_empty() || is_legacy_thought_title(&entry.title) {
+        live.map(|value| thought_header_title(value.elapsed, value.tokens.as_deref()))
+            .unwrap_or_else(|| "Thought".to_string())
+    } else {
+        entry.title.clone()
     }
 }
 
@@ -3748,10 +3807,7 @@ fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'stat
             "/               commands · @ files · Tab transcript",
             muted,
         )),
-        Line::from(Span::styled(
-            "drag            copy chat · Esc clears selection",
-            muted,
-        )),
+        Line::from(Span::styled("drag            copy chat on release", muted)),
         Line::from(Span::styled("Y / N           approve or deny", muted)),
     ]);
     lines
@@ -3978,6 +4034,19 @@ fn publish_copied_chat(
     let (text, status) = copy_chat_content(pointer, view, selected, activities)?;
     copy_text_to_clipboard(&text);
     Some(status)
+}
+
+fn copy_pointer_selection_and_clear(
+    pointer_selection: &mut Option<PointerSelection>,
+    tui_focus: &mut TuiFocus,
+    view: &TranscriptView,
+    selected: Option<usize>,
+    activities: &[ActivityEntry],
+) -> Option<&'static str> {
+    let status = publish_copied_chat(*pointer_selection, view, selected, activities);
+    *pointer_selection = None;
+    *tui_focus = TuiFocus::Composer;
+    status
 }
 
 fn osc52_sequence(text: &str) -> String {
@@ -4313,14 +4382,36 @@ fn plan_todo_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Lin
     lines
 }
 
-fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
-    let mut lines = dotted_header_lines(
-        entry.kind,
-        &entry.title,
-        fold_prefix(entry),
-        width,
-        no_color,
-    );
+fn thought_lines(
+    entry: &ActivityEntry,
+    width: u16,
+    no_color: bool,
+    live: Option<&TranscriptLive>,
+) -> Vec<Line<'static>> {
+    let marker = if entry.folded { "▸ " } else { "▾ " };
+    let heading = thought_row_title(entry, live);
+    let style = thought_body_style(no_color);
+    let inner = usize::from(width.max(1))
+        .saturating_sub(unicode_display_width(marker))
+        .max(1);
+    let mut lines: Vec<Line<'static>> =
+        wrapped_display_rows(&heading, u16::try_from(inner).unwrap_or(u16::MAX))
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                if index == 0 {
+                    Line::from(vec![
+                        Span::styled(marker.to_string(), muted_style(no_color)),
+                        Span::styled(row, style),
+                    ])
+                } else {
+                    Line::from(Span::styled(
+                        format!("{}{row}", " ".repeat(unicode_display_width(marker))),
+                        style,
+                    ))
+                }
+            })
+            .collect();
     if !entry.folded && !entry.body.is_empty() {
         lines.extend(dotted_result_lines(
             &entry.body,
@@ -4332,14 +4423,38 @@ fn thought_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<
     lines
 }
 
-fn tool_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
-    let mut lines = dotted_header_lines(
-        entry.kind,
-        &entry.title,
-        fold_prefix(entry),
-        width,
-        no_color,
-    );
+fn running_tool_verb(title: &str) -> &'static str {
+    if title.starts_with("run_terminal") {
+        "Running command…"
+    } else if title.starts_with("read_file")
+        || title.starts_with("list_directory")
+        || title.starts_with("grep")
+    {
+        "Reading…"
+    } else {
+        "Working…"
+    }
+}
+
+fn tool_lines(
+    entry: &ActivityEntry,
+    width: u16,
+    no_color: bool,
+    live: Option<&TranscriptLive>,
+) -> Vec<Line<'static>> {
+    let rest = quiet_tool_title(&entry.title);
+    let mut lines = dotted_header_lines(entry.kind, &rest, fold_prefix(entry), width, no_color);
+    if tool_is_live(entry) {
+        let spin = spinner_glyph(live.map(|value| value.tick).unwrap_or(0), no_color);
+        let verb = running_tool_verb(&entry.title);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{spin}  {verb}"),
+                ink_style(ChannelInk::ToolCall, no_color),
+            ),
+        ]));
+    }
     if !entry.folded && !entry.body.is_empty() {
         lines.extend(dotted_result_lines(
             &entry.body,
@@ -4369,12 +4484,17 @@ fn log_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'sta
     lines
 }
 
-fn activity_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
+fn activity_lines(
+    entry: &ActivityEntry,
+    width: u16,
+    no_color: bool,
+    live: Option<&TranscriptLive>,
+) -> Vec<Line<'static>> {
     match entry.kind {
         ActivityKind::User | ActivityKind::Assistant => speech_lines(entry, width, no_color),
-        ActivityKind::Thinking => thought_lines(entry, width, no_color),
+        ActivityKind::Thinking => thought_lines(entry, width, no_color, live),
         ActivityKind::Plan => plan_todo_lines(entry, width, no_color),
-        ActivityKind::Tool => tool_lines(entry, width, no_color),
+        ActivityKind::Tool => tool_lines(entry, width, no_color, live),
         _ => log_lines(entry, width, no_color),
     }
 }
@@ -4383,12 +4503,13 @@ fn flatten_activity_lines(
     activities: &[ActivityEntry],
     width: u16,
     no_color: bool,
+    live: Option<&TranscriptLive>,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut owners = Vec::new();
     let mut previous_channel = None;
     for (index, entry) in activities.iter().enumerate() {
-        let wrapped = activity_lines(entry, width, no_color);
+        let wrapped = activity_lines(entry, width, no_color, live);
         if wrapped.is_empty() {
             continue;
         }
@@ -4659,7 +4780,12 @@ fn render_session_activities(
             Vec::new(),
         )
     } else {
-        flatten_activity_lines(activities, body[0].width.max(1), no_color)
+        let live = meter.map(|meter| TranscriptLive {
+            elapsed: meter.elapsed,
+            tokens: meter_token_label(&meter.tokens),
+            tick: meter.tick,
+        });
+        flatten_activity_lines(activities, body[0].width.max(1), no_color, live.as_ref())
     };
     viewport.observe_layout(rendered_rows.len(), usize::from(body[0].height.max(1)));
     if let Some(selected) = selected {
@@ -5182,21 +5308,24 @@ fn draw_loop(
                             selected_activity = transcript_view.owners.get(row).copied();
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            tui_focus = TuiFocus::Transcript;
                             if let Some(selection) = pointer_selection.as_mut() {
                                 selection.drag_to(row, col);
-                                if !selection.moved {
-                                    pointer_selection = None;
-                                } else if let Some(status) = publish_copied_chat(
-                                    pointer_selection,
+                            }
+                            if pointer_selection_is_active(pointer_selection) {
+                                if let Some(status) = copy_pointer_selection_and_clear(
+                                    &mut pointer_selection,
+                                    &mut tui_focus,
                                     &transcript_view,
                                     selected_activity,
                                     &timeline.activities,
                                 ) {
                                     timeline.push_status(status.to_string());
                                 }
+                            } else {
+                                tui_focus = TuiFocus::Transcript;
+                                pointer_selection = None;
+                                selected_activity = transcript_view.owners.get(row).copied();
                             }
-                            selected_activity = transcript_view.owners.get(row).copied();
                         }
                         _ => {}
                     }
@@ -5206,8 +5335,9 @@ fn draw_loop(
                 } else if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
                     && pointer_selection_is_active(pointer_selection)
                 {
-                    if let Some(status) = publish_copied_chat(
-                        pointer_selection,
+                    if let Some(status) = copy_pointer_selection_and_clear(
+                        &mut pointer_selection,
+                        &mut tui_focus,
                         &transcript_view,
                         selected_activity,
                         &timeline.activities,
@@ -6485,12 +6615,13 @@ mod tests {
     fn transcript_separates_thought_tools_and_user_facing_speech() {
         let activities = vec![
             ActivityEntry::new(ActivityKind::User, "", "inspect wrap"),
-            ActivityEntry::new(ActivityKind::Thinking, "planning", String::new()),
+            ActivityEntry::new(ActivityKind::Thinking, "Thought for 14s", String::new()).folded(),
             ActivityEntry::new(
                 ActivityKind::Tool,
                 "read_file running · src/lib.rs",
                 "line one",
-            ),
+            )
+            .folded(),
             ActivityEntry::new(ActivityKind::Assistant, "", "Here is the answer"),
         ];
         let backend = TestBackend::new(80, 24);
@@ -6523,10 +6654,14 @@ mod tests {
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
         assert!(joined.contains("inspect wrap"), "{joined}");
-        assert!(joined.contains("planning"), "{joined}");
+        assert!(joined.contains("Thought for 14s"), "{joined}");
         assert!(joined.contains("●"), "{joined}");
         assert!(joined.contains("read_file"), "{joined}");
+        assert!(joined.contains("Reading…"), "{joined}");
         assert!(joined.contains("Here is the answer"), "{joined}");
+        assert!(!joined.contains("planning"), "{joined}");
+        assert!(!joined.contains(" running"), "{joined}");
+        assert!(!joined.contains("line one"), "{joined}");
         assert!(!joined.contains("● you"), "no you role label: {joined}");
         assert!(!joined.contains("● nib"), "no nib role label: {joined}");
         assert!(!joined.contains("thought"), "{joined}");
@@ -6535,7 +6670,7 @@ mod tests {
             "tool rows use the tool name, not a tool role label: {rows:?}"
         );
         let you = row_index_containing(&rows, "inspect wrap").expect("user");
-        let thought = row_index_containing(&rows, "planning").expect("planning");
+        let thought = row_index_containing(&rows, "Thought for 14s").expect("thought");
         let tool = row_index_containing(&rows, "read_file").expect("tool");
         let speech = rows
             .iter()
@@ -6550,8 +6685,13 @@ mod tests {
             rows[you]
         );
         assert!(
-            rows[thought].contains('●'),
-            "planning is marked with a colored dot: {}",
+            rows[thought].contains('▸'),
+            "thought is a folded chevron header: {}",
+            rows[thought]
+        );
+        assert!(
+            !rows[thought].contains('●'),
+            "thought does not use the tool dot: {}",
             rows[thought]
         );
         assert!(
@@ -6569,17 +6709,32 @@ mod tests {
             "assistant speech has no nib label: {}",
             rows[speech]
         );
-        let result = rows
-            .iter()
-            .position(|row| row.contains("line one"))
-            .expect("tool result");
-        assert!(
-            rows[result].contains('·'),
-            "tool results use a muted result dot: {}",
-            rows[result]
+    }
+
+    #[test]
+    fn quiet_tool_title_hides_running_and_ok() {
+        assert_eq!(
+            quiet_tool_title("read_file running · src/lib.rs"),
+            "read_file  src/lib.rs"
         );
-        assert!(tool < result, "{rows:?}");
-        assert!(result < speech, "{rows:?}");
+        assert_eq!(
+            quiet_tool_title("read_file ok · src/lib.rs · 3 lines"),
+            "read_file  src/lib.rs · 3 lines"
+        );
+        assert_eq!(
+            quiet_tool_title("run_terminal failed · task backup · exit 1"),
+            "run_terminal failed · task backup · exit 1"
+        );
+        assert_eq!(
+            thought_header_title(Duration::from_secs(14), Some("267")),
+            "Thought for 14s, 267 tokens"
+        );
+        assert_eq!(
+            thought_header_title(Duration::from_secs(14), None),
+            "Thought for 14s"
+        );
+        assert_eq!(meter_token_label("tok -"), None);
+        assert_eq!(meter_token_label("tok 8k").as_deref(), Some("8k"));
     }
 
     #[test]
@@ -9517,6 +9672,15 @@ mod tests {
             copy_chat_content(Some(pointer), &view, Some(0), &activities).expect("copy drag");
         assert_eq!(selected, "inspect wrap");
         assert_eq!(selected_status, "Copied selection.");
+
+        let mut live = Some(pointer);
+        let mut focus = TuiFocus::Transcript;
+        assert_eq!(
+            copy_pointer_selection_and_clear(&mut live, &mut focus, &view, Some(0), &activities,),
+            Some("Copied selection.")
+        );
+        assert!(live.is_none());
+        assert_eq!(focus, TuiFocus::Composer);
     }
 
     #[test]
