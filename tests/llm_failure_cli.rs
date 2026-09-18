@@ -258,27 +258,23 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let approval_ready = store
+        let recovery_completed = store
             .load_result(RECOVERY_SESSION_ID)
             .expect("read plain recovery session")
             .is_some_and(|session| {
-                session
-                    .events
-                    .iter()
-                    .any(|event| event.kind == "approval_required")
+                session.events.iter().any(|event| {
+                    event.kind == "reconciliation" && event.details["outcome"] == "completed"
+                })
             });
-        if approval_ready {
+        if recovery_completed {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "plain recovery did not reach approval"
+            "plain recovery did not complete after the auto-approved plan"
         );
         std::thread::yield_now();
     }
-    stdin
-        .write_all(b"y\n\n")
-        .expect("plain recovery approval frame");
     drop(stdin);
     let mut output = child.wait_with_output().expect("plain recovery output");
 
@@ -436,6 +432,7 @@ fn run_prints_one_plain_redacted_actionable_failure_and_exits_nonzero() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn plain_chat_recovers_after_one_structured_failure_with_identical_safe_output() {
     const MAX_STDOUT_BYTES: usize = 16 * 1024;
     const MAX_STDERR_BYTES: usize = 4 * 1024;

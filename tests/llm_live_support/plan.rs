@@ -256,6 +256,7 @@ impl OpenRouterAllowlist {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_entry(entry: &AllowlistEntry, today: NaiveDate) -> Result<(), String> {
     super::validate_catalog_identifier(&entry.id, "OpenRouter allowlist ID")?;
     if !entry.id.contains('/')
@@ -464,6 +465,7 @@ pub(super) fn validate_generation_matrix(
     })
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(super) fn build_plan(
     settings: &LiveSettings,
     snapshot: &CatalogSnapshot,

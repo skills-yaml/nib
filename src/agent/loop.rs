@@ -369,6 +369,7 @@ pub fn exact_run_steering_channel(
 }
 
 impl ExactRunSteeringHandle {
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn submit(&self, text: &str) -> Result<usize, String> {
         let text = normalize_steering_input(text)?;
         let _submission_guard = self
@@ -1567,6 +1568,7 @@ async fn run_agent_loop_with_runtime(
     .await
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_agent_loop_with_runtime_and_recovery(
     runtime: AgentLoopRuntime,
     session_id: &str,
@@ -1761,6 +1763,7 @@ async fn run_agent_operation(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_explicit_compaction(
     runtime: AgentLoopRuntime,
     session_id: &str,
@@ -2008,6 +2011,7 @@ fn request_scope_for_run(session_id: &str, run_id: &str) -> Result<LlmRequestSco
     LlmRequestScope::new(session_id, run_id)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_agent_loop_inner(
     runtime: AgentLoopRuntime,
     session_id: &str,
@@ -4794,6 +4798,7 @@ fn has_unterminated_prior_run(session: &Session, current_run_id: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn run_answer_only_route(
     store: &SessionStore,
     session_id: &str,
@@ -5331,6 +5336,7 @@ fn workload_context_sections(
     sections
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn reconcile_cancelled_run(
     store: &SessionStore,
     session_id: &str,
@@ -6607,6 +6613,7 @@ fn audited_tool_evidence(
     Ok((mutates_content, worktree_identity))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn compute_verification_content_identity(
     worktree_root: &Path,
     affected_paths: &[String],
@@ -6809,6 +6816,7 @@ fn revalidate_plan_verification_content(
     Ok(stale_ids)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn finish_plan_verification(
     store: &SessionStore,
     session_id: &str,
@@ -7275,6 +7283,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn clarification_answer_and_unresolved_state_persist_with_sources() {
         let directory = tempdir().expect("session directory");
         let store = SessionStore::new(directory.path());

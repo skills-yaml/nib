@@ -439,6 +439,7 @@ fn describe_reserved_branch_conflict(
     ))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn validate_durable_ownership_record(
     record: &DurableManagedWorktreeOwnership,
     project_root: &Path,
@@ -1092,6 +1093,7 @@ fn persist_durable_ownership_revision(
 // Reservation persistence validates each durable identity independently; a
 // parameter bag would weaken that correspondence without simplifying callers.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn persist_managed_worktree_reservation(
     project_root: &Path,
     kind: ManagedWorktreeKind,
@@ -1543,6 +1545,7 @@ fn reopen_owned_branch(
     })
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn promote_durable_intent(
     mut revision: DurableOwnershipRevision,
 ) -> Result<ManagedWorktreeReceipt, String> {
@@ -2101,6 +2104,7 @@ fn reconcile_unfinished_intent_path(revision: &mut DurableOwnershipRevision) -> 
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn reconcile_unfinished_intent_branch(
     revision: &mut DurableOwnershipRevision,
 ) -> Result<(), String> {
@@ -2346,6 +2350,7 @@ fn reconcile_unfinished_intent(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn rehydrate_owned_worktree(
     mut revision: DurableOwnershipRevision,
     adopted_oid: Option<&str>,
@@ -2862,6 +2867,7 @@ impl Worktree {
         )
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn create_from_preparation_authority_with_guard(
         project_root: &Path,
         authority: &WorktreePreparationAuthority,
@@ -3229,6 +3235,7 @@ impl Worktree {
         .await
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) async fn create_cancellable_from_preparation_authority_with_guard(
         project_root: &Path,
         authority: &WorktreePreparationAuthority,
@@ -3876,6 +3883,7 @@ fn parse_common_git_directory(project_root: &Path, output: &Output) -> Result<Pa
     Ok(common)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn capture_managed_worktree_receipt(
     common_git_dir: &Path,
     path: &Path,
@@ -4336,6 +4344,7 @@ fn adopt_registered_worktree_branch(
     adopt_managed_worktree_branch(&ownership, &safe_id, expected_oid)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn adopt_managed_worktree_branch(
     ownership: &ManagedWorktreeReceipt,
     safe_id: &str,
@@ -4595,6 +4604,7 @@ pub(crate) fn cleanup_managed_worktree(
     cleanup_managed_worktree_with_guard(ownership, deadline, timeout, &mut || Ok(()))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn cleanup_managed_worktree_with_guard(
     ownership: &ManagedWorktreeReceipt,
     deadline: Instant,
@@ -5837,6 +5847,7 @@ fn prepare_owned_ref_claim(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn claim_owned_ref_after_inspection(
     claim: &mut OwnedRefClaim,
     existing: &Output,
@@ -6428,6 +6439,7 @@ fn stage_reserved_branch_publication(
     stage_reserved_branch_publication_with_hook(reservation, || {})
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn stage_reserved_branch_publication_with_hook(
     reservation: &mut ManagedWorktreeReservation,
     before_present_cas: impl FnOnce(),
@@ -7710,6 +7722,7 @@ mod tests {
         command
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn run_restart_crash_fixture() -> bool {
         if std::env::var(RESTART_CRASH_ROLE).as_deref() != Ok("holder") {
             return false;

@@ -997,6 +997,7 @@ impl ToolExecutor {
             && !self.auto_approve
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn execute_inner(
         &mut self,
         call: ToolCall,
@@ -2084,6 +2085,7 @@ impl ToolExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn record(
         &self,
         call: &ToolCall,

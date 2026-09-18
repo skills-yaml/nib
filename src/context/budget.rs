@@ -382,6 +382,7 @@ fn render_planning_session_context(session: &Session, max_tokens: usize) -> Stri
     truncate_to_chars(&content, max_tokens.saturating_mul(4))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn render_runtime_context(
     context: &RuntimeContextSections,
     current_step: Option<&str>,

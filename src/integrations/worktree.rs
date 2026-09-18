@@ -244,6 +244,7 @@ impl Drop for BlockingCreateCancellationGuard {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn create_session_worktree(
     repo_root: &Path,
     session_id: &str,

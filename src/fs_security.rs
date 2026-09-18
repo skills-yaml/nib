@@ -636,6 +636,7 @@ pub(crate) fn directory_removal_quarantine_exists(
     capability_metadata_if_present(&parent_directory, &quarantine).map(|entry| entry.is_some())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn remove_directory_tree_capability_bound_inner(
     parent: &Path,
     directory: &Path,

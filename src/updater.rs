@@ -2040,9 +2040,7 @@ mod tests {
             target,
             backup,
             |source, destination| {
-                if (source == staged && destination == target)
-                    || (source == backup && destination == target)
-                {
+                if (source == backup || source == staged) && destination == target {
                     Err(UpdateError::Filesystem("injected move failure".to_string()))
                 } else {
                     Ok(())

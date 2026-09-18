@@ -220,6 +220,7 @@ impl AnthropicClient {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
@@ -858,6 +859,7 @@ struct AnthropicStreamParser {
 }
 
 impl AnthropicStreamParser {
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn parse_event(
         &mut self,
         event_type: &str,

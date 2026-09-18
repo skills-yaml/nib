@@ -197,6 +197,7 @@ fn is_compression_request(messages: &[crate::llm::types::LlmMessage]) -> bool {
         .any(|message| message.content.contains("context compression engine"))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for MockLlmClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
@@ -716,6 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn invalid_mock_results_and_continuations_fail_before_a_second_step() {
         let capabilities = crate::llm::registry::provider_descriptor("mock")
             .expect("Mock descriptor")

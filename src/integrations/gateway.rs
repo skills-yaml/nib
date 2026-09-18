@@ -861,6 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn typed_provider_failure_is_safe_and_does_not_poison_the_gateway_session() {
         const SECRET: &str = "gateway/secret+token";
         const SECRET_PERCENT: &str = "gateway%2Fsecret%2Btoken";

@@ -77,7 +77,7 @@ fn forced_tui_rejects_redirected_streams_before_session_mutation() {
             "args={args:?}: {stderr}"
         );
         assert!(stderr.contains("use --plain instead"), "{stderr}");
-        if args == &["tui"] {
+        if args == ["tui"] {
             assert!(stderr.contains("compatibility alias"), "{stderr}");
         }
         assert_eq!(session_count(project.path()), 0, "args={args:?}");
