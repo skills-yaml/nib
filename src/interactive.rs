@@ -13,7 +13,7 @@ use crate::{mcp_cmd, skill_cmd};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
@@ -1555,7 +1555,7 @@ pub enum ActivityKind {
     System,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ActivityEntry {
     pub kind: ActivityKind,
     pub title: String,
@@ -1564,7 +1564,21 @@ pub struct ActivityEntry {
     /// Runtime-only correlation for a live tool block. It is deliberately kept
     /// out of the rendered text and persisted session projection.
     pub tool_invocation_id: Option<ToolInvocationId>,
+    /// Runtime-only start time for an open thought block. Ignored in equality.
+    pub live_since: Option<Instant>,
 }
+
+impl PartialEq for ActivityEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.title == other.title
+            && self.body == other.body
+            && self.folded == other.folded
+            && self.tool_invocation_id == other.tool_invocation_id
+    }
+}
+
+impl Eq for ActivityEntry {}
 
 impl ActivityKind {
     pub fn role_label(self) -> &'static str {
@@ -1593,6 +1607,7 @@ impl ActivityEntry {
             body: body.into(),
             folded: false,
             tool_invocation_id: None,
+            live_since: None,
         }
     }
 
@@ -1642,16 +1657,8 @@ impl ActivityEntry {
     }
 
     fn thought_display_text(&self) -> String {
-        let fold = if self.folded && !self.body.is_empty() {
-            "› "
-        } else {
-            ""
-        };
-        let header = if self.title.is_empty() {
-            format!("{fold}thought")
-        } else {
-            format!("{fold}thought  {}", self.title)
-        };
+        let marker = if self.folded { "▸ " } else { "▾ " };
+        let header = format!("{marker}{}", thought_heading(self));
         if self.folded || self.body.is_empty() {
             return header;
         }
@@ -1735,21 +1742,87 @@ fn is_thought_state(state: &str) -> bool {
     matches!(state, "planning" | "inspect_llm" | "build_context")
 }
 
-fn upsert_thought_activity(activities: &mut Vec<ActivityEntry>, state: &str) {
-    let title = state.replace('_', " ");
-    if let Some(existing) = activities
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.kind == ActivityKind::Thinking)
+pub(crate) fn is_legacy_thought_title(title: &str) -> bool {
+    matches!(
+        title,
+        "planning" | "inspect llm" | "build context" | "inspect_llm" | "build_context"
+    )
+}
+
+pub(crate) fn compact_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let remain = secs % 60;
+    if hours > 0 {
+        format!("{hours}h{mins:02}m")
+    } else if mins > 0 {
+        format!("{mins}m{remain:02}s")
+    } else {
+        format!("{remain}s")
+    }
+}
+
+pub(crate) fn meter_token_label(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().strip_prefix("tok ").unwrap_or(raw).trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub(crate) fn thought_header_title(elapsed: Duration, token_label: Option<&str>) -> String {
+    let time = compact_elapsed(elapsed);
+    match token_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "-")
     {
-        existing.title = title;
+        Some(tokens) => format!("Thought for {time}, {tokens} tokens"),
+        None => format!("Thought for {time}"),
+    }
+}
+
+fn thought_heading(entry: &ActivityEntry) -> String {
+    if entry.title.starts_with("Thought") {
+        entry.title.clone()
+    } else if entry.title.is_empty() || is_legacy_thought_title(&entry.title) {
+        "Thought".to_string()
+    } else {
+        entry.title.clone()
+    }
+}
+
+fn freeze_open_thought(activities: &mut [ActivityEntry]) {
+    let Some(entry) = activities.last_mut() else {
+        return;
+    };
+    if entry.kind != ActivityKind::Thinking {
         return;
     }
-    activities.push(ActivityEntry::new(
-        ActivityKind::Thinking,
-        title,
-        String::new(),
-    ));
+    if let Some(started) = entry.live_since.take() {
+        entry.title = thought_header_title(started.elapsed(), None);
+    } else if !entry.title.starts_with("Thought") {
+        entry.title = "Thought".to_string();
+    }
+    entry.folded = true;
+}
+
+fn upsert_thought_activity(activities: &mut Vec<ActivityEntry>, _state: &str) {
+    if activities
+        .last()
+        .is_some_and(|entry| entry.kind == ActivityKind::Thinking)
+    {
+        return;
+    }
+    activities.push(ActivityEntry {
+        kind: ActivityKind::Thinking,
+        title: "Thought".to_string(),
+        body: String::new(),
+        folded: true,
+        tool_invocation_id: None,
+        live_since: Some(Instant::now()),
+    });
 }
 
 pub fn classify_composer_submit(worker_active: bool) -> ComposerSubmitKind {
@@ -2610,6 +2683,7 @@ pub fn apply_stream_event(
                     return;
                 }
             }
+            freeze_open_thought(activities);
             activities.push(ActivityEntry::new(
                 ActivityKind::Assistant,
                 "live",
@@ -2622,12 +2696,14 @@ pub fn apply_stream_event(
             arguments,
             ..
         } if !name.is_empty() => {
+            freeze_open_thought(activities);
             let hint = tool_argument_summary(&name, arguments.as_deref());
             let detail = tool_argument_detail(&name, arguments.as_deref());
             upsert_tool_activity(activities, invocation_id, &name, "requested", detail, &hint)
         }
         StreamEvent::ToolCallChunk { .. } => {}
         StreamEvent::PlanGenerated { step_count, steps } => {
+            freeze_open_thought(activities);
             let mut activity = ActivityEntry::new(
                 ActivityKind::Plan,
                 todo_plan_title(step_count, false),
@@ -2660,6 +2736,7 @@ pub fn apply_stream_event(
             invocation_id,
             tool_name,
         } => {
+            freeze_open_thought(activities);
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
             upsert_tool_activity(
                 activities,
@@ -2681,7 +2758,6 @@ pub fn apply_stream_event(
                 }
                 last.body.push_str(chunk.trim_end_matches(['\r', '\n']));
                 last.body = bounded_activity_body(&last.body, sensitive_values);
-                last.folded = false;
             }
         }
         StreamEvent::ToolCompleted {
@@ -2961,17 +3037,17 @@ fn upsert_tool_activity(
         if !body.is_empty() {
             existing.body = merge_tool_body(&existing.body, &body);
         }
-        existing.folded = !matches!(phase, "requested" | "running") && !existing.body.is_empty();
+        existing.folded = matches!(phase, "requested" | "running") || !existing.body.is_empty();
         return;
     }
-    activities.push(
-        ActivityEntry::new(
-            ActivityKind::Tool,
-            compose_tool_title(tool_name, phase, arg_hint, ""),
-            body,
-        )
-        .for_tool_invocation(invocation_id),
-    );
+    let mut entry = ActivityEntry::new(
+        ActivityKind::Tool,
+        compose_tool_title(tool_name, phase, arg_hint, ""),
+        body,
+    )
+    .for_tool_invocation(invocation_id);
+    entry.folded = matches!(phase, "requested" | "running") || !entry.body.is_empty();
+    activities.push(entry);
 }
 
 pub fn summarize_tool_result(
@@ -7279,8 +7355,8 @@ mod tests {
             activities[0].body
         );
         assert!(
-            !activities[0].folded,
-            "running command stays expanded so the command is visible"
+            activities[0].folded,
+            "running command stays folded; the TUI nests a spinner and keeps the command in the body"
         );
         apply_stream_event(
             &mut activities,
@@ -7339,8 +7415,10 @@ mod tests {
         assert_eq!(speech.display_text(), "nib\n  Here is the answer");
         let user = ActivityEntry::new(ActivityKind::User, "", "inspect wrap");
         assert_eq!(user.display_text(), "you\n  inspect wrap");
-        let thought = ActivityEntry::new(ActivityKind::Thinking, "planning", "next files");
-        assert_eq!(thought.display_text(), "thought  planning\n┊ next files");
+        let thought = ActivityEntry::new(ActivityKind::Thinking, "planning", "next files").folded();
+        assert_eq!(thought.display_text(), "▸ Thought");
+        let expanded = ActivityEntry::new(ActivityKind::Thinking, "Thought for 14s", "next files");
+        assert_eq!(expanded.display_text(), "▾ Thought for 14s\n┊ next files");
         let plan = ActivityEntry::new(
             ActivityKind::Plan,
             "Working on 1 to-do",
@@ -7425,8 +7503,9 @@ mod tests {
         assert_eq!(state.as_deref(), Some("planning"));
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].kind, ActivityKind::Thinking);
-        assert_eq!(live[0].title, "planning");
-        assert!(live[0].display_text().starts_with("thought"));
+        assert_eq!(live[0].title, "Thought");
+        assert!(live[0].folded);
+        assert!(live[0].display_text().starts_with("▸ Thought"));
         apply_stream_event(
             &mut live,
             StreamEvent::PlanGenerated {
@@ -7472,6 +7551,11 @@ mod tests {
             &[],
         );
         assert_eq!(live[0].kind, ActivityKind::Thinking);
+        assert!(
+            live[0].title.starts_with("Thought for "),
+            "{}",
+            live[0].title
+        );
         assert_eq!(live[1].kind, ActivityKind::Plan);
         assert_eq!(live[2].kind, ActivityKind::Assistant);
         assert_eq!(live[3].kind, ActivityKind::Tool);

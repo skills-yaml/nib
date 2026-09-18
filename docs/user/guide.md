@@ -614,17 +614,20 @@ numbers and requires explicit confirmation before submitting the selection.
 The transcript uses Grok-style structure instead of role labels. User and
 assistant speech are markdown with a muted colored `●` on the first line (dusty
 teal vs sage). There is no `you`, `nib`, or `system` tag on each block. Tool
-calls show the tool name, phase, and path or command (`● read_file running ·
-src/lib.rs`). `run_terminal` shows the command (and directory) in the title and
-the full command in the expanded body while it runs. Expanded results use a slate `·`. Thinking is stone italic
-(`planning`) without a `thought` label. Speech follows Codex communication
+calls show the tool name and path or command (`● read_file  src/lib.rs`) without
+`running` or `ok` on the quiet row. Failed tools still include `failed`. A running
+`run_terminal` nests a spinner line (`Running command…`); the full command stays
+in the expanded body. Expanded results use a slate `·`. Thinking is a folded
+chevron header (`▸ Thought for 14s`, plus `, N tokens` when the waiting meter
+has a count) without a `thought` label. Left/Right expands it. Speech follows Codex communication
 style: a short preamble before tools that says what it is about to do and why,
 then a concise final answer. Speech renders markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring.
 `Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
 composer and the transcript. Click in the chat to focus it; drag to select text.
-Releasing the drag copies the selection. `Esc` or `Enter` clears it and returns
-to the composer; a click in the prompt or typing does the same. `Ctrl+A` selects
+Releasing the drag copies the selection and clears the highlight. `Esc` or
+`Enter` also clears a leftover selection and returns to the composer; a click
+in the prompt or typing does the same. `Ctrl+A` selects
 the whole chat. `Ctrl+C` copies while text is selected (it still cancels a run
 or quits when nothing is selected). `Ctrl+Y` or `Ctrl+Shift+C` copy the
 selection, the selected block, or the last reply. Printable keys return to the

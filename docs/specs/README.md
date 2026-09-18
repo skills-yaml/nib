@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **51 done, 1 development, and 2 backlog**.
+The current lifecycle is **51 done, 2 development, and 2 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -44,7 +44,9 @@ interaction on hosted macOS, with deterministic regression and native local evid
 T038 and T039 complete the block transcript, safe key contract, visible tool lifecycle,
 under-composer decisions, compact chrome, markdown speech, and startup workspace
 consent. Live tool blocks use exact invocation identity, so repeated same-name calls
-remain distinct through streaming and completion.
+remain distinct through streaming and completion. T045 restyles thought and tool
+rows into a scan list (`▸ Thought for Ns`, quiet `●` tool hints, nested running
+spinner) without changing T038 keys.
 FT-020 remains backlog for any future protected Windows/macOS production delegation
 authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
 bwrap containment; native non-Linux mechanism tests are complete and production use
@@ -96,6 +98,7 @@ work or narrower guarantees.
 - [T041: Task-Aware Context and Verified Completion](done/T041_task_aware_context_and_verified_completion.md)
 - [T042: Context Budgeting and Live Visibility](backlog/T042_context_budgeting_and_live_visibility.md)
 - [T044: Strict Clippy Quality Gate](done/T044_strict_clippy_quality_gate.md)
+- [T045: Codex-Style Thought and Tool Rows](development/T045_codex_style_thought_and_tool_rows.md)
 
 ### Feature specs
 
