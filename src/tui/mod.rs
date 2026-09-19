@@ -3159,13 +3159,19 @@ fn transcript_hit(view: &TranscriptView, mouse: MouseEvent) -> Option<(usize, us
     Some((row, col))
 }
 
-fn restore_terminal_to(output: &mut impl io::Write, raw_result: io::Result<()>) -> io::Result<()> {
+fn restore_terminal_to(
+    output: &mut impl io::Write,
+    restore_raw_mode: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     // Attempt all restorations even if an earlier one fails. In particular,
     // mouse capture and bracketed paste must not remain enabled on a raw-mode
     // or alternate-screen error.
     let mouse_result = execute!(output, DisableMouseCapture);
     let paste_result = execute!(output, DisableBracketedPaste);
     let alternate_result = execute!(output, LeaveAlternateScreen);
+    // Windows mouse cleanup restores the input mode it saved after raw mode
+    // was enabled. Disable raw mode last so that snapshot cannot re-enable it.
+    let raw_result = restore_raw_mode();
     let mut errors = Vec::new();
     if let Err(error) = raw_result {
         errors.push(format!("failed to disable raw mode: {error}"));
@@ -3187,7 +3193,7 @@ fn restore_terminal_to(output: &mut impl io::Write, raw_result: io::Result<()>) 
 }
 
 fn restore_terminal() -> io::Result<()> {
-    restore_terminal_to(&mut io::stdout(), disable_raw_mode())
+    restore_terminal_to(&mut io::stdout(), disable_raw_mode)
 }
 
 type RestoreTerminalFn = fn() -> io::Result<()>;
@@ -9729,7 +9735,7 @@ mod tests {
         #[cfg(not(windows))]
         let restored = {
             let mut restored = Vec::new();
-            restore_terminal_to(&mut restored, Ok(())).expect("restore sequences");
+            restore_terminal_to(&mut restored, || Ok(())).expect("restore sequences");
             String::from_utf8(restored).expect("terminal control UTF-8")
         };
         #[cfg(windows)]
@@ -9765,6 +9771,71 @@ mod tests {
             guard.restore().expect("explicit restoration");
         }
         assert_eq!(TEST_TERMINAL_RESTORE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn raw_mode_restoration_runs_last_even_after_an_output_failure() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        struct Output {
+            bytes: Rc<RefCell<Vec<u8>>>,
+            fail_first_flush: bool,
+            flushes: usize,
+        }
+
+        impl io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                if self.fail_first_flush && self.flushes == 1 {
+                    Err(io::Error::other("mouse output failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        for fail in [false, true] {
+            let bytes = Rc::new(RefCell::new(Vec::new()));
+            let mut output = Output {
+                bytes: Rc::clone(&bytes),
+                fail_first_flush: fail,
+                flushes: 0,
+            };
+            let raw_called = Cell::new(false);
+            let result = restore_terminal_to(&mut output, || {
+                let captured = String::from_utf8(bytes.borrow().clone()).expect("ANSI output");
+                for sequence in ["\x1b[?1000l", "\x1b[?2004l", "\x1b[?1049l"] {
+                    assert!(
+                        captured.contains(sequence),
+                        "raw cleanup ran before {sequence:?}"
+                    );
+                }
+                raw_called.set(true);
+                if fail {
+                    Err(io::Error::other("raw cleanup failed"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(raw_called.get());
+            assert_eq!(output.flushes, 3);
+            if fail {
+                let error = result
+                    .expect_err("retain both cleanup failures")
+                    .to_string();
+                assert!(error.contains("mouse output failed"));
+                assert!(error.contains("raw cleanup failed"));
+            } else {
+                result.expect("successful restoration");
+            }
+        }
     }
 
     #[test]

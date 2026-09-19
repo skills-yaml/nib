@@ -167,7 +167,12 @@ try {
         if ($modeParts.Count -ne 3 -or
             $modeParts[0] -ne "1" -or
             $modeParts[1] -ne $modeParts[2]) {
-            throw "Windows headless console child did not restore its console modes"
+            if ($modeParts.Count -eq 3 -and
+                $modeParts[1] -match '^[01A-Fa-f0-9-]{27}$' -and
+                $modeParts[2] -match '^[01A-Fa-f0-9-]{27}$') {
+                throw "Windows headless console child did not restore its console modes: before=$($modeParts[1]) after=$($modeParts[2])"
+            }
+            throw "Windows headless console child returned invalid console-mode evidence"
         }
         $consoleModesBefore = $modeParts[1]
         $consoleModesAfter = $modeParts[2]

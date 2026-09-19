@@ -20,6 +20,8 @@ worktree cleanup and bounded, prompt-synchronized Windows terminal input. Preser
 bounded instruction discovery, link rejection,
 auditable workload reconciliation, explicit workspace consent, terminal restoration,
 and credential-free native qualification.
+Restore Windows mouse capture before disabling raw mode so mouse cleanup cannot
+reapply the raw input mode it saved during TUI initialization.
 
 Affected areas: `src/context/`, `src/tools/delegation.rs`, `src/agent/loop.rs` test
 fixtures, `src/tui/`, interactive
@@ -34,7 +36,9 @@ No persistence schema changes, release publication changes, or new frameworks.
 3. Diagnose the legacy-audit reconciliation deadline failure and fix the demonstrated
    cause while retaining bounded locking and exactly-once audit adoption.
 4. Separate pure terminal-sequence assertions from native console operations where
-   necessary, retaining native Windows restoration verification.
+   necessary, retaining native Windows restoration verification. Defer raw-mode
+   restoration until mouse, paste, and alternate-screen cleanup have all been
+   attempted; preserve error aggregation and restore-guard behavior.
 5. Update native smoke input and assertions for current consent and interaction
    behavior. Preserve exact child status, bounded waits, persisted-state assertions,
    privacy checks, and terminal mode restoration.
@@ -63,6 +67,8 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 - [ ] Native Windows merge verification preserves results and removes the owned
       worktree after test observers release child-session handles.
 - [ ] Terminal restoration tests work without assuming a Windows console in unit tests.
+- [ ] Raw-mode cleanup runs after mouse restoration even when another restoration
+      step fails, and native before/after console mode checks remain exact.
 - [ ] Windows terminal input waits for actual consent and quit prompts within the
       original deadline; missing prompts fail boundedly without sending input.
 - [ ] Steering tool-readiness fixtures allow bounded hosted filesystem startup and
@@ -144,6 +150,12 @@ verification alone cannot close native acceptance.
   key events can be coalesced, while Crossterm's Windows parser ignores repeat count;
   separate quit writes around the visible confirmation prompt. The captured timeout
   alone does not establish which input hazard occurred on that runner.
+- Once prompt synchronization let the Windows child exit, its mode check exposed
+  a production restoration-order defect: `disable_raw_mode()` ran eagerly before
+  `DisableMouseCapture`. Crossterm's Windows mouse cleanup restores the input mode
+  captured after raw mode was enabled, thereby re-enabling raw input. Defer raw
+  cleanup until the other restoration steps finish. Keep exact native comparisons
+  and add nonsecret before/after mode tokens to diagnostics for remaining failures.
 
 ## Validation evidence (2026-09-19)
 
@@ -184,8 +196,9 @@ verification alone cannot close native acceptance.
 
 The checked local smoke criterion is supported by Linux execution. The updated
 Windows smoke, Windows-only alias/junction regressions, and Windows console-free
-encoding branch still require native CI. No production permission, terminal
-restoration, persistence schema, or delegation timeout behavior was changed.
+encoding branch still require native CI. No production permission policy,
+persistence schema, or delegation timeout behavior was changed.
+Production terminal restoration now disables raw input after Windows mouse cleanup.
 
 ## Incremental terminal prompt follow-up (2026-09-19)
 
