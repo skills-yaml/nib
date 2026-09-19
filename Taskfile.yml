@@ -92,6 +92,14 @@ tasks:
     cmds:
       - >-
         cargo test --lib
+        tools::delegation::tests::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
         daemons::state::tests::optional_read_write_
         -- --test-threads=1
       - >-
@@ -173,6 +181,11 @@ tasks:
     platforms: [windows]
     cmds:
       - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1
+
+  test:windows-pseudoterminal-output:
+    desc: Verify portable prompt synchronization and Windows adapter syntax
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal-output.ps1
 
   test:installers:
     desc: Run installer and release-transaction integration tests

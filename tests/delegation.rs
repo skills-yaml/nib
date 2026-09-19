@@ -717,11 +717,14 @@ async fn subagent_merge_requires_successful_verification_and_preserves_result() 
         .join(".nib/profiles/default/sessions/child.json")
         .is_file());
     assert!(!worktree.path.join(".nib/sessions").exists());
-    let child_store = SessionStore::for_project(&worktree.path).expect("child session store");
-    let child = child_store.load("child").expect("child session");
-    assert_eq!(child.messages[0].role, "user");
-    assert_eq!(child.message_origin(0), MessageOrigin::ToolOutput);
-    assert!(child.human_intent.is_empty());
+    {
+        // Release the child identity file before Windows quarantines the worktree.
+        let child_store = SessionStore::for_project(&worktree.path).expect("child session store");
+        let child = child_store.load("child").expect("child session");
+        assert_eq!(child.messages[0].role, "user");
+        assert_eq!(child.message_origin(0), MessageOrigin::ToolOutput);
+        assert!(child.human_intent.is_empty());
+    }
 
     let failed = execute_merge(&mut executor, root.path(), "parent", "sub-test", "false").await;
     assert!(!failed.success, "verification must gate merge");

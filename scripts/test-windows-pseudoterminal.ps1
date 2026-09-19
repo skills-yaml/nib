@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 
+& (Join-Path $PSScriptRoot "test-windows-pseudoterminal-output.ps1")
 . (Join-Path $PSScriptRoot "invoke-windows-pseudoterminal.ps1")
 
 $pwshPath = (Get-Process -Id $PID).Path
@@ -37,6 +38,58 @@ if ($inputResult.ExitCode -ne 0 -or
     -not $inputResult.ConsoleModesRestored -or
     -not $inputResult.ChildConsoleModesRestored) {
     throw "Windows pseudoterminal did not preserve bounded delayed input"
+}
+
+$promptProbe = @'
+Start-Sleep -Milliseconds 750
+[Console]::WriteLine("NIB_PROMPT_FIRST")
+$first = [Console]::ReadKey($true)
+if ($first.KeyChar -ne "q") { exit 45 }
+[Console]::WriteLine("NIB_PROMPT_SECOND")
+$second = [Console]::ReadKey($true)
+if ($second.KeyChar -ne "q") { exit 46 }
+[Console]::WriteLine("NIB_PROMPT_INPUT_COMPLETE")
+'@
+$promptResult = Invoke-WindowsPseudoTerminal `
+    -Executable $pwshPath `
+    -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $promptProbe) `
+    -InputChunks @(
+        [pscustomobject]@{ Text = "q"; WaitForOutput = "NIB_PROMPT_FIRST" },
+        [pscustomobject]@{ Text = "q"; WaitForOutput = "NIB_PROMPT_SECOND" }
+    ) `
+    -TimeoutMilliseconds 30000
+if ($promptResult.ExitCode -ne 0 -or
+    -not $promptResult.Output.Contains("NIB_PROMPT_INPUT_COMPLETE") -or
+    -not $promptResult.ConsoleModesRestored -or
+    -not $promptResult.ChildConsoleModesRestored) {
+    throw "Windows pseudoterminal did not preserve prompt-synchronized repeated input"
+}
+
+$missingPromptProbe = @'
+[Console]::WriteLine("NIB_MISSING_PROMPT_PROBE_READY")
+$line = [Console]::ReadLine()
+exit 47
+'@
+$missingPromptClock = [Diagnostics.Stopwatch]::StartNew()
+$missingPromptError = $null
+try {
+    Invoke-WindowsPseudoTerminal `
+        -Executable $pwshPath `
+        -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $missingPromptProbe) `
+        -InputChunks @(
+            [pscustomobject]@{ Text = ""; WaitForOutput = "NIB_MISSING_PROMPT_PROBE_READY" },
+            [pscustomobject]@{ Text = "must-not-send`r`n"; WaitForOutput = "NIB_ABSENT_PROMPT" }
+        ) `
+        -TimeoutMilliseconds 10000 `
+        -HostGraceMilliseconds 5000 | Out-Null
+} catch { $missingPromptError = $_.Exception }
+if ($null -eq $missingPromptError -or
+    $missingPromptError.Message -ne "Windows pseudoterminal host exceeded its bounded timeout" -or
+    -not ([string]$missingPromptError.Data["NibHostDiagnostics"]).Contains(
+        "Timed out waiting for Windows pseudoterminal prompt: NIB_ABSENT_PROMPT"
+    ) -or
+    $missingPromptClock.ElapsedMilliseconds -ge 25000) {
+    throw "Missing Windows pseudoterminal prompt did not fail within its bound with diagnostics"
 }
 
 $exitProbe = @'

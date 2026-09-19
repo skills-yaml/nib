@@ -258,10 +258,17 @@ terminal_restored_marker='__NIB_TERMINAL_RESTORED__'
 child_status_marker='__NIB_INTERACTIVE_CHILD_STATUS__'
 
 quit_tui_input() {
-  sleep 0.8
-  printf '\021'
+  wait_for_pty_output "$fixture/$current_case.txt" "$bracketed_paste_enable"
   sleep 0.2
-  printf '\021'
+  # Confirm quit in one write; a second delayed write can race terminal shutdown.
+  printf '\021\021'
+}
+
+consent_tui_input() {
+  wait_for_pty_output "$fixture/$current_case.txt" 'Work in this directory'
+  printf 'y'
+  wait_for_pty_output "$fixture/.nib/config.toml" 'allowed = true'
+  printf '\021\021'
 }
 
 quit_plain_input() {
@@ -281,6 +288,24 @@ wait_for_pty_output() {
     sleep 0.1
   done
   printf 'PTY output did not reach the expected prompt: %s\n' "$expected" >&2
+  return 1
+}
+
+wait_for_goal_session() {
+  local goal=$1
+  local attempts=0
+  local candidate
+  while [ "$attempts" -lt 100 ]; do
+    for candidate in "$session_directory"/*.json; do
+      if [ -f "$candidate" ] && grep -Fq "\"content\": \"$goal\"" "$candidate" 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'PTY goal did not persist a session: %s\n' "$goal" >&2
   return 1
 }
 
@@ -331,7 +356,9 @@ run_tui_case() {
   grep -Fq "$bracketed_paste_disable" "$fixture/$label.txt"
 }
 
-run_tui_case automatic quit_tui_input ''
+run_tui_case automatic consent_tui_input ''
+grep -Fq 'Work in this directory' "$fixture/automatic.txt"
+grep -Fq 'allowed = true' "$fixture/.nib/config.toml"
 run_tui_case compatibility quit_tui_input 'tui'
 grep -Fq 'compatibility alias' "$fixture/compatibility.txt"
 
@@ -347,10 +374,13 @@ fi
 
 # Keep the project dirty so /review and /diff have an authoritative, harmless target.
 printf 'interactive review smoke change\n' >>"$fixture/README.md"
+# Plans now print and continue. Request approval for a harmless action explicitly
+# so approval, rejection, and cancellation still exercise a real pending gate.
+printf '%s\n' '- nib-policy: require-approval list_directory' >"$fixture/AGENTS.md"
 
 plain_semantics_input() {
   printf '%s\n' 'inspect @README.md'
-  sleep 0.8
+  wait_for_pty_output "$fixture/plain-semantics.txt" 'Approve? [y/N]: '
   printf '%s\n' 'n' ''
   sleep 0.8
   printf '%s\n' \
@@ -379,8 +409,6 @@ grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
 
 plain_question_input() {
   local question_output="$fixture/plain-question.txt"
-  wait_for_pty_output "$question_output" 'Approve? [y/N]: '
-  printf 'y\n\n'
   wait_for_pty_output "$question_output" 'Answer (number or text):'
   printf '2\n\n'
   wait_for_pty_output "$question_output" 'You> '
@@ -392,8 +420,6 @@ run_pty_case \
   plain_question_input \
   'TERM=xterm-256color NO_COLOR=1' \
   "--plain --run 'ask a question before continuing'"
-grep -Fq 'Approval required' "$fixture/plain-question.txt"
-grep -Fq 'Action: approve_plan' "$fixture/plain-question.txt"
 grep -Fq 'Answer (number or text):' "$fixture/plain-question.txt"
 grep -Fq '"answer":"full"' "$fixture/plain-question.txt"
 grep -Fq 'Goodbye. Session saved' "$fixture/plain-question.txt"
@@ -401,12 +427,13 @@ grep -Fq 'Goodbye. Session saved' "$fixture/plain-question.txt"
 # A real terminal must remain usable after a typed provider failure. Mock exposes this
 # credential-free fault only under NIB_ENABLE_INTERACTIVE_SMOKE and this exact goal.
 plain_failure_recovery_input() {
+  local output="$fixture/plain-provider-failure-recovery.txt"
   printf '%s\n' 'interactive provider failure smoke'
-  sleep 0.8
+  wait_for_pty_output "$output" 'LLM request failed [LLM-AUTH]'
   printf '%s\n' 'list workspace after provider recovery'
-  sleep 0.8
+  wait_for_pty_output "$output" 'Approve? [y/N]: '
   printf 'y\n\n'
-  sleep 1.8
+  wait_for_pty_output "$output" '[stream ended] completed'
   printf '/status\n/quit\n'
 }
 
@@ -422,6 +449,8 @@ fi
 grep -Fq 'Provider: mock (mock), model: mock-model' "$fixture/plain-provider-failure-recovery.txt"
 grep -Fq 'HTTP: 401; retry: not attempted' "$fixture/plain-provider-failure-recovery.txt"
 grep -Fq 'Final answer: task complete. (mock LLM response)' "$fixture/plain-provider-failure-recovery.txt"
+grep -Fq 'Approval required' "$fixture/plain-provider-failure-recovery.txt"
+grep -Fq 'Action: list_directory' "$fixture/plain-provider-failure-recovery.txt"
 failure_recovery_session_list="$fixture/failure-recovery-sessions.txt"
 grep -F -l 'interactive provider failure smoke' "$session_directory"/*.json \
   >"$failure_recovery_session_list"
@@ -439,27 +468,45 @@ if grep -Fq 'LLM request failed' "$failure_recovery_session"; then
   exit 1
 fi
 
-tui_docks_input() {
-  sleep 1.8
+tui_approval_input() {
+  local output="$fixture/tui-approval-dock.txt"
+  # The title can reuse cells from the previous frame; the fresh choice row
+  # supplies a complete prompt in the terminal's incremental output.
+  wait_for_pty_output "$output" 'Approve once (y)'
   printf 'y'
-  sleep 1.8
-  printf '\033[B\r'
-  sleep 1.8
-  printf '\021'
-  sleep 0.2
-  printf '\021'
+  local session
+  session="$(wait_for_goal_session 'list workspace for approval smoke')"
+  wait_for_pty_output "$session" '"source": "user"'
+  wait_for_pty_output "$session" '"outcome": "completed"'
+  printf '\021\021'
 }
 
 run_tui_case \
-  tui-approval-question-docks \
-  tui_docks_input \
-  "--tui --run 'ask a question before continuing'" \
+  tui-approval-dock \
+  tui_approval_input \
+  "--tui --run 'list workspace for approval smoke'" \
   no \
   'TERM=xterm-256color NO_COLOR=1'
-grep -Fq 'ask a question before continuing' "$fixture/tui-approval-question-docks.txt"
-grep -Fq 'approval  Action: approve_plan' "$fixture/tui-approval-question-docks.txt"
-grep -Fq 'Which verification mode?' "$fixture/tui-approval-question-docks.txt"
-grep -Fq 'question  Which verification mode?' "$fixture/tui-approval-question-docks.txt"
+grep -Fq 'Approve once (y)' "$fixture/tui-approval-dock.txt"
+
+tui_question_input() {
+  local output="$fixture/tui-question-dock.txt"
+  wait_for_pty_output "$output" 'Which verification mode?'
+  printf '\033[B\r'
+  local session
+  session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')"
+  wait_for_pty_output "$session" '"answer": "full"'
+  wait_for_pty_output "$session" '"outcome": "completed"'
+  printf '\021\021'
+}
+
+run_tui_case \
+  tui-question-dock \
+  tui_question_input \
+  "--tui --run 'ask a question before continuing in TUI smoke'" \
+  no \
+  'TERM=xterm-256color NO_COLOR=1'
+grep -Fq 'Which verification mode?' "$fixture/tui-question-dock.txt"
 
 wait_for_composer_session() {
   local attempts=0
@@ -540,9 +587,7 @@ tui_composer_input() {
     '"content": "edit line\nunicode 🙂X\nrestored history smoke"'
   printf '\003'
   wait_for_composer_terminal "$composer_session" 3
-  printf '\021'
-  sleep 0.2
-  printf '\021'
+  printf '\021\021'
 }
 
 run_tui_case tui-composer-scroll-history tui_composer_input '--tui' yes
@@ -554,7 +599,7 @@ composer_words="$fixture/tui-composer-scroll-history.words"
 sed "s/${terminal_escape}\\[[0-9;?]*[ -/]*[@-~]/ /g" \
   "$fixture/tui-composer-scroll-history.txt" | tr -s '[:space:]' ' ' >"$composer_words"
 grep -Fq 'Tab insert' "$composer_words"
-grep -Fq 'Enter send' "$composer_words"
+grep -Fq 'Enter run' "$composer_words"
 grep -Fq 'Ctrl+End follow' "$composer_words"
 grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
 grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
@@ -578,8 +623,8 @@ tui_queue_input() {
   while [ "$planning_attempts" -lt 100 ]; do
     for queue_candidate in "$session_directory"/*.json; do
       if [ -f "$queue_candidate" ] &&
-        grep -Fq '"content": "interactive queue smoke"' "$queue_candidate" &&
-        grep -Fq '"to": "planning"' "$queue_candidate"; then
+        grep -Fq '"content": "interactive queue smoke"' "$queue_candidate" 2>/dev/null &&
+        grep -Fq '"to": "planning"' "$queue_candidate" 2>/dev/null; then
         planning_ready=yes
         break
       fi
@@ -601,9 +646,7 @@ tui_queue_input() {
   sleep 2.5
   printf '\003'
   sleep 1.4
-  printf '\021'
-  sleep 0.2
-  printf '\021'
+  printf '\021\021'
 }
 
 run_tui_case tui-queue-steer-cancel tui_queue_input '--tui'

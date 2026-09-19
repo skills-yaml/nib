@@ -87,6 +87,14 @@ function Invoke-WindowsPseudoTerminal {
             [int]$chunk.DelayMilliseconds
         }
         $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($text)
+        $waitForOutput = if ($null -eq $chunk.PSObject.Properties["WaitForOutput"]) {
+            ""
+        } else {
+            [string]$chunk.WaitForOutput
+        }
+        if ([Text.Encoding]::UTF8.GetByteCount($waitForOutput) -gt 4096) {
+            throw "Windows pseudoterminal prompt exceeds 4096 bytes"
+        }
         if ($chunkBytes -gt 4096) {
             throw "Windows pseudoterminal input chunk exceeds 4096 bytes"
         }
@@ -104,6 +112,7 @@ function Invoke-WindowsPseudoTerminal {
         $normalizedChunks.Add([ordered]@{
             text = $text
             delay_ms = $delayMilliseconds
+            wait_for_output = $waitForOutput
         })
     }
 
@@ -153,8 +162,12 @@ function Invoke-WindowsPseudoTerminal {
                 throw "Unable to stop the timed-out Windows pseudoterminal host"
             }
             $stdoutTask.GetAwaiter().GetResult() | Out-Null
-            $stderrTask.GetAwaiter().GetResult() | Out-Null
-            throw "Windows pseudoterminal host exceeded its bounded timeout"
+            $hostDiagnostics = $stderrTask.GetAwaiter().GetResult()
+            $timeoutError = [TimeoutException]::new("Windows pseudoterminal host exceeded its bounded timeout")
+            $timeoutError.Data["NibHostDiagnostics"] = $hostDiagnostics.Substring(
+                0, [Math]::Min(8192, $hostDiagnostics.Length)
+            )
+            throw $timeoutError
         }
 
         $stdout = $stdoutTask.GetAwaiter().GetResult()

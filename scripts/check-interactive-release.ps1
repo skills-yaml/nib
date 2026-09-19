@@ -163,19 +163,29 @@ curator_enabled = false
     $env:TERM = "xterm-256color"
     $env:NO_COLOR = "1"
     $tuiCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --tui; exit `$LASTEXITCODE"
+    # Incremental redraw skips unchanged spaces, splitting complete status sentences.
+    # These fresh segments are unique to consent success and quit confirmation in
+    # this isolated startup, so each write still waits for its actual UI state.
     $tuiResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = [string][char]17; DelayMilliseconds = 1200 }
+            [pscustomobject]@{ Text = "y"; WaitForOutput = "Work in this directory" },
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Allowed work" },
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "again" }
         ) `
         -TimeoutMilliseconds 30000
     if ($tuiResult.ExitCode -ne 0 -or
         -not $tuiResult.ConsoleModesRestored -or
         -not $tuiResult.ChildConsoleModesRestored -or
+        -not $tuiResult.Output.Contains("Work in this directory") -or
         -not $tuiResult.Output.Contains("$([char]27)[?1049l") -or
         -not $tuiResult.Output.Contains("$([char]27)[?2004l")) {
         throw "Windows interactive smoke did not restore the capable TUI terminal"
+    }
+    $persistedConfig = Get-Content -LiteralPath (Join-Path $fixture ".nib\config.toml") -Raw
+    if (-not $persistedConfig.Contains("allowed = true")) {
+        throw "Windows interactive smoke did not persist explicit workspace consent"
     }
 
     $env:TERM = "dumb"
@@ -185,7 +195,7 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; DelayMilliseconds = 600 }
+            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; WaitForOutput = "You> " }
         ) `
         -TimeoutMilliseconds 30000
     if ($plainResult.ExitCode -ne 0 -or
@@ -240,6 +250,13 @@ curator_enabled = false
     }
 
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
+} catch {
+    $hostDiagnostics = [string]$_.Exception.Data["NibHostDiagnostics"]
+    if (-not [string]::IsNullOrWhiteSpace($hostDiagnostics)) {
+        # This fixture has one explicit secret sentinel; never print it in errors.
+        [Console]::Error.WriteLine($hostDiagnostics.Replace($privateSentinel, "[fixture-secret]"))
+    }
+    throw
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")
