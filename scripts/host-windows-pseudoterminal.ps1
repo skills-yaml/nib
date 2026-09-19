@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = "Stop"
 
 try {
+    . (Join-Path $PSScriptRoot "windows-pseudoterminal-output.ps1")
     $encodedRequest = $env:NIB_WINDOWS_PTY_REQUEST
     Remove-Item Env:NIB_WINDOWS_PTY_REQUEST -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace($encodedRequest)) {
@@ -29,7 +30,9 @@ try {
     foreach ($chunk in $inputChunks) {
         $chunkBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.text)
         $delayMilliseconds = [int]$chunk.delay_ms
+        $promptBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.wait_for_output)
         if ($chunkBytes -gt 4096 -or
+            $promptBytes -gt 4096 -or
             $delayMilliseconds -lt 0 -or
             $delayMilliseconds -gt 10000) {
             throw "Windows pseudoterminal input chunk is invalid"
@@ -93,13 +96,22 @@ try {
         }
         $started = $true
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stdoutCapture = [Nib.WindowsPseudoTerminal.OutputCapture]::new($process.StandardOutput)
+        $stdoutTask = $stdoutCapture.Completion
         $stderrTask = $process.StandardError.ReadToEndAsync()
         foreach ($chunk in $inputChunks) {
-            $delayMilliseconds = [int]$chunk.delay_ms
-            if ($delayMilliseconds -gt 0) {
-                Start-Sleep -Milliseconds $delayMilliseconds
+            if (-not [string]::IsNullOrEmpty([string]$chunk.wait_for_output)) {
+                Wait-NibWindowsPseudoTerminalOutput `
+                    -Capture $stdoutCapture `
+                    -Expected ([string]$chunk.wait_for_output) `
+                    -Stopwatch $stopwatch `
+                    -TimeoutMilliseconds $timeoutMilliseconds
             }
+            $delayMilliseconds = [int]$chunk.delay_ms
+            Wait-NibWindowsPseudoTerminalInputDelay `
+                -DelayMilliseconds $delayMilliseconds `
+                -Stopwatch $stopwatch `
+                -TimeoutMilliseconds $timeoutMilliseconds
             $remainingMilliseconds = $timeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds
             if ($remainingMilliseconds -lt 1) {
                 throw "The Windows pseudoterminal child exceeded its timeout"
@@ -128,7 +140,8 @@ try {
             throw "Timed out while draining Windows pseudoterminal output"
         }
 
-        $output = $stdoutTask.GetAwaiter().GetResult()
+        $stdoutTask.GetAwaiter().GetResult() | Out-Null
+        $output = $stdoutCapture.Text
         $hostError = $stderrTask.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) {
             throw "Windows headless console host failed: $($hostError.Trim())"

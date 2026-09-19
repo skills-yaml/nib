@@ -167,8 +167,9 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = "y"; DelayMilliseconds = 1200 },
-            [pscustomobject]@{ Text = ([string][char]17) * 2; DelayMilliseconds = 1200 }
+            [pscustomobject]@{ Text = "y"; WaitForOutput = "Work in this directory" },
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Allowed work in this directory." },
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Press Ctrl+Q again to quit." }
         ) `
         -TimeoutMilliseconds 30000
     if ($tuiResult.ExitCode -ne 0 -or
@@ -191,7 +192,7 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; DelayMilliseconds = 600 }
+            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; WaitForOutput = "You> " }
         ) `
         -TimeoutMilliseconds 30000
     if ($plainResult.ExitCode -ne 0 -or
@@ -246,6 +247,13 @@ curator_enabled = false
     }
 
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
+} catch {
+    $hostDiagnostics = [string]$_.Exception.Data["NibHostDiagnostics"]
+    if (-not [string]::IsNullOrWhiteSpace($hostDiagnostics)) {
+        # This fixture has one explicit secret sentinel; never print it in errors.
+        [Console]::Error.WriteLine($hostDiagnostics.Replace($privateSentinel, "[fixture-secret]"))
+    }
+    throw
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")

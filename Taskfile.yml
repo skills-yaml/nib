@@ -182,6 +182,11 @@ tasks:
     cmds:
       - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1
 
+  test:windows-pseudoterminal-output:
+    desc: Verify portable prompt synchronization and Windows adapter syntax
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal-output.ps1
+
   test:installers:
     desc: Run installer and release-transaction integration tests
     cmds:

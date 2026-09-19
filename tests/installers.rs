@@ -340,6 +340,10 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "allowed = true",
         "[?1049l",
         "[?2004l",
+        "WaitForOutput = \"Work in this directory\"",
+        "WaitForOutput = \"Press Ctrl+Q again to quit.\"",
+        "WaitForOutput = \"You> \"",
+        "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
     ] {
@@ -591,6 +595,10 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_invoke.contains("64 chunk limit"));
     assert!(windows_pty_invoke.contains("4096 bytes"));
     assert!(windows_pty_invoke.contains("32768 bytes"));
+    assert!(windows_pty_invoke.contains("WaitForOutput"));
+    assert!(windows_pty_invoke.contains("NibHostDiagnostics"));
+    assert!(windows_pty_host.contains("windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalOutput"));
     assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
     assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));
@@ -599,6 +607,9 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("Invoke-WindowsPseudoTerminal"));
     assert!(windows_pty_test.contains("-InputChunks"));
     assert!(windows_pty_test.contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input"));
+    assert!(windows_pty_test.contains("test-windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_test.contains("NIB_PROMPT_INPUT_COMPLETE"));
+    assert!(windows_pty_test.contains("NIB_ABSENT_PROMPT"));
     assert!(windows_pty_test.contains("ChildConsoleModesRestored"));
     assert!(windows_pty_test.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));

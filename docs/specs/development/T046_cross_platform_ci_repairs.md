@@ -2,8 +2,8 @@
 
 **Status:** Development
 
-Implementation and local verification are complete. Native Windows/macOS acceptance
-remains pending through the repair pull request before merge into development.
+Initial repairs are locally verified. Follow-up Windows terminal synchronization
+requires native acceptance through the repair pull request before merge into development.
 
 ## Problem
 
@@ -16,7 +16,8 @@ Artifacts succeeded independently, so its success does not prove CI acceptance.
 Repair the redundant context-test formatting, Windows instruction scope resolution,
 legacy reconciliation failure, terminal restoration test portability, and native
 interactive smoke regressions, including child-session fixture handles retained across
-worktree cleanup. Preserve bounded instruction discovery, link rejection,
+worktree cleanup and bounded, prompt-synchronized Windows terminal input. Preserve
+bounded instruction discovery, link rejection,
 auditable workload reconciliation, explicit workspace consent, terminal restoration,
 and credential-free native qualification.
 
@@ -36,6 +37,10 @@ No persistence schema changes, release publication changes, or new frameworks.
 5. Update native smoke input and assertions for current consent and interaction
    behavior. Preserve exact child status, bounded waits, persisted-state assertions,
    privacy checks, and terminal mode restoration.
+   Add optional output-prompt gates to the existing Windows input chunks, keeping
+   asynchronous output drains and the same absolute child timeout. Verify prompt
+   matching across output chunks and bounded missing-prompt failure before using
+   separate consent, quit-arm, and quit-confirmation writes in native smoke.
 6. Review spec compliance, then code quality; run local gates and record native
    platform limitations explicitly.
 
@@ -53,6 +58,8 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 - [ ] Native Windows merge verification preserves results and removes the owned
       worktree after test observers release child-session handles.
 - [ ] Terminal restoration tests work without assuming a Windows console in unit tests.
+- [ ] Windows terminal input waits for actual consent and quit prompts within the
+      original deadline; missing prompts fail boundedly without sending input.
 - [x] Offline interactive smokes exercise current consent and interaction behavior,
       validate successful child exit and exact terminal restoration, and remain bounded.
 - [x] `task verify`, documentation checks, relevant focused checks, runtime coverage,
@@ -63,7 +70,9 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 
 Use `task check`, `task test:agent-context`, `task test:interactive`, relevant
 delegation regression tasks, `task verify`, `task docs:check`, `task coverage`, and
-`task smoke:interactive`. Cross-check Windows compilation if the target is installed.
+`task smoke:interactive`, `task test:windows-pseudoterminal-output` where PowerShell
+is available, and native `task test:windows-pseudoterminal`. Cross-check Windows
+compilation if the target is installed.
 Hosted CI remains authoritative for native Windows and macOS execution.
 
 ## Risks and rollout
@@ -95,7 +104,7 @@ verification alone cannot close native acceptance.
   prompt, the first immediately declined and exited, leaving the second write to
   fail with SIGPIPE on macOS. The smoke must explicitly accept and verify consent
   before exercising the rest of the interaction. Normal TUI quit still requires
-  two keystrokes; emit them together once consent has been persisted.
+  two keystrokes; Unix can emit them together once consent has been persisted.
 - Plans now print and continue automatically. Replace obsolete plan-approval
   expectations with an isolated instruction policy requiring approval for
   `list_directory`, and verify question answers and action approval in persisted
@@ -113,9 +122,23 @@ verification alone cannot close native acceptance.
   sequence. Wait for the fresh `Approve once (y)` choice row instead; retain
   persisted user-approval and completed-run evidence, bounded waits, and exact
   terminal restoration checks.
+- A later hosted Windows run passed library/integration tests and optimized release
+  qualification but timed out in the native smoke. Input delays started at conhost
+  launch, before child PowerShell initialization and the consent prompt. The adapter
+  also hid the inner failure behind its outer timeout. Synchronize input against
+  actual output and preserve bounded inner diagnostics. Adjacent identical Windows
+  key events can be coalesced, while Crossterm's Windows parser ignores repeat count;
+  separate quit writes around the visible confirmation prompt. The captured timeout
+  alone does not establish which input hazard occurred on that runner.
 
 ## Validation evidence (2026-09-19)
 
+- The portable `task test:windows-pseudoterminal-output` passed using PowerShell
+  7.6.6 on Linux. It parsed all affected adapters, compiled the asynchronous capture,
+  matched a live split prompt before EOF, preserved complete output, enforced a
+  missing-prompt deadline, rejected a post-prompt delay exceeding the remaining
+  absolute budget, and covered final-append/EOF ordering. This does not
+  substitute for native ConPTY success, missing-prompt, and restoration probes.
 - `task verify` passed strict formatting and all-target/all-feature Clippy, all 1,161
   library tests, all 86 CLI tests, every deterministic integration target, and
   doctests. Credentialed live qualification and the separately invoked exact-release
