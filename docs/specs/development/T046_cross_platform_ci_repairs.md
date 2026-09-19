@@ -15,7 +15,8 @@ Artifacts succeeded independently, so its success does not prove CI acceptance.
 
 Repair the redundant context-test formatting, Windows instruction scope resolution,
 legacy reconciliation failure, terminal restoration test portability, and native
-interactive smoke regressions. Preserve bounded instruction discovery, link rejection,
+interactive smoke regressions, including child-session fixture handles retained across
+worktree cleanup. Preserve bounded instruction discovery, link rejection,
 auditable workload reconciliation, explicit workspace consent, terminal restoration,
 and credential-free native qualification.
 
@@ -49,6 +50,8 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 - [x] Linux static checks pass with no new lint suppressions.
 - [ ] Valid Windows instruction scopes resolve while outside-root and linked paths fail.
 - [x] Legacy audit adoption retains one reconciliation event without lock failure.
+- [ ] Native Windows merge verification preserves results and removes the owned
+      worktree after test observers release child-session handles.
 - [ ] Terminal restoration tests work without assuming a Windows console in unit tests.
 - [x] Offline interactive smokes exercise current consent and interaction behavior,
       validate successful child exit and exact terminal restoration, and remain bounded.
@@ -97,6 +100,12 @@ verification alone cannot close native acceptance.
   expectations with an isolated instruction policy requiring approval for
   `list_directory`, and verify question answers and action approval in persisted
   session evidence. No product permission behavior changes are needed.
+- Repair PR run 35442785518 passed the original Windows library failures, then
+  exposed a delegation integration fixture retaining a child `SessionStore` across
+  worktree cleanup. Its open identity file prevents Windows from renaming the
+  ancestor directory into quarantine. Scope the readback before merge; preserve
+  production identity fences and every verification, result, and cleanup assertion.
+  macOS passed its complete native job on that run.
 
 ## Validation evidence (2026-09-19)
 
