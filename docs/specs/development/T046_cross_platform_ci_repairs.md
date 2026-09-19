@@ -21,7 +21,8 @@ bounded instruction discovery, link rejection,
 auditable workload reconciliation, explicit workspace consent, terminal restoration,
 and credential-free native qualification.
 
-Affected areas: `src/context/`, `src/tools/delegation.rs`, `src/tui/`, interactive
+Affected areas: `src/context/`, `src/tools/delegation.rs`, `src/agent/loop.rs` test
+fixtures, `src/tui/`, interactive
 smoke scripts, focused regression tests, and Task entries only where needed.
 No persistence schema changes, release publication changes, or new frameworks.
 
@@ -43,6 +44,10 @@ No persistence schema changes, release publication changes, or new frameworks.
    separate consent, quit-arm, and quit-confirmation writes in native smoke.
 6. Review spec compliance, then code quality; run local gates and record native
    platform limitations explicitly.
+7. Align the two hosted steering tool-readiness fixtures with the existing bounded
+   fifteen-second hosted progress budget. Keep event and persisted-state ordering
+   assertions, fail immediately if the stream closes before tool readiness, and
+   leave every production deadline unchanged.
 
 ## Alternatives
 
@@ -60,6 +65,8 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 - [ ] Terminal restoration tests work without assuming a Windows console in unit tests.
 - [ ] Windows terminal input waits for actual consent and quit prompts within the
       original deadline; missing prompts fail boundedly without sending input.
+- [ ] Steering tool-readiness fixtures allow bounded hosted filesystem startup and
+      fail immediately on early stream closure while preserving steering order checks.
 - [x] Offline interactive smokes exercise current consent and interaction behavior,
       validate successful child exit and exact terminal restoration, and remain bounded.
 - [x] `task verify`, documentation checks, relevant focused checks, runtime coverage,
@@ -89,6 +96,13 @@ verification alone cannot close native acceptance.
 
 ## Implementation findings (2026-09-19)
 
+- Separate hosted Windows runs exhausted the five-second tool-readiness waits in
+  `exact_run_steering_stays_closed_when_the_final_provider_turn_starts_a_tool` and
+  `exact_run_steering_after_tool_start_applies_before_the_next_provider_request`.
+  Their event gates include runtime startup and durable session I/O, and the latter
+  also waits for persisted tool-start evidence. Use the adjacent compression fixture's
+  fifteen-second hosted progress budget; do not change the production run limits.
+  A closed stream must fail explicitly instead of spinning until the timeout.
 - Instruction discovery canonicalized the root but compared it lexically against
   caller scopes containing Windows verbatim-prefix or DOS-short-path aliases. Match
   only the root alias through the existing filesystem helper and retain child path
@@ -172,3 +186,21 @@ The checked local smoke criterion is supported by Linux execution. The updated
 Windows smoke, Windows-only alias/junction regressions, and Windows console-free
 encoding branch still require native CI. No production permission, terminal
 restoration, persistence schema, or delegation timeout behavior was changed.
+
+## Incremental terminal prompt follow-up (2026-09-19)
+
+A bounded temporary Task probe drove the existing optimized Linux binary at the
+Windows smoke's 120-column, 30-row geometry with `NO_COLOR=1`. Consent succeeded,
+but the raw output split `Allowed work in this directory.` with cursor-position
+escapes before `in`, `this`, and `directory.`. A second probe reached the first quit
+request and likewise split `Press Ctrl+Q again to quit.` between every word;
+`Ctrl+Q again` was not contiguous either. Complete visible sentences therefore
+cannot be used as raw-stream gates for these incremental redraws.
+
+Use the observed contiguous `Allowed work` and `again` segments, which are unique
+to consent success and quit confirmation in this isolated startup. A third probe
+completed both separately gated quit writes and passed persisted consent, exact
+child exit status, bracketed-paste/alternate-screen restoration, and exact terminal
+mode restoration. The tracked Windows smoke retains all those assertions and its
+absolute deadline. This Linux evidence establishes the raw-output failure and
+repair mechanics; native ConPTY acceptance remains required.

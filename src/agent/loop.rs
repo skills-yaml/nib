@@ -9832,6 +9832,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn exact_run_steering_stays_closed_when_the_final_provider_turn_starts_a_tool() {
+        // Readiness includes durable session I/O on hosted Windows runners.
+        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
         initialize_git_repository(directory.path());
@@ -9867,11 +9869,11 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(HOSTED_PROGRESS_TIMEOUT, async {
             loop {
                 if matches!(
-                    stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
+                    stream_rx.recv().await.expect("stream closed before final-turn tool started"),
+                    StreamEvent::ToolStarted { tool_name, .. } if tool_name == "run_terminal"
                 ) {
                     break;
                 }
@@ -9899,6 +9901,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn exact_run_steering_after_tool_start_applies_before_the_next_provider_request() {
+        // Readiness includes durable session I/O on hosted Windows runners.
+        const HOSTED_PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
         let _steering_smoke = EnvironmentGuard::set("NIB_ENABLE_EXACT_STEERING_SMOKE", "1");
         let directory = tempdir().expect("project");
         initialize_git_repository(directory.path());
@@ -9934,11 +9938,11 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(HOSTED_PROGRESS_TIMEOUT, async {
             loop {
                 if matches!(
-                    stream_rx.recv().await,
-                    Some(StreamEvent::ToolStarted { tool_name, .. }) if tool_name == "run_terminal"
+                    stream_rx.recv().await.expect("stream closed before tool started"),
+                    StreamEvent::ToolStarted { tool_name, .. } if tool_name == "run_terminal"
                 ) {
                     loop {
                         if store

@@ -163,13 +163,16 @@ curator_enabled = false
     $env:TERM = "xterm-256color"
     $env:NO_COLOR = "1"
     $tuiCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --tui; exit `$LASTEXITCODE"
+    # Incremental redraw skips unchanged spaces, splitting complete status sentences.
+    # These fresh segments are unique to consent success and quit confirmation in
+    # this isolated startup, so each write still waits for its actual UI state.
     $tuiResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiCommand) `
         -InputChunks @(
             [pscustomobject]@{ Text = "y"; WaitForOutput = "Work in this directory" },
-            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Allowed work in this directory." },
-            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Press Ctrl+Q again to quit." }
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "Allowed work" },
+            [pscustomobject]@{ Text = [string][char]17; WaitForOutput = "again" }
         ) `
         -TimeoutMilliseconds 30000
     if ($tuiResult.ExitCode -ne 0 -or
