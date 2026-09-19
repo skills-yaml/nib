@@ -92,6 +92,14 @@ tasks:
     cmds:
       - >-
         cargo test --lib
+        tools::delegation::tests::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
         daemons::state::tests::optional_read_write_
         -- --test-threads=1
       - >-

@@ -167,15 +167,21 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = [string][char]17; DelayMilliseconds = 1200 }
+            [pscustomobject]@{ Text = "y"; DelayMilliseconds = 1200 },
+            [pscustomobject]@{ Text = ([string][char]17) * 2; DelayMilliseconds = 1200 }
         ) `
         -TimeoutMilliseconds 30000
     if ($tuiResult.ExitCode -ne 0 -or
         -not $tuiResult.ConsoleModesRestored -or
         -not $tuiResult.ChildConsoleModesRestored -or
+        -not $tuiResult.Output.Contains("Work in this directory") -or
         -not $tuiResult.Output.Contains("$([char]27)[?1049l") -or
         -not $tuiResult.Output.Contains("$([char]27)[?2004l")) {
         throw "Windows interactive smoke did not restore the capable TUI terminal"
+    }
+    $persistedConfig = Get-Content -LiteralPath (Join-Path $fixture ".nib\config.toml") -Raw
+    if (-not $persistedConfig.Contains("allowed = true")) {
+        throw "Windows interactive smoke did not persist explicit workspace consent"
     }
 
     $env:TERM = "dumb"

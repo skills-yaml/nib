@@ -289,6 +289,11 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "private_run_ids",
         "private_sentinel",
         "wait_for_pty_output",
+        "Work in this directory",
+        "allowed = true",
+        "nib-policy: require-approval list_directory",
+        "Action: list_directory",
+        "List this directory",
     ] {
         assert!(
             script.contains(contract),
@@ -331,6 +336,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "NO_COLOR = \"1\"",
         "ConsoleModesRestored",
         "ChildConsoleModesRestored",
+        "Work in this directory",
+        "allowed = true",
         "[?1049l",
         "[?2004l",
         "Timed out while draining redirected Windows plain-mode output",

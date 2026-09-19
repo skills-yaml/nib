@@ -9726,9 +9726,25 @@ mod tests {
         enable_bracketed_paste_to(&mut enabled).expect("enable paste sequence");
         assert_eq!(enabled, b"\x1b[?2004h");
 
-        let mut restored = Vec::new();
-        restore_terminal_to(&mut restored, Ok(())).expect("restore sequences");
-        let restored = String::from_utf8(restored).expect("terminal control UTF-8");
+        #[cfg(not(windows))]
+        let restored = {
+            let mut restored = Vec::new();
+            restore_terminal_to(&mut restored, Ok(())).expect("restore sequences");
+            String::from_utf8(restored).expect("terminal control UTF-8")
+        };
+        #[cfg(windows)]
+        let restored = {
+            // `execute!` invokes Win32 console APIs even for an in-memory writer.
+            // Check encoding here; native ConPTY smokes verify real restoration.
+            let mut restored = String::new();
+            crossterm::Command::write_ansi(&DisableMouseCapture, &mut restored)
+                .expect("disable mouse sequence");
+            crossterm::Command::write_ansi(&DisableBracketedPaste, &mut restored)
+                .expect("disable paste sequence");
+            crossterm::Command::write_ansi(&LeaveAlternateScreen, &mut restored)
+                .expect("leave alternate screen sequence");
+            restored
+        };
         let mouse = restored.find("\x1b[?1000l").expect("disable mouse capture");
         let paste = restored.find("\x1b[?2004l").expect("disable paste");
         let alternate = restored

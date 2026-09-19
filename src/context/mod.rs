@@ -749,7 +749,7 @@ mod tests {
                 {"index": 3, "role": "assistant", "content": "accepted correction"},
                 {"index": 4, "role": "user", "content": "Continue with approved plan step: edit"},
                 {"index": 5, "role": "assistant", "content": "working"},
-                {"index": 6, "role": "tool", "content": format!("{}", "large output ".repeat(500))}
+                {"index": 6, "role": "tool", "content": "large output ".repeat(500)}
             ],
             "message_provenance": [
                 {"message_index": 2, "origin": "human_steering"},

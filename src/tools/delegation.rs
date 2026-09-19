@@ -17901,16 +17901,27 @@ mod tests {
             )
             .expect("legacy audit-first event");
 
+        // Audit adoption exercises durable writes and identity checks across several
+        // stores. Use the production budget; this is not a latency regression test.
         let terminal = reconcile_subagent_ownership_until(
             root.path(),
             id,
-            Instant::now() + Duration::from_secs(2),
+            Instant::now() + SUBAGENT_RECORD_LOCK_TIMEOUT,
         )
         .expect("adopt legacy audit");
+        assert_eq!(terminal.status, "failed");
         assert_eq!(
             terminal.result.as_ref().expect("result")["ownership_reconciliation"]["reconciled_at"],
             json!(reconciled_at)
         );
+        let retried = reconcile_subagent_ownership_until(
+            root.path(),
+            id,
+            Instant::now() + SUBAGENT_RECORD_LOCK_TIMEOUT,
+        )
+        .expect("retry adopted legacy audit");
+        assert_eq!(retried.status, terminal.status);
+        assert_eq!(retried.result, terminal.result);
         let session = store
             .load_result("parent")
             .expect("session")

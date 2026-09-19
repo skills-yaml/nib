@@ -197,12 +197,26 @@ impl InstructionResolver {
             self.repository_root.join(scope)
         };
         let mut normalized = self.repository_root.clone();
-        let relative = candidate.strip_prefix(&self.repository_root).map_err(|_| {
-            format!(
-                "instruction scope {} is outside the active worktree",
-                candidate.display()
-            )
-        })?;
+        // Match only the root alias: canonicalizing the whole scope would hide
+        // linked child directories and cannot resolve prospective file paths.
+        let root_alias = candidate
+            .ancestors()
+            .find(|ancestor| {
+                crate::fs_security::canonical_paths_match(&self.repository_root, ancestor)
+            })
+            .filter(|ancestor| {
+                !ancestor
+                    .components()
+                    .any(|part| part == Component::ParentDir)
+            });
+        let relative = root_alias
+            .and_then(|root| candidate.strip_prefix(root).ok())
+            .ok_or_else(|| {
+                format!(
+                    "instruction scope {} is outside the active worktree",
+                    candidate.display()
+                )
+            })?;
         for component in relative.components() {
             match component {
                 Component::Normal(component) => normalized.push(component),
@@ -739,6 +753,92 @@ mod tests {
         assert!(rendered.contains("backend rule"));
         assert!(rendered.contains("frontend/**"));
         assert!(rendered.contains("backend/**"));
+    }
+
+    #[test]
+    fn scopes_reject_outside_roots_and_parent_traversal() {
+        let project = tempdir().expect("project");
+        let outside = tempdir().expect("outside");
+        fs::create_dir(project.path().join("nested")).expect("nested");
+        let mut resolver = InstructionResolver::new(project.path()).expect("resolver");
+        resolver.home = None;
+        for scope in [
+            outside.path().to_path_buf(),
+            outside.path().join("prospective/file.rs"),
+            project.path().join("nested/../file.rs"),
+            project.path().join("../file.rs"),
+        ] {
+            assert!(
+                resolver.resolve_for_scopes([&scope]).is_err(),
+                "unbounded scope accepted: {}",
+                scope.display()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_aliases_resolve_existing_and_prospective_scopes() {
+        let project = tempfile::Builder::new()
+            .prefix("nib instruction root alias ")
+            .tempdir()
+            .expect("project");
+        fs::write(project.path().join("AGENTS.md"), "root rule").expect("root");
+        fs::create_dir(project.path().join("nested")).expect("nested");
+        fs::write(project.path().join("nested/AGENTS.md"), "nested rule").expect("nested");
+        fs::write(project.path().join("nested/file.rs"), "source").expect("source");
+        let canonical = project.path().canonicalize().expect("canonical root");
+        let aliases = [
+            crate::fs_security::path_without_windows_verbatim_prefix(&canonical),
+            crate::fs_security::windows_dos_short_path_for_test(&canonical).expect("DOS alias"),
+        ];
+        let mut resolver = InstructionResolver::new(&canonical).expect("resolver");
+        resolver.home = None;
+        for alias in aliases {
+            for relative in ["", "nested", "nested/file.rs", "nested/new/file.rs"] {
+                let expected = resolver
+                    .resolve_for_scopes([canonical.join(relative)])
+                    .expect("canonical scope");
+                let actual = resolver
+                    .resolve_for_scopes([alias.join(relative)])
+                    .expect("aliased scope");
+                assert_eq!(actual, expected);
+                assert!(actual.render().contains("root rule"));
+                if !relative.is_empty() {
+                    assert!(actual.render().contains("nested rule"));
+                }
+            }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn scopes_reject_linked_children_even_when_they_resolve_inside_root() {
+        let project = tempdir().expect("project");
+        let target = project.path().join("real");
+        let link = project.path().join("linked");
+        fs::create_dir(&target).expect("target");
+        fs::write(target.join("file.rs"), "source").expect("source");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).expect("directory link");
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .expect("directory junction");
+            assert!(output.status.success(), "junction creation: {output:?}");
+        }
+        let mut resolver = InstructionResolver::new(project.path()).expect("resolver");
+        resolver.home = None;
+        for relative in ["linked", "linked/file.rs", "linked/new/file.rs"] {
+            let error = resolver
+                .resolve_for_scopes([project.path().join(relative)])
+                .expect_err("linked scope rejected");
+            assert!(error.contains("linked"), "{error}");
+        }
     }
 
     #[test]
