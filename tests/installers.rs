@@ -293,7 +293,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "allowed = true",
         "nib-policy: require-approval list_directory",
         "Action: list_directory",
-        "List this directory",
+        "Approve once (y)",
     ] {
         assert!(
             script.contains(contract),
