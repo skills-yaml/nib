@@ -1,9 +1,9 @@
 # T046: Cross-platform CI repairs
 
-**Status:** Development
+**Status:** Done
 
-Initial repairs are locally verified. Follow-up Windows terminal synchronization
-requires native acceptance through the repair pull request before merge into development.
+Implementation, local verification, and exact-revision hosted Linux, macOS, and
+Windows acceptance are complete. Final evidence is recorded below.
 
 ## Problem
 
@@ -62,22 +62,22 @@ and repair fixtures or implementation at the demonstrated failing boundary.
 ## Acceptance criteria
 
 - [x] Linux static checks pass with no new lint suppressions.
-- [ ] Valid Windows instruction scopes resolve while outside-root and linked paths fail.
+- [x] Valid Windows instruction scopes resolve while outside-root and linked paths fail.
 - [x] Legacy audit adoption retains one reconciliation event without lock failure.
-- [ ] Native Windows merge verification preserves results and removes the owned
+- [x] Native Windows merge verification preserves results and removes the owned
       worktree after test observers release child-session handles.
-- [ ] Terminal restoration tests work without assuming a Windows console in unit tests.
-- [ ] Raw-mode cleanup runs after mouse restoration even when another restoration
+- [x] Terminal restoration tests work without assuming a Windows console in unit tests.
+- [x] Raw-mode cleanup runs after mouse restoration even when another restoration
       step fails, and native before/after console mode checks remain exact.
-- [ ] Windows terminal input waits for actual consent and quit prompts within the
+- [x] Windows terminal input waits for actual consent and quit prompts within the
       original deadline; missing prompts fail boundedly without sending input.
-- [ ] Steering tool-readiness fixtures allow bounded hosted filesystem startup and
+- [x] Steering tool-readiness fixtures allow bounded hosted filesystem startup and
       fail immediately on early stream closure while preserving steering order checks.
 - [x] Offline interactive smokes exercise current consent and interaction behavior,
       validate successful child exit and exact terminal restoration, and remain bounded.
 - [x] `task verify`, documentation checks, relevant focused checks, runtime coverage,
       and Linux release interactive smoke pass locally.
-- [ ] Exact-revision hosted Windows and macOS CI pass before native closure.
+- [x] Exact-revision hosted Windows and macOS CI pass before native closure.
 
 ## Validation gates
 
@@ -93,12 +93,12 @@ Hosted CI remains authoritative for native Windows and macOS execution.
 Path normalization is a containment boundary: retain component and file identity
 validation. Reconciliation changes must preserve lock ordering and audit identity.
 Smoke fixtures must test consent rather than globally bypassing it. Ship as a focused
-repair and retain this spec in development until native evidence exists.
+repair; exact native acceptance is recorded below.
 
 ## Open questions
 
-Native Windows and macOS execution is available through hosted CI; local Linux
-verification alone cannot close native acceptance.
+None for this repair. Native acceptance is complete; credentialed live LLM
+qualification remains separately scoped by T023.
 
 ## Implementation findings (2026-09-19)
 
@@ -192,11 +192,10 @@ verification alone cannot close native acceptance.
 - Windows cross-target checking was attempted through
   `task check:all-targets TARGET=x86_64-pc-windows-msvc`, but failed in dependency
   compilation because the local MSVC librarian `lib.exe` is unavailable, before
-  checking nib. Hosted Windows and macOS evidence remains open.
+  checking nib. The final hosted Windows run below supersedes this local limitation.
 
-The checked local smoke criterion is supported by Linux execution. The updated
-Windows smoke, Windows-only alias/junction regressions, and Windows console-free
-encoding branch still require native CI. No production permission policy,
+Local smoke evidence is complemented by the final hosted Windows alias/junction,
+console-free encoding, and native interaction checks recorded below. No production permission policy,
 persistence schema, or delegation timeout behavior was changed.
 Production terminal restoration now disables raw input after Windows mouse cleanup.
 
@@ -216,4 +215,32 @@ completed both separately gated quit writes and passed persisted consent, exact
 child exit status, bracketed-paste/alternate-screen restoration, and exact terminal
 mode restoration. The tracked Windows smoke retains all those assertions and its
 absolute deadline. This Linux evidence establishes the raw-output failure and
-repair mechanics; native ConPTY acceptance remains required.
+repair mechanics; the final hosted run below also proves native ConPTY acceptance.
+
+## Final acceptance (2026-09-19)
+
+[CI run 35451287933](https://github.com/skills-yaml/nib/actions/runs/35451287933)
+passed every Linux, macOS, and Windows job for PR head
+`f7d5bf91dd9ea4ac24b4067b7b5f79059350ac18`, tested through merge revision
+`b2f081c83a48dcd118b91703214a8ddc76b11dd9`.
+
+- Linux passed strict static checks, 1,162 library tests, 86 CLI tests, all
+  integration gates, **85.91% runtime line coverage (112,331/130,753)**,
+  exact release qualification, interactive smoke, and managed-process owner loss.
+- macOS passed its complete native suite, exact release qualification, and PTY
+  interactive/restoration smoke.
+- Windows passed 1,072 library tests, 91 CLI tests, all integration gates,
+  bounded prompt/timeout probes, exact release qualification, ConPTY and plain
+  interaction with exact caller/child console restoration, and binary smoke.
+- Final local `task verify`, `task test:interactive`, installer/documentation
+  checks, portable PowerShell output checks, a fresh `task build`, and optimized
+  `task smoke:interactive:binary` passed. The focused TUI suite includes the new
+  cleanup ordering and combined-error regression.
+- Independent spec-compliance and code-quality reviews passed after correcting
+  the prompt EOF race and prompt-plus-delay deadline gap found during review.
+
+Earlier failed runs remain diagnostic history, not acceptance evidence. An isolated
+Linux delegated-result assertion also failed on an intermediate run without enough
+error detail to establish a cause; final local, hosted, and coverage suites passed
+it without weakening its assertions. No production permission policy, persistence
+schema, or delegation/steering deadline was changed.
