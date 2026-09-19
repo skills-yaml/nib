@@ -470,7 +470,9 @@ fi
 
 tui_approval_input() {
   local output="$fixture/tui-approval-dock.txt"
-  wait_for_pty_output "$output" 'List this directory'
+  # The title can reuse cells from the previous frame; the fresh choice row
+  # supplies a complete prompt in the terminal's incremental output.
+  wait_for_pty_output "$output" 'Approve once (y)'
   printf 'y'
   local session
   session="$(wait_for_goal_session 'list workspace for approval smoke')"
@@ -485,7 +487,7 @@ run_tui_case \
   "--tui --run 'list workspace for approval smoke'" \
   no \
   'TERM=xterm-256color NO_COLOR=1'
-grep -Fq 'List this directory' "$fixture/tui-approval-dock.txt"
+grep -Fq 'Approve once (y)' "$fixture/tui-approval-dock.txt"
 
 tui_question_input() {
   local output="$fixture/tui-question-dock.txt"

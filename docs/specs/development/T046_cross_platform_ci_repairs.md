@@ -106,6 +106,13 @@ verification alone cannot close native acceptance.
   ancestor directory into quarantine. Scope the readback before merge; preserve
   production identity fences and every verification, result, and cleanup assertion.
   macOS passed its complete native job on that run.
+- The same repair run reached the Linux TUI approval dock, but its prompt wait
+  searched for the full title in incremental terminal bytes. Ratatui reused the
+  previous frame's `s` cell and emitted `Li` followed by a cursor move and
+  `t this directory`, so the visible title never appeared as a contiguous byte
+  sequence. Wait for the fresh `Approve once (y)` choice row instead; retain
+  persisted user-approval and completed-run evidence, bounded waits, and exact
+  terminal restoration checks.
 
 ## Validation evidence (2026-09-19)
 
