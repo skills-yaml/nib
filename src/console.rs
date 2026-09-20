@@ -1,7 +1,9 @@
-use nib::agent::QuestionHandler;
+use nib::agent::{QuestionHandler, QuestionOutcome, QuestionRequestContext};
+#[cfg(test)]
+use nib::interactive::InteractionConsumer;
 use nib::interactive::{
-    reduce_interaction, InteractionConsumer, InteractionInput, InteractionReduction,
-    InteractionState,
+    modal_command_unsupported_message, reduce_interaction, InteractionDecision, InteractionInput,
+    InteractionReduction, InteractionState,
 };
 use nib::tools::executor::{ApprovalContext, ApprovalHandler};
 use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
@@ -179,23 +181,33 @@ impl ApprovalHandler for ConsoleApprovalHandler {
 impl ConsoleApprovalHandler {
     async fn prompt(&self, context: &ApprovalContext) -> ApprovalDecision {
         eprintln!("\nApproval required\n{}", context.render());
-        eprint!("Approve? [y/N]: ");
-        let _ = io::stderr().flush();
-
-        match self.input.read_line_async().await {
-            Ok(line)
-                if plain_modal_line_is_owned(
-                    &InteractionState {
-                        approval_pending: true,
-                        ..InteractionState::default()
-                    },
-                    &line,
-                    InteractionConsumer::Approval,
-                ) && line.trim().eq_ignore_ascii_case("y") =>
-            {
-                ApprovalDecision::granted_user()
+        loop {
+            eprint!("Approve? [y/N] (details): ");
+            let _ = io::stderr().flush();
+            let line = match self.input.read_line_async().await {
+                Ok(line) => line,
+                Err(_) => return ApprovalDecision::denied_input_closed(),
+            };
+            if line.trim().eq_ignore_ascii_case("details") {
+                eprintln!("{}", context.render());
+                continue;
             }
-            _ => ApprovalDecision::denied(),
+            let state = InteractionState {
+                approval_pending: true,
+                ..InteractionState::default()
+            };
+            match reduce_interaction(&state, InteractionInput::ApprovalAnswer(&line)) {
+                InteractionReduction::ApprovalDecision(InteractionDecision::Accept) => {
+                    return ApprovalDecision::granted_user();
+                }
+                InteractionReduction::ApprovalDecision(InteractionDecision::Reject) => {
+                    return ApprovalDecision::denied();
+                }
+                InteractionReduction::Error { message, .. } => {
+                    eprintln!("{message}");
+                }
+                _ => return ApprovalDecision::denied(),
+            }
         }
     }
 }
@@ -213,34 +225,80 @@ impl ConsoleQuestionHandler {
 #[async_trait::async_trait]
 impl QuestionHandler for ConsoleQuestionHandler {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
-        println!("\nQuestion: {question}");
-        for (index, option) in options.iter().enumerate() {
+        match self
+            .ask_with_context(QuestionRequestContext {
+                invocation_id: nib::tools::ToolInvocationId::new(),
+                question,
+                options,
+            })
+            .await
+        {
+            QuestionOutcome::Answered(answer) => Ok(answer),
+            QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
+            QuestionOutcome::Cancelled => Err("cancelled".to_string()),
+            QuestionOutcome::InputClosed => Err("input closed".to_string()),
+            QuestionOutcome::InputUnavailable(error) => Err(error),
+        }
+    }
+
+    async fn ask_with_context(&self, context: QuestionRequestContext<'_>) -> QuestionOutcome {
+        println!("\nQuestion: {}", context.question);
+        for (index, option) in context.options.iter().enumerate() {
             println!("  {}. {}", index + 1, option);
         }
-        if options.is_empty() {
-            print!("Answer: ");
-        } else {
-            print!("Answer (number or text): ");
-        }
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("failed to flush question prompt: {error}"))?;
-
-        let line = self.input.read_line_async().await?;
-        if !plain_modal_line_is_owned(
-            &InteractionState {
+        loop {
+            if context.options.is_empty() {
+                print!("Answer: ");
+            } else {
+                print!("Answer (number or text): ");
+            }
+            if io::stdout().flush().is_err() {
+                return QuestionOutcome::InputUnavailable(
+                    "failed to flush question prompt".to_string(),
+                );
+            }
+            let line = match self.input.read_line_async().await {
+                Ok(line) => line,
+                Err(_) => return QuestionOutcome::InputClosed,
+            };
+            let state = InteractionState {
                 question_pending: true,
                 ..InteractionState::default()
-            },
-            &line,
-            InteractionConsumer::Question,
-        ) {
-            return Err("question input was rejected by the shared reducer".to_string());
+            };
+            match reduce_interaction(
+                &state,
+                InteractionInput::QuestionAnswer {
+                    answer: &line,
+                    options: context.options,
+                    selected_option: None,
+                },
+            ) {
+                InteractionReduction::QuestionAnswered(answer) => {
+                    return QuestionOutcome::Answered(answer);
+                }
+                InteractionReduction::QuestionLeftUnanswered => {
+                    return QuestionOutcome::LeftUnanswered;
+                }
+                InteractionReduction::QuestionInputClosed => {
+                    return QuestionOutcome::InputClosed;
+                }
+                InteractionReduction::ModalCommand(_) => {
+                    eprintln!("{}", modal_command_unsupported_message());
+                }
+                InteractionReduction::Error { message, .. } => {
+                    eprintln!("{message}");
+                }
+                _ => {
+                    return QuestionOutcome::InputUnavailable(
+                        "question input was rejected by the shared reducer".to_string(),
+                    );
+                }
+            }
         }
-        parse_question_answer(&line, options)
     }
 }
 
+#[cfg(test)]
 fn plain_modal_line_is_owned(
     state: &InteractionState,
     line: &str,
@@ -252,27 +310,27 @@ fn plain_modal_line_is_owned(
     )
 }
 
+#[cfg(test)]
 fn parse_question_answer(line: &str, options: &[String]) -> Result<String, String> {
-    let answer = line.trim();
-    if answer.is_empty() {
-        return Err("question response cannot be empty".to_string());
-    }
-    if options.is_empty() {
-        return Ok(answer.to_string());
-    }
-    if answer.bytes().all(|byte| byte.is_ascii_digit()) {
-        let index = answer
-            .parse::<usize>()
-            .map_err(|_| format!("question option {answer} is out of range"))?;
-        if !(1..=options.len()).contains(&index) {
-            return Err(format!("question option {index} is out of range"));
+    let state = InteractionState {
+        question_pending: true,
+        ..InteractionState::default()
+    };
+    match reduce_interaction(
+        &state,
+        InteractionInput::QuestionAnswer {
+            answer: line,
+            options,
+            selected_option: None,
+        },
+    ) {
+        InteractionReduction::QuestionAnswered(answer) => Ok(answer),
+        InteractionReduction::Error { message, .. } => Err(message),
+        InteractionReduction::ModalCommand(_) => {
+            Err(modal_command_unsupported_message().to_string())
         }
-        return options
-            .get(index - 1)
-            .cloned()
-            .ok_or_else(|| format!("question option {index} is out of range"));
+        _ => Err("question input was rejected by the shared reducer".to_string()),
     }
-    Ok(answer.to_string())
 }
 
 #[cfg(test)]

@@ -120,6 +120,14 @@ impl ApprovalDecision {
         }
     }
 
+    pub fn denied_input_closed() -> Self {
+        Self {
+            granted: false,
+            source: "input_closed".to_string(),
+            note: Some("Input closed".to_string()),
+        }
+    }
+
     pub fn denied_by_policy(note: impl Into<String>) -> Self {
         Self {
             granted: false,

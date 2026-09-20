@@ -1357,6 +1357,7 @@ pub enum HumanIntentKind {
     Request,
     Steering,
     QuestionAnswer,
+    Continue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1400,6 +1401,8 @@ pub struct ClarificationRecord {
     pub answer_event_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

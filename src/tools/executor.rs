@@ -662,7 +662,9 @@ impl StdinApprovalHandler {
 
         let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
         let mut line = String::new();
-        if reader.read_line(&mut line).await.is_ok() && line.trim().eq_ignore_ascii_case("y") {
+        if reader.read_line(&mut line).await.is_ok()
+            && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        {
             ApprovalDecision::granted_user()
         } else {
             ApprovalDecision::denied()

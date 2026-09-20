@@ -7,7 +7,7 @@ nib is a command-line AI agent that plans, executes, and reconciles work in loca
 - **Local Sessions:** Stores profile-scoped history under `./.nib/profiles/<id>/sessions/`.
 - **Pluggable LLMs:** Includes OpenAI Responses and Chat Completions transports plus configured adapters for Anthropic, Gemini, Grok, OpenRouter, Meta, and Mock.
 - **Layered Execution:** Isolates mutations in Git worktrees; the default hybrid provider uses Linux `bwrap` when usable and otherwise runs directly in the worktree.
-- **Human-in-the-Loop:** Manual mode prompts for plans and risky actions; explicit deny policies remain authoritative.
+- **Human-in-the-Loop:** Manual mode prompts for unclear questions and risky actions; plans print and continue. Explicit deny policies remain authoritative.
 - **MCP Integration:** Can act as an MCP (Model Context Protocol) server for external IDEs or clients.
 - **Durable Work:** Background commands and scheduled wakes have inspectable, cancellable, lease-fenced records.
 - **Supervised Delegation:** Foreground subagents use an independent cleanup supervisor;
