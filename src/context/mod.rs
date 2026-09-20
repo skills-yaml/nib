@@ -296,6 +296,7 @@ fn render_bounded_human_context(session: &Session, max_tokens: usize) -> Option<
             HumanIntentKind::Request => "request",
             HumanIntentKind::Steering => "steering",
             HumanIntentKind::QuestionAnswer => "clarification answer",
+            HumanIntentKind::Continue => "continue existing plan",
         };
         lines.push(format!("- {kind} [{source}]: {}", intent.text));
     }

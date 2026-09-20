@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 
 const MAX_RUN_GOAL_BYTES: usize = 20_000;
-const MAX_RUN_SUMMARY_BYTES: usize = 512;
+const MAX_RUN_ANSWER_BYTES: usize = 32 * 1024;
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -65,6 +65,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     // We use the Rust agent loop directly
     let rt = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
 
+    let cancellation = nib::agent::CancellationSignal::new();
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
     let loop_cfg = nib::agent::AgentLoopConfig {
         max_steps: args.max_steps,
         mode: args.mode.clone(),
@@ -73,6 +75,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         auto_approve: args.yes,
         approval_handler: Some(Arc::new(ConsoleApprovalHandler::new(input.clone()))),
         question_handler: Some(Arc::new(ConsoleQuestionHandler::new(input))),
+        stream_tx: Some(stream_tx),
+        cancellation: Some(cancellation.clone()),
         ..Default::default()
     };
 
@@ -82,38 +86,108 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     let result = nib::agent::block_on_agent_runtime_worker(
         &rt,
         async move {
-            nib::agent::run_agent_loop(worker_project, &worker_session_id, &worker_goal, loop_cfg)
-                .await
+            let cancel = cancellation.clone();
+            let signal = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    cancel.cancel();
+                }
+            });
+            let printer = tokio::spawn(async move {
+                while let Some(event) = stream_rx.recv().await {
+                    if let Some(display) =
+                        nib::interactive::display_stream_event_with_sensitive_values(event, &[])
+                    {
+                        match display {
+                            nib::interactive::StreamDisplay::Content(content) => {
+                                print!("{content}");
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            }
+                            nib::interactive::StreamDisplay::Status(status)
+                                if status.starts_with("[plan]") =>
+                            {
+                                println!("{status}");
+                            }
+                            nib::interactive::StreamDisplay::Status(_) => {}
+                        }
+                    }
+                }
+            });
+            let result = nib::agent::run_agent_loop(
+                worker_project,
+                &worker_session_id,
+                &worker_goal,
+                loop_cfg,
+            )
+            .await;
+            signal.abort();
+            let _ = printer.await;
+            result
         },
         "agent runtime worker",
     )?;
 
     match result {
-        Ok(summary) => {
-            if summary.outcome == "waiting_for_user_input" {
-                return Err(format!(
-                    "agent stopped because console question input was unavailable; session {} was reconciled without continuing",
-                    sid
-                ));
-            }
-            if summary.is_failure() {
-                return Err(summary.user_failure_report().unwrap_or_else(|| {
-                    format!("Agent run failed: {}\nSession: {sid}", summary.outcome)
-                }));
-            }
-            println!("Agent run completed for session {}", sid);
-            if let Some(msg) = summary.last_message {
-                let msg = nib::interactive::bounded_public_text(
-                    &msg,
-                    &sensitive_values,
-                    MAX_RUN_SUMMARY_BYTES,
-                    false,
-                );
-                println!("Last: {msg}");
-            }
-            Ok(())
-        }
+        Ok(summary) => report_run_summary(args, &session_store, &sid, &sensitive_values, summary),
         Err(error) => Err(format!("failed to launch agent: {error}")),
+    }
+}
+
+fn report_run_summary(
+    args: &RunArgs,
+    session_store: &nib::session::SessionStore,
+    sid: &str,
+    sensitive_values: &[String],
+    summary: nib::agent::AgentRunSummary,
+) -> Result<(), String> {
+    if summary.outcome == "cancelled_by_user" {
+        eprintln!("Run cancelled.");
+        std::process::exit(interrupt_exit_status());
+    }
+    if summary.outcome == "waiting_for_user_input" {
+        return Err(format!(
+            "Waiting for your answer. Resume with `nib --session {sid}` then `/questions` and `/continue <plan-id>`."
+        ));
+    }
+    if summary.is_failure() {
+        return Err(summary
+            .user_failure_report()
+            .unwrap_or_else(|| format!("Agent run failed: {}\nSession: {sid}", summary.outcome)));
+    }
+    println!("Agent run completed for session {sid}");
+    if args.mode == "plan" {
+        if let Ok(Some(session)) = session_store.load_result(sid) {
+            if let Some(plan) = session.plan.as_ref() {
+                println!("Plan {}:", plan.id);
+                for (index, step) in plan.steps.iter().enumerate() {
+                    println!("  {}. {}", index + 1, step.description);
+                }
+            }
+        }
+    }
+    if let Some(msg) = summary.last_message {
+        let msg = nib::interactive::bounded_public_text(
+            &msg,
+            sensitive_values,
+            MAX_RUN_ANSWER_BYTES,
+            false,
+        );
+        if msg.trim().is_empty() {
+            println!("Final answer omitted by safety/storage limits; inspect the session record.");
+        } else {
+            println!("{msg}");
+        }
+    }
+    Ok(())
+}
+
+fn interrupt_exit_status() -> i32 {
+    #[cfg(unix)]
+    {
+        130
+    }
+    #[cfg(not(unix))]
+    {
+        1
     }
 }
 

@@ -66,6 +66,16 @@ pub enum InteractiveAvailability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractiveWorkerPolicy {
     Allowed,
+    ReadOnly,
+    LiveControl,
+    RequiresIdle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEffectClass {
+    Always,
+    ReadOnlyInspection,
+    LiveControl,
     RequiresIdle,
 }
 
@@ -114,7 +124,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "Show session, model, permissions, plan, and queue",
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
-        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveWorkerPolicy::ReadOnly,
         NO_COMPLETION,
     ),
     spec(
@@ -124,7 +134,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "Show compact context usage or its bounded breakdown",
         InteractiveArgumentSchema::OptionalSingle,
         InteractiveMutability::ReadOnly,
-        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveWorkerPolicy::ReadOnly,
         InteractiveCompletionSpec {
             candidates: &["details"],
             argument_after: &[],
@@ -177,7 +187,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "review",
         &[],
         "/review",
-        "Review authoritative workspace changes",
+        "Show changes (diff)",
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
         InteractiveWorkerPolicy::RequiresIdle,
@@ -267,7 +277,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "copy",
         &[],
         "/copy",
-        "Print the latest completed assistant output",
+        "Copy the latest completed assistant output",
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
         InteractiveWorkerPolicy::RequiresIdle,
@@ -290,7 +300,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "List session-owned background work",
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
-        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveWorkerPolicy::ReadOnly,
         NO_COMPLETION,
     ),
     spec(
@@ -300,7 +310,7 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "Stop exact session-owned background work",
         InteractiveArgumentSchema::OptionalSingle,
         InteractiveMutability::Runtime,
-        InteractiveWorkerPolicy::RequiresIdle,
+        InteractiveWorkerPolicy::LiveControl,
         NO_COMPLETION,
     ),
     spec(
@@ -336,6 +346,26 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         "Show interactive command help",
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
+        InteractiveWorkerPolicy::ReadOnly,
+        NO_COMPLETION,
+    ),
+    spec(
+        "questions",
+        &[],
+        "/questions [id]",
+        "List or answer unresolved questions for the active plan",
+        InteractiveArgumentSchema::OptionalSingle,
+        InteractiveMutability::Session,
+        InteractiveWorkerPolicy::RequiresIdle,
+        NO_COMPLETION,
+    ),
+    spec(
+        "continue",
+        &[],
+        "/continue <plan-id>",
+        "Continue an exact existing plan without retyping its goal",
+        InteractiveArgumentSchema::RequiredText,
+        InteractiveMutability::Runtime,
         InteractiveWorkerPolicy::RequiresIdle,
         NO_COMPLETION,
     ),
@@ -741,6 +771,8 @@ pub enum InteractiveCommand {
     Model { selection: Option<String> },
     Skills(SkillCommand),
     Mcp(McpCommand),
+    Questions { id: Option<String> },
+    Continue { plan_id: String },
 }
 
 impl InteractiveCommand {
@@ -769,9 +801,32 @@ impl InteractiveCommand {
             Self::Model { .. } => "model",
             Self::Skills(_) => "skills",
             Self::Mcp(_) => "mcp",
+            Self::Questions { .. } => "questions",
+            Self::Continue { .. } => "continue",
         };
         find_command_spec(name).expect("every typed interactive command has registry metadata")
     }
+}
+
+pub fn command_effect_class(command: &InteractiveCommand) -> CommandEffectClass {
+    match command {
+        InteractiveCommand::Quit => CommandEffectClass::Always,
+        InteractiveCommand::Help
+        | InteractiveCommand::Status
+        | InteractiveCommand::Context { .. }
+        | InteractiveCommand::Plan { prompt: None }
+        | InteractiveCommand::Ps => CommandEffectClass::ReadOnlyInspection,
+        InteractiveCommand::Stop { task_id: Some(_) } => CommandEffectClass::LiveControl,
+        _ => CommandEffectClass::RequiresIdle,
+    }
+}
+
+pub fn live_stop_requires_id_message() -> &'static str {
+    "usage: /stop <task-id> — live stop needs an exact session-owned task id"
+}
+
+pub fn modal_command_unsupported_message() -> &'static str {
+    "typed :command is unsupported here; use text: to answer literally"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -797,6 +852,15 @@ pub enum InteractiveEffect {
     RunAgent {
         goal: String,
         mode: InteractiveAgentMode,
+    },
+    ContinuePlan {
+        plan_id: String,
+        goal: String,
+    },
+    OpenQuestion {
+        invocation_id: String,
+        question: String,
+        options: Vec<String>,
     },
 }
 
@@ -1239,12 +1303,16 @@ pub enum InteractionInput<'a> {
     SubmittedLine(&'a str),
     ComposerSubmit(&'a str),
     ApprovalAnswer(&'a str),
+    ApprovalInputClosed,
     QuestionAnswer {
         answer: &'a str,
         options: &'a [String],
         selected_option: Option<usize>,
     },
+    QuestionLeaveUnanswered,
+    QuestionInputClosed,
     ConfirmationAnswer(&'a str),
+    ConfirmationInputClosed,
     ReconciledOutcome {
         outcome: &'a str,
         failure: bool,
@@ -1267,9 +1335,14 @@ pub enum InteractionInput<'a> {
 pub enum InteractionReduction {
     Consumed(InteractionConsumer),
     Command(InteractiveCommand),
+    ModalCommand(InteractiveCommand),
     ApprovalDecision(InteractionDecision),
+    ApprovalInputClosed,
     QuestionAnswered(String),
+    QuestionLeftUnanswered,
+    QuestionInputClosed,
     ConfirmationDecision(InteractionDecision),
+    ConfirmationInputClosed,
     Reconciled {
         outcome: String,
         terminal: InteractionTerminalOutcome,
@@ -1376,38 +1449,42 @@ pub fn reduce_interaction(
         InteractionInput::Transcript(action) => InteractionReduction::Transcript(action),
         InteractionInput::OpenHistorySearch => InteractionReduction::Consumed(consumer),
         InteractionInput::UserAction => InteractionReduction::Consumed(consumer),
-        InteractionInput::ApprovalAnswer(_) if consumer != InteractionConsumer::Approval => {
+        InteractionInput::ApprovalAnswer(_) | InteractionInput::ApprovalInputClosed
+            if consumer != InteractionConsumer::Approval =>
+        {
             InteractionReduction::Consumed(consumer)
         }
-        InteractionInput::ApprovalAnswer(answer) => {
-            let decision = if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                InteractionDecision::Accept
-            } else {
-                InteractionDecision::Reject
-            };
-            InteractionReduction::ApprovalDecision(decision)
-        }
-        InteractionInput::QuestionAnswer { .. } if consumer != InteractionConsumer::Question => {
+        InteractionInput::ApprovalAnswer(answer) => reduce_choice_answer(
+            answer,
+            InteractionConsumer::Approval,
+            InteractionReduction::ApprovalDecision,
+        ),
+        InteractionInput::ApprovalInputClosed => InteractionReduction::ApprovalInputClosed,
+        InteractionInput::QuestionAnswer { .. }
+        | InteractionInput::QuestionLeaveUnanswered
+        | InteractionInput::QuestionInputClosed
+            if consumer != InteractionConsumer::Question =>
+        {
             InteractionReduction::Consumed(consumer)
         }
+        InteractionInput::QuestionLeaveUnanswered => InteractionReduction::QuestionLeftUnanswered,
+        InteractionInput::QuestionInputClosed => InteractionReduction::QuestionInputClosed,
         InteractionInput::QuestionAnswer {
             answer,
             options,
             selected_option,
         } => reduce_question_answer(answer, options, selected_option),
-        InteractionInput::ConfirmationAnswer(_)
+        InteractionInput::ConfirmationAnswer(_) | InteractionInput::ConfirmationInputClosed
             if consumer != InteractionConsumer::DestructiveConfirmation =>
         {
             InteractionReduction::Consumed(consumer)
         }
-        InteractionInput::ConfirmationAnswer(answer) => {
-            let decision = if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                InteractionDecision::Accept
-            } else {
-                InteractionDecision::Reject
-            };
-            InteractionReduction::ConfirmationDecision(decision)
-        }
+        InteractionInput::ConfirmationAnswer(answer) => reduce_choice_answer(
+            answer,
+            InteractionConsumer::DestructiveConfirmation,
+            InteractionReduction::ConfirmationDecision,
+        ),
+        InteractionInput::ConfirmationInputClosed => InteractionReduction::ConfirmationInputClosed,
         InteractionInput::SteerCurrent(_) if consumer != InteractionConsumer::Composer => {
             InteractionReduction::Consumed(consumer)
         }
@@ -1438,15 +1515,97 @@ pub fn reduce_interaction(
     }
 }
 
+fn reduce_choice_answer(
+    answer: &str,
+    consumer: InteractionConsumer,
+    decided: fn(InteractionDecision) -> InteractionReduction,
+) -> InteractionReduction {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "n" | "no" => decided(InteractionDecision::Reject),
+        "y" | "yes" => decided(InteractionDecision::Accept),
+        _ => InteractionReduction::Error {
+            consumer,
+            message: "enter y/yes to confirm or n/no to deny".to_string(),
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptPrefix {
+    Text(String),
+    Command(String),
+}
+
+fn parse_prompt_prefix(input: &str) -> Result<Option<PromptPrefix>, String> {
+    let trimmed = input.trim_start_matches([' ', '\t']);
+    if let Some(rest) = trimmed.strip_prefix("text:") {
+        return parse_prefixed_payload("text:", rest)
+            .map(|payload| Some(PromptPrefix::Text(payload)));
+    }
+    if let Some(rest) = trimmed.strip_prefix(":command") {
+        return parse_prefixed_payload(":command", rest)
+            .map(|payload| Some(PromptPrefix::Command(payload)));
+    }
+    Ok(None)
+}
+
+fn parse_prefixed_payload(token: &str, rest: &str) -> Result<String, String> {
+    if rest.is_empty() || !rest.starts_with(' ') {
+        return Err(format!(
+            "{token} requires an ASCII space and a non-empty payload"
+        ));
+    }
+    let payload = &rest[1..];
+    if payload.trim().is_empty() {
+        return Err(format!("{token} payload cannot be empty"));
+    }
+    Ok(payload.to_string())
+}
+
 fn reduce_question_answer(
     answer: &str,
     options: &[String],
     selected_option: Option<usize>,
 ) -> InteractionReduction {
-    let answer = answer.trim();
-    if !answer.is_empty() {
-        if let Ok(index) = answer.parse::<usize>() {
-            return options
+    match parse_prompt_prefix(answer) {
+        Err(message) => InteractionReduction::Error {
+            consumer: InteractionConsumer::Question,
+            message,
+        },
+        Ok(Some(PromptPrefix::Text(value))) => {
+            reduce_literal_question_answer(&value, options, selected_option)
+        }
+        Ok(Some(PromptPrefix::Command(payload))) => reduce_modal_question_command(&payload),
+        Ok(None) => reduce_question_body(answer.trim(), options, selected_option),
+    }
+}
+
+fn reduce_literal_question_answer(
+    value: &str,
+    options: &[String],
+    selected_option: Option<usize>,
+) -> InteractionReduction {
+    if value.trim().is_empty() {
+        reduce_empty_question_answer(options, selected_option)
+    } else {
+        InteractionReduction::QuestionAnswered(value.to_string())
+    }
+}
+
+fn reduce_question_body(
+    answer: &str,
+    options: &[String],
+    selected_option: Option<usize>,
+) -> InteractionReduction {
+    if answer.is_empty() {
+        return reduce_empty_question_answer(options, selected_option);
+    }
+    if options.is_empty() {
+        return InteractionReduction::QuestionAnswered(answer.to_string());
+    }
+    if !answer.is_empty() && answer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return match answer.parse::<usize>() {
+            Ok(index) => options
                 .get(index.saturating_sub(1))
                 .filter(|_| index > 0)
                 .cloned()
@@ -1454,10 +1613,20 @@ fn reduce_question_answer(
                 .unwrap_or_else(|| InteractionReduction::Error {
                     consumer: InteractionConsumer::Question,
                     message: format!("question option {index} is out of range"),
-                });
-        }
-        return InteractionReduction::QuestionAnswered(answer.to_string());
+                }),
+            Err(_) => InteractionReduction::Error {
+                consumer: InteractionConsumer::Question,
+                message: format!("question option {answer} is out of range"),
+            },
+        };
     }
+    InteractionReduction::QuestionAnswered(answer.to_string())
+}
+
+fn reduce_empty_question_answer(
+    options: &[String],
+    selected_option: Option<usize>,
+) -> InteractionReduction {
     if let Some(answer) = selected_option
         .and_then(|index| options.get(index))
         .cloned()
@@ -1467,6 +1636,35 @@ fn reduce_question_answer(
     InteractionReduction::Error {
         consumer: InteractionConsumer::Question,
         message: "question response cannot be empty".to_string(),
+    }
+}
+
+fn reduce_modal_question_command(payload: &str) -> InteractionReduction {
+    match parse_interactive_command(payload.trim()) {
+        Err(message) => InteractionReduction::Error {
+            consumer: InteractionConsumer::Question,
+            message,
+        },
+        Ok(None) => InteractionReduction::Error {
+            consumer: InteractionConsumer::Question,
+            message: "typed :command requires a slash command".to_string(),
+        },
+        Ok(Some(InteractiveCommand::Stop { task_id: None })) => InteractionReduction::Error {
+            consumer: InteractionConsumer::Question,
+            message: live_stop_requires_id_message().to_string(),
+        },
+        Ok(Some(command)) => match command_effect_class(&command) {
+            CommandEffectClass::ReadOnlyInspection | CommandEffectClass::LiveControl => {
+                InteractionReduction::ModalCommand(command)
+            }
+            _ => InteractionReduction::Error {
+                consumer: InteractionConsumer::Question,
+                message: format!(
+                    "command /{} is unavailable while a question is pending",
+                    command.spec().name
+                ),
+            },
+        },
     }
 }
 
@@ -1513,14 +1711,17 @@ fn reduce_composer_submission(state: &InteractionState, line: &str) -> Interacti
     };
     if state.run.worker_active() {
         return match parsed {
-            Some(command)
-                if command.spec().worker_policy == InteractiveWorkerPolicy::RequiresIdle =>
-            {
+            Some(InteractiveCommand::Stop { task_id: None }) => InteractionReduction::Error {
+                consumer: InteractionConsumer::Composer,
+                message: live_stop_requires_id_message().to_string(),
+            },
+            Some(command) if command_effect_class(&command) == CommandEffectClass::RequiresIdle => {
                 InteractionReduction::Error {
                     consumer: InteractionConsumer::Composer,
-                    message:
-                        "Agent is still running; cancel it or wait before running this command."
-                            .to_string(),
+                    message: format!(
+                        "Command /{} is unavailable while the agent is running; cancel it or wait.",
+                        command.spec().name
+                    ),
                 }
             }
             Some(InteractiveCommand::History { query }) => {
@@ -4564,6 +4765,12 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         },
         "skills" => InteractiveCommand::Skills(parse_skill_command(&arguments)?),
         "mcp" => InteractiveCommand::Mcp(parse_mcp_command(&arguments)?),
+        "questions" if arguments.len() <= 1 => InteractiveCommand::Questions {
+            id: arguments.first().cloned(),
+        },
+        "continue" if arguments.len() == 1 => InteractiveCommand::Continue {
+            plan_id: arguments[0].clone(),
+        },
         _ => return Err(format!("usage: {}", spec.usage)),
     };
     Ok(Some(parsed))
@@ -4820,7 +5027,168 @@ pub fn execute_interactive_command_in_state(
                 "Successfully removed MCP server '{name}'."
             )))
         }
+        InteractiveCommand::Questions { id } => {
+            load_questions_effect(store, session_id, id.as_deref())
+        }
+        InteractiveCommand::Continue { plan_id } => {
+            load_continue_plan_effect(store, session_id, &plan_id)
+        }
     }
+}
+
+fn load_questions_effect(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: Option<&str>,
+) -> Result<InteractiveEffect, String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .ok_or_else(|| format!("session {session_id} was not found"))?;
+    let active_plan = session.plan.as_ref().map(|plan| plan.id.as_str());
+    let unresolved: Vec<&crate::session::ClarificationRecord> = session
+        .clarifications
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                crate::session::ClarificationStatus::Pending
+                    | crate::session::ClarificationStatus::Unresolved
+            ) && record.plan_id.as_deref() == active_plan
+        })
+        .collect();
+    let Some(invocation_id) = invocation_id else {
+        return Ok(InteractiveEffect::Output(format_unresolved_questions(
+            &unresolved,
+        )));
+    };
+    let record = unresolved
+        .iter()
+        .find(|record| record.invocation_id.to_string() == invocation_id)
+        .ok_or_else(|| format!("no unresolved question {invocation_id} for the current plan"))?;
+    Ok(InteractiveEffect::OpenQuestion {
+        invocation_id: record.invocation_id.to_string(),
+        question: record.question.clone(),
+        options: record.options.clone(),
+    })
+}
+
+fn format_unresolved_questions(records: &[&crate::session::ClarificationRecord]) -> String {
+    if records.is_empty() {
+        return "No unresolved questions for the current plan. Use /questions <id> with an exact invocation id.".to_string();
+    }
+    let mut output = String::from("Unresolved questions:");
+    for record in records {
+        output.push_str(&format!(
+            "\n  {}  [{}]  {}",
+            record.invocation_id,
+            format!("{:?}", record.status).to_ascii_lowercase(),
+            bounded_status_value(&record.question)
+        ));
+    }
+    output.push_str("\nAnswer with /questions <id>, then /continue <plan-id> to resume.");
+    output
+}
+
+fn load_continue_plan_effect(
+    store: &SessionStore,
+    session_id: &str,
+    plan_id: &str,
+) -> Result<InteractiveEffect, String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .ok_or_else(|| format!("session {session_id} was not found"))?;
+    let plan = session
+        .plan
+        .as_ref()
+        .ok_or_else(|| "no active plan is available to continue".to_string())?;
+    if plan.id != plan_id {
+        return Err(format!(
+            "plan {plan_id} is not the current session plan {}",
+            plan.id
+        ));
+    }
+    if plan.goal.trim().is_empty() || plan.id.trim().is_empty() {
+        return Err("persisted plan is missing goal or identity and cannot continue".to_string());
+    }
+    if plan.is_complete() {
+        return Err(format!("plan {plan_id} is already complete"));
+    }
+    if session.has_unresolved_clarification(Some(&plan.id)) {
+        return Err(
+            "unresolved questions still block this plan; answer them with /questions first"
+                .to_string(),
+        );
+    }
+    Ok(InteractiveEffect::ContinuePlan {
+        plan_id: plan.id.clone(),
+        goal: plan.goal.clone(),
+    })
+}
+
+pub fn persist_recovered_question_answer(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: &str,
+    answer: &str,
+) -> Result<String, String> {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Err("recovered question answer cannot be empty".to_string());
+    }
+    store
+        .update_session(session_id, |session| {
+            let active_plan = session.plan.as_ref().map(|plan| plan.id.clone());
+            let index = session
+                .clarifications
+                .iter()
+                .position(|record| record.invocation_id.to_string() == invocation_id)
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(format!(
+                        "question {invocation_id} was not found"
+                    ))
+                })?;
+            let record = &session.clarifications[index];
+            if record.plan_id != active_plan {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "question does not belong to the current plan".to_string(),
+                ));
+            }
+            if record.status == crate::session::ClarificationStatus::Answered {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "question was already answered".to_string(),
+                ));
+            }
+            let event_index = session.events.len();
+            session.events.push(SessionEvent {
+                index: event_index,
+                kind: "human_question_answer_received".to_string(),
+                details: serde_json::json!({
+                    "invocation_id": invocation_id,
+                    "answer": answer,
+                    "recovered": true,
+                }),
+                timestamp: Some(Utc::now()),
+            });
+            session
+                .human_intent
+                .push(crate::session::HumanIntentRecord {
+                    kind: crate::session::HumanIntentKind::QuestionAnswer,
+                    text: answer.to_string(),
+                    source_message_index: None,
+                    source_event_index: Some(event_index),
+                });
+            let record = &mut session.clarifications[index];
+            record.status = crate::session::ClarificationStatus::Answered;
+            record.answer = Some(answer.to_string());
+            record.outcome = Some("answered".to_string());
+            record.reason = Some("recovered via /questions".to_string());
+            record.answer_event_index = Some(event_index);
+            let plan_id = record.plan_id.clone().unwrap_or_default();
+            Ok(plan_id)
+        })
+        .map_err(|error| error.to_string())
 }
 
 pub fn set_active_model(project_root: &Path, model: &str) -> Result<String, String> {
@@ -5077,7 +5445,7 @@ mod tests {
             ),
             InteractionReduction::QueueNext("next ordinary turn".to_string())
         );
-        assert!(matches!(
+        assert_eq!(
             reduce_interaction(
                 &InteractionState {
                     run: InteractionRunState::Running,
@@ -5085,11 +5453,8 @@ mod tests {
                 },
                 InteractionInput::SubmittedLine("/status"),
             ),
-            InteractionReduction::Error {
-                consumer: InteractionConsumer::Composer,
-                ..
-            }
-        ));
+            InteractionReduction::Command(InteractiveCommand::Status)
+        );
         assert_eq!(
             reduce_interaction(
                 &InteractionState::default(),
@@ -5103,6 +5468,88 @@ mod tests {
                 InteractionInput::SubmittedLine("ordinary idle turn"),
             ),
             InteractionReduction::IdleTurn("ordinary idle turn".to_string())
+        );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    question_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::QuestionAnswer {
+                    answer: "42",
+                    options: &[],
+                    selected_option: None,
+                },
+            ),
+            InteractionReduction::QuestionAnswered("42".to_string())
+        );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    question_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::QuestionAnswer {
+                    answer: "text: 42",
+                    options: &["plan".to_string()],
+                    selected_option: None,
+                },
+            ),
+            InteractionReduction::QuestionAnswered("42".to_string())
+        );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    question_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::QuestionAnswer {
+                    answer: "text: :command /status",
+                    options: &[],
+                    selected_option: None,
+                },
+            ),
+            InteractionReduction::QuestionAnswered(":command /status".to_string())
+        );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    question_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::QuestionAnswer {
+                    answer: ":command /status",
+                    options: &[],
+                    selected_option: None,
+                },
+            ),
+            InteractionReduction::ModalCommand(InteractiveCommand::Status)
+        );
+        assert!(matches!(
+            reduce_interaction(
+                &InteractionState {
+                    approval_pending: true,
+                    ..InteractionState::default()
+                },
+                InteractionInput::ApprovalAnswer("maybe"),
+            ),
+            InteractionReduction::Error {
+                consumer: InteractionConsumer::Approval,
+                ..
+            }
+        ));
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    run: InteractionRunState::Running,
+                    ..InteractionState::default()
+                },
+                InteractionInput::SubmittedLine("/stop"),
+            ),
+            InteractionReduction::Error {
+                consumer: InteractionConsumer::Composer,
+                message: live_stop_requires_id_message().to_string(),
+            }
         );
         assert!(matches!(
             reduce_interaction(
@@ -6344,6 +6791,10 @@ mod tests {
             "/ps",
             "/stop",
             "/stop exact-task",
+            "/questions",
+            "/questions abc",
+            "/continue plan-1",
+            "/help",
         ] {
             parse_interactive_command(command).unwrap_or_else(|error| panic!("{command}: {error}"));
         }

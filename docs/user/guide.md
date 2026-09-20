@@ -442,13 +442,15 @@ Both presentation modes expose these commands:
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
   states are labeled in text rather than by color alone.
 - `/plan [prompt]` shows the current plan or starts a planning turn.
-- `/review` and `/diff` show the git workspace diff.
+- `/review` and `/diff` show the git workspace diff (`Show changes (diff)`).
+- `/questions [id]` lists or answers unresolved questions for the current plan.
+- `/continue <plan-id>` continues that exact plan without retyping its goal.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
   display name. The first user message also names an unnamed session; `/rename`
   is not overwritten.
-- `/copy` prints the latest completed assistant output.
+- `/copy` copies the latest completed assistant output in supported terminals, or prints a labeled fallback.
 - `/compact` requests bounded compression for the active session through the configured
   provider. It may bypass the automatic usage threshold, but still respects the
   compression enabled switch, preserves every raw message, and reports the resulting
@@ -478,11 +480,11 @@ Parity matrix (same command/session effect in both renderers):
 | Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
 | Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
-| Quit | idle `Ctrl+C` twice, `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`); idle `Ctrl+C` |
-| Transcript | `Tab`, then arrows / fold / `Ctrl+C` or `Ctrl+Y` | ordered printed transcript |
+| Quit | `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
+| Transcript | `Tab`, then arrows / fold / `Ctrl+Y` or `Ctrl+Shift+C` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
-| Approvals | dock on the current tool | Y/N prompt |
+| Approvals | dock on the current tool; Deny is the default | `y`/`yes` or `n`/`no`; `details` |
 | Draft history | `Up`/`Down`; `Ctrl+R` or `/history [query]` search | `/history [query]` numbered search |
 | Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
 | Path attachment | `@` completion, structured context | same `@path` mentions |
@@ -571,13 +573,13 @@ continues without waiting for you to approve the plan. nib asks only when the
 request is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
 options. The composer states what nib wants to do and shows the command or path;
-`Y` Approve once and `N` Deny sit under the input. `Y`/`Enter`/`1` approve once, or
-`N`/`Esc`/`2` deny. Up/Down change the selected choice. The conversation stays
-visible. While approval is open the footer reads `WAITING APPROVAL`. When nib asks a
-question, the composer shows the question and choices sit under the input in Codex
-form: `› 1. option (y)`, `2. option (2)`, `3. Skip (esc)`. Press `Enter` or `1`-`9`
-or `y` to answer, or `Esc` to skip. While a question is open the
-footer reads `WAITING QUESTION`.
+`Approve once` and `Deny` sit under the input, with Deny focused first. Type
+`y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.
+Escape denies. While approval is open the footer reads `WAITING APPROVAL`. When nib
+asks a question, type a custom answer or move to the numbered suggestions. Bare
+numbers select one-based options; `text: 42` forces literal text. Escape leaves the
+question unanswered. Recover later with `/questions [id]` and `/continue <plan-id>`.
+While a question is open the footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 
@@ -587,8 +589,9 @@ notice and `nib update` when a newer build is available, `/new` to start a fresh
 session and worktree, `/session` to switch sessions, and the most-used keys, plus
 the prompt. The first interactive start in a project asks permission to work in
 that directory before any goal runs. The composer shows the path and Allow/Decline
-choices sit under the input; `Y`/`Enter` allow and persist `workspace.allowed`, and
-`N`/`Esc` quit. Later starts skip the prompt. A
+choices sit under the input with Decline focused first. Select Allow and press Enter
+to persist `workspace.allowed`; Enter on the default, or Escape, quits. Later starts
+skip the prompt. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
 conversation. Command signatures start on the same column as the `/` in the
@@ -628,10 +631,9 @@ composer and the transcript. Click in the chat to focus it; drag to select text.
 Releasing the drag copies the selection and clears the highlight. `Esc` or
 `Enter` also clears a leftover selection and returns to the composer; a click
 in the prompt or typing does the same. `Ctrl+A` selects
-the whole chat. `Ctrl+C` copies while text is selected (it still cancels a run
-or quits when nothing is selected). `Ctrl+Y` or `Ctrl+Shift+C` copy the
-selection, the selected block, or the last reply. Printable keys return to the
-composer and insert.
+the whole chat. `Ctrl+C` cancels an active run or clears idle draft/selection; it
+never copies or quits. `Ctrl+Y` or `Ctrl+Shift+C` copy the selection, the selected
+block, or the last reply. Printable keys return to the composer and insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
 mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
@@ -658,9 +660,8 @@ full-view replacement boundary for its new session.
 Approval, question, model, and session overlays take input before command completion.
 Switcher and selector errors render on the overlay that caused them. `Esc` never
 cancels a run; press it twice within 800ms to clear a non-empty draft. `Ctrl+C`
-cancels an active run, or clears an idle draft. On an empty idle composer, press
-`Ctrl+C` twice within 1000ms to quit (`Ctrl+Q` twice still quits). `/quit`,
-`/exit`, and `/q` still exit.
+cancels an active run, or clears an idle draft/selection, and never quits.
+`Ctrl+Q` twice within 1000ms quits. `/quit`, `/exit`, and `/q` still exit.
 Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.
 

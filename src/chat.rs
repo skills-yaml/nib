@@ -109,7 +109,7 @@ impl PlainModalState {
 struct PlainQuestionPrompt {
     question: String,
     options: Vec<String>,
-    reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    reply: tokio::sync::oneshot::Sender<nib::agent::QuestionOutcome>,
 }
 
 enum PendingPlainModalResponse {
@@ -118,8 +118,8 @@ enum PendingPlainModalResponse {
         reply: tokio::sync::oneshot::Sender<nib::tools::models::ApprovalDecision>,
     },
     Question {
-        answer: Result<String, String>,
-        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+        outcome: nib::agent::QuestionOutcome,
+        reply: tokio::sync::oneshot::Sender<nib::agent::QuestionOutcome>,
     },
 }
 
@@ -129,8 +129,8 @@ impl PendingPlainModalResponse {
             Self::Approval { decision, reply } => {
                 let _ = reply.send(decision);
             }
-            Self::Question { answer, reply } => {
-                let _ = reply.send(answer);
+            Self::Question { outcome, reply } => {
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -141,9 +141,7 @@ impl PendingPlainModalResponse {
                 let _ = reply.send(nib::tools::models::ApprovalDecision::denied());
             }
             Self::Question { reply, .. } => {
-                let _ = reply.send(Err(
-                    "console input closed before the modal frame delimiter".to_string()
-                ));
+                let _ = reply.send(nib::agent::QuestionOutcome::InputClosed);
             }
         }
     }
@@ -206,31 +204,57 @@ impl nib::tools::executor::ApprovalHandler for BrokeredPlainApprovalHandler {
 #[async_trait::async_trait]
 impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
+        match self
+            .ask_with_context(nib::agent::QuestionRequestContext {
+                invocation_id: nib::tools::ToolInvocationId::new(),
+                question,
+                options,
+            })
+            .await
+        {
+            nib::agent::QuestionOutcome::Answered(answer) => Ok(answer),
+            nib::agent::QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
+            nib::agent::QuestionOutcome::Cancelled => Err("cancelled".to_string()),
+            nib::agent::QuestionOutcome::InputClosed => Err("input closed".to_string()),
+            nib::agent::QuestionOutcome::InputUnavailable(error) => Err(error),
+        }
+    }
+
+    async fn ask_with_context(
+        &self,
+        context: nib::agent::QuestionRequestContext<'_>,
+    ) -> nib::agent::QuestionOutcome {
         if !self.modal_state.claim(PLAIN_MODAL_QUESTION) {
-            return Err("another interactive prompt already owns plain input".to_string());
+            return nib::agent::QuestionOutcome::InputUnavailable(
+                "another interactive prompt already owns plain input".to_string(),
+            );
         }
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
             .tx
             .send(PlainQuestionPrompt {
-                question: question.to_string(),
-                options: options.to_vec(),
+                question: context.question.to_string(),
+                options: context.options.to_vec(),
                 reply,
             })
             .is_err()
         {
             self.modal_state.clear();
-            return Err("plain question input router stopped".to_string());
+            return nib::agent::QuestionOutcome::InputUnavailable(
+                "plain question input router stopped".to_string(),
+            );
         }
-        let answer = match response.await {
-            Ok(answer) => answer,
+        let outcome = match response.await {
+            Ok(outcome) => outcome,
             Err(_) => {
                 self.modal_state.clear();
-                return Err("plain question input router stopped".to_string());
+                return nib::agent::QuestionOutcome::InputUnavailable(
+                    "plain question input router stopped".to_string(),
+                );
             }
         };
         self.modal_state.clear();
-        answer
+        outcome
     }
 }
 
@@ -762,6 +786,66 @@ fn run_plain_with_input_and_modal_state(
                             println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
                             break 'repl;
                         }
+                        Err(error) => println!("{error}"),
+                    }
+                }
+                Ok(InteractiveEffect::ContinuePlan { plan_id, goal }) => {
+                    println!("Continuing plan {plan_id}...");
+                    match execute_plain_continuation(
+                        &agent_scope,
+                        &sid,
+                        &goal,
+                        &plan_id,
+                        &input,
+                        modal_state.clone(),
+                    ) {
+                        Ok(PlainAgentDisposition::Completed) => {}
+                        Ok(PlainAgentDisposition::Cancelled) => println!(
+                            "{}",
+                            chat_queue_disposition(&session_store, &sid, "cancelled active run")
+                        ),
+                        Ok(PlainAgentDisposition::Failed) => println!(
+                            "{}",
+                            chat_queue_disposition(&session_store, &sid, "failed active run")
+                        ),
+                        Ok(PlainAgentDisposition::QuitRequested(terminal)) => {
+                            println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
+                            break 'repl;
+                        }
+                        Err(error) => println!("{error}"),
+                    }
+                }
+                Ok(InteractiveEffect::OpenQuestion {
+                    invocation_id,
+                    question,
+                    options,
+                }) => {
+                    println!("Recovered question {invocation_id}: {question}");
+                    for (index, option) in options.iter().enumerate() {
+                        println!("  {}. {}", index + 1, option);
+                    }
+                    print!("Answer: ");
+                    let _ = io::stdout().flush();
+                    match input.read_line_blocking() {
+                        Ok(line) => match interpret_plain_question_line(&line, &options) {
+                            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(
+                                answer,
+                            )) => {
+                                match nib::interactive::persist_recovered_question_answer(
+                                    &session_store,
+                                    &sid,
+                                    &invocation_id,
+                                    &answer,
+                                ) {
+                                    Ok(plan_id) => {
+                                        println!("Saved answer. Continue with /continue {plan_id}")
+                                    }
+                                    Err(error) => println!("{error}"),
+                                }
+                            }
+                            PlainQuestionLine::Retry(message) => println!("{message}"),
+                            other => println!("question was not answered: {other:?}"),
+                        },
                         Err(error) => println!("{error}"),
                     }
                 }
@@ -1301,35 +1385,75 @@ impl Drop for PreparedPlainAgentStep {
     }
 }
 
-fn parse_plain_question_answer(line: &str, options: &[String]) -> Result<String, String> {
+fn parse_plain_question_answer(line: &str, options: &[String]) -> InteractionReduction {
     let state = InteractionState {
         question_pending: true,
         ..InteractionState::default()
     };
-    match reduce_interaction(
+    reduce_interaction(
         &state,
         InteractionInput::QuestionAnswer {
             answer: line,
             options,
             selected_option: None,
         },
-    ) {
-        InteractionReduction::QuestionAnswered(answer) => Ok(answer),
-        InteractionReduction::Error { message, .. } => Err(message),
-        _ => Err("plain question input was rejected by the shared reducer".to_string()),
-    }
+    )
 }
 
-fn plain_approval_decision(line: &str) -> nib::tools::models::ApprovalDecision {
+fn plain_approval_decision(line: &str) -> InteractionReduction {
     let state = InteractionState {
         approval_pending: true,
         ..InteractionState::default()
     };
-    match reduce_interaction(&state, InteractionInput::ApprovalAnswer(line)) {
+    reduce_interaction(&state, InteractionInput::ApprovalAnswer(line))
+}
+
+fn complete_plain_approval_line(
+    line: &str,
+    context: &nib::tools::executor::ApprovalContext,
+) -> Result<Option<nib::tools::models::ApprovalDecision>, String> {
+    if line.trim().eq_ignore_ascii_case("details") {
+        eprintln!("{}", context.render());
+        return Ok(None);
+    }
+    match plain_approval_decision(line) {
         InteractionReduction::ApprovalDecision(InteractionDecision::Accept) => {
-            nib::tools::models::ApprovalDecision::granted_user()
+            Ok(Some(nib::tools::models::ApprovalDecision::granted_user()))
         }
-        _ => nib::tools::models::ApprovalDecision::denied(),
+        InteractionReduction::ApprovalDecision(InteractionDecision::Reject) => {
+            Ok(Some(nib::tools::models::ApprovalDecision::denied()))
+        }
+        InteractionReduction::ApprovalInputClosed => Ok(Some(
+            nib::tools::models::ApprovalDecision::denied_input_closed(),
+        )),
+        InteractionReduction::Error { message, .. } => Err(message),
+        _ => Ok(Some(nib::tools::models::ApprovalDecision::denied())),
+    }
+}
+
+#[derive(Debug)]
+enum PlainQuestionLine {
+    Retry(String),
+    Outcome(nib::agent::QuestionOutcome),
+    Command(nib::interactive::InteractiveCommand),
+}
+
+fn interpret_plain_question_line(line: &str, options: &[String]) -> PlainQuestionLine {
+    match parse_plain_question_answer(line, options) {
+        InteractionReduction::QuestionAnswered(answer) => {
+            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(answer))
+        }
+        InteractionReduction::QuestionLeftUnanswered => {
+            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::LeftUnanswered)
+        }
+        InteractionReduction::QuestionInputClosed => {
+            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::InputClosed)
+        }
+        InteractionReduction::ModalCommand(command) => PlainQuestionLine::Command(command),
+        InteractionReduction::Error { message, .. } => PlainQuestionLine::Retry(message),
+        _ => PlainQuestionLine::Retry(
+            "question input was rejected by the shared reducer".to_string(),
+        ),
     }
 }
 
@@ -1430,7 +1554,7 @@ fn execute_prepared_agent_step(
                         let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
                     }
                     if let Some(prompt) = pending_question.take() {
-                        let _ = prompt.reply.send(Err("agent run ended before question input".to_string()));
+                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::Cancelled);
                     }
                     if let Some(response) = pending_modal_response.take() {
                         response.fail_closed();
@@ -1445,13 +1569,20 @@ fn execute_prepared_agent_step(
                         let _ = io::stderr().flush();
                         pending_approval = Some(prompt);
                         if let Some(line) = buffered_modal_line.take() {
-                            let prompt = pending_approval.take().expect("approval prompt was installed");
-                            let decision = plain_approval_decision(&line);
-                            pending_modal_response = Some(PendingPlainModalResponse::Approval {
-                                decision,
-                                reply: prompt.reply,
-                            });
-                            request_plain_modal_frame_delimiter();
+                            if let Some(prompt) = pending_approval.as_ref() {
+                                match complete_plain_approval_line(&line, &prompt.context) {
+                                    Ok(Some(decision)) => {
+                                        let prompt = pending_approval.take().expect("approval");
+                                        pending_modal_response = Some(PendingPlainModalResponse::Approval {
+                                            decision,
+                                            reply: prompt.reply,
+                                        });
+                                        request_plain_modal_frame_delimiter();
+                                    }
+                                    Ok(None) => {}
+                                    Err(message) => eprintln!("{message}"),
+                                }
+                            }
                         }
                     } else {
                         modal_state.clear();
@@ -1472,17 +1603,26 @@ fn execute_prepared_agent_step(
                         let _ = io::stdout().flush();
                         pending_question = Some(prompt);
                         if let Some(line) = buffered_modal_line.take() {
-                            let prompt = pending_question.take().expect("question prompt was installed");
-                            let answer = parse_plain_question_answer(&line, &prompt.options);
-                            pending_modal_response = Some(PendingPlainModalResponse::Question {
-                                answer,
-                                reply: prompt.reply,
-                            });
-                            request_plain_modal_frame_delimiter();
+                            if let Some(prompt) = pending_question.as_ref() {
+                                match interpret_plain_question_line(&line, &prompt.options) {
+                                    PlainQuestionLine::Outcome(outcome) => {
+                                        let prompt = pending_question.take().expect("question");
+                                        pending_modal_response = Some(PendingPlainModalResponse::Question {
+                                            outcome,
+                                            reply: prompt.reply,
+                                        });
+                                        request_plain_modal_frame_delimiter();
+                                    }
+                                    PlainQuestionLine::Retry(message) => println!("{message}"),
+                                    PlainQuestionLine::Command(_) => println!(
+                                        "buffered command was not applied; enter it after the prompt is shown"
+                                    ),
+                                }
+                            }
                         }
                     } else {
                         modal_state.clear();
-                        let _ = prompt.reply.send(Err("console input closed before a response was received".to_string()));
+                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
                     }
                 }
                 line = input.read_line_async(), if input_open && buffered_modal_line.is_none() => {
@@ -1495,10 +1635,10 @@ fn execute_prepared_agent_step(
                                 modal_state.clear();
                             }
                             if let Some(prompt) = pending_approval.take() {
-                                let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
+                                let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied_input_closed());
                             }
                             if let Some(prompt) = pending_question.take() {
-                                let _ = prompt.reply.send(Err("console input closed before a response was received".to_string()));
+                                let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
                             }
                             continue;
                         }
@@ -1517,22 +1657,71 @@ fn execute_prepared_agent_step(
                         }
                         continue;
                     }
-                    if let Some(prompt) = pending_approval.take() {
-                        let decision = plain_approval_decision(&line);
-                        pending_modal_response = Some(PendingPlainModalResponse::Approval {
-                            decision,
-                            reply: prompt.reply,
-                        });
-                        request_plain_modal_frame_delimiter();
+                    if pending_approval.is_some() {
+                        let context = pending_approval
+                            .as_ref()
+                            .expect("approval")
+                            .context
+                            .clone();
+                        match complete_plain_approval_line(&line, &context) {
+                            Ok(Some(decision)) => {
+                                let prompt = pending_approval.take().expect("approval");
+                                pending_modal_response = Some(PendingPlainModalResponse::Approval {
+                                    decision,
+                                    reply: prompt.reply,
+                                });
+                                request_plain_modal_frame_delimiter();
+                            }
+                            Ok(None) => {}
+                            Err(message) => eprintln!("{message}"),
+                        }
                         continue;
                     }
-                    if let Some(prompt) = pending_question.take() {
-                        let answer = parse_plain_question_answer(&line, &prompt.options);
-                        pending_modal_response = Some(PendingPlainModalResponse::Question {
-                            answer,
-                            reply: prompt.reply,
-                        });
-                        request_plain_modal_frame_delimiter();
+                    if pending_question.is_some() {
+                        let options = pending_question
+                            .as_ref()
+                            .expect("question")
+                            .options
+                            .clone();
+                        match interpret_plain_question_line(&line, &options) {
+                            PlainQuestionLine::Outcome(outcome) => {
+                                let prompt = pending_question.take().expect("question");
+                                pending_modal_response = Some(PendingPlainModalResponse::Question {
+                                    outcome,
+                                    reply: prompt.reply,
+                                });
+                                request_plain_modal_frame_delimiter();
+                            }
+                            PlainQuestionLine::Retry(message) => {
+                                println!("{message}");
+                                if options.is_empty() {
+                                    print!("Answer: ");
+                                } else {
+                                    print!("Answer (number or text): ");
+                                }
+                                let _ = io::stdout().flush();
+                            }
+                            PlainQuestionLine::Command(command) => {
+                                match execute_interactive_command_in_state(
+                                    command,
+                                    scope.project,
+                                    scope.profile_id,
+                                    scope.session_store,
+                                    session_id,
+                                    "running",
+                                ) {
+                                    Ok(InteractiveEffect::Output(output)) => {
+                                        println!("{output}")
+                                    }
+                                    Ok(_) => println!(
+                                        "command completed without changing the pending question"
+                                    ),
+                                    Err(error) => println!("{error}"),
+                                }
+                                print!("Answer: ");
+                                let _ = io::stdout().flush();
+                            }
+                        }
                         continue;
                     }
                     if modal_state.is_pending() {
@@ -1617,6 +1806,26 @@ fn execute_prepared_agent_step(
             Ok(PlainAgentDisposition::Completed)
         }
     })
+}
+
+fn execute_plain_continuation(
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    goal: &str,
+    plan_id: &str,
+    input: &ConsoleInput,
+    modal_state: PlainModalState,
+) -> Result<PlainAgentDisposition, String> {
+    let mut prepared = PreparedPlainAgentStep::prepare(
+        scope,
+        session_id,
+        InteractiveAgentMode::Execute,
+        modal_state.clone(),
+    )?;
+    if let Some(cfg) = prepared.loop_cfg.as_mut() {
+        cfg.continuation_plan_id = Some(plan_id.to_string());
+    }
+    execute_prepared_agent_step(prepared, scope, session_id, goal, input, modal_state)
 }
 
 fn execute_plain_turn_and_queued_follow_ups(
@@ -2856,10 +3065,9 @@ mod tests {
             .iter()
             .find(|record| record.tool_name.as_deref() == Some("ask_question"))
             .expect("question audit");
-        assert!(question
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("console input closed")));
+        assert!(question.error.as_deref().is_some_and(|error| {
+            error.contains("console input closed") || error.contains("input closed")
+        }));
     }
 
     #[test]

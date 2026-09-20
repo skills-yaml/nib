@@ -130,6 +130,14 @@ T036 quieted chrome but the default view is still a string dump:
 Presentation and TUI key routing only. No persistence schema, tool authority, or
 provider contract change. T023 and FT-020 remain out of scope.
 
+## T047 supersession (2026-09-19)
+
+[T047](../development/T047_user_interaction_harmonization.md) revises idle `Ctrl+C`
+quit sharing and selection-copy on `Ctrl+C`. Historical checked criteria below remain
+the T038-era contract. Shipped T047 behavior: idle `Ctrl+C` only clears draft/selection;
+`Ctrl+Q` keeps the two-press 1000ms quit window; copy uses `/copy`, `Ctrl+Y`,
+`Ctrl+Shift+C`, and drag-release.
+
 ## Final Reconciliation (2026-09-16)
 
 T038 owns the block transcript, focus, folding, selection, copy, composer, and key

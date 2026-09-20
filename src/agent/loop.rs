@@ -1071,6 +1071,7 @@ fn persist_question_required(
                 reason: prior
                     .as_ref()
                     .map(|_| "reused exact answered question in the same plan".to_string()),
+                outcome: prior.as_ref().map(|_| "answered".to_string()),
             });
             Ok(prior)
         })
@@ -1082,7 +1083,7 @@ fn persist_question_observation(
     session_id: &str,
     invocation_id: crate::tools::ToolInvocationId,
     observations: &[Value],
-    answer: &Result<String, String>,
+    outcome: &QuestionOutcome,
     reused_answer: bool,
 ) -> Result<(), String> {
     store
@@ -1106,8 +1107,8 @@ fn persist_question_observation(
                     )
                 })?
                 .clone();
-            match answer {
-                Ok(answer) => {
+            match outcome {
+                QuestionOutcome::Answered(answer) => {
                     let (answer_message_index, answer_event_index) = if reused_answer {
                         (target.answer_message_index, target.answer_event_index)
                     } else {
@@ -1139,6 +1140,7 @@ fn persist_question_observation(
                         clarification.answer = Some(answer.clone());
                         clarification.answer_message_index = answer_message_index;
                         clarification.answer_event_index = answer_event_index;
+                        clarification.outcome = Some(outcome.reason().to_string());
                         clarification.reason = (clarification.invocation_id != invocation_id)
                             .then(|| {
                                 "resolved by a later valid answer to the same question and option set"
@@ -1146,19 +1148,19 @@ fn persist_question_observation(
                             });
                     }
                 }
-                Err(error) => {
+                other => {
                     let clarification = session
                         .clarifications
                         .iter_mut()
                         .rev()
                         .find(|clarification| clarification.invocation_id == invocation_id)
                         .expect("target clarification was cloned above");
-                    clarification.status = if error.to_ascii_lowercase().contains("cancel") {
-                        ClarificationStatus::Cancelled
-                    } else {
-                        ClarificationStatus::Unresolved
-                    };
-                    clarification.reason = Some(error.clone());
+                    clarification.status = other.clarification_status();
+                    clarification.outcome = Some(other.reason().to_string());
+                    clarification.reason = Some(match other {
+                        QuestionOutcome::InputUnavailable(message) => message.clone(),
+                        _ => other.reason().to_string(),
+                    });
                 }
             }
             Ok(())
@@ -1344,9 +1346,66 @@ impl CancellationSignal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionOutcome {
+    Answered(String),
+    LeftUnanswered,
+    Cancelled,
+    InputClosed,
+    InputUnavailable(String),
+}
+
+impl QuestionOutcome {
+    pub fn answered_text(&self) -> Option<&str> {
+        match self {
+            Self::Answered(answer) => Some(answer.as_str()),
+            _ => None,
+        }
+    }
+
+    fn clarification_status(&self) -> ClarificationStatus {
+        match self {
+            Self::Answered(_) => ClarificationStatus::Answered,
+            Self::Cancelled => ClarificationStatus::Cancelled,
+            Self::LeftUnanswered | Self::InputClosed | Self::InputUnavailable(_) => {
+                ClarificationStatus::Unresolved
+            }
+        }
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Answered(_) => "answered",
+            Self::LeftUnanswered => "left_unanswered",
+            Self::Cancelled => "cancelled",
+            Self::InputClosed => "input_closed",
+            Self::InputUnavailable(_) => "input_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QuestionRequestContext<'a> {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    pub question: &'a str,
+    pub options: &'a [String],
+}
+
 #[async_trait::async_trait]
 pub trait QuestionHandler: Send + Sync {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String>;
+
+    async fn ask_with_context(&self, context: QuestionRequestContext<'_>) -> QuestionOutcome {
+        match self.ask(context.question, context.options).await {
+            Ok(answer) if !answer.trim().is_empty() => QuestionOutcome::Answered(answer),
+            Ok(_) => QuestionOutcome::InputUnavailable(
+                "question handler returned an empty answer".to_string(),
+            ),
+            Err(_) => {
+                QuestionOutcome::InputUnavailable("question handler was unavailable".to_string())
+            }
+        }
+    }
 }
 
 pub struct AgentLoopConfig {
@@ -1365,6 +1424,7 @@ pub struct AgentLoopConfig {
     pub cancellation: Option<CancellationSignal>,
     pub run_id: Option<String>,
     pub steering: Option<ExactRunSteeringReceiver>,
+    pub continuation_plan_id: Option<String>,
 }
 
 impl Default for AgentLoopConfig {
@@ -1382,6 +1442,7 @@ impl Default for AgentLoopConfig {
             cancellation: None,
             run_id: None,
             steering: None,
+            continuation_plan_id: None,
         }
     }
 }
@@ -2065,8 +2126,13 @@ async fn run_agent_loop_inner(
             &cfg.stream_tx,
         );
     }
-    let answer_only_candidate =
-        nib_cfg.agent.answer_only && cfg.interactive_request && cfg.mode == "execute";
+    if let Some(plan_id) = cfg.continuation_plan_id.as_deref() {
+        prepare_continue_turn(&store, session_id, plan_id, &normalized_goal)?;
+    }
+    let answer_only_candidate = nib_cfg.agent.answer_only
+        && cfg.interactive_request
+        && cfg.mode == "execute"
+        && cfg.continuation_plan_id.is_none();
     let active_plan = session_before_request
         .plan
         .as_ref()
@@ -2131,7 +2197,9 @@ async fn run_agent_loop_inner(
     let active_skills = &skill_selection.skills;
     let policy_rules = skill_policy_rules(active_skills);
     let after_tool_hooks = skill_after_tool_hooks(active_skills);
-    prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+    if cfg.continuation_plan_id.is_none() {
+        prepare_user_turn(&store, session_id, goal, profile.root_path())?;
+    }
     for record in &skill_selection.records {
         store
             .record_skill_usage(session_id, &record.skill_name, Some(record.reason.clone()))
@@ -4369,32 +4437,55 @@ async fn run_agent_loop_inner(
                 }
 
                 let reused_answer = reused.is_some();
-                let answer = match reused {
-                    Some(prior) => Ok(prior.answer),
+                let outcome = match reused {
+                    Some(prior) => QuestionOutcome::Answered(prior.answer),
                     None => match cfg.question_handler.as_ref() {
-                        Some(handler) => handler.ask(&question, &options).await,
-                        None => Err("no question handler configured".to_string()),
-                    }
-                    .and_then(|answer| {
-                        if answer.trim().is_empty() {
-                            Err("question handler returned an empty answer".to_string())
-                        } else {
-                            Ok(crate::interactive::bounded_public_text(
-                                &answer,
-                                &public_output_sensitive_values,
-                                MAX_QUESTION_BYTES,
-                                false,
-                            ))
+                        Some(handler) => {
+                            handler
+                                .ask_with_context(QuestionRequestContext {
+                                    invocation_id: request.invocation_id,
+                                    question: &question,
+                                    options: &options,
+                                })
+                                .await
                         }
-                    })
-                    .map_err(|error| {
-                        crate::interactive::bounded_public_text(
+                        None => QuestionOutcome::InputUnavailable(
+                            "no question handler configured".to_string(),
+                        ),
+                    },
+                };
+                let outcome = match outcome {
+                    QuestionOutcome::Answered(answer) => {
+                        let answer = crate::interactive::bounded_public_text(
+                            &answer,
+                            &public_output_sensitive_values,
+                            MAX_QUESTION_BYTES,
+                            false,
+                        );
+                        if answer.trim().is_empty() {
+                            QuestionOutcome::InputUnavailable(
+                                "question handler returned an empty answer".to_string(),
+                            )
+                        } else {
+                            QuestionOutcome::Answered(answer)
+                        }
+                    }
+                    QuestionOutcome::InputUnavailable(error) => {
+                        QuestionOutcome::InputUnavailable(crate::interactive::bounded_public_text(
                             &error,
                             &public_output_sensitive_values,
                             MAX_QUESTION_BYTES,
                             false,
-                        )
-                    }),
+                        ))
+                    }
+                    other => other,
+                };
+                let answer = match &outcome {
+                    QuestionOutcome::Answered(answer) => Ok(answer.clone()),
+                    QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
+                    QuestionOutcome::Cancelled => Err("cancelled".to_string()),
+                    QuestionOutcome::InputClosed => Err("input closed".to_string()),
+                    QuestionOutcome::InputUnavailable(error) => Err(error.clone()),
                 };
 
                 let arguments = safe_question_execution_arguments(
@@ -4473,7 +4564,7 @@ async fn run_agent_loop_inner(
                     session_id,
                     request.invocation_id,
                     &pending_observations,
-                    &answer,
+                    &outcome,
                     reused_answer,
                 )?;
                 let plan_updated = update_plan_tool_outcome(
@@ -6025,6 +6116,60 @@ fn record_curator_tool_call(
         })
 }
 
+fn prepare_continue_turn(
+    store: &SessionStore,
+    session_id: &str,
+    plan_id: &str,
+    goal: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            let plan = session.plan.as_ref().ok_or_else(|| {
+                crate::session::SessionError::InvalidMutation(
+                    "continue requires a persisted plan".to_string(),
+                )
+            })?;
+            if plan.id != plan_id {
+                return Err(crate::session::SessionError::InvalidMutation(format!(
+                    "continue target {plan_id} is not the current plan {}",
+                    plan.id
+                )));
+            }
+            if plan.goal != goal {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "continue goal does not match persisted plan provenance".to_string(),
+                ));
+            }
+            if plan.is_complete() {
+                return Err(crate::session::SessionError::InvalidMutation(format!(
+                    "plan {plan_id} is already complete"
+                )));
+            }
+            if session.has_unresolved_clarification(Some(&plan.id)) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "unresolved questions still block this plan".to_string(),
+                ));
+            }
+            let event_index = session.events.len();
+            append_session_event(
+                session,
+                "plan_continue_requested",
+                json!({
+                    "plan_id": plan_id,
+                    "goal_provenance": "persisted_plan_goal",
+                }),
+            );
+            session.human_intent.push(HumanIntentRecord {
+                kind: HumanIntentKind::Continue,
+                text: plan_id.to_string(),
+                source_message_index: None,
+                source_event_index: Some(event_index),
+            });
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn prepare_user_turn(
     store: &SessionStore,
     session_id: &str,
@@ -7322,7 +7467,7 @@ mod tests {
             &session.id,
             first,
             &[json!({"tool": "ask_question", "success": true})],
-            &Ok("full".to_string()),
+            &QuestionOutcome::Answered("full".to_string()),
             false,
         )
         .expect("persist answer");
@@ -7385,7 +7530,7 @@ mod tests {
             &session.id,
             third,
             &[json!({"tool": "ask_question", "success": false})],
-            &Err("input unavailable".to_string()),
+            &QuestionOutcome::InputUnavailable("input unavailable".to_string()),
             false,
         )
         .expect("persist unresolved");
@@ -7421,7 +7566,7 @@ mod tests {
             &session.id,
             fourth,
             &[json!({"tool": "ask_question", "success": true})],
-            &Ok("src/lib.rs".to_string()),
+            &QuestionOutcome::Answered("src/lib.rs".to_string()),
             false,
         )
         .expect("persist later valid answer");
@@ -7457,7 +7602,7 @@ mod tests {
             &session.id,
             fifth,
             &[json!({"tool": "ask_question", "success": false})],
-            &Err("input unavailable".to_string()),
+            &QuestionOutcome::InputUnavailable("input unavailable".to_string()),
             false,
         )
         .expect("persist changed-option unresolved state");

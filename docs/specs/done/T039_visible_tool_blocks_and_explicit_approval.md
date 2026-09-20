@@ -130,6 +130,15 @@ says `awaiting you`.
 - This slice supersedes T038's two-row chrome and the T038 markdown non-goal for
   user/nib speech.
 
+## T047 supersession (2026-09-19)
+
+[T047](../development/T047_user_interaction_harmonization.md) revises T039 defaults
+for `Ctrl+C` copy-on-selection, Approve-first Enter, immediate `y`/`n`/`1`/`2`,
+number-key question submit, `Skip`, and no printed role labels. Historical checked
+criteria below remain the T039-era contract. Shipped T047 behavior: Deny-first
+buffered approval, custom question answers with `Leave unanswered`, textual roles
+in `NO_COLOR`, and `Ctrl+C` never copies.
+
 ## Acceptance Criteria
 
 - [x] Live tool headers render as `● <name> <phase>` with an argument hint when

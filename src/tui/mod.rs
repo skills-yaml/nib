@@ -78,6 +78,7 @@ enum QuitConfirmAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum IdleCtrlCAction {
     ClearDraft,
     ArmQuit,
@@ -92,6 +93,7 @@ fn quit_confirm_action(armed_at: Option<Instant>, now: Instant) -> QuitConfirmAc
     }
 }
 
+#[cfg(test)]
 fn idle_ctrl_c_action(
     draft_empty: bool,
     armed_at: Option<Instant>,
@@ -124,7 +126,7 @@ impl StartupWelcome {
             update_notice: update_notice
                 .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
             consent_directory: None,
-            consent_selected: 0,
+            consent_selected: 1,
         }
     }
 
@@ -135,7 +137,7 @@ impl StartupWelcome {
             working_directory: "~/project".to_string(),
             update_notice: None,
             consent_directory: None,
-            consent_selected: 0,
+            consent_selected: 1,
         }
     }
 }
@@ -690,6 +692,7 @@ pub struct TuiApprovalRequest {
     pub level: PermissionLevel,
     pub context: ApprovalContext,
     pub selected_option: usize,
+    pub typed: String,
     pub reply: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -726,7 +729,8 @@ impl TuiApprovalHandler {
             call: call.clone(),
             level,
             context,
-            selected_option: 0,
+            selected_option: 1,
+            typed: String::new(),
             reply: reply_tx,
         };
         let _ = self.tx.send(req);
@@ -739,7 +743,7 @@ impl TuiApprovalHandler {
 pub struct TuiQuestionRequest {
     pub question: String,
     pub options: Vec<String>,
-    pub reply: oneshot::Sender<Result<String, String>>,
+    pub reply: oneshot::Sender<crate::agent::QuestionOutcome>,
 }
 
 pub struct TuiQuestionHandler {
@@ -749,24 +753,60 @@ pub struct TuiQuestionHandler {
 #[async_trait::async_trait]
 impl crate::agent::QuestionHandler for TuiQuestionHandler {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
+        match self
+            .ask_with_context(crate::agent::QuestionRequestContext {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                question,
+                options,
+            })
+            .await
+        {
+            crate::agent::QuestionOutcome::Answered(answer) => Ok(answer),
+            crate::agent::QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
+            crate::agent::QuestionOutcome::Cancelled => Err("cancelled".to_string()),
+            crate::agent::QuestionOutcome::InputClosed => Err("input closed".to_string()),
+            crate::agent::QuestionOutcome::InputUnavailable(error) => Err(error),
+        }
+    }
+
+    async fn ask_with_context(
+        &self,
+        context: crate::agent::QuestionRequestContext<'_>,
+    ) -> crate::agent::QuestionOutcome {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
+        if self
+            .tx
             .send(TuiQuestionRequest {
-                question: question.to_string(),
-                options: options.to_vec(),
+                question: context.question.to_string(),
+                options: context.options.to_vec(),
                 reply: reply_tx,
             })
-            .map_err(|_| "TUI question channel closed".to_string())?;
+            .is_err()
+        {
+            return crate::agent::QuestionOutcome::InputUnavailable(
+                "TUI question channel closed".to_string(),
+            );
+        }
         reply_rx
             .await
-            .map_err(|_| "TUI question response was dropped".to_string())?
+            .unwrap_or(crate::agent::QuestionOutcome::InputUnavailable(
+                "TUI question response was dropped".to_string(),
+            ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuestionFocus {
+    Editor,
+    Suggestions,
+    Actions,
 }
 
 struct PendingQuestion {
     request: TuiQuestionRequest,
     response: String,
-    selected_option: usize,
+    selected_option: Option<usize>,
+    focus: QuestionFocus,
     error: Option<String>,
 }
 
@@ -1414,7 +1454,8 @@ impl PendingQuestion {
         Self {
             request,
             response: String::new(),
-            selected_option: 0,
+            selected_option: None,
+            focus: QuestionFocus::Editor,
             error: None,
         }
     }
@@ -1424,7 +1465,7 @@ impl PendingQuestion {
 enum QuestionAction {
     Pending,
     Submit(String),
-    Cancel,
+    LeaveUnanswered,
     Error(String),
 }
 
@@ -1438,34 +1479,44 @@ fn submit_question_answer(question: &PendingQuestion, answer: &str) -> QuestionA
         InteractionInput::QuestionAnswer {
             answer,
             options: &question.request.options,
-            selected_option: (!question.request.options.is_empty())
-                .then_some(question.selected_option),
+            selected_option: question.selected_option,
         },
     ) {
         InteractionReduction::QuestionAnswered(answer) => QuestionAction::Submit(answer),
+        InteractionReduction::QuestionLeftUnanswered => QuestionAction::LeaveUnanswered,
         InteractionReduction::Error { message, .. } => QuestionAction::Error(message),
+        InteractionReduction::ModalCommand(_) => QuestionAction::Error(
+            crate::interactive::modal_command_unsupported_message().to_string(),
+        ),
         _ => QuestionAction::Error("question input was rejected by the shared reducer".to_string()),
-    }
-}
-
-fn question_choice_count(question: &PendingQuestion) -> usize {
-    if question.request.options.is_empty() {
-        0
-    } else {
-        question.request.options.len().saturating_add(1)
     }
 }
 
 fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> QuestionAction {
     match code {
-        KeyCode::Char(digit) if digit.is_ascii_digit() && !question.request.options.is_empty() => {
-            submit_question_answer(question, &digit.to_string())
+        KeyCode::Tab => {
+            question.focus = match question.focus {
+                QuestionFocus::Editor if !question.request.options.is_empty() => {
+                    QuestionFocus::Suggestions
+                }
+                QuestionFocus::Editor | QuestionFocus::Suggestions => QuestionFocus::Actions,
+                QuestionFocus::Actions => QuestionFocus::Editor,
+            };
+            QuestionAction::Pending
         }
-        KeyCode::Char('y' | 'Y') if !question.request.options.is_empty() => {
-            submit_question_answer(question, "1")
+        KeyCode::BackTab => {
+            question.focus = match question.focus {
+                QuestionFocus::Editor => QuestionFocus::Actions,
+                QuestionFocus::Suggestions => QuestionFocus::Editor,
+                QuestionFocus::Actions if question.request.options.is_empty() => {
+                    QuestionFocus::Editor
+                }
+                QuestionFocus::Actions => QuestionFocus::Suggestions,
+            };
+            QuestionAction::Pending
         }
         KeyCode::Char(character)
-            if question.request.options.is_empty()
+            if question.focus == QuestionFocus::Editor
                 && question.response.len().saturating_add(character.len_utf8())
                     <= MAX_COMPOSER_BYTES =>
         {
@@ -1473,34 +1524,38 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
             question.error = None;
             QuestionAction::Pending
         }
-        KeyCode::Char(_) => QuestionAction::Pending,
-        KeyCode::Backspace => {
+        KeyCode::Backspace if question.focus == QuestionFocus::Editor => {
             question.response.pop();
             question.error = None;
             QuestionAction::Pending
         }
-        KeyCode::Up => {
-            question.selected_option = question.selected_option.saturating_sub(1);
-            QuestionAction::Pending
-        }
-        KeyCode::Down | KeyCode::Tab => {
-            let count = question_choice_count(question);
-            if count > 0 {
-                question.selected_option =
-                    (question.selected_option + 1).min(count.saturating_sub(1));
+        KeyCode::Up if question.focus == QuestionFocus::Suggestions => {
+            if let Some(selected) = question.selected_option {
+                question.selected_option = selected.checked_sub(1);
             }
             QuestionAction::Pending
         }
-        KeyCode::Enter => {
-            if !question.request.options.is_empty()
-                && question.selected_option >= question.request.options.len()
-            {
-                QuestionAction::Cancel
-            } else {
-                submit_question_answer(question, &question.response)
-            }
+        KeyCode::Down if question.focus == QuestionFocus::Suggestions => {
+            let last = question.request.options.len().saturating_sub(1);
+            question.selected_option = Some(match question.selected_option {
+                Some(selected) => selected.saturating_add(1).min(last),
+                None => 0,
+            });
+            QuestionAction::Pending
         }
-        KeyCode::Esc => QuestionAction::Cancel,
+        KeyCode::Enter => match question.focus {
+            QuestionFocus::Actions => QuestionAction::LeaveUnanswered,
+            QuestionFocus::Suggestions => {
+                if let Some(index) = question.selected_option {
+                    if let Some(option) = question.request.options.get(index) {
+                        return QuestionAction::Submit(option.clone());
+                    }
+                }
+                QuestionAction::Error("select an option or type a custom answer".to_string())
+            }
+            QuestionFocus::Editor => submit_question_answer(question, &question.response),
+        },
+        KeyCode::Esc => QuestionAction::LeaveUnanswered,
         _ => QuestionAction::Pending,
     }
 }
@@ -1514,16 +1569,19 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
         QuestionAction::Pending => false,
         QuestionAction::Submit(response) => {
             if let Some(pending) = question.take() {
-                let _ = pending.request.reply.send(Ok(response));
+                let _ = pending
+                    .request
+                    .reply
+                    .send(crate::agent::QuestionOutcome::Answered(response));
             }
             true
         }
-        QuestionAction::Cancel => {
+        QuestionAction::LeaveUnanswered => {
             if let Some(pending) = question.take() {
                 let _ = pending
                     .request
                     .reply
-                    .send(Err("question cancelled by user".to_string()));
+                    .send(crate::agent::QuestionOutcome::LeftUnanswered);
             }
             true
         }
@@ -1536,24 +1594,20 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
     }
 }
 
-fn approval_decision_for_key(code: KeyCode) -> Option<ApprovalDecision> {
-    let answer = match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => "y",
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => "n",
-        _ => return None,
-    };
+fn approval_decision_from_answer(answer: &str) -> Result<ApprovalDecision, String> {
     let state = InteractionState {
         approval_pending: true,
         ..InteractionState::default()
     };
     match reduce_interaction(&state, InteractionInput::ApprovalAnswer(answer)) {
         InteractionReduction::ApprovalDecision(InteractionDecision::Accept) => {
-            Some(ApprovalDecision::granted_user())
+            Ok(ApprovalDecision::granted_user())
         }
         InteractionReduction::ApprovalDecision(InteractionDecision::Reject) => {
-            Some(ApprovalDecision::denied())
+            Ok(ApprovalDecision::denied())
         }
-        _ => None,
+        InteractionReduction::Error { message, .. } => Err(message),
+        _ => Err("approval input was rejected".to_string()),
     }
 }
 
@@ -1562,37 +1616,57 @@ fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode)
         return false;
     };
     match code {
+        KeyCode::Esc => {
+            if let Some(request) = approval.take() {
+                let _ = request.reply.send(ApprovalDecision::denied());
+            }
+            return true;
+        }
         KeyCode::Up => {
             pending.selected_option = pending.selected_option.saturating_sub(1);
+            pending.typed.clear();
             return true;
         }
         KeyCode::Down | KeyCode::Tab => {
             pending.selected_option = (pending.selected_option + 1).min(1);
+            pending.typed.clear();
+            return true;
+        }
+        KeyCode::Char(character) if !character.is_control() => {
+            pending.typed.push(character);
+            return true;
+        }
+        KeyCode::Backspace => {
+            pending.typed.pop();
             return true;
         }
         KeyCode::Enter => {
-            let answer = if pending.selected_option == 0 {
-                KeyCode::Char('y')
+            let typed = pending.typed.trim().to_string();
+            let answer = if typed.is_empty() {
+                if pending.selected_option == 0 {
+                    "y"
+                } else {
+                    "n"
+                }
             } else {
-                KeyCode::Char('n')
+                typed.as_str()
             };
-            let Some(decision) = approval_decision_for_key(answer) else {
-                return true;
-            };
-            if let Some(request) = approval.take() {
-                let _ = request.reply.send(decision);
+            match approval_decision_from_answer(answer) {
+                Ok(decision) => {
+                    if let Some(request) = approval.take() {
+                        let _ = request.reply.send(decision);
+                    }
+                }
+                Err(message) => {
+                    pending.typed.clear();
+                    let _ = message;
+                }
             }
             return true;
         }
         _ => {}
     }
-    let Some(decision) = approval_decision_for_key(code) else {
-        return false;
-    };
-    if let Some(request) = approval.take() {
-        let _ = request.reply.send(decision);
-    }
-    true
+    false
 }
 
 fn handle_pending_interaction_key(
@@ -2100,8 +2174,9 @@ fn visible_option_range(selected: usize, len: usize, capacity: usize) -> (usize,
         return (0, 0);
     }
     let capacity = capacity.max(1);
+    let selected = if selected < len { selected } else { 0 };
     let start = selected.saturating_sub(capacity.saturating_sub(1));
-    (start, (start + capacity).min(len))
+    (start, start.saturating_add(capacity).min(len))
 }
 
 fn band_hint_line(text: &str, width: u16, no_color: bool) -> Line<'static> {
@@ -2167,6 +2242,7 @@ fn render_numbered_choice_band(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+#[allow(dead_code)]
 fn render_choice_band(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -2215,40 +2291,25 @@ fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApp
 }
 
 fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, question: &PendingQuestion) {
-    if question.request.options.is_empty() {
-        render_choice_band(
-            frame,
-            area,
-            &[],
-            0,
-            "Type an answer · Enter submit · Esc skip",
-        );
-        return;
-    }
-    let mut choices = question
+    let mut choices: Vec<(String, String)> = question
         .request
         .options
         .iter()
         .enumerate()
-        .map(|(index, option)| {
-            let shortcut = if index == 0 {
-                "y".to_string()
-            } else {
-                (index + 1).to_string()
-            };
-            (option.clone(), shortcut)
-        })
-        .collect::<Vec<_>>();
-    choices.push(("Skip".to_string(), "esc".to_string()));
-    render_numbered_choice_band(
-        frame,
-        area,
-        &choices,
-        question
-            .selected_option
-            .min(choices.len().saturating_sub(1)),
-        "Up/Down select · Enter / 1-9 / y choose · Esc skip",
-    );
+        .map(|(index, option)| (option.clone(), (index + 1).to_string()))
+        .collect();
+    choices.push(("Leave unanswered".to_string(), "esc".to_string()));
+    let selected = match question.focus {
+        QuestionFocus::Suggestions => question.selected_option.unwrap_or(0),
+        QuestionFocus::Actions => choices.len().saturating_sub(1),
+        QuestionFocus::Editor => choices.len(),
+    };
+    let hint = if question.focus == QuestionFocus::Editor {
+        "Type an answer · Tab suggestions · Enter submit · Esc leave unanswered"
+    } else {
+        "Up/Down select · Tab editor/actions · Enter submit · Esc leave unanswered"
+    };
+    render_numbered_choice_band(frame, area, &choices, selected, hint);
 }
 
 fn render_workspace_band(
@@ -2443,6 +2504,7 @@ type TuiAgentStart = (
     InteractiveAgentMode,
     String,
     Option<crate::agent::ExactRunSteeringReceiver>,
+    Option<String>,
 );
 
 struct PreparedTuiAgentWorker {
@@ -2517,7 +2579,16 @@ fn submit_tui_steering_draft(
 }
 
 impl PreparedTuiAgentWorker {
-    fn start(mut self, goal: String, mode: InteractiveAgentMode) -> io::Result<TuiAgentWorker> {
+    fn start(self, goal: String, mode: InteractiveAgentMode) -> io::Result<TuiAgentWorker> {
+        self.start_with_continuation(goal, mode, None)
+    }
+
+    fn start_with_continuation(
+        mut self,
+        goal: String,
+        mode: InteractiveAgentMode,
+        continuation_plan_id: Option<String>,
+    ) -> io::Result<TuiAgentWorker> {
         let start_tx = self
             .start_tx
             .take()
@@ -2536,7 +2607,13 @@ impl PreparedTuiAgentWorker {
             (Some(steering), Some(receiver))
         };
         start_tx
-            .send((goal, mode, run_id.clone(), steering_receiver))
+            .send((
+                goal,
+                mode,
+                run_id.clone(),
+                steering_receiver,
+                continuation_plan_id,
+            ))
             .map_err(|_| io::Error::other("prepared TUI worker stopped before activation"))?;
         Ok(TuiAgentWorker {
             run_id,
@@ -2596,7 +2673,7 @@ fn prepare_tui_agent_worker(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            let Ok((goal, mode, run_id, steering)) = start_rx.recv() else {
+            let Ok((goal, mode, run_id, steering, continuation_plan_id)) = start_rx.recv() else {
                 return;
             };
 
@@ -2635,6 +2712,7 @@ fn prepare_tui_agent_worker(
                     cancellation: Some(run_cancellation),
                     run_id: Some(run_id),
                     steering,
+                    continuation_plan_id,
                     ..Default::default()
                 };
 
@@ -2725,13 +2803,13 @@ fn cancel_pending_interactions(
         let _ = question
             .request
             .reply
-            .send(Err("cancelled_by_user".to_string()));
+            .send(crate::agent::QuestionOutcome::Cancelled);
     }
     while let Ok(request) = approval_rx.try_recv() {
         let _ = request.reply.send(ApprovalDecision::denied());
     }
     while let Ok(request) = question_rx.try_recv() {
-        let _ = request.reply.send(Err("cancelled_by_user".to_string()));
+        let _ = request.reply.send(crate::agent::QuestionOutcome::Cancelled);
     }
 }
 
@@ -3744,9 +3822,9 @@ fn header_line(chrome: &TuiChrome, width: u16, no_color: bool) -> Line<'static> 
 
 fn waiting_keys(waiting: WaitingKind) -> &'static str {
     match waiting {
-        WaitingKind::Approval => "Y/Enter approve once · N deny · Esc deny",
-        WaitingKind::Workspace => "Y/Enter allow this directory · N decline",
-        WaitingKind::Question => "Enter / 1-9 answer · Esc skip",
+        WaitingKind::Approval => "Enter deny · select Approve once then Enter · Esc deny",
+        WaitingKind::Workspace => "Enter decline · select Allow then Enter · Esc decline",
+        WaitingKind::Question => "Type answer · Enter submit · Esc leave unanswered",
         WaitingKind::None => "",
     }
 }
@@ -3803,7 +3881,7 @@ fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'stat
             muted,
         )),
         Line::from(Span::styled(
-            "Ctrl+C          stop · clear draft · twice to quit",
+            "Ctrl+C          stop · clear draft · never copies or quits",
             muted,
         )),
         Line::from(Span::styled(
@@ -3832,7 +3910,7 @@ fn footer_line(
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {
-        hint = format!("{hint} · Ctrl+C copy · Esc clear");
+        hint = format!("{hint} · Ctrl+Y copy · Esc clear");
     } else if let Some(band) = band_hint {
         hint = format!("{hint} · {band}");
     }
@@ -3987,14 +4065,13 @@ fn copy_text_osc52(text: &str) {
     let _ = out.flush();
 }
 
-fn copy_text_to_clipboard(text: &str) {
-    copy_text_osc52(text);
-    let payload = text.to_string();
-    let _ = std::thread::Builder::new()
-        .name("nib-clipboard".to_string())
-        .spawn(move || {
-            let _ = copy_text_system_clipboard(&payload);
-        });
+fn copy_text_to_clipboard(text: &str) -> &'static str {
+    if copy_text_system_clipboard(text) {
+        "Copied"
+    } else {
+        copy_text_osc52(text);
+        "Copy requested"
+    }
 }
 
 fn copy_text_system_clipboard(text: &str) -> bool {
@@ -4038,9 +4115,8 @@ fn publish_copied_chat(
     selected: Option<usize>,
     activities: &[ActivityEntry],
 ) -> Option<&'static str> {
-    let (text, status) = copy_chat_content(pointer, view, selected, activities)?;
-    copy_text_to_clipboard(&text);
-    Some(status)
+    let (text, _status) = copy_chat_content(pointer, view, selected, activities)?;
+    Some(copy_text_to_clipboard(&text))
 }
 
 fn copy_pointer_selection_and_clear(
@@ -4360,11 +4436,20 @@ fn speech_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'
     if source.is_empty() {
         return dotted_header_lines(entry.kind, "", "", width, no_color);
     }
-    prefix_speech_dot(
+    let mut lines = prefix_speech_dot(
         markdown::render_markdown(&source, width, markdown::speech_indent(), no_color),
         entry.kind,
         no_color,
-    )
+    );
+    if no_color {
+        let label = entry.kind.role_label();
+        if let Some(first) = lines.first_mut() {
+            let mut spans = vec![Span::raw(format!("{label}  "))];
+            spans.append(&mut first.spans);
+            *first = Line::from(spans);
+        }
+    }
+    lines
 }
 
 fn plan_todo_lines(entry: &ActivityEntry, width: u16, no_color: bool) -> Vec<Line<'static>> {
@@ -5032,6 +5117,7 @@ fn draw_loop(
 
     let mut pending_approval: Option<TuiApprovalRequest> = None;
     let mut pending_question: Option<PendingQuestion> = None;
+    let mut command_overlay: Option<String> = None;
     let mut pending_model: Option<PendingModelSelection> = None;
     let mut pending_switcher: Option<SessionSwitcher> = None;
     let mut pending_history_search: Option<PendingHistorySearch> = None;
@@ -5279,6 +5365,15 @@ fn draw_loop(
                 if welcome.consent_directory.is_some() {
                     continue;
                 }
+                if let Some(question) = pending_question.as_mut() {
+                    if question.focus == QuestionFocus::Editor {
+                        let remaining = MAX_COMPOSER_BYTES.saturating_sub(question.response.len());
+                        let take = pasted.chars().take(remaining).collect::<String>();
+                        question.response.push_str(&take);
+                        question.error = None;
+                    }
+                    continue;
+                }
                 if matches!(
                     interaction_layer,
                     InteractionLayer::Composer | InteractionLayer::Completion
@@ -5442,8 +5537,7 @@ fn draw_loop(
                 };
                 let copy_requested = (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
                     && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || control_shift_c
-                    || (control_c && pointer_selection_is_active(pointer_selection));
+                    || control_shift_c;
                 if copy_requested {
                     if let Some(status) = publish_copied_chat(
                         pointer_selection,
@@ -5474,24 +5568,15 @@ fn draw_loop(
                     continue;
                 }
                 if control_c {
-                    let now = Instant::now();
-                    match idle_ctrl_c_action(composer.input.is_empty(), quit_armed_at, now) {
-                        IdleCtrlCAction::ClearDraft => {
-                            composer.set_text(String::new());
-                            completion.sync_for(&composer.input, Some(project_root));
-                            quit_armed_at = None;
-                            timeline.push_status("Draft cleared.".to_string());
-                        }
-                        IdleCtrlCAction::ArmQuit => {
-                            quit_armed_at = Some(now);
-                            timeline.push_status("Press Ctrl+C again to quit.".to_string());
-                        }
-                        IdleCtrlCAction::Quit => {
-                            exit_requested_with_active_run = worker.is_some();
-                            exit_requested = true;
-                            break Ok(());
-                        }
+                    pointer_selection = None;
+                    composer.set_text(String::new());
+                    completion.sync_for(&composer.input, Some(project_root));
+                    quit_armed_at = None;
+                    if let Some(question) = pending_question.as_mut() {
+                        question.response.clear();
+                        question.error = None;
                     }
+                    timeline.push_status("Draft cleared.".to_string());
                     continue;
                 }
                 if control_q {
@@ -5554,6 +5639,83 @@ fn draw_loop(
                     pending_history_search.is_some(),
                     completion.is_open(),
                 );
+                if matches!(key.code, KeyCode::F(2))
+                    && (pending_approval.is_some() || pending_question.is_some())
+                    && command_overlay.is_none()
+                {
+                    command_overlay = Some(String::new());
+                    timeline
+                        .push_status("Command (F2): type a slash command · Esc cancel".to_string());
+                    continue;
+                }
+                if let Some(buffer) = command_overlay.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            command_overlay = None;
+                            timeline.push_status("Command entry cancelled.".to_string());
+                        }
+                        KeyCode::Backspace => {
+                            buffer.pop();
+                        }
+                        KeyCode::Enter => {
+                            let raw = command_overlay.take().unwrap_or_default();
+                            let command_line = if raw.trim().starts_with('/') {
+                                raw
+                            } else {
+                                format!("/{}", raw.trim())
+                            };
+                            match crate::interactive::parse_interactive_command(&command_line) {
+                                Ok(Some(command))
+                                    if matches!(
+                                        crate::interactive::command_effect_class(&command),
+                                        crate::interactive::CommandEffectClass::ReadOnlyInspection
+                                            | crate::interactive::CommandEffectClass::LiveControl
+                                    ) =>
+                                {
+                                    match execute_interactive_command_in_state(
+                                        command,
+                                        project_root,
+                                        &profile_id,
+                                        &store,
+                                        &active_session_id,
+                                        worker_status,
+                                    ) {
+                                        Ok(InteractiveEffect::Output(output)) => {
+                                            timeline.push_status(output)
+                                        }
+                                        Ok(_) => timeline.push_status(
+                                            "command completed without changing the pending prompt"
+                                                .to_string(),
+                                        ),
+                                        Err(error) => {
+                                            timeline.push_status(format!("[command error] {error}"))
+                                        }
+                                    }
+                                }
+                                Ok(Some(crate::interactive::InteractiveCommand::Stop {
+                                    task_id: None,
+                                })) => timeline.push_status(
+                                    crate::interactive::live_stop_requires_id_message().to_string(),
+                                ),
+                                Ok(Some(command)) => timeline.push_status(format!(
+                                    "command /{} is unavailable while a prompt is pending",
+                                    command.spec().name
+                                )),
+                                Ok(None) => {
+                                    timeline.push_status("F2 requires a slash command".to_string())
+                                }
+                                Err(error) => {
+                                    timeline.push_status(format!("[command error] {error}"))
+                                }
+                            }
+                        }
+                        KeyCode::Char(character) if !character.is_control() => {
+                            buffer.push(character);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if matches!(
                     interaction_layer,
                     InteractionLayer::Approval | InteractionLayer::Question
@@ -5962,6 +6124,43 @@ fn draw_loop(
                                             worker.as_ref().map(|worker| worker.run_id.clone()),
                                         );
                                     }
+                                    Ok(InteractiveEffect::ContinuePlan { plan_id, goal }) => {
+                                        timeline.push_status(format!("Continue plan {plan_id}"));
+                                        worker = Some(
+                                            prepare_tui_agent_worker(
+                                                agent_profile_scope.clone(),
+                                                active_session_id.clone(),
+                                                approval_tx.clone(),
+                                                question_tx.clone(),
+                                                stream_tx.clone(),
+                                            )?
+                                            .start_with_continuation(
+                                                goal,
+                                                InteractiveAgentMode::Execute,
+                                                Some(plan_id),
+                                            )?,
+                                        );
+                                        timeline.bind_run(
+                                            worker.as_ref().map(|worker| worker.run_id.clone()),
+                                        );
+                                    }
+                                    Ok(InteractiveEffect::OpenQuestion {
+                                        invocation_id,
+                                        question,
+                                        options,
+                                    }) => {
+                                        let (reply_tx, reply_rx) = oneshot::channel();
+                                        drop(reply_rx);
+                                        pending_question =
+                                            Some(PendingQuestion::new(TuiQuestionRequest {
+                                                question,
+                                                options,
+                                                reply: reply_tx,
+                                            }));
+                                        timeline.push_status(format!(
+                                            "Answer recovered question {invocation_id}"
+                                        ));
+                                    }
                                     Ok(InteractiveEffect::RunAgent { goal, mode }) => {
                                         if mode != InteractiveAgentMode::Compact {
                                             assign_session_title_from_goal(
@@ -6013,9 +6212,14 @@ fn draw_loop(
                                     .bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
                             }
                             InteractionReduction::Consumed(_)
+                            | InteractionReduction::ModalCommand(_)
                             | InteractionReduction::ApprovalDecision(_)
+                            | InteractionReduction::ApprovalInputClosed
                             | InteractionReduction::QuestionAnswered(_)
+                            | InteractionReduction::QuestionLeftUnanswered
+                            | InteractionReduction::QuestionInputClosed
                             | InteractionReduction::ConfirmationDecision(_)
+                            | InteractionReduction::ConfirmationInputClosed
                             | InteractionReduction::Reconciled { .. }
                             | InteractionReduction::Transcript(_)
                             | InteractionReduction::CancelRun
@@ -6129,7 +6333,8 @@ mod tests {
             call,
             level,
             context,
-            selected_option: 0,
+            selected_option: 1,
+            typed: String::new(),
             reply,
         }
     }
@@ -6435,7 +6640,7 @@ mod tests {
         assert!(rendered.contains("new session and worktree"));
         assert!(rendered.contains("/session"));
         assert!(rendered.contains("Ctrl+C"));
-        assert!(rendered.contains("twice to quit"));
+        assert!(rendered.contains("never copies or quits"));
         assert!(rendered.contains("> Ask nib anything…"));
         assert!(rendered.contains("approval manual"));
         assert!(rendered.contains("idle"));
@@ -6491,7 +6696,7 @@ mod tests {
         assert!(rendered.contains("Decline"), "{rendered}");
         assert!(!rendered.contains("Permission required"), "{rendered}");
         assert!(
-            rendered.contains("Y/Enter allow this directory"),
+            rendered.contains("Enter decline · select Allow then Enter"),
             "{rendered}"
         );
         assert!(
@@ -6714,8 +6919,8 @@ mod tests {
             rows[speech]
         );
         assert!(
-            !rows[speech].contains("nib"),
-            "assistant speech has no nib label: {}",
+            rows[speech].contains("nib") || rows[speech].contains('●'),
+            "assistant speech has a role or channel marker: {}",
             rows[speech]
         );
     }
@@ -6873,13 +7078,13 @@ mod tests {
         waiting.agent_mode = "WAITING APPROVAL".to_string();
         assert_eq!(
             footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
-            "approval manual · WAITING APPROVAL · Y/Enter approve once · N deny · Esc deny"
+            "approval manual · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
         );
         let mut question = chrome.clone();
         question.agent_mode = "WAITING QUESTION".to_string();
         assert_eq!(
             footer_line(&question, &viewport, 0, WaitingKind::Question, None, false),
-            "approval manual · WAITING QUESTION · Enter / 1-9 answer · Esc skip"
+            "approval manual · WAITING QUESTION · Type answer · Enter submit · Esc leave unanswered"
         );
         let mut workspace = chrome.clone();
         workspace.agent_mode = "WAITING PERMISSION".to_string();
@@ -6892,7 +7097,7 @@ mod tests {
                 None,
                 false
             ),
-            "approval manual · WAITING PERMISSION · Y/Enter allow this directory · N decline"
+            "approval manual · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
         );
         assert!(footer_line(
             &chrome,
@@ -6905,7 +7110,7 @@ mod tests {
         .contains("Tab insert"));
         assert!(
             footer_line(&chrome, &viewport, 0, WaitingKind::None, None, true)
-                .contains("Ctrl+C copy · Esc clear")
+                .contains("Ctrl+Y copy · Esc clear")
         );
         viewport.observe_layout(100, 10);
         viewport.apply(TranscriptViewportAction::PageUp);
@@ -7978,11 +8183,13 @@ mod tests {
             reply_tx,
         ));
 
-        assert!(!handle_approval_key(&mut pending, KeyCode::Char('x')));
+        assert!(handle_approval_key(&mut pending, KeyCode::Char('x')));
         assert!(pending.is_some());
         assert!(reply_rx.try_recv().is_err());
 
+        assert!(handle_approval_key(&mut pending, KeyCode::Backspace));
         assert!(handle_approval_key(&mut pending, KeyCode::Char('Y')));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         let decision = reply_rx.try_recv().unwrap();
         assert!(decision.granted);
         assert_eq!(decision.source, "user");
@@ -8003,7 +8210,7 @@ mod tests {
             reply_tx,
         ));
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
-        assert!(reply_rx.try_recv().unwrap().granted);
+        assert!(!reply_rx.try_recv().unwrap().granted);
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(approval_request(
@@ -8017,8 +8224,9 @@ mod tests {
             PermissionLevel::Destructive,
             reply_tx,
         ));
-        assert!(handle_approval_key(&mut pending, KeyCode::Char('2')));
-        assert!(!reply_rx.try_recv().unwrap().granted);
+        assert!(handle_approval_key(&mut pending, KeyCode::Up));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
+        assert!(reply_rx.try_recv().unwrap().granted);
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(approval_request(
@@ -8054,6 +8262,7 @@ mod tests {
         ));
 
         assert!(handle_approval_key(&mut pending, KeyCode::Char('n')));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         let decision = reply_rx.try_recv().unwrap();
         assert!(!decision.granted);
         assert_eq!(decision.source, "denied");
@@ -8095,16 +8304,20 @@ mod tests {
         assert!(handle_pending_interaction_key(
             &mut approval,
             &mut question,
-            KeyCode::Char('y')
+            KeyCode::Esc
         ));
         assert!(approval.is_none());
-        assert!(approval_rx.try_recv().expect("approval reply").granted);
+        assert!(!approval_rx.try_recv().expect("approval reply").granted);
         assert!(question.is_some());
         assert!(question_rx.try_recv().is_err());
         assert_eq!(composer.input, "/");
         assert!(completion.is_open());
 
-        // The next key belongs only to the still-higher-priority question.
+        assert!(handle_pending_interaction_key(
+            &mut approval,
+            &mut question,
+            KeyCode::Char('y')
+        ));
         assert!(handle_pending_interaction_key(
             &mut approval,
             &mut question,
@@ -8112,7 +8325,7 @@ mod tests {
         ));
         assert_eq!(
             question_rx.try_recv().expect("question reply"),
-            Ok("yes".to_string())
+            crate::agent::QuestionOutcome::Answered("y".to_string())
         );
         assert_eq!(composer.input, "/");
     }
@@ -8314,7 +8527,10 @@ mod tests {
         assert!(!handle_question_key(&mut pending, KeyCode::Char('n')));
         assert!(handle_question_key(&mut pending, KeyCode::Enter));
 
-        assert_eq!(reply_rx.try_recv().unwrap(), Ok("main".to_string()));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("main".to_string())
+        );
         assert!(pending.is_none());
     }
 
@@ -8337,7 +8553,10 @@ mod tests {
         }
         assert!(handle_question_key(&mut pending, KeyCode::Enter));
 
-        assert_eq!(reply_rx.try_recv().unwrap(), Ok("query".to_string()));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("query".to_string())
+        );
         assert!(pending.is_none());
     }
 
@@ -8350,9 +8569,14 @@ mod tests {
             reply: reply_tx,
         }));
 
+        assert!(!handle_question_key(&mut pending, KeyCode::Tab));
+        assert!(!handle_question_key(&mut pending, KeyCode::Down));
         assert!(!handle_question_key(&mut pending, KeyCode::Down));
         assert!(handle_question_key(&mut pending, KeyCode::Enter));
-        assert_eq!(reply_rx.try_recv().unwrap(), Ok("execute".to_string()));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("execute".to_string())
+        );
     }
 
     #[test]
@@ -8363,8 +8587,12 @@ mod tests {
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
-        assert!(handle_question_key(&mut pending, KeyCode::Char('1')));
-        assert_eq!(reply_rx.try_recv().unwrap(), Ok("plan".to_string()));
+        assert!(!handle_question_key(&mut pending, KeyCode::Char('1')));
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("plan".to_string())
+        );
         assert!(pending.is_none());
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
@@ -8373,8 +8601,12 @@ mod tests {
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
-        assert!(handle_question_key(&mut pending, KeyCode::Char('y')));
-        assert_eq!(reply_rx.try_recv().unwrap(), Ok("plan".to_string()));
+        assert!(!handle_question_key(&mut pending, KeyCode::Char('y')));
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("y".to_string())
+        );
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
@@ -8382,12 +8614,12 @@ mod tests {
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
-        handle_question_key(&mut pending, KeyCode::Down);
-        handle_question_key(&mut pending, KeyCode::Down);
+        handle_question_key(&mut pending, KeyCode::Tab);
+        handle_question_key(&mut pending, KeyCode::Tab);
         assert!(handle_question_key(&mut pending, KeyCode::Enter));
         assert_eq!(
             reply_rx.try_recv().unwrap(),
-            Err("question cancelled by user".to_string())
+            crate::agent::QuestionOutcome::LeftUnanswered
         );
     }
 
@@ -8403,7 +8635,7 @@ mod tests {
         assert!(handle_question_key(&mut pending, KeyCode::Esc));
         assert_eq!(
             reply_rx.try_recv().unwrap(),
-            Err("question cancelled by user".to_string())
+            crate::agent::QuestionOutcome::LeftUnanswered
         );
     }
 
@@ -8428,7 +8660,12 @@ mod tests {
             .unwrap();
         assert_eq!(request.question, "Mode?");
         assert_eq!(request.options, ["plan", "execute"]);
-        request.reply.send(Ok("execute".to_string())).unwrap();
+        request
+            .reply
+            .send(crate::agent::QuestionOutcome::Answered(
+                "execute".to_string(),
+            ))
+            .unwrap();
 
         assert_eq!(handle.join().unwrap(), Ok("execute".to_string()));
     }
@@ -8551,7 +8788,7 @@ mod tests {
                 initial_reply_rx
                     .blocking_recv()
                     .expect("early question rejection"),
-                Err("cancelled_by_user".to_string())
+                crate::agent::QuestionOutcome::Cancelled
             );
             assert!(worker_cancellation.is_cancelled());
             // This send cannot finish until shutdown drains the full stream. That
@@ -8647,7 +8884,7 @@ mod tests {
             question_reply_rx
                 .try_recv()
                 .expect("late question rejected"),
-            Err("cancelled_by_user".to_string())
+            crate::agent::QuestionOutcome::Cancelled
         );
         assert_eq!(
             active_interaction_layer(
@@ -9380,10 +9617,9 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Choose a mode"), "{rendered}");
-        assert!(rendered.contains("1. plan (y)"), "{rendered}");
+        assert!(rendered.contains("1. plan (1)"), "{rendered}");
         assert!(rendered.contains("2. execute (2)"), "{rendered}");
-        assert!(rendered.contains("3. Skip (esc)"), "{rendered}");
-        assert!(rendered.contains("›"), "{rendered}");
+        assert!(rendered.contains("Leave unanswered"), "{rendered}");
         assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
         assert!(rendered.contains("Enter"), "{rendered}");
         assert!(rendered.contains("Esc"), "{rendered}");
@@ -9685,9 +9921,11 @@ mod tests {
 
         let mut live = Some(pointer);
         let mut focus = TuiFocus::Transcript;
-        assert_eq!(
-            copy_pointer_selection_and_clear(&mut live, &mut focus, &view, Some(0), &activities,),
-            Some("Copied selection.")
+        let delivery =
+            copy_pointer_selection_and_clear(&mut live, &mut focus, &view, Some(0), &activities);
+        assert!(
+            matches!(delivery, Some("Copied") | Some("Copy requested")),
+            "{delivery:?}"
         );
         assert!(live.is_none());
         assert_eq!(focus, TuiFocus::Composer);
