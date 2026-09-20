@@ -473,7 +473,8 @@ tui_approval_input() {
   # The title can reuse cells from the previous frame; the fresh choice row
   # supplies a complete prompt in the terminal's incremental output.
   wait_for_pty_output "$output" 'Approve once (y)'
-  printf 'y'
+  # Deny is focused first; typed y/yes is buffered until Enter.
+  printf 'y\r'
   local session
   session="$(wait_for_goal_session 'list workspace for approval smoke')"
   wait_for_pty_output "$session" '"source": "user"'
@@ -492,7 +493,8 @@ grep -Fq 'Approve once (y)' "$fixture/tui-approval-dock.txt"
 tui_question_input() {
   local output="$fixture/tui-question-dock.txt"
   wait_for_pty_output "$output" 'Which verification mode?'
-  printf '\033[B\r'
+  # Number keys type into the answer editor; Enter submits option 2 (full).
+  printf '2\r'
   local session
   session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')"
   wait_for_pty_output "$session" '"answer": "full"'
