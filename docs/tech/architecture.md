@@ -209,9 +209,12 @@ plan state is left intact and receives no model or tool call from the new reques
 Execution can call `ask_question` alone, wait for the answer, and resume; skipped or
 unavailable input remains unresolved. Each tool batch continues the current step.
 A response without tools requests completion, but an unresolved tool failure keeps
-the step blocked. Three consecutive unchanged, fully failed batches stop with an
-audited failure instead of consuming the full turn allowance. Changed attempts or
-results and successful intervening work permit recovery.
+the step blocked. When required verification remains unresolved and run bounds permit
+more work, the completion text is withheld and the next bounded request receives the
+exact obligation IDs as runtime corrective context. Bound exhaustion remains terminal.
+Three consecutive unchanged, fully failed batches stop with an audited failure instead
+of consuming the full turn allowance. Changed attempts or results and successful
+intervening work permit recovery.
 
 Required verification is persisted separately from coarse step status. Each obligation
 is bound to its plan and step, authority (`human`, `project`, or approved plan), exact

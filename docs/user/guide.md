@@ -388,6 +388,12 @@ successful command cannot clear it. Later relevant changes make prior evidence s
 Absence checks use the typed `grep` result and pass only when the result is empty and
 untruncated.
 
+If the model tries to finish while required verification remains unresolved, nib
+rejects that completion and supplies the exact outstanding IDs for another corrective
+turn while the configured run bounds allow it. The rejected text is not shown as the
+final answer. If the bound is exhausted, the step remains blocked with the unresolved
+verification outcome.
+
 To remove an unrun human or approved-plan requirement that became inapplicable, enter
 `waive verification <id>: <reason>`. nib binds the waiver to that human message and
 active plan. Project gates and requirements with running, failed, or passed evidence

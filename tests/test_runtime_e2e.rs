@@ -733,7 +733,51 @@ async fn run_failure_fixture_with_obligations(
     question_handler: Option<Arc<dyn QuestionHandler>>,
     verification_obligations: Vec<VerificationObligation>,
 ) -> (AgentRunSummary, Session, Vec<Value>) {
+    run_failure_fixture_with_obligations_and_max_steps(
+        root,
+        responses,
+        question_handler,
+        verification_obligations,
+        16,
+    )
+    .await
+}
+
+async fn run_failure_fixture_with_obligations_and_max_steps(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
+    max_steps: u32,
+) -> (AgentRunSummary, Session, Vec<Value>) {
+    let (summary, session, requests, _) =
+        run_failure_fixture_with_obligations_and_max_steps_and_stream(
+            root,
+            responses,
+            question_handler,
+            verification_obligations,
+            max_steps,
+        )
+        .await;
+    (summary, session, requests)
+}
+
+async fn run_failure_fixture_with_obligations_and_max_steps_and_stream(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
+    max_steps: u32,
+) -> (AgentRunSummary, Session, Vec<Value>, Vec<StreamEvent>) {
     let (base_url, request_rx) = serve_responses_sequence(responses);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(128);
+    let stream_collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = stream_rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
     let mut config = mock_runtime_config();
     config.execution.provider = "internal".to_string();
     config.llm.active_provider = Some("openai".to_string());
@@ -773,9 +817,10 @@ async fn run_failure_fixture_with_obligations(
             &session.id,
             goal,
             AgentLoopConfig {
-                max_steps: 16,
+                max_steps,
                 auto_approve: true,
                 question_handler,
+                stream_tx: Some(stream_tx),
                 ..Default::default()
             },
         ),
@@ -791,7 +836,8 @@ async fn run_failure_fixture_with_obligations(
         .try_iter()
         .map(|request| captured_json_body(&request))
         .collect();
-    (summary, persisted, requests)
+    let stream_events = stream_collector.await.expect("stream collector");
+    (summary, persisted, requests, stream_events)
 }
 
 fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (SessionStore, String) {
@@ -846,6 +892,111 @@ fn required_terminal_check(
 }
 
 #[tokio::test]
+async fn premature_completion_with_required_verification_gets_a_corrective_turn() {
+    let root = git_repository();
+    let responses = vec![
+        failure_fixture_text_turn(),
+        failure_fixture_tool_turn(
+            "verification-passes-after-rejected-completion",
+            vec![(
+                "run_terminal",
+                json!({
+                    "command": "true",
+                    "affected_paths": ["."],
+                    "verification_id": "required-check"
+                }),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+
+    let (summary, persisted, requests, stream_events) =
+        run_failure_fixture_with_obligations_and_max_steps_and_stream(
+            root.path(),
+            responses,
+            None,
+            vec![required_check("true")],
+            16,
+        )
+        .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 1);
+    assert_eq!(requests.len(), 3);
+    let corrective_request = requests[1].to_string();
+    assert!(corrective_request.contains("required_verification_unresolved"));
+    assert!(corrective_request.contains("required-check"));
+    assert_eq!(
+        stream_events
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::Content(_)))
+            .count(),
+        1,
+        "the rejected completion must not be projected to observers"
+    );
+    let plan = persisted.plan.as_ref().expect("persisted plan");
+    assert!(plan.is_complete());
+    assert_eq!(
+        plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Passed
+    );
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "step_completion_rejected"
+            && event.details["reason"] == "required_verification_unresolved"
+    }));
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "reconciliation"
+            && event.details["outcome"] == "verification_recovery"
+            && event.details["continue"] == true
+    }));
+}
+
+#[tokio::test]
+async fn repeated_premature_completion_stops_at_the_turn_bound() {
+    let root = git_repository();
+    let responses = vec![failure_fixture_text_turn(), failure_fixture_text_turn()];
+
+    let (summary, persisted, requests) = run_failure_fixture_with_obligations_and_max_steps(
+        root.path(),
+        responses,
+        None,
+        vec![required_check("true")],
+        2,
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "required_verification_unresolved");
+    assert!(summary.is_failure());
+    assert_eq!(requests.len(), 2);
+    let reconciliation = persisted
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == "reconciliation"
+                && matches!(
+                    event.details["outcome"].as_str(),
+                    Some("verification_recovery" | "required_verification_unresolved")
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reconciliation.len(), 2);
+    assert_eq!(
+        reconciliation[0].details["outcome"],
+        "verification_recovery"
+    );
+    assert_eq!(reconciliation[0].details["continue"], true);
+    assert_eq!(
+        reconciliation[1].details["outcome"],
+        "required_verification_unresolved"
+    );
+    assert_eq!(reconciliation[1].details["continue"], false);
+    assert_eq!(
+        persisted.plan.as_ref().expect("persisted plan").steps[0].status,
+        "Blocked"
+    );
+}
+
+#[tokio::test]
 async fn unrelated_success_cannot_clear_a_failed_required_verification() {
     let root = git_repository();
     let responses = vec![
@@ -867,11 +1018,12 @@ async fn unrelated_success_cannot_clear_a_failed_required_verification() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+    let (summary, persisted, _) = run_failure_fixture_with_obligations_and_max_steps(
         root.path(),
         responses,
         None,
         vec![required_check("exit 7")],
+        3,
     )
     .await;
 
@@ -905,6 +1057,7 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
                 }),
             )],
         ),
+        failure_fixture_text_turn(),
         failure_fixture_tool_turn(
             "repair",
             vec![(
@@ -929,7 +1082,7 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+    let (summary, persisted, requests) = run_failure_fixture_with_obligations(
         root.path(),
         responses,
         None,
@@ -938,6 +1091,9 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
     .await;
 
     assert_eq!(summary.outcome, "completed");
+    assert!(requests[2]
+        .to_string()
+        .contains("required_verification_unresolved"));
     let plan = persisted.plan.as_ref().expect("persisted plan");
     assert!(plan.is_complete());
     assert_eq!(
@@ -1124,11 +1280,12 @@ async fn mutation_after_a_passing_check_makes_its_evidence_stale() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+    let (summary, persisted, _) = run_failure_fixture_with_obligations_and_max_steps(
         root.path(),
         responses,
         None,
         vec![required_check("true")],
+        3,
     )
     .await;
 
@@ -1163,11 +1320,12 @@ async fn unknown_verification_binding_is_rejected_before_tool_side_effects() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+    let (summary, persisted, _) = run_failure_fixture_with_obligations_and_max_steps(
         root.path(),
         responses,
         None,
         vec![required_check("true")],
+        2,
     )
     .await;
 
@@ -1200,11 +1358,12 @@ async fn known_verification_id_cannot_credit_a_different_command() {
         failure_fixture_text_turn(),
     ];
 
-    let (summary, persisted, _) = run_failure_fixture_with_obligations(
+    let (summary, persisted, _) = run_failure_fixture_with_obligations_and_max_steps(
         root.path(),
         responses,
         None,
         vec![required_check("true")],
+        2,
     )
     .await;
 

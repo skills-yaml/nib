@@ -120,6 +120,12 @@ Acceptance: AC1 and the typed-outcome portion of AC3.
   authority/uncertain-effect blockers still fail closed. Reject missing goal/provenance instead of reconstructing
   display text, and audit Continue against original goal provenance rather than a
   fabricated new user goal. Preserve existing uncertain-side-effect reconciliation.
+- Treat a tool-free response with unresolved required verification as a rejected
+  completion attempt while normal run bounds permit recovery. Persist the rejection,
+  discard the claimed final text, inject runtime-authored corrective context with the
+  exact unresolved IDs, and return to the same step. Do not mark the obligation passed, reset
+  its evidence, or manufacture human intent. Cover pending and failed checks, successful
+  exact corrective execution, repeated premature completion, and exhausted bounds.
 - Re-read the record under the lease and reject stale plan/identity/already-answered
   cases. Test failure before persistence, after persistence/before acknowledgement,
   restart, duplicate submission, and a concurrent owner. Extend the fixture through
@@ -131,7 +137,7 @@ Acceptance: AC1 and the typed-outcome portion of AC3.
 - Add one-shot guidance to recover via `nib --session <id>` and `/questions`.
 
 Files: A1 files plus `src/session/`, `src/run.rs`, session/runtime fixtures and guide.
-Acceptance: AC2, AC3, AC4a–c; no unintended plan-step completion.
+Acceptance: AC2, AC3, AC4a–d; no unintended plan-step completion.
 
 ### A3. Approval projection and decision parity
 
@@ -271,6 +277,7 @@ test success. Each row includes observable output and authoritative state assert
 | Recovered answer then exact-plan Continue, answer-only on/off | TUI/plain plus runtime | Same plan resumes dependency once, without retyping a redacted goal or relaxing policy |
 | Missing/stale/foreign/completed/ineligible/concurrently owned continuation ID | TUI/plain plus runtime | Fail closed by actual blocking cause; no replacement plan, queue replay, or unrelated answer consumption |
 | Answered clarification with historical Blocked step and unrun verification | TUI/plain plus runtime | Continue can run required work/checks; obligations remain enforced and no uncertain side effect is replayed |
+| Premature completion with pending/failed required verification | Runtime | Completion text is discarded; exact IDs reach one bounded corrective turn; audited success can complete the same plan |
 | Existing same-goal one-shot execution with answer-only on | One-shot plus runtime | Existing routing remains compatible; not the required recovery UI |
 | Approve/deny/invalid/empty/details/back | All approval prompts | Same affirmative contract, default denial, inspection never approves |
 | Consent/management/switch EOF and explicit denial | TUI/plain where applicable | No grant/mutation/switch; existing startup gating and authority preserved |

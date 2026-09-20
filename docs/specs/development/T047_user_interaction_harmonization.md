@@ -231,6 +231,17 @@ the current plan before recovery and continuation; report changed/non-resumable 
 without silently transferring the answer. Verify actual same-plan dependent execution,
 not just successful storage of a recovery answer.
 
+A tool-free model response is a completion attempt, not authority to abandon remaining
+required verification. If the current step still has pending, failed, cancelled, or
+stale required obligations and the normal turn/transition bounds permit more work,
+reject and discard that response, persist the rejected-completion evidence, provide a
+runtime-authored corrective context containing the exact unresolved verification IDs,
+and return to the same plan step. That context is not human intent and cannot waive or
+pass an obligation. A later exact audited invocation remains the only way to satisfy
+the check. Repeated premature completion attempts remain bounded; an exhausted bound,
+changed plan binding, denied action, or other non-recoverable condition still
+reconciles terminally with the plan incomplete.
+
 #### Prompt prefix grammar
 
 Process prefixes before number/option parsing, once, using the case-sensitive ASCII
@@ -493,6 +504,10 @@ then quality/security, and record exact-revision evidence before moving to `done
   verification obligations and unresolved authority/uncertain-effect blockers.
   Recovered answers cannot resolve another record; a deterministic recovery fixture
   executes the intended dependent action once.
+- [x] AC4d: A premature tool-free completion with unresolved required verification is
+  rejected without completing the step and receives a same-run corrective turn with
+  the exact obligation IDs when bounds allow. Exact audited verification can then
+  complete the same plan; repeated attempts or exhausted bounds remain terminal.
 - [ ] AC5: Approvals show common summary and inspectable redacted action details,
   bind to exact validated input, and accept only deliberate affirmative decisions.
 - [ ] AC6: Read-only live/modal commands and exact-target `/stop` work without stealing
