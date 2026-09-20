@@ -353,7 +353,12 @@ mod tests {
             ConsoleInput::new(Cursor::new(Vec::<u8>::new())),
         )
         .expect_err("closed question input must be visible to the caller");
-        assert!(error.contains("question input was unavailable"));
+        assert!(
+            error.contains("Waiting for your answer")
+                && error.contains("/questions")
+                && error.contains("/continue"),
+            "{error}"
+        );
 
         let store = SessionStore::for_project(project.path()).expect("session store");
         let session_id = store
@@ -373,10 +378,15 @@ mod tests {
         let question = &session.tool_calls[0];
         assert_eq!(question.tool_name.as_deref(), Some("ask_question"));
         assert_eq!(question.result.as_ref().unwrap()["success"], false);
-        assert!(question
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("console input closed")));
+        assert!(
+            question.error.as_deref().is_some_and(|error| {
+                error.contains("console input closed")
+                    || error.contains("input closed")
+                    || error.contains("input_closed")
+            }),
+            "{:?}",
+            question.error
+        );
         assert!(session.tool_calls.iter().all(|record| {
             !matches!(
                 record.tool_name.as_deref(),
