@@ -2420,6 +2420,7 @@ async fn run_agent_loop_inner(
     let mut messages = Vec::new();
     let mut llm_tools: Option<Vec<Value>> = None;
     let mut response_content: Option<String> = None;
+    let mut pending_response_events: Vec<StreamEvent> = Vec::new();
     let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
     let mut reconciliation_reason: Option<String> = None;
     let mut reconciliation_failure: Option<LlmError> = None;
@@ -2430,6 +2431,7 @@ async fn run_agent_loop_inner(
     let mut bound_reached = false;
     let mut active_plan_id: Option<String> = None;
     let mut provider_continuation: Option<ProviderContinuation> = None;
+    let mut verification_recovery: Option<Vec<String>> = None;
     let mut failed_tool_batches = FailedToolBatchGuard::default();
 
     store
@@ -2529,6 +2531,7 @@ async fn run_agent_loop_inner(
 
                 if state == AgentState::UpdateMemory {
                     response_content = None;
+                    pending_response_events.clear();
                     tool_calls.clear();
                     state = transition_state(
                         &store,
@@ -3174,7 +3177,21 @@ async fn run_agent_loop_inner(
                             .plan
                             .as_ref()
                             .and_then(|plan| plan.steps.get(plan.current_step_index))
-                            .map(|step| format!("{}\nStatus: {}", step.description, step.status));
+                            .map(|step| {
+                                let mut content =
+                                    format!("{}\nStatus: {}", step.description, step.status);
+                                if let Some(verification_ids) = verification_recovery.as_ref() {
+                                    content.push_str(&format!(
+                                        "\nCompletion rejected: {}",
+                                        json!({
+                                            "reason": "required_verification_unresolved",
+                                            "verification_ids": verification_ids,
+                                            "instruction": "Continue this step and resolve every listed verification obligation with its exact verification_id before attempting completion again.",
+                                        })
+                                    ));
+                                }
+                                content
+                            });
                         let bounded = match build_bounded_runtime_input(RuntimePromptRequest {
                             context: &context_sections,
                             session: &session,
@@ -3261,6 +3278,7 @@ async fn run_agent_loop_inner(
                     continue;
                 }
                 llm_turns += 1;
+                verification_recovery = None;
                 let continued_turn = provider_continuation.is_some();
                 let typed_messages = crate::llm::LlmMessage::from_openai_values(&messages)?;
                 let typed_tools =
@@ -3308,6 +3326,7 @@ async fn run_agent_loop_inner(
                         }
                         if response.terminal_status == LlmTerminalStatus::Refused {
                             response_content = None;
+                            pending_response_events.clear();
                             tool_calls.clear();
                             provider_continuation = None;
                             reconciliation_reason = Some("model_refusal".to_string());
@@ -3322,11 +3341,16 @@ async fn run_agent_loop_inner(
                             )
                             .await?
                         } else {
-                            for event in pending_stream_events {
-                                emit(&cfg.stream_tx, event).await;
-                            }
                             response_content = response.content;
                             tool_calls = response.tool_calls.unwrap_or_default();
+                            if tool_calls.is_empty() {
+                                pending_response_events = pending_stream_events;
+                            } else {
+                                for event in pending_stream_events {
+                                    emit(&cfg.stream_tx, event).await;
+                                }
+                                pending_response_events.clear();
+                            }
                             provider_continuation = response.continuation;
                             if provider_continuation.is_some() {
                                 record_provider_continuation_lifecycle(
@@ -3381,6 +3405,7 @@ async fn run_agent_loop_inner(
                     true,
                     "update_memory",
                 )? {
+                    pending_response_events.clear();
                     reconciliation_reason = Some("plan_binding_changed".to_string());
                     state = transition_state(
                         &store,
@@ -3453,9 +3478,16 @@ async fn run_agent_loop_inner(
                         .map_err(|error| error.to_string())?;
                     if !unresolved_verifications.is_empty() {
                         response_content = None;
+                        pending_response_events.clear();
                         reconciliation_reason =
                             Some("required_verification_unresolved".to_string());
+                        if llm_turns < max_turns {
+                            verification_recovery = Some(unresolved_verifications);
+                        }
                     } else if let Some(content) = response_content.as_deref() {
+                        for event in std::mem::take(&mut pending_response_events) {
+                            emit(&cfg.stream_tx, event).await;
+                        }
                         let content = safe_persisted_provider_message(
                             content,
                             &public_output_sensitive_values,
@@ -3471,6 +3503,7 @@ async fn run_agent_loop_inner(
                             .map_err(|error| error.to_string())?;
                         reconciliation_reason = Some("model_response".to_string());
                     } else {
+                        pending_response_events.clear();
                         reconciliation_reason = Some("empty_model_response".to_string());
                     }
                     transition_state(
@@ -3484,6 +3517,9 @@ async fn run_agent_loop_inner(
                     )
                     .await?
                 } else {
+                    for event in std::mem::take(&mut pending_response_events) {
+                        emit(&cfg.stream_tx, event).await;
+                    }
                     let intent = json!({
                         "content": response_content,
                         "tool_calls": tool_calls.iter().map(|call| json!({
@@ -4769,6 +4805,10 @@ async fn run_agent_loop_inner(
                             "Plan approval denied; no tools were executed.",
                         )?;
                         "plan_approval_denied".to_string()
+                    }
+                    "required_verification_unresolved" if llm_turns < max_turns => {
+                        continue_plan = true;
+                        "verification_recovery".to_string()
                     }
                     other => {
                         if is_agent_failure_outcome(other)

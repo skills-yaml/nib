@@ -577,7 +577,7 @@ impl ActiveTimeline {
 
     fn apply_event(&mut self, event: StreamEvent) {
         if let StreamEvent::Reconciled { outcome } = &event {
-            if outcome != "step_completed" {
+            if !matches!(outcome.as_str(), "step_completed" | "verification_recovery") {
                 if let InteractionReduction::Reconciled { terminal, outcome } = reduce_interaction(
                     &InteractionState::default(),
                     InteractionInput::ReconciledOutcome {
@@ -7959,9 +7959,11 @@ mod tests {
     #[test]
     fn timeline_ignores_intermediate_plan_reconciliation_and_deduplicates_end() {
         let mut timeline = ActiveTimeline::default();
-        timeline.apply_event(StreamEvent::Reconciled {
-            outcome: "step_completed".to_string(),
-        });
+        for outcome in ["step_completed", "verification_recovery"] {
+            timeline.apply_event(StreamEvent::Reconciled {
+                outcome: outcome.to_string(),
+            });
+        }
         assert!(timeline.reconciled_terminal.is_none());
         assert!(timeline.activities.is_empty());
 

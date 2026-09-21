@@ -3009,6 +3009,7 @@ pub fn apply_stream_event(
                 advance_todo_plan(plan, sensitive_values);
             }
         }
+        StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {}
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
                 &InteractionState::default(),
@@ -4596,6 +4597,11 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
         } => StreamDisplay::Status(format!(
             "[compression] {before_tokens} -> {after_tokens} tokens; summarized through message {summarized_through}"
         )),
+        StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {
+            StreamDisplay::Status(
+                "[verification] completion rejected; continuing the current step".to_string(),
+            )
+        }
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
                 &InteractionState::default(),
