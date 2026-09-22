@@ -416,17 +416,20 @@ curator_enabled = false
             throw "Windows one-shot Ctrl+C did not create one isolated session for $($interruptCase.Label)"
         }
         $interruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
-        $expectedStageIndex = $interruptSessionText.IndexOf(
-            '"kind": "' + $interruptCase.ExpectedEvent + '"',
-            [StringComparison]::Ordinal
-        )
-        $cancelledOutcomeIndex = $interruptSessionText.IndexOf(
-            '"outcome": "cancelled_by_user"',
-            [StringComparison]::Ordinal
-        )
+        $interruptSession = $interruptSessionText | ConvertFrom-Json
+        $expectedStageEvent = $interruptSession.events |
+            Where-Object { $_.kind -eq $interruptCase.ExpectedEvent } |
+            Select-Object -First 1
+        $cancelledEvent = $interruptSession.events |
+            Where-Object {
+                $_.kind -eq "run_terminal" -and
+                $_.details.outcome -eq "cancelled_by_user"
+            } |
+            Select-Object -First 1
         if (-not $interruptSessionText.Contains('"goal": "' + $interruptCase.Goal + '"') -or
-            $expectedStageIndex -lt 0 -or
-            $cancelledOutcomeIndex -le $expectedStageIndex) {
+            $null -eq $expectedStageEvent -or
+            $null -eq $cancelledEvent -or
+            [int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index) {
             throw "Windows one-shot Ctrl+C lacked exact durable stage evidence for $($interruptCase.Label)"
         }
         if (-not [string]::IsNullOrWhiteSpace($interruptCase.Forbidden) -and

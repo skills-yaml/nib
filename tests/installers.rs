@@ -352,7 +352,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "ExpectedEvent = \"question_required\"",
         "ExpectedEvent = \"approval_required\"",
         "ExpectedEvent = \"tool_started\"",
-        "$cancelledOutcomeIndex -le $expectedStageIndex",
+        "$_.details.outcome -eq \"cancelled_by_user\"",
+        "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
     ] {
         assert!(
             windows_script.contains(contract),
