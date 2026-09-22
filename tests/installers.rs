@@ -352,6 +352,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "ExpectedEvent = \"question_required\"",
         "ExpectedEvent = \"approval_required\"",
         "ExpectedEvent = \"tool_started\"",
+        "WaitForDirectory = $sessionDirectory",
+        "WaitForFileContents = @(",
         "$_.details.outcome -eq \"cancelled_by_user\"",
         "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
     ] {
@@ -382,6 +384,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(!windows_script.contains("curl"));
     assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));
     assert!(windows_pty.contains("allow_interrupted_child_without_exit_marker"));
+    assert!(windows_pty.contains("wait_for_file_contents"));
+    assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalFileContents"));
     assert!(windows_pty_host
         .contains("$inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3"));
     assert!(windows_pty_host.contains(

@@ -72,3 +72,37 @@ function Wait-NibWindowsPseudoTerminalInputDelay {
         Start-Sleep -Milliseconds $DelayMilliseconds
     }
 }
+
+function Wait-NibWindowsPseudoTerminalFileContents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string[]]$Expected,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Stopwatch,
+        [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+    )
+
+    while ($true) {
+        if (Test-Path -LiteralPath $Directory -PathType Container) {
+            foreach ($candidate in Get-ChildItem -LiteralPath $Directory -Filter "*.json" -File) {
+                try {
+                    $content = Get-Content -LiteralPath $candidate.FullName -Raw -ErrorAction Stop
+                    $matches = $true
+                    foreach ($needle in $Expected) {
+                        if (-not $content.Contains($needle)) {
+                            $matches = $false
+                            break
+                        }
+                    }
+                    if ($matches) { return }
+                } catch {
+                    # Session publication is atomic. A transient replacement/read
+                    # race is retried under the same absolute host deadline.
+                }
+            }
+        }
+        if ($Stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            throw "Timed out waiting for Windows pseudoterminal durable file evidence"
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}

@@ -94,8 +94,32 @@ function Invoke-WindowsPseudoTerminal {
         } else {
             [string]$chunk.WaitForOutput
         }
+        $waitForDirectory = if ($null -eq $chunk.PSObject.Properties["WaitForDirectory"]) {
+            ""
+        } else {
+            [string]$chunk.WaitForDirectory
+        }
+        $waitForFileContents = if ($null -eq $chunk.PSObject.Properties["WaitForFileContents"]) {
+            @()
+        } else {
+            [string[]]@($chunk.WaitForFileContents)
+        }
         if ([Text.Encoding]::UTF8.GetByteCount($waitForOutput) -gt 4096) {
             throw "Windows pseudoterminal prompt exceeds 4096 bytes"
+        }
+        if ([Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
+            $waitForFileContents.Count -gt 4) {
+            throw "Windows pseudoterminal durable wait exceeds its bounds"
+        }
+        foreach ($expectedFileContent in $waitForFileContents) {
+            if ([string]::IsNullOrEmpty($expectedFileContent) -or
+                [Text.Encoding]::UTF8.GetByteCount($expectedFileContent) -gt 4096) {
+                throw "Windows pseudoterminal durable wait text is invalid"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($waitForDirectory) -ne
+            ($waitForFileContents.Count -eq 0)) {
+            throw "Windows pseudoterminal durable wait requires a directory and content"
         }
         if ($chunkBytes -gt 4096) {
             throw "Windows pseudoterminal input chunk exceeds 4096 bytes"
@@ -115,6 +139,8 @@ function Invoke-WindowsPseudoTerminal {
             text = $text
             delay_ms = $delayMilliseconds
             wait_for_output = $waitForOutput
+            wait_for_directory = $waitForDirectory
+            wait_for_file_contents = @($waitForFileContents)
         })
     }
 

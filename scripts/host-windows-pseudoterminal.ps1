@@ -36,11 +36,25 @@ try {
         $chunkBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.text)
         $delayMilliseconds = [int]$chunk.delay_ms
         $promptBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.wait_for_output)
+        $waitForDirectory = [string]$chunk.wait_for_directory
+        $waitForFileContents = [string[]]@($chunk.wait_for_file_contents)
         if ($chunkBytes -gt 4096 -or
             $promptBytes -gt 4096 -or
+            [Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
+            $waitForFileContents.Count -gt 4 -or
             $delayMilliseconds -lt 0 -or
             $delayMilliseconds -gt 10000) {
             throw "Windows pseudoterminal input chunk is invalid"
+        }
+        foreach ($expectedFileContent in $waitForFileContents) {
+            if ([string]::IsNullOrEmpty($expectedFileContent) -or
+                [Text.Encoding]::UTF8.GetByteCount($expectedFileContent) -gt 4096) {
+                throw "Windows pseudoterminal durable wait text is invalid"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($waitForDirectory) -ne
+            ($waitForFileContents.Count -eq 0)) {
+            throw "Windows pseudoterminal durable wait requires a directory and content"
         }
         $totalInputBytes += $chunkBytes
         $totalDelayMilliseconds += $delayMilliseconds
@@ -105,6 +119,13 @@ try {
         $stdoutTask = $stdoutCapture.Completion
         $stderrTask = $process.StandardError.ReadToEndAsync()
         foreach ($chunk in $inputChunks) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$chunk.wait_for_directory)) {
+                Wait-NibWindowsPseudoTerminalFileContents `
+                    -Directory ([string]$chunk.wait_for_directory) `
+                    -Expected ([string[]]@($chunk.wait_for_file_contents)) `
+                    -Stopwatch $stopwatch `
+                    -TimeoutMilliseconds $timeoutMilliseconds
+            }
             if (-not [string]::IsNullOrEmpty([string]$chunk.wait_for_output)) {
                 Wait-NibWindowsPseudoTerminalOutput `
                     -Capture $stdoutCapture `

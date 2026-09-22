@@ -348,12 +348,11 @@ curator_enabled = false
 
     $env:TERM = "xterm-256color"
     $oneShotOutputs = [ordered]@{}
+    $sessionDirectory = Join-Path $fixture ".nib\profiles\default\sessions"
     foreach ($interruptCase in @(
         [pscustomobject]@{
             Label = "question"
             Goal = "ask a question before continuing"
-            Prompt = "Question:"
-            Delay = 0
             Yes = $false
             Forbidden = ""
             ExpectedEvent = "question_required"
@@ -361,11 +360,6 @@ curator_enabled = false
         [pscustomobject]@{
             Label = "approval"
             Goal = "one-shot interrupt approval"
-            # The durable event below qualifies the exact interaction stage. A
-            # short post-start delay avoids depending on how ConPTY fragments or
-            # orders stderr prompt text relative to process exit.
-            Prompt = "nib run: starting"
-            Delay = 2000
             Yes = $false
             Forbidden = "one-shot-approval-ran.txt"
             ExpectedEvent = "approval_required"
@@ -373,8 +367,6 @@ curator_enabled = false
         [pscustomobject]@{
             Label = "terminal"
             Goal = "one-shot interrupt terminal"
-            Prompt = "nib run: starting"
-            Delay = 1500
             Yes = $true
             Forbidden = "one-shot-interrupt-completed.txt"
             ExpectedEvent = "tool_started"
@@ -395,8 +387,12 @@ curator_enabled = false
                 # input delivers the native Ctrl+C console event to the foreground child.
                 [pscustomobject]@{
                     Text = [string][char]3
-                    WaitForOutput = $interruptCase.Prompt
-                    DelayMilliseconds = $interruptCase.Delay
+                    WaitForDirectory = $sessionDirectory
+                    WaitForFileContents = @(
+                        ('"goal": "' + $interruptCase.Goal + '"')
+                        ('"kind": "' + $interruptCase.ExpectedEvent + '"')
+                    )
+                    DelayMilliseconds = 100
                 }
             ) `
             -TimeoutMilliseconds 30000 `
@@ -438,7 +434,6 @@ curator_enabled = false
         }
     }
     $cancelledSessionCount = 0
-    $sessionDirectory = Join-Path $fixture ".nib\profiles\default\sessions"
     if (Test-Path -LiteralPath $sessionDirectory -PathType Container) {
         foreach ($sessionFile in Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File) {
             $sessionText = Get-Content -LiteralPath $sessionFile.FullName -Raw
