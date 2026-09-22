@@ -272,7 +272,9 @@ curator_enabled = false
         Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
             Where-Object {
                 $text = Get-Content -LiteralPath $_.FullName -Raw
-                $text.Contains("ask a question before continuing") -and
+                # Match the exact goal field: the earlier TUI fixture deliberately
+                # extends the same phrase with "in TUI smoke".
+                $text.Contains('"goal": "ask a question before continuing"') -and
                 $text.Contains('"answer": "full"') -and
                 $text.Contains('"outcome": "completed"')
             }
