@@ -139,6 +139,19 @@ try {
         "interactive Windows smoke fixture`n",
         [Text.UTF8Encoding]::new($false)
     )
+    [IO.File]::WriteAllText(
+        (Join-Path $fixture ".gitignore"),
+        ".nib/`nhome/`nxdg-config/`n*.txt`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+    & git -C $fixture add .gitignore README.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to stage the isolated Windows interactive smoke baseline"
+    }
+    & git -C $fixture commit --quiet -m initial
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to commit the isolated Windows interactive smoke baseline"
+    }
     $configText = @"
 [llm]
 active_provider = "mock"

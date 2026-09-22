@@ -111,10 +111,8 @@ try {
     }
     [Console]::Out.WriteLine("$processMarker$PID")
     try {
-        # PowerShell's native-command invocation treats a console Ctrl+C as a
-        # pipeline stop and can terminate the child before its own handler has
-        # reconciled the run. Launch through the process API so the console
-        # event is handled by the child and this adapter independently.
+        # Keep PowerShell's native-command pipeline out of the Ctrl+C path.
+        # The target and this adapter handle the shared console event independently.
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = [string]$request.executable
         $startInfo.UseShellExecute = $false

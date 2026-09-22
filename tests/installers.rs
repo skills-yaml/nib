@@ -351,6 +351,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
         "ExpectedEvent = \"question_required\"",
         "ExpectedEvent = \"approval_required\"",
+        "& git -C $fixture add .gitignore README.md",
+        "& git -C $fixture commit --quiet -m initial",
         "ExpectedEvent = \"tool_started\"",
         "$interruptSessionId = \"t047-native-interrupt-$($interruptCase.Label)\"",
         "('\"id\": \"' + $interruptSessionId + '\"')",
