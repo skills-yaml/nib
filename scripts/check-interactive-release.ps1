@@ -110,6 +110,8 @@ $previousEnvironment = @{}
 $originalClipboard = $null
 $restoreClipboard = $false
 $activeStage = "initialization"
+$lastInterruptResult = $null
+$lastInterruptSessionText = ""
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
@@ -406,6 +408,7 @@ curator_enabled = false
             ) `
             -TimeoutMilliseconds 30000 `
             -AllowInterruptedChildWithoutExitMarker
+        $lastInterruptResult = $oneShotResult
         $oneShotOutputs[$interruptCase.Label] = $oneShotResult.Output
         if ($oneShotResult.ExitCode -eq 0 -or
             -not $oneShotResult.ConsoleModesRestored -or
@@ -421,6 +424,7 @@ curator_enabled = false
             throw "Windows one-shot Ctrl+C did not create one isolated session for $($interruptCase.Label)"
         }
         $interruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
+        $lastInterruptSessionText = $interruptSessionText
         $interruptSession = $interruptSessionText | ConvertFrom-Json
         $expectedStageEvent = $interruptSession.events |
             Where-Object { $_.kind -eq $interruptCase.ExpectedEvent } |
@@ -557,12 +561,33 @@ curator_enabled = false
             "acceptance_eligible=false"
             "stage=$activeStage"
             "failure=$($_.Exception.Message)"
+            if ($null -ne $lastInterruptResult) {
+                "interrupt_exit_code=$($lastInterruptResult.ExitCode)"
+                "caller_modes_restored=$($lastInterruptResult.ConsoleModesRestored)"
+                "child_modes_restored=$($lastInterruptResult.ChildConsoleModesRestored)"
+                "reported_run_cancelled=$($lastInterruptResult.Output.Contains('Run cancelled.'))"
+                "interrupted_without_exit_marker=$($lastInterruptResult.InterruptedChildWithoutExitMarker)"
+            }
         ) -join "`n"
         [IO.File]::WriteAllText(
             (Join-Path $failureEvidenceDirectory "failure-summary.txt"),
             $failureText.Replace($privateSentinel, "[fixture-secret]") + "`n",
             [Text.UTF8Encoding]::new($false)
         )
+        if ($null -ne $lastInterruptResult) {
+            [IO.File]::WriteAllText(
+                (Join-Path $failureEvidenceDirectory "failure-interrupt-output.txt"),
+                $lastInterruptResult.Output.Replace($privateSentinel, "[fixture-secret]"),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+        if (-not [string]::IsNullOrWhiteSpace($lastInterruptSessionText)) {
+            [IO.File]::WriteAllText(
+                (Join-Path $failureEvidenceDirectory "failure-interrupt-session.json"),
+                $lastInterruptSessionText.Replace($privateSentinel, "[fixture-secret]"),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
     }
     $hostDiagnostics = [string]$_.Exception.Data["NibHostDiagnostics"]
     if (-not [string]::IsNullOrWhiteSpace($hostDiagnostics)) {

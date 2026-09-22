@@ -359,6 +359,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "$_.details.outcome -eq \"cancelled_by_user\"",
         "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
         "\"stage=$activeStage\"",
+        "interrupt_exit_code=$($lastInterruptResult.ExitCode)",
+        "failure-interrupt-output.txt",
     ] {
         assert!(
             windows_script.contains(contract),
