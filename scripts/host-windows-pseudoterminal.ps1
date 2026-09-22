@@ -322,6 +322,16 @@ namespace Nib.WindowsPseudoTerminal {
     } | ConvertTo-Json -Compress -Depth 6))
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
+    if ($env:NIB_ENABLE_INTERACTIVE_SMOKE -eq "1" -and $null -ne $stdoutCapture) {
+        # The release fixture uses only offline mock data. Keep this bounded and
+        # printable; the caller redacts its private sentinel before logging it.
+        $diagnosticOutput = $stdoutCapture.Text
+        if ($diagnosticOutput.Length -gt 4096) {
+            $diagnosticOutput = $diagnosticOutput.Substring($diagnosticOutput.Length - 4096)
+        }
+        $diagnosticOutput = [regex]::Replace($diagnosticOutput, '[^\x20-\x7E]', ' ')
+        [Console]::Error.WriteLine("ConPTY output tail: $diagnosticOutput")
+    }
     while ($true) {
         Start-Sleep -Seconds 60
     }

@@ -642,6 +642,8 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_invoke.contains("WaitForOutput"));
     assert!(windows_pty_invoke.contains("NibHostDiagnostics"));
     assert!(windows_pty_host.contains("windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_host.contains("ConPTY output tail:"));
+    assert!(windows_pty_host.contains("$env:NIB_ENABLE_INTERACTIVE_SMOKE -eq \"1\""));
     assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalOutput"));
     assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
     assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
