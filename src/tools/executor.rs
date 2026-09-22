@@ -25,7 +25,9 @@ use uuid::Uuid;
 
 const MAX_INSTRUCTION_POLICY_BYTES: u64 = 1_048_576;
 const MAX_APPROVAL_FIELD_BYTES: usize = 240;
-const MAX_APPROVAL_LINE_BYTES: usize = 320;
+const MAX_APPROVAL_LINE_BYTES: usize = 32 * 1024;
+const MAX_APPROVAL_DETAIL_PAGE_BYTES: usize = 24 * 1024;
+const MAX_APPROVAL_DETAIL_INPUT_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
 const MAX_APPROVAL_LINES: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +86,7 @@ impl ApprovalContext {
             worktree: "not available to compatibility handler".to_string(),
             reason: "interactive approval requested".to_string(),
             choices: "approve once or deny".to_string(),
-            details: approval_plan_step_details(call, &[]),
+            details: approval_invocation_details(call, &[]),
         }
     }
 
@@ -1933,7 +1935,7 @@ impl ToolExecutor {
             worktree: bounded_approval_field(worktree, &secrets),
             reason: bounded_approval_field(reason, &secrets),
             choices: "approve once or deny".to_string(),
-            details: approval_plan_step_details(call, &secrets),
+            details: approval_invocation_details(call, &secrets),
         }
     }
 
@@ -2486,24 +2488,75 @@ fn normalized_approval_display(call: &ToolCall, secrets: &[String]) -> (String, 
     display
 }
 
-fn approval_plan_step_details(call: &ToolCall, secrets: &[String]) -> Vec<String> {
-    if call.tool_name != "approve_plan" {
-        return Vec::new();
+fn approval_invocation_details(call: &ToolCall, secrets: &[String]) -> Vec<String> {
+    if call.tool_name == "approve_plan" {
+        return call
+            .arguments
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                let text = step.as_str()?.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                let bounded =
+                    bounded_approval_field_with_limit(text, secrets, MAX_APPROVAL_LINE_BYTES);
+                (!bounded.is_empty()).then(|| format!("{}. {bounded}", index + 1))
+            })
+            .collect();
     }
-    call.arguments
-        .get("steps")
-        .and_then(Value::as_array)
+    let raw = match call.tool_name.as_str() {
+        "run_terminal" => format!(
+            "Command: {}\nWorking directory: {}\nBackground: {}",
+            approval_argument_string(call, "command").unwrap_or("(missing command)"),
+            approval_argument_string(call, "cwd").unwrap_or("."),
+            call.arguments
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        ),
+        "apply_patch" => format!(
+            "Patch:\n{}",
+            approval_argument_string(call, "patch").unwrap_or("(missing patch)")
+        ),
+        _ => format!("Validated arguments: {}", call.arguments),
+    };
+    let safe = crate::interactive::control_safe_text(
+        &redact_text_with_encoded_secrets_with_limit(
+            &raw,
+            secrets,
+            MAX_APPROVAL_DETAIL_INPUT_BYTES,
+        ),
+        true,
+    );
+    if safe.len() <= MAX_APPROVAL_DETAIL_PAGE_BYTES {
+        return vec![safe];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < safe.len() {
+        let mut end = start
+            .saturating_add(MAX_APPROVAL_DETAIL_PAGE_BYTES)
+            .min(safe.len());
+        while end > start && !safe.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(safe[start..end].to_string());
+        start = end;
+    }
+    let page_count = chunks.len();
+    chunks
         .into_iter()
-        .flatten()
         .enumerate()
-        .filter_map(|(index, step)| {
-            let text = step.as_str()?.trim();
-            if text.is_empty() {
-                return None;
-            }
-            let bounded =
-                bounded_approval_field_with_limit(text, secrets, MAX_APPROVAL_FIELD_BYTES);
-            (!bounded.is_empty()).then(|| format!("{}. {bounded}", index + 1))
+        .map(|(index, chunk)| {
+            format!(
+                "[approval details page {}/{}; no content omitted]\n{chunk}",
+                index + 1,
+                page_count
+            )
         })
         .collect()
 }
@@ -3045,7 +3098,15 @@ fn redact_text_with_secrets(text: &str, secrets: &[String]) -> String {
 fn redact_text_with_encoded_secrets(text: &str, secrets: &[String]) -> String {
     const MAX_ENCODED_REDACTION_INPUT_BYTES: usize = 64 * 1024;
 
-    if text.len() > MAX_ENCODED_REDACTION_INPUT_BYTES {
+    redact_text_with_encoded_secrets_with_limit(text, secrets, MAX_ENCODED_REDACTION_INPUT_BYTES)
+}
+
+fn redact_text_with_encoded_secrets_with_limit(
+    text: &str,
+    secrets: &[String],
+    max_input_bytes: usize,
+) -> String {
+    if text.len() > max_input_bytes {
         return "[REDACTED]".to_string();
     }
 
@@ -3353,12 +3414,12 @@ mod tests {
         assert!(context.display_subject.len() <= 120);
         assert!(!context.display_subject.chars().any(char::is_control));
         assert!(!context.display_subject.contains('\u{202e}'));
-        assert_eq!(context.lines().len(), MAX_APPROVAL_LINES);
+        assert!(context.lines().len() > MAX_APPROVAL_LINES);
         assert!(context
             .lines()
             .iter()
             .all(|line| line.len() <= MAX_APPROVAL_LINE_BYTES));
-        assert!(rendered.len() < 2_048);
+        assert!(rendered.len() < MAX_APPROVAL_DETAIL_PAGE_BYTES + 2_048);
         assert!(rendered.contains("Action: run_terminal command="));
         assert!(rendered.contains("destructive / destructive"));
         assert!(rendered.contains("Network: restricted"));
@@ -3369,7 +3430,7 @@ mod tests {
         assert!(!rendered.contains("sk-privateapproval"));
         assert!(!rendered.contains("raw-json-sentinel"));
         assert!(!rendered.contains('\u{202e}'));
-        assert!(!rendered.contains("LONG_ARGUMENT_SENTINEL"));
+        assert!(rendered.contains("LONG_ARGUMENT_SENTINEL"));
         assert!(!rendered.contains("LONG_TARGET_SENTINEL"));
         assert!(context
             .lines()
@@ -3436,6 +3497,12 @@ mod tests {
         assert!(context.action.contains("docs/a.md"));
         assert!(!context.render().contains("configured-patch-secret"));
         assert!(!context.render().contains("sk-privatepatch"));
+        let details = context.details.join("\n");
+        assert!(details.contains("diff --git a/src/old.rs b/src/new.rs"));
+        assert!(details.contains("diff --git a/docs/a.md b/docs/a.md"));
+        assert!(details.contains("[REDACTED]"));
+        assert!(!details.contains("configured-patch-secret"));
+        assert!(!details.contains("sk-privatepatch"));
     }
 
     #[test]
@@ -3467,6 +3534,85 @@ mod tests {
             "5 files (+1 more): docs/a.md,docs/b.md,docs/c.md,docs/d.md"
         );
         assert!(!context.display_subject.contains("docs/e.md"));
+    }
+
+    #[test]
+    fn approval_details_page_complete_content_without_splitting_utf8() {
+        let command = format!(
+            "printf '{}' END_SENTINEL",
+            "界".repeat(MAX_APPROVAL_DETAIL_PAGE_BYTES / 3 + 1_024)
+        );
+        let call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({
+                "command": command,
+                "cwd": "/tmp/work",
+                "background": false,
+            }),
+            session_id: None,
+            project_root: None,
+        };
+
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+        assert!(context.details.len() > 1);
+        assert!(context.details[0].contains("[approval details page 1/"));
+        assert!(context
+            .details
+            .iter()
+            .all(|page| page.contains("no content omitted") && page.is_char_boundary(page.len())));
+        let reconstructed = context
+            .details
+            .iter()
+            .map(|page| page.split_once('\n').expect("page header").1)
+            .collect::<String>();
+        assert_eq!(
+            reconstructed,
+            format!(
+                "Command: {}\nWorking directory: /tmp/work\nBackground: false",
+                call.arguments["command"].as_str().expect("command")
+            )
+        );
+    }
+
+    #[test]
+    fn approval_details_cover_memory_delegation_and_network_scope() {
+        for (tool_name, arguments, expected) in [
+            (
+                "manage_memory",
+                json!({
+                    "action": "set",
+                    "namespace": "environment",
+                    "key": "release-channel",
+                    "value": "development"
+                }),
+                ["environment", "release-channel", "development"].as_slice(),
+            ),
+            (
+                "spawn_subagent",
+                json!({"prompt": "inspect the release", "max_steps": 7}),
+                ["inspect the release", "max_steps"].as_slice(),
+            ),
+            (
+                "read_url_content",
+                json!({"url": "https://example.invalid/release", "max_chars": 4000}),
+                ["https://example.invalid/release", "max_chars"].as_slice(),
+            ),
+        ] {
+            let call = ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: tool_name.to_string(),
+                arguments,
+                session_id: None,
+                project_root: None,
+            };
+            let details = ApprovalContext::compatibility(&call, PermissionLevel::Safe)
+                .details
+                .join("\n");
+            for value in expected {
+                assert!(details.contains(value), "{tool_name}: {details}");
+            }
+        }
     }
 
     #[test]

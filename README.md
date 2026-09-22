@@ -101,6 +101,8 @@ task build
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
    - `/session` - Preview and resume a persisted session
+   - `/questions [id]` - List or answer unresolved questions for the current plan
+   - `/continue <plan-id>` - Explicitly continue that exact recovered plan
    - `/clear` - Start a fresh session
    - `/skills` - Manage installed skills
    - `/mcp` - Manage MCP servers
@@ -116,8 +118,9 @@ task build
    changing the active session in either mode.
 
 Mutating work remains on a `nib/session/*` worktree branch until you review and merge
-it. `nib run --yes` bypasses interactive plan and tool prompts and should be limited to
-already trusted environments.
+it. Plans are informational and continue without a separate approval prompt.
+`nib run --yes` bypasses eligible interactive tool prompts, but never explicit deny
+policies or execution boundaries, and should be limited to already trusted environments.
 
 ### Upgrading legacy delegation state
 

@@ -62,7 +62,17 @@ jobs:
         run: task qualify:llm-release
 
       - name: Smoke unified interactive launcher
+        env:
+          NIB_INTERACTIVE_EVIDENCE_DIR: ${{ runner.temp }}/nib-interactive-evidence
         run: task smoke:interactive
+
+      - name: Retain Linux interactive evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: interactive-evidence-linux
+          path: ${{ runner.temp }}/nib-interactive-evidence
+          if-no-files-found: error
 
       - name: Smoke managed-process owner loss
         run: task smoke:managed-process
@@ -96,7 +106,17 @@ jobs:
         run: task qualify:llm-release
 
       - name: Smoke native Windows interaction
+        env:
+          NIB_INTERACTIVE_EVIDENCE_DIR: ${{ runner.temp }}\nib-interactive-evidence
         run: task smoke:interactive:windows:binary
+
+      - name: Retain Windows interactive evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: interactive-evidence-windows
+          path: ${{ runner.temp }}\nib-interactive-evidence
+          if-no-files-found: error
 
       - name: Smoke release binary
         shell: pwsh
@@ -160,7 +180,17 @@ jobs:
         run: task qualify:llm-release
 
       - name: Smoke native macOS interaction
+        env:
+          NIB_INTERACTIVE_EVIDENCE_DIR: ${{ runner.temp }}/nib-interactive-evidence
         run: task smoke:interactive:binary
+
+      - name: Retain macOS interactive evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: interactive-evidence-macos
+          path: ${{ runner.temp }}/nib-interactive-evidence
+          if-no-files-found: error
 
       - name: Smoke release binary
         shell: bash

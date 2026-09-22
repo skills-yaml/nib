@@ -943,3 +943,13 @@ scope by this final matrix and the prior evidence recorded above.
 
 T034 closes on the same native release binaries and platform smokes before this
 umbrella transition, satisfying the FT-019 dependency order.
+
+## T047 supersession (2026-09-21)
+
+[T047](../development/T047_user_interaction_harmonization.md) extends the shared
+interactive command and runtime contract with durable `/questions [id]` recovery and
+exact-plan `/continue <plan-id>`. It also owns the revised default-negative approval,
+Ctrl+C/Ctrl+Q, modal command, one-shot output, and truthful clipboard behavior. The
+checked FT-019 criteria and native evidence above remain historical evidence for that
+revision; they do not qualify T047's changed behavior or its still-required exact-revision
+native matrix.

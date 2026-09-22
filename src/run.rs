@@ -4,7 +4,41 @@ use std::sync::Arc;
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 
 const MAX_RUN_GOAL_BYTES: usize = 20_000;
-const MAX_RUN_ANSWER_BYTES: usize = 32 * 1024;
+const MAX_RUN_ANSWER_BYTES: usize = 64 * 1024;
+
+fn one_shot_stream_line(display: nib::interactive::StreamDisplay) -> Option<String> {
+    match display {
+        // The reconciled summary below owns the one complete final answer. Streaming
+        // this projection as well would print that answer twice.
+        nib::interactive::StreamDisplay::Content(_) => None,
+        nib::interactive::StreamDisplay::Status(status) if status.starts_with("[plan]") => {
+            Some(status)
+        }
+        nib::interactive::StreamDisplay::Status(_) => None,
+    }
+}
+
+fn one_shot_final_output(message: &str, sensitive_values: &[String], session_id: &str) -> String {
+    if message.len() > MAX_RUN_ANSWER_BYTES {
+        return format!(
+            "Final answer omitted from terminal output because the retained session value exceeds the {MAX_RUN_ANSWER_BYTES}-byte display limit. Inspect session {session_id}."
+        );
+    }
+    let message =
+        nib::interactive::bounded_public_text(message, sensitive_values, usize::MAX, true);
+    if message.len() > MAX_RUN_ANSWER_BYTES {
+        return format!(
+            "Final answer omitted from terminal output because the retained session value exceeds the {MAX_RUN_ANSWER_BYTES}-byte display limit. Inspect session {session_id}."
+        );
+    }
+    if message.trim().is_empty() {
+        format!(
+            "Final answer omitted by safety/storage limits. Inspect session {session_id} for the retained record."
+        )
+    } else {
+        message
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -97,17 +131,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
                     if let Some(display) =
                         nib::interactive::display_stream_event_with_sensitive_values(event, &[])
                     {
-                        match display {
-                            nib::interactive::StreamDisplay::Content(content) => {
-                                print!("{content}");
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
-                            }
-                            nib::interactive::StreamDisplay::Status(status)
-                                if status.starts_with("[plan]") =>
-                            {
-                                println!("{status}");
-                            }
-                            nib::interactive::StreamDisplay::Status(_) => {}
+                        if let Some(line) = one_shot_stream_line(display) {
+                            println!("{line}");
                         }
                     }
                 }
@@ -165,17 +190,7 @@ fn report_run_summary(
         }
     }
     if let Some(msg) = summary.last_message {
-        let msg = nib::interactive::bounded_public_text(
-            &msg,
-            sensitive_values,
-            MAX_RUN_ANSWER_BYTES,
-            false,
-        );
-        if msg.trim().is_empty() {
-            println!("Final answer omitted by safety/storage limits; inspect the session record.");
-        } else {
-            println!("{msg}");
-        }
+        println!("{}", one_shot_final_output(&msg, sensitive_values, sid));
     }
     Ok(())
 }
@@ -284,6 +299,51 @@ mod tests {
             message_count,
             "configuration failures must not become assistant content"
         );
+    }
+
+    #[test]
+    fn one_shot_stream_defers_content_to_the_single_reconciled_summary() {
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Content(
+                "complete final answer".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Status(
+                "[plan] inspect\n[plan] verify".to_string()
+            )),
+            Some("[plan] inspect\n[plan] verify".to_string())
+        );
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Status(
+                "tool running".to_string()
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn one_shot_final_output_preserves_structure_and_labels_legacy_omission() {
+        let structured = format!(
+            "# Result\n\n{}\n\n```rust\nfn verified() {{}}\n```",
+            "complete paragraph. ".repeat(80)
+        );
+        let rendered = one_shot_final_output(&structured, &[], "session-structured");
+        assert_eq!(rendered, structured);
+        assert!(rendered.len() > 512);
+        assert!(rendered.contains("\n\n```rust\n"));
+
+        let oversized = "x".repeat(MAX_RUN_ANSWER_BYTES + 1);
+        let rendered = one_shot_final_output(&oversized, &[], "session-legacy");
+        assert!(rendered.contains("omitted from terminal output"));
+        assert!(rendered.contains("session-legacy"));
+        assert!(!rendered.ends_with("..."));
+
+        let expanding_controls = "\u{1b}".repeat(MAX_RUN_ANSWER_BYTES / 2);
+        let rendered = one_shot_final_output(&expanding_controls, &[], "session-controls");
+        assert!(rendered.contains("omitted from terminal output"));
+        assert!(!rendered.ends_with("..."));
     }
 
     #[test]

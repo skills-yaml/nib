@@ -482,6 +482,32 @@ impl LlmClient for MockLlmClient {
                     false,
                 );
             }
+            if last.contains("one-shot interrupt terminal") {
+                return mock_tool_response(
+                    vec![ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
+                            "command": "sleep 30; echo interrupt-failed > one-shot-interrupt-completed.txt",
+                            "affected_paths": ["."]
+                        }),
+                    )],
+                    scope,
+                    false,
+                );
+            }
+            if last.contains("one-shot interrupt approval") {
+                return mock_tool_response(
+                    vec![ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
+                            "command": "touch one-shot-approval-ran.txt",
+                            "affected_paths": ["one-shot-approval-ran.txt"]
+                        }),
+                    )],
+                    scope,
+                    false,
+                );
+            }
             if last.contains(EXACT_STEERING_TOOL_SMOKE_GOAL) {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
@@ -593,6 +619,18 @@ impl LlmClient for MockLlmClient {
             return Ok(LlmResponse::text(
                 "Final answer: replacement steering marker observed.",
             ));
+        }
+
+        if messages.iter().any(|message| {
+            message
+                .content
+                .to_ascii_lowercase()
+                .contains("one-shot long structured final")
+        }) {
+            return Ok(LlmResponse::text(format!(
+                "# Verified result\n\n{}\n\n```text\nLONG_FINAL_SENTINEL\n```",
+                "complete structured paragraph. ".repeat(80)
+            )));
         }
 
         Ok(LlmResponse::text(

@@ -114,8 +114,15 @@ AGENTS.md can also tighten the execution envelope:
 These directives are tighten-only; project instructions cannot weaken configured isolation.
 
 **Approval UX**:
-- CLI approval prints the tool, permission level, and complete arguments before accepting `y`.
-- TUI approval shows the tool and arguments and accepts an explicit `Y` or `N` decision.
+- CLI approval prints the common action/risk summary and offers complete bounded,
+  redacted details before accepting case-insensitive `y`/`yes`; empty input, EOF,
+  Escape, and the default choice deny.
+- TUI approval starts on `Deny`. It buffers `y`/`yes` or `n`/`no` until Enter and
+  exposes a scrollable `View details` action built from the exact validated invocation.
+  Closing details does not decide or authorize the action.
+- `--yes` can satisfy eligible interactive tool approval only. Explicit deny and
+  require-approval policy, workspace, worktree, sandbox, and platform boundaries
+  remain authoritative.
 - The source, decision, arguments, timestamp, plan link, and execution result are recorded in the originating session.
 
 ### Layer 5: Output & Secret Control

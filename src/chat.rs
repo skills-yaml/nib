@@ -10,13 +10,13 @@ use nib::config::load_nib_config_full;
 use nib::interactive::{
     claim_next_queued_follow_up_after_startup, execute_interactive_command_in_state,
     format_session_status, interactive_completions, interactive_session_candidate,
-    maybe_assign_session_display_name, persist_queued_follow_up, queue_disposition_message,
-    reduce_interaction, resolve_interactive_profile_scope, resolve_session, set_active_model,
-    validate_interactive_session_target, DraftHistory, InteractionConsumer, InteractionDecision,
-    InteractionInput, InteractionReduction, InteractionRunState, InteractionState,
-    InteractionTerminalOutcome, InteractiveAgentMode, InteractiveEffect,
-    InteractiveSessionSelection, ModelSelection, SelectorDetailKind, SessionResolution,
-    StreamDisplay,
+    maybe_assign_session_display_name, persist_queued_follow_up, project_session_conversation,
+    queue_disposition_message, reduce_interaction, resolve_interactive_profile_scope,
+    resolve_session, set_active_model, validate_interactive_session_target, ActivityKind,
+    DraftHistory, InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
+    InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
+    InteractiveCommand, InteractiveEffect, InteractiveSessionSelection, ModelSelection,
+    SelectorDetailKind, SessionResolution, StreamDisplay,
 };
 use nib::session::SessionStore;
 
@@ -600,11 +600,14 @@ fn run_plain_with_input_and_modal_state(
         .load_result(&sid)
         .map_err(|error| format!("failed to load session history: {error}"))?
     {
-        for msg in sess.messages.iter().rev().take(6).rev() {
-            let prefix = &msg.role;
-            let short =
-                nib::interactive::bounded_public_text(&msg.content, &sensitive_values, 512, true);
-            println!("{prefix}: {short}");
+        let conversation = project_session_conversation(&sess, &sensitive_values);
+        for activity in conversation.iter().rev().take(6).rev() {
+            let prefix = match activity.kind {
+                ActivityKind::User => "user",
+                ActivityKind::Assistant => "assistant",
+                _ => "system",
+            };
+            println!("{prefix}: {}", activity.copy_text());
         }
     }
 
@@ -714,6 +717,7 @@ fn run_plain_with_input_and_modal_state(
         }
 
         if let InteractionReduction::Command(command) = &reduction {
+            let copy_command = matches!(command, InteractiveCommand::Copy);
             match execute_interactive_command_in_state(
                 command.clone(),
                 project,
@@ -727,7 +731,13 @@ fn run_plain_with_input_and_modal_state(
                     println!("{}", plain_goodbye(&session_store, &sid, &sensitive_values));
                     break;
                 }
-                Ok(InteractiveEffect::Output(output)) => println!("{}", public_output(&output)),
+                Ok(InteractiveEffect::Output(output)) => {
+                    if copy_command {
+                        println!("{}", nib::tui::copy_text_to_clipboard(&output));
+                    } else {
+                        println!("{}", public_output(&output));
+                    }
+                }
                 Ok(InteractiveEffect::SessionChanged { session_id, output }) => {
                     let disposition =
                         chat_queue_disposition(&session_store, &sid, "switched sessions");
@@ -824,10 +834,17 @@ fn run_plain_with_input_and_modal_state(
                     for (index, option) in options.iter().enumerate() {
                         println!("  {}. {}", index + 1, option);
                     }
-                    print!("Answer: ");
-                    let _ = io::stdout().flush();
-                    match input.read_line_blocking() {
-                        Ok(line) => match interpret_plain_question_line(&line, &options) {
+                    loop {
+                        print!("Answer: ");
+                        let _ = io::stdout().flush();
+                        let line = match input.read_line_blocking() {
+                            Ok(line) => line,
+                            Err(error) => {
+                                println!("{error}");
+                                break;
+                            }
+                        };
+                        match interpret_plain_question_line(&line, &options) {
                             PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(
                                 answer,
                             )) => {
@@ -842,11 +859,14 @@ fn run_plain_with_input_and_modal_state(
                                     }
                                     Err(error) => println!("{error}"),
                                 }
+                                break;
                             }
                             PlainQuestionLine::Retry(message) => println!("{message}"),
-                            other => println!("question was not answered: {other:?}"),
-                        },
-                        Err(error) => println!("{error}"),
+                            other => {
+                                println!("question was not answered: {other:?}");
+                                break;
+                            }
+                        }
                     }
                 }
                 Ok(InteractiveEffect::RunAgent { goal, mode }) => {
@@ -2996,6 +3016,7 @@ mod tests {
                 modal_state.clone(),
                 [
                     ModalInputStep::Immediate("ask a question before continuing\n"),
+                    ModalInputStep::AfterModal(PLAIN_MODAL_QUESTION, ":command /status\n"),
                     ModalInputStep::AfterModal(PLAIN_MODAL_QUESTION, "2\n\n"),
                 ],
             ),
@@ -3017,6 +3038,15 @@ mod tests {
         assert!(session.messages.iter().any(|message| {
             message.role == "tool" && message.content.contains("\"answer\":\"full\"")
         }));
+        assert_eq!(
+            session
+                .tool_calls
+                .iter()
+                .filter(|record| record.tool_name.as_deref() == Some("ask_question"))
+                .count(),
+            1,
+            "modal inspection must not consume or duplicate the question"
+        );
     }
 
     #[test]
@@ -3068,6 +3098,85 @@ mod tests {
         assert!(question.error.as_deref().is_some_and(|error| {
             error.contains("console input closed") || error.contains("input closed")
         }));
+    }
+
+    #[test]
+    #[serial]
+    fn plain_recovered_question_retries_invalid_input_before_persisting() {
+        let project = tempdir().expect("project");
+        save_mock_config(project.path());
+        let store = SessionStore::for_project(project.path()).expect("session store");
+        let mut session = store.try_create_session().expect("session");
+        let plan = nib::session::Plan::new(
+            "finish after recovery",
+            vec![nib::session::PlanStep {
+                description: "use the selected target".to_string(),
+                status: "Blocked".to_string(),
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            }],
+        );
+        let plan_id = plan.id.clone();
+        let invocation_id = nib::tools::ToolInvocationId::new();
+        session.plan = Some(plan);
+        session.events.push(nib::session::SessionEvent {
+            index: 0,
+            kind: "question_required".to_string(),
+            details: serde_json::json!({
+                "invocation_id": invocation_id,
+                "question": "Which target?",
+                "options": ["alpha", "beta"],
+            }),
+            timestamp: Some(chrono::Utc::now()),
+        });
+        session
+            .clarifications
+            .push(nib::session::ClarificationRecord {
+                invocation_id,
+                plan_id: Some(plan_id),
+                question: "Which target?".to_string(),
+                options: vec!["alpha".to_string(), "beta".to_string()],
+                dependent_paths: Vec::new(),
+                status: nib::session::ClarificationStatus::Unresolved,
+                answer: None,
+                question_event_index: 0,
+                answer_message_index: None,
+                answer_event_index: None,
+                reason: Some("left unanswered".to_string()),
+                outcome: Some("left_unanswered".to_string()),
+            });
+        store.save(&mut session).expect("recoverable question");
+        let session_id = session.id.clone();
+        let input = format!("/questions {invocation_id}\n0\n2\n/quit\n");
+        let _cwd = CurrentDirGuard::enter(project.path());
+
+        run_chat_with_input(
+            &ChatArgs {
+                session: Some(session_id.clone()),
+                plain: true,
+                ..Default::default()
+            },
+            Cursor::new(input.into_bytes()),
+        )
+        .expect("plain recovery session");
+
+        let persisted = store.load(&session_id).expect("answered session");
+        assert_eq!(
+            persisted.clarifications[0].status,
+            nib::session::ClarificationStatus::Answered
+        );
+        assert_eq!(persisted.clarifications[0].answer.as_deref(), Some("beta"));
+        assert_eq!(
+            persisted
+                .events
+                .iter()
+                .filter(|event| event.kind == "human_question_answer_received")
+                .count(),
+            1
+        );
     }
 
     #[test]

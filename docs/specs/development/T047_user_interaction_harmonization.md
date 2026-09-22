@@ -487,18 +487,18 @@ then quality/security, and record exact-revision evidence before moving to `done
 
 ## Acceptance Criteria
 
-- [ ] AC1: TUI/plain/console share numeric/text/option parsing and local retry semantics;
+- [x] AC1: TUI/plain/console share numeric/text/option parsing and local retry semantics;
   no invalid answer consumes the request or triggers a model call.
-- [ ] AC2: TUI questions support custom answers, normal editing, Unicode and multiline
+- [x] AC2: TUI questions support custom answers, normal editing, Unicode and multiline
   paste; the question remains inspectable and initial Enter supplies no implicit answer.
-- [ ] AC3: Dismissal, EOF, cancellation, and absent handlers have distinct typed
+- [x] AC3: Dismissal, EOF, cancellation, and absent handlers have distinct typed
   handling; all leave required dependencies blocked unless an answer is persisted.
-- [ ] AC4a: Leave unanswered reconciles the worker to idle waiting-for-input, making
+- [x] AC4a: Leave unanswered reconciles the worker to idle waiting-for-input, making
   `/questions [id]` usable immediately and after restart, without automatic execution.
-- [ ] AC4b: `/continue <plan-id>` uses the persisted original goal and exact plan
+- [x] AC4b: `/continue <plan-id>` uses the persisted original goal and exact plan
   identity, including when its displayed summary is redacted/truncated; test both
   `agent.answer_only` settings without weakening policy or fresh-request semantics.
-- [ ] AC4c: Concurrent, stale, foreign, completed, malformed, or genuinely ineligible
+- [x] AC4c: Concurrent, stale, foreign, completed, malformed, or genuinely ineligible
   continuation targets fail closed based on blocking causes, not a coarse Blocked
   label. Test answered clarification alone and with a pending required check; retain
   verification obligations and unresolved authority/uncertain-effect blockers.
@@ -508,34 +508,34 @@ then quality/security, and record exact-revision evidence before moving to `done
   rejected without completing the step and receives a same-run corrective turn with
   the exact obligation IDs when bounds allow. Exact audited verification can then
   complete the same plan; repeated attempts or exhausted bounds remain terminal.
-- [ ] AC5: Approvals show common summary and inspectable redacted action details,
+- [x] AC5: Approvals show common summary and inspectable redacted action details,
   bind to exact validated input, and accept only deliberate affirmative decisions.
-- [ ] AC6: Read-only live/modal commands and exact-target `/stop` work without stealing
+- [x] AC6: Read-only live/modal commands and exact-target `/stop` work without stealing
   answers, granting consent, mutating inspection state, or weakening lease fencing.
-- [ ] AC7a: Ctrl+C never copies/quits; active cancellation takes precedence over
+- [x] AC7a: Ctrl+C never copies/quits; active cancellation takes precedence over
   selection/modal input, and idle clearing does not authorize or submit work.
-- [ ] AC7b: Ctrl+Q's first press only arms; its second within 1000ms quits through
+- [x] AC7b: Ctrl+Q's first press only arms; its second within 1000ms quits through
   bounded reconciliation. Timeout, intervening input, and consumer changes disarm it.
 - [ ] AC7c: F2 and `:command` preserve prompt/draft ownership; idle F2 is a no-op.
   Prefix case, separators, empty/nested payloads, and modal frame behavior are tested.
-- [ ] AC7d: Enter send/queue, Ctrl+S exact-run steering, persisted queue retention,
+- [x] AC7d: Enter send/queue, Ctrl+S exact-run steering, persisted queue retention,
   and cancellation/quit reconciliation retain their existing authority guarantees.
 - [ ] AC7e: One-shot Unix SIGINT exits 130 after bounded reconciliation; native
   Windows interruption proves non-success, cancellation, cleanup, and restoration
   against the exact binary. Missing native evidence is not N/A or a pass.
-- [ ] AC8: One-shot plan/final output is complete within declared safety limits,
+- [x] AC8: One-shot plan/final output is complete within declared safety limits,
   structured, redaction-safe, and compatible with existing outcome/exit-code contracts.
-- [ ] AC9a: No-color/narrow layouts expose roles, focus, states, actionable errors,
+- [x] AC9a: No-color/narrow layouts expose roles, focus, states, actionable errors,
   and readable session choices without hidden-only actions.
 - [ ] AC9b: `/copy` and retained drag-release copy report native success, unconfirmed
   OSC52, and failure accurately; redirected output contains no clipboard sequences.
-- [ ] AC9c: `/review` explicitly means diff inspection, not performed code review.
-- [ ] AC10a: Docs/help and dated supersession notes match implemented behavior;
+- [x] AC9c: `/review` explicitly means diff inspection, not performed code review.
+- [x] AC10a: Docs/help and dated supersession notes match implemented behavior;
   T042/T045/T046 ownership is reconciled without adopting T043's broad restructuring.
-- [ ] AC10b: Workspace consent and management/switch confirmations use safe shared
+- [x] AC10b: Workspace consent and management/switch confirmations use safe shared
   input defaults; deny/EOF grants nothing, changes no management/session state, and
   preserves terminal-only workspace gating and existing grant scope.
-- [ ] AC10c: Typed question adapters preserve legacy implementer compatibility;
+- [x] AC10c: Typed question adapters preserve legacy implementer compatibility;
   absent handlers, explicit deny/require-approval policies, external schemas, and
   legacy `approve_plan` compatibility remain fail-closed without adding a plan gate.
 - [ ] AC10d: All implementation gates and exact-revision native evidence are recorded;
@@ -595,3 +595,47 @@ No product decision from Q1–Q20 remains open. Shared-file handoffs and native 
 clipboard, and Windows interruption evidence remain implementation prerequisites/gates,
 not assumptions that the behavior already works. The historical full-verification
 failure in the companion remains recorded until a new successful run supersedes it.
+
+## Implementation Checkpoint (2026-09-21)
+
+The recovered-answer path now holds the authoritative run lease through identity
+revalidation and durable publication. TUI and plain recovery retain the responder on
+invalid input, and runtime coverage proves that an answered clarification continues
+the exact stored plan once with `agent.answer_only` both enabled and disabled. The
+continuation adds an explicitly runtime-authored user-role boundary while preserving
+the saved human goal and plan identity.
+
+Approval details are generated from the validated invocation, redacted and
+control-sanitized before lossless paging, and exposed through a non-authorizing TUI
+detail view. Ctrl+Q is disarmed by timeout, intervening input, and consumer changes.
+One-shot output suppresses the duplicate streamed final response and emits the
+complete reconciled retained answer once within the declared 64 KiB public-output
+limit, with an explicit omission marker for incompatible oversized legacy state.
+`/copy` now attempts delivery, distinguishes native success from unconfirmed OSC52
+and failure, and emits no clipboard escape sequence when redirected. Plain resumed
+history now uses the shared public conversation projection and cannot expose provider
+tool envelopes or raw tool-result payloads.
+
+Focused evidence passed in this working tree: `task check`, `task test:interactive`,
+`task test:agent-context`, `task test:runtime-e2e`, `task test:tui-shutdown`,
+`task docs:check`, `git diff --check`, the complete local `task verify`, and
+`task coverage` at 85.78% line coverage (113,996/132,896). The final successful
+verification included 1,174 library tests, 89 binary tests, and every
+ordinary integration target; only explicitly opt-in paid/live and release-binary
+qualification tests remained ignored by their existing contracts. The final Linux
+optimized-binary sequence (`task build` then `task smoke:interactive:binary`) also
+passed. It proves native F2 command routing without consuming the pending question,
+OSC52/native-copy status handling, native Ctrl+C while a one-shot question, approval,
+and foreground tool are active, exit 130 with durable cancellation, privacy scanning,
+and exact before/after terminal-mode restoration. Sanitized captures are retained
+under `target/t047-local-evidence/Linux/` for this working tree. The smoke summary
+records the source revision and embedded binary identity, but correctly marks this
+dirty working-tree run ineligible as final acceptance evidence.
+
+This spec remains in development. macOS qualification was not run on this Linux host.
+Windows ConPTY qualification was prepared in `scripts/check-interactive-release.ps1`,
+but the local Windows task could not run because `pwsh` is unavailable. Exact-revision
+native F2, clipboard, and interruption evidence still need the hosted Windows/macOS
+matrix. Therefore AC7c,
+AC7e, AC9b, and AC10d remain open, and no exact-revision completion claim is made from
+this uncommitted working tree.

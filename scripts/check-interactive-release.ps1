@@ -66,6 +66,20 @@ function Invoke-NibRedirectedPlain {
 }
 
 $binaryPath = (Resolve-Path -LiteralPath $Binary).Path
+$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$sourceRevision = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceRevision)) {
+    throw "Unable to resolve the interactive smoke source revision"
+}
+$sourceClean = @(& git -C $repositoryRoot status --porcelain).Count -eq 0
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to inspect the interactive smoke source state"
+}
+$binaryVersion = (& $binaryPath version | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $binaryVersion.Contains($sourceRevision)) {
+    throw "Release binary identity does not match source revision $sourceRevision"
+}
+$acceptanceEligible = $sourceClean
 $temporaryBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [IO.Path]::GetTempPath()
 } else {
@@ -93,11 +107,19 @@ $environmentNames = @(
     "NO_COLOR"
 )
 $previousEnvironment = @{}
+$originalClipboard = $null
+$restoreClipboard = $false
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
 try {
+    try {
+        $originalClipboard = Get-Clipboard -Raw -ErrorAction Stop
+        $restoreClipboard = $true
+    } catch {
+        $restoreClipboard = $false
+    }
     New-Item -ItemType Directory -Force -Path `
         $fixture, `
         $isolatedHome, `
@@ -188,6 +210,43 @@ curator_enabled = false
         throw "Windows interactive smoke did not persist explicit workspace consent"
     }
 
+    $tuiQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --tui --run 'ask a question before continuing in TUI smoke'; exit `$LASTEXITCODE"
+    $tuiQuestionResult = Invoke-WindowsPseudoTerminal `
+        -Executable $pwshPath `
+        -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiQuestionCommand) `
+        -InputChunks @(
+            [pscustomobject]@{ Text = "$([char]27)OQ"; WaitForOutput = "Which verification mode?" },
+            # Incremental redraws may split the command-overlay label with cursor
+            # controls. Status output is the stable proof that F2 owned this input.
+            [pscustomobject]@{ Text = "/status`r"; DelayMilliseconds = 300 },
+            [pscustomobject]@{ Text = "2`r"; WaitForOutput = "Verification:" },
+            [pscustomobject]@{ Text = "$([char]17)$([char]17)"; WaitForOutput = "Final answer: task complete" }
+        ) `
+        -TimeoutMilliseconds 60000
+    if ($tuiQuestionResult.ExitCode -ne 0 -or
+        -not $tuiQuestionResult.ConsoleModesRestored -or
+        -not $tuiQuestionResult.ChildConsoleModesRestored -or
+        -not $tuiQuestionResult.Output.Contains("Verification:")) {
+        throw "Windows TUI F2 smoke did not preserve the pending question and command overlay"
+    }
+
+    $plainQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --plain --run 'ask a question before continuing'; exit `$LASTEXITCODE"
+    $plainQuestionResult = Invoke-WindowsPseudoTerminal `
+        -Executable $pwshPath `
+        -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainQuestionCommand) `
+        -InputChunks @(
+            [pscustomobject]@{ Text = ":command /status`r`n"; WaitForOutput = "Answer (number or text):" },
+            [pscustomobject]@{ Text = "2`r`n`r`n"; WaitForOutput = "Configured approval preset:" },
+            [pscustomobject]@{ Text = "/quit`r`n"; WaitForOutput = "You> " }
+        ) `
+        -TimeoutMilliseconds 60000
+    if ($plainQuestionResult.ExitCode -ne 0 -or
+        -not $plainQuestionResult.ConsoleModesRestored -or
+        -not $plainQuestionResult.ChildConsoleModesRestored -or
+        -not $plainQuestionResult.Output.Contains('"answer":"full"')) {
+        throw "Windows plain :command smoke did not preserve and answer the pending question"
+    }
+
     $env:TERM = "dumb"
     $env:NO_COLOR = "1"
     $plainCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary; exit `$LASTEXITCODE"
@@ -215,6 +274,112 @@ curator_enabled = false
         }
     }
 
+    $copySeedCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run 'finish the release smoke' --session t047-copy-smoke --provider mock --model mock-model --max-steps 4 --yes; exit `$LASTEXITCODE"
+    $copySeedResult = Invoke-WindowsPseudoTerminal `
+        -Executable $pwshPath `
+        -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $copySeedCommand) `
+        -TimeoutMilliseconds 60000
+    if ($copySeedResult.ExitCode -ne 0 -or
+        -not $copySeedResult.Output.Contains("Agent run completed for session")) {
+        throw "Windows clipboard smoke could not create its completed session"
+    }
+
+    $copyCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --plain --session t047-copy-smoke; exit `$LASTEXITCODE"
+    $copyResult = Invoke-WindowsPseudoTerminal `
+        -Executable $pwshPath `
+        -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $copyCommand) `
+        -InputChunks @(
+            [pscustomobject]@{ Text = "/copy`r`n/quit`r`n"; WaitForOutput = "You> " }
+        ) `
+        -TimeoutMilliseconds 30000
+    if ($copyResult.ExitCode -ne 0 -or
+        -not $copyResult.ConsoleModesRestored -or
+        -not $copyResult.ChildConsoleModesRestored) {
+        throw "Windows native clipboard smoke did not restore its console"
+    }
+    if ($copyResult.Output.Contains("Copied")) {
+        $copiedText = Get-Clipboard -Raw -ErrorAction Stop
+        if (-not $copiedText.Contains("Final answer: task complete")) {
+            throw "Windows native clipboard backend reported success without delivering the expected text"
+        }
+    } elseif ($copyResult.Output.Contains("Copy requested via OSC52 (unconfirmed)")) {
+        if (-not $copyResult.Output.Contains("$([char]27)]52;c;")) {
+            throw "Windows OSC52 fallback did not emit its labeled request"
+        }
+    } else {
+        throw "Windows clipboard smoke produced neither native success nor a labeled OSC52 fallback"
+    }
+
+    $env:TERM = "xterm-256color"
+    $oneShotOutputs = [ordered]@{}
+    foreach ($interruptCase in @(
+        [pscustomobject]@{
+            Label = "question"
+            Goal = "ask a question before continuing"
+            Prompt = "Question:"
+            Delay = 0
+            Yes = $false
+            Forbidden = ""
+        },
+        [pscustomobject]@{
+            Label = "approval"
+            Goal = "one-shot interrupt approval"
+            Prompt = "Approval required"
+            Delay = 0
+            Yes = $false
+            Forbidden = "one-shot-approval-ran.txt"
+        },
+        [pscustomobject]@{
+            Label = "terminal"
+            Goal = "one-shot interrupt terminal"
+            Prompt = "nib run: starting"
+            Delay = 1500
+            Yes = $true
+            Forbidden = "one-shot-interrupt-completed.txt"
+        }
+    )) {
+        $quotedGoal = Quote-NibPowerShellLiteral $interruptCase.Goal
+        $yesArgument = if ($interruptCase.Yes) { " --yes" } else { "" }
+        $oneShotCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run $quotedGoal --provider mock --model mock-model --max-steps 5$yesArgument; exit `$LASTEXITCODE"
+        $oneShotResult = Invoke-WindowsPseudoTerminal `
+            -Executable $pwshPath `
+            -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $oneShotCommand) `
+            -InputChunks @(
+                # This byte enters through ConPTY's console-input path, where processed
+                # input delivers the native Ctrl+C console event to the foreground child.
+                [pscustomobject]@{
+                    Text = [string][char]3
+                    WaitForOutput = $interruptCase.Prompt
+                    DelayMilliseconds = $interruptCase.Delay
+                }
+            ) `
+            -TimeoutMilliseconds 30000
+        $oneShotOutputs[$interruptCase.Label] = $oneShotResult.Output
+        if ($oneShotResult.ExitCode -eq 0 -or
+            -not $oneShotResult.ConsoleModesRestored -or
+            -not $oneShotResult.ChildConsoleModesRestored -or
+            -not $oneShotResult.Output.Contains("Run cancelled.")) {
+            throw "Windows one-shot Ctrl+C did not reconcile $($interruptCase.Goal)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($interruptCase.Forbidden) -and
+            (Test-Path -LiteralPath (Join-Path $fixture $interruptCase.Forbidden))) {
+            throw "Windows one-shot Ctrl+C allowed $($interruptCase.Goal) to mutate"
+        }
+    }
+    $cancelledSessionCount = 0
+    $sessionDirectory = Join-Path $fixture ".nib\profiles\default\sessions"
+    if (Test-Path -LiteralPath $sessionDirectory -PathType Container) {
+        foreach ($sessionFile in Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File) {
+            $sessionText = Get-Content -LiteralPath $sessionFile.FullName -Raw
+            if ($sessionText.Contains('"outcome": "cancelled_by_user"')) {
+                $cancelledSessionCount++
+            }
+        }
+    }
+    if ($cancelledSessionCount -lt 3) {
+        throw "Windows one-shot Ctrl+C did not persist all three cancellation reconciliations"
+    }
+
     $redirectedResult = Invoke-NibRedirectedPlain `
         -Executable $binaryPath `
         -WorkingDirectory $fixture
@@ -234,7 +399,7 @@ curator_enabled = false
         $plainResult.Output,
         $redirectedResult.Output,
         $redirectedResult.ErrorOutput
-    )) {
+    ) + @($oneShotOutputs.Values)) {
         if ($output.Contains($privateSentinel) -or $output.Contains('"arguments"')) {
             throw "Windows interactive smoke exposed private configuration or raw arguments"
         }
@@ -249,6 +414,61 @@ curator_enabled = false
         }
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($env:NIB_INTERACTIVE_EVIDENCE_DIR)) {
+        $evidenceDirectory = Join-Path $env:NIB_INTERACTIVE_EVIDENCE_DIR "Windows"
+        New-Item -ItemType Directory -Force -Path $evidenceDirectory | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $evidenceDirectory "revision.txt"),
+            "$sourceRevision`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        $evidence = [ordered]@{
+            platform = "Windows"
+            source_revision = $sourceRevision
+            source_clean = $sourceClean
+            binary_version = $binaryVersion
+            acceptance_eligible = $acceptanceEligible
+            terminal_restoration = "passed"
+            caller_modes_before = $tuiQuestionResult.CallerConsoleModesBefore
+            caller_modes_after = $tuiQuestionResult.CallerConsoleModesAfter
+            child_modes_before = $tuiQuestionResult.ChildConsoleModesBefore
+            child_modes_after = $tuiQuestionResult.ChildConsoleModesAfter
+            f2_prompt_command = "passed"
+            plain_modal_command = "passed"
+            clipboard = if ($copyResult.Output.Contains("Copied")) { "native" } else { "osc52_unconfirmed" }
+            interruption_cases = 3
+            durable_cancellations = $cancelledSessionCount
+            privacy_scan = "passed"
+        } | ConvertTo-Json -Depth 8
+        [IO.File]::WriteAllText(
+            (Join-Path $evidenceDirectory "summary.json"),
+            $evidence.Replace($privateSentinel, "[fixture-secret]"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $evidenceDirectory "tui-f2.txt"),
+            $tuiQuestionResult.Output.Replace($privateSentinel, "[fixture-secret]"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $evidenceDirectory "plain-modal-command.txt"),
+            $plainQuestionResult.Output.Replace($privateSentinel, "[fixture-secret]"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $evidenceDirectory "clipboard.txt"),
+            $copyResult.Output.Replace($privateSentinel, "[fixture-secret]"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        foreach ($interruptLabel in $oneShotOutputs.Keys) {
+            [IO.File]::WriteAllText(
+                (Join-Path $evidenceDirectory "one-shot-interrupt-$interruptLabel.txt"),
+                $oneShotOutputs[$interruptLabel].Replace($privateSentinel, "[fixture-secret]"),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+    }
+
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
 } catch {
     $hostDiagnostics = [string]$_.Exception.Data["NibHostDiagnostics"]
@@ -258,6 +478,13 @@ curator_enabled = false
     }
     throw
 } finally {
+    if ($restoreClipboard) {
+        try {
+            Set-Clipboard -Value $originalClipboard -ErrorAction Stop
+        } catch {
+            [Console]::Error.WriteLine("Warning: unable to restore the pre-smoke clipboard value")
+        }
+    }
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")
     }

@@ -345,3 +345,29 @@ reorganization or context-budget work needs its own owning spec.
   parent acceptance criteria and native implementation qualification remain open.
 - The recommendation-integration revision reruns documentation integrity and whitespace
   checks only; it does not claim a new full-runtime or native qualification result.
+
+## Implementation Checkpoint (2026-09-21)
+
+- Implemented the remaining source-audit gaps in durable question recovery, exact-plan
+  continuation, approval detail inspection, Ctrl+Q disarming, one-shot final output,
+  truthful clipboard behavior, and native one-shot interruption handling.
+- Added deterministic recovery/continuation, TUI/plain interaction, redirected-copy,
+  and real Unix SIGINT fixtures. Extended the Unix PTY and Windows ConPTY release
+  scripts for interruption during a question, approval, and foreground tool.
+- Passed `task check`, `task test:interactive`, `task test:agent-context`,
+  `task test:runtime-e2e`, `task test:tui-shutdown`, `task docs:check`,
+  `git diff --check`, the complete local `task verify`, `task coverage` at 85.78%
+  (113,996/132,896 lines), and the final Linux optimized sequence `task build` plus
+  `task smoke:interactive:binary`. The successful full gate ran 1,174 library tests,
+  89 binary tests, and every ordinary integration target; only
+  the repository's explicitly opt-in paid/live and release qualification tests were
+  ignored under their existing contracts. Sanitized Linux evidence under
+  `target/t047-local-evidence/Linux/` retains F2/question, clipboard,
+  interruption, privacy-scan, and before/after terminal-mode results for this working
+  tree, with source/binary identity recorded and acceptance eligibility false because
+  the source tree is dirty. The smoke-driven review also closed a plain resumed-history
+  privacy gap by routing it through the shared public conversation projection.
+- Local Windows qualification could not start because `pwsh` is not installed; macOS
+  was not available on this Linux host. Native clipboard qualification and a recorded
+  exact revision also remain open. The parent and companion therefore stay in
+  `development/`; their unchecked native/completion criteria are not waived.

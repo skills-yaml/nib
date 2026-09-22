@@ -78,35 +78,31 @@ enum QuitConfirmAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-enum IdleCtrlCAction {
-    ClearDraft,
-    ArmQuit,
-    Quit,
+struct QuitArm {
+    armed_at: Instant,
+    consumer: InteractionLayer,
 }
 
-fn quit_confirm_action(armed_at: Option<Instant>, now: Instant) -> QuitConfirmAction {
-    if armed_at.is_some_and(|armed| now.duration_since(armed) <= QUIT_CONFIRM) {
+fn quit_confirm_action(
+    armed: Option<QuitArm>,
+    now: Instant,
+    consumer: InteractionLayer,
+) -> QuitConfirmAction {
+    if armed.is_some_and(|armed| {
+        armed.consumer == consumer && now.duration_since(armed.armed_at) <= QUIT_CONFIRM
+    }) {
         QuitConfirmAction::Confirm
     } else {
         QuitConfirmAction::Arm
     }
 }
 
-#[cfg(test)]
-fn idle_ctrl_c_action(
-    draft_empty: bool,
-    armed_at: Option<Instant>,
-    now: Instant,
-) -> IdleCtrlCAction {
-    if !draft_empty {
-        IdleCtrlCAction::ClearDraft
-    } else {
-        match quit_confirm_action(armed_at, now) {
-            QuitConfirmAction::Arm => IdleCtrlCAction::ArmQuit,
-            QuitConfirmAction::Confirm => IdleCtrlCAction::Quit,
-        }
-    }
+fn quit_arm_after_input(armed: Option<QuitArm>, is_control_q: bool) -> Option<QuitArm> {
+    is_control_q.then_some(armed).flatten()
+}
+
+fn quit_arm_for_consumer(armed: Option<QuitArm>, consumer: InteractionLayer) -> Option<QuitArm> {
+    armed.filter(|armed| armed.consumer == consumer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,6 +689,9 @@ pub struct TuiApprovalRequest {
     pub context: ApprovalContext,
     pub selected_option: usize,
     pub typed: String,
+    details_open: bool,
+    detail_offset: usize,
+    error: Option<String>,
     pub reply: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -731,6 +730,9 @@ impl TuiApprovalHandler {
             context,
             selected_option: 1,
             typed: String::new(),
+            details_open: false,
+            detail_offset: 0,
+            error: None,
             reply: reply_tx,
         };
         let _ = self.tx.send(req);
@@ -804,10 +806,17 @@ enum QuestionFocus {
 
 struct PendingQuestion {
     request: TuiQuestionRequest,
+    recovery: Option<RecoveredQuestionTarget>,
     response: String,
     selected_option: Option<usize>,
     focus: QuestionFocus,
     error: Option<String>,
+}
+
+struct RecoveredQuestionTarget {
+    store: SessionStore,
+    session_id: String,
+    invocation_id: String,
 }
 
 const MAX_COMPOSER_BYTES: usize = 16 * 1024;
@@ -1453,11 +1462,18 @@ impl PendingQuestion {
     fn new(request: TuiQuestionRequest) -> Self {
         Self {
             request,
+            recovery: None,
             response: String::new(),
             selected_option: None,
             focus: QuestionFocus::Editor,
             error: None,
         }
+    }
+
+    fn recovered(request: TuiQuestionRequest, target: RecoveredQuestionTarget) -> Self {
+        let mut pending = Self::new(request);
+        pending.recovery = Some(target);
+        pending
     }
 }
 
@@ -1560,6 +1576,34 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
     }
 }
 
+fn paste_question_answer(question: &mut PendingQuestion, pasted: &str) {
+    if question.focus != QuestionFocus::Editor {
+        return;
+    }
+    let input = std::mem::take(&mut question.response);
+    let mut editor = Composer {
+        cursor: input.len(),
+        input,
+        ..Composer::default()
+    };
+    let outcome = editor.insert_paste(pasted);
+    question.response = editor.input;
+    question.error = outcome.visible_status();
+}
+
+fn open_prompt_command_overlay(
+    code: KeyCode,
+    prompt_pending: bool,
+    command_overlay: &mut Option<String>,
+) -> bool {
+    if matches!(code, KeyCode::F(2)) && prompt_pending && command_overlay.is_none() {
+        *command_overlay = Some(String::new());
+        true
+    } else {
+        false
+    }
+}
+
 fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) -> bool {
     let Some(pending) = question.as_mut() else {
         return false;
@@ -1568,6 +1612,28 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
     match action {
         QuestionAction::Pending => false,
         QuestionAction::Submit(response) => {
+            if let Some(target) = question
+                .as_ref()
+                .and_then(|pending| pending.recovery.as_ref())
+            {
+                match crate::interactive::persist_recovered_question_answer(
+                    &target.store,
+                    &target.session_id,
+                    &target.invocation_id,
+                    &response,
+                ) {
+                    Ok(_) => {
+                        question.take();
+                        return true;
+                    }
+                    Err(message) => {
+                        if let Some(pending) = question.as_mut() {
+                            pending.error = Some(message);
+                        }
+                        return false;
+                    }
+                }
+            }
             if let Some(pending) = question.take() {
                 let _ = pending
                     .request
@@ -1615,6 +1681,17 @@ fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode)
     let Some(pending) = approval.as_mut() else {
         return false;
     };
+    if pending.details_open {
+        match code {
+            KeyCode::Esc => pending.details_open = false,
+            KeyCode::Up => pending.detail_offset = pending.detail_offset.saturating_sub(1),
+            KeyCode::Down => pending.detail_offset = pending.detail_offset.saturating_add(1),
+            KeyCode::PageUp => pending.detail_offset = pending.detail_offset.saturating_sub(5),
+            KeyCode::PageDown => pending.detail_offset = pending.detail_offset.saturating_add(5),
+            _ => {}
+        }
+        return true;
+    }
     match code {
         KeyCode::Esc => {
             if let Some(request) = approval.take() {
@@ -1625,23 +1702,32 @@ fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode)
         KeyCode::Up => {
             pending.selected_option = pending.selected_option.saturating_sub(1);
             pending.typed.clear();
+            pending.error = None;
             return true;
         }
         KeyCode::Down | KeyCode::Tab => {
-            pending.selected_option = (pending.selected_option + 1).min(1);
+            pending.selected_option = (pending.selected_option + 1).min(2);
             pending.typed.clear();
+            pending.error = None;
             return true;
         }
         KeyCode::Char(character) if !character.is_control() => {
             pending.typed.push(character);
+            pending.error = None;
             return true;
         }
         KeyCode::Backspace => {
             pending.typed.pop();
+            pending.error = None;
             return true;
         }
         KeyCode::Enter => {
             let typed = pending.typed.trim().to_string();
+            if typed.is_empty() && pending.selected_option == 2 {
+                pending.details_open = true;
+                pending.detail_offset = 0;
+                return true;
+            }
             let answer = if typed.is_empty() {
                 if pending.selected_option == 0 {
                     "y"
@@ -1659,7 +1745,7 @@ fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode)
                 }
                 Err(message) => {
                     pending.typed.clear();
-                    let _ = message;
+                    pending.error = Some(message);
                 }
             }
             return true;
@@ -2278,14 +2364,25 @@ fn render_choice_band(
 }
 
 fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApprovalRequest) {
+    if req.details_open {
+        render_choice_band(
+            frame,
+            area,
+            &[("Approval details", "Esc returns to the decision")],
+            0,
+            "Up/Down scroll · Esc back",
+        );
+        return;
+    }
     render_numbered_choice_band(
         frame,
         area,
         &[
             ("Approve once".to_string(), "y".to_string()),
             ("Deny".to_string(), "esc".to_string()),
+            ("View details".to_string(), "enter".to_string()),
         ],
-        req.selected_option.min(1),
+        req.selected_option.min(2),
         "Up/Down select · Enter choose · Esc deny",
     );
 }
@@ -3390,6 +3487,36 @@ fn overlay_visual_rows(first: &str, extra: &[String], width: u16) -> Vec<String>
     rows
 }
 
+fn approval_detail_view_rows(details: &[String], width: u16, offset: usize) -> Vec<String> {
+    const MAX_ROWS: usize = 6;
+    let width = width.max(1);
+    let inner = width.saturating_sub(COMPOSER_PROMPT_CELLS).max(1);
+    let mut detail_rows = details
+        .iter()
+        .flat_map(|detail| detail.lines())
+        .flat_map(|line| wrapped_display_rows(line, inner))
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>();
+    if detail_rows.is_empty() {
+        detail_rows.push("  No additional details are available.".to_string());
+    }
+    let offset = offset.min(detail_rows.len().saturating_sub(1));
+    let mut rows = vec!["> Approval details".to_string()];
+    let capacity = MAX_ROWS.saturating_sub(rows.len());
+    rows.extend(detail_rows.iter().skip(offset).take(capacity).cloned());
+    let remaining = detail_rows.len().saturating_sub(offset + capacity);
+    if remaining > 0 {
+        if let Some(last) = rows.last_mut() {
+            *last = format!("  … {remaining} more rows · Down to inspect");
+        }
+    }
+    if rows.len() < 2 {
+        rows.resize(2, String::new());
+    }
+    rows.truncate(MAX_ROWS);
+    rows
+}
+
 fn waiting_composer_rows(
     waiting: WaitingKind,
     pending_approval: Option<&TuiApprovalRequest>,
@@ -3401,6 +3528,12 @@ fn waiting_composer_rows(
         WaitingKind::Approval => {
             let req = pending_approval?;
             let prompt = approval_prompt(&req.call, &req.context);
+            if req.details_open {
+                return Some((
+                    approval_detail_view_rows(&req.context.details, width, req.detail_offset),
+                    false,
+                ));
+            }
             let mut extra = if req.call.tool_name == "approve_plan" {
                 req.context.details.clone()
             } else {
@@ -3419,6 +3552,9 @@ fn waiting_composer_rows(
                 if !risk.is_empty() {
                     extra.push(format!("Risk: {risk}"));
                 }
+            }
+            if let Some(error) = &req.error {
+                extra.push(format!("Input error: {error}"));
             }
             Some((overlay_visual_rows(&prompt.statement, &extra, width), false))
         }
@@ -4057,21 +4193,68 @@ fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: bool) -> Str
     truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
 }
 
-fn copy_text_osc52(text: &str) {
-    let encoded = encode_base64(text.as_bytes());
+fn copy_text_osc52(text: &str) -> bool {
     let mut out = io::stdout();
-    let _ = write!(out, "{}", osc52_sequence(text));
-    let _ = write!(out, "\x1b]52;c;{encoded}\x1b\\");
-    let _ = out.flush();
+    write!(out, "{}", osc52_sequence(text)).is_ok() && out.flush().is_ok()
 }
 
-fn copy_text_to_clipboard(text: &str) -> &'static str {
-    if copy_text_system_clipboard(text) {
-        "Copied"
-    } else {
-        copy_text_osc52(text);
-        "Copy requested"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardDelivery {
+    Native,
+    Osc52Unconfirmed,
+    Unavailable,
+    Failed,
+}
+
+impl ClipboardDelivery {
+    fn status(self) -> &'static str {
+        match self {
+            Self::Native => "Copied",
+            Self::Osc52Unconfirmed => "Copy requested via OSC52 (unconfirmed)",
+            Self::Unavailable => {
+                "Copy unavailable: output is not a terminal; text remains available for manual selection"
+            }
+            Self::Failed => "Copy failed; text remains available for manual selection",
+        }
     }
+
+    fn may_clear_selection(self) -> bool {
+        matches!(self, Self::Native | Self::Osc52Unconfirmed)
+    }
+}
+
+fn deliver_text_to_clipboard(text: &str) -> ClipboardDelivery {
+    deliver_text_to_clipboard_with(
+        text,
+        io::stdout().is_terminal(),
+        copy_text_system_clipboard,
+        copy_text_osc52,
+    )
+}
+
+fn deliver_text_to_clipboard_with<Native, Osc52>(
+    text: &str,
+    is_terminal: bool,
+    mut native: Native,
+    mut osc52: Osc52,
+) -> ClipboardDelivery
+where
+    Native: FnMut(&str) -> bool,
+    Osc52: FnMut(&str) -> bool,
+{
+    if !is_terminal {
+        ClipboardDelivery::Unavailable
+    } else if native(text) {
+        ClipboardDelivery::Native
+    } else if osc52(text) {
+        ClipboardDelivery::Osc52Unconfirmed
+    } else {
+        ClipboardDelivery::Failed
+    }
+}
+
+pub fn copy_text_to_clipboard(text: &str) -> &'static str {
+    deliver_text_to_clipboard(text).status()
 }
 
 fn copy_text_system_clipboard(text: &str) -> bool {
@@ -4116,7 +4299,7 @@ fn publish_copied_chat(
     activities: &[ActivityEntry],
 ) -> Option<&'static str> {
     let (text, _status) = copy_chat_content(pointer, view, selected, activities)?;
-    Some(copy_text_to_clipboard(&text))
+    Some(deliver_text_to_clipboard(&text).status())
 }
 
 fn copy_pointer_selection_and_clear(
@@ -4126,10 +4309,34 @@ fn copy_pointer_selection_and_clear(
     selected: Option<usize>,
     activities: &[ActivityEntry],
 ) -> Option<&'static str> {
-    let status = publish_copied_chat(*pointer_selection, view, selected, activities);
-    *pointer_selection = None;
-    *tui_focus = TuiFocus::Composer;
-    status
+    copy_pointer_selection_and_clear_with(
+        pointer_selection,
+        tui_focus,
+        view,
+        selected,
+        activities,
+        deliver_text_to_clipboard,
+    )
+}
+
+fn copy_pointer_selection_and_clear_with<Deliver>(
+    pointer_selection: &mut Option<PointerSelection>,
+    tui_focus: &mut TuiFocus,
+    view: &TranscriptView,
+    selected: Option<usize>,
+    activities: &[ActivityEntry],
+    deliver: Deliver,
+) -> Option<&'static str>
+where
+    Deliver: FnOnce(&str) -> ClipboardDelivery,
+{
+    let (text, _status) = copy_chat_content(*pointer_selection, view, selected, activities)?;
+    let delivery = deliver(&text);
+    if delivery.may_clear_selection() {
+        *pointer_selection = None;
+        *tui_focus = TuiFocus::Composer;
+    }
+    Some(delivery.status())
 }
 
 fn osc52_sequence(text: &str) -> String {
@@ -5129,7 +5336,7 @@ fn draw_loop(
     let mut pointer_selection: Option<PointerSelection> = None;
     let mut transcript_view = TranscriptView::default();
     let mut clear_armed_at: Option<Instant> = None;
-    let mut quit_armed_at: Option<Instant> = None;
+    let mut quit_arm: Option<QuitArm> = None;
     let spinner_origin = Instant::now();
     let mut chrome_generation: u64 = 0;
     let mut chrome_cache: Option<ChromeCache> = None;
@@ -5208,6 +5415,7 @@ fn draw_loop(
             pending_history_search.is_some(),
             completion.is_open(),
         );
+        quit_arm = quit_arm_for_consumer(quit_arm, interaction_layer);
         let worker_status = tui_interaction_state(
             pending_approval.is_some(),
             pending_question.is_some(),
@@ -5347,6 +5555,12 @@ fn draw_loop(
                 Ok(input) => input,
                 Err(error) => break Err(error),
             };
+            let is_control_q = matches!(
+                &input,
+                Event::Key(key)
+                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+            );
             refresh_pending_interactions(
                 &mut pending_approval,
                 &mut pending_question,
@@ -5361,17 +5575,14 @@ fn draw_loop(
                 pending_history_search.is_some(),
                 completion.is_open(),
             );
+            quit_arm = quit_arm_for_consumer(quit_arm, interaction_layer);
+            quit_arm = quit_arm_after_input(quit_arm, is_control_q);
             if let Event::Paste(pasted) = input {
                 if welcome.consent_directory.is_some() {
                     continue;
                 }
                 if let Some(question) = pending_question.as_mut() {
-                    if question.focus == QuestionFocus::Editor {
-                        let remaining = MAX_COMPOSER_BYTES.saturating_sub(question.response.len());
-                        let take = pasted.chars().take(remaining).collect::<String>();
-                        question.response.push_str(&take);
-                        question.error = None;
-                    }
+                    paste_question_answer(question, &pasted);
                     continue;
                 }
                 if matches!(
@@ -5571,7 +5782,7 @@ fn draw_loop(
                     pointer_selection = None;
                     composer.set_text(String::new());
                     completion.sync_for(&composer.input, Some(project_root));
-                    quit_armed_at = None;
+                    quit_arm = None;
                     if let Some(question) = pending_question.as_mut() {
                         question.response.clear();
                         question.error = None;
@@ -5581,14 +5792,17 @@ fn draw_loop(
                 }
                 if control_q {
                     let now = Instant::now();
-                    match quit_confirm_action(quit_armed_at, now) {
+                    match quit_confirm_action(quit_arm, now, interaction_layer) {
                         QuitConfirmAction::Confirm => {
                             exit_requested_with_active_run = worker.is_some();
                             exit_requested = true;
                             break Ok(());
                         }
                         QuitConfirmAction::Arm => {
-                            quit_armed_at = Some(now);
+                            quit_arm = Some(QuitArm {
+                                armed_at: now,
+                                consumer: interaction_layer,
+                            });
                             timeline.push_status("Press Ctrl+Q again to quit.".to_string());
                         }
                     }
@@ -5639,11 +5853,11 @@ fn draw_loop(
                     pending_history_search.is_some(),
                     completion.is_open(),
                 );
-                if matches!(key.code, KeyCode::F(2))
-                    && (pending_approval.is_some() || pending_question.is_some())
-                    && command_overlay.is_none()
-                {
-                    command_overlay = Some(String::new());
+                if open_prompt_command_overlay(
+                    key.code,
+                    pending_approval.is_some() || pending_question.is_some(),
+                    &mut command_overlay,
+                ) {
                     timeline
                         .push_status("Command (F2): type a slash command · Esc cancel".to_string());
                     continue;
@@ -5672,6 +5886,10 @@ fn draw_loop(
                                             | crate::interactive::CommandEffectClass::LiveControl
                                     ) =>
                                 {
+                                    let copy_command = matches!(
+                                        &command,
+                                        crate::interactive::InteractiveCommand::Copy
+                                    );
                                     match execute_interactive_command_in_state(
                                         command,
                                         project_root,
@@ -5680,9 +5898,12 @@ fn draw_loop(
                                         &active_session_id,
                                         worker_status,
                                     ) {
-                                        Ok(InteractiveEffect::Output(output)) => {
-                                            timeline.push_status(output)
-                                        }
+                                        Ok(InteractiveEffect::Output(output)) => timeline
+                                            .push_status(if copy_command {
+                                                copy_text_to_clipboard(&output).to_string()
+                                            } else {
+                                                output
+                                            }),
                                         Ok(_) => timeline.push_status(
                                             "command completed without changing the pending prompt"
                                                 .to_string(),
@@ -6037,6 +6258,10 @@ fn draw_loop(
                                     Some(PendingHistorySearch::new(&composer.history, query));
                             }
                             InteractionReduction::Command(command) => {
+                                let copy_command = matches!(
+                                    &command,
+                                    crate::interactive::InteractiveCommand::Copy
+                                );
                                 let changed_origin = match &command {
                                     crate::interactive::InteractiveCommand::New
                                     | crate::interactive::InteractiveCommand::Clear => Some("new"),
@@ -6076,7 +6301,11 @@ fn draw_loop(
                                     }
                                     Ok(InteractiveEffect::Output(output)) => {
                                         chrome_generation = chrome_generation.saturating_add(1);
-                                        timeline.push_status(output)
+                                        timeline.push_status(if copy_command {
+                                            copy_text_to_clipboard(&output).to_string()
+                                        } else {
+                                            output
+                                        })
                                     }
                                     Ok(InteractiveEffect::SessionChanged {
                                         session_id,
@@ -6151,12 +6380,18 @@ fn draw_loop(
                                     }) => {
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         drop(reply_rx);
-                                        pending_question =
-                                            Some(PendingQuestion::new(TuiQuestionRequest {
+                                        pending_question = Some(PendingQuestion::recovered(
+                                            TuiQuestionRequest {
                                                 question,
                                                 options,
                                                 reply: reply_tx,
-                                            }));
+                                            },
+                                            RecoveredQuestionTarget {
+                                                store: store.clone(),
+                                                session_id: active_session_id.clone(),
+                                                invocation_id: invocation_id.clone(),
+                                            },
+                                        ));
                                         timeline.push_status(format!(
                                             "Answer recovered question {invocation_id}"
                                         ));
@@ -6335,8 +6570,65 @@ mod tests {
             context,
             selected_option: 1,
             typed: String::new(),
+            details_open: false,
+            detail_offset: 0,
+            error: None,
             reply,
         }
+    }
+
+    fn recoverable_question_session() -> (
+        tempfile::TempDir,
+        SessionStore,
+        String,
+        crate::tools::ToolInvocationId,
+    ) {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        let mut session = store.try_create_session().expect("session");
+        let plan = crate::session::Plan::new(
+            "resume after answering",
+            vec![crate::session::PlanStep {
+                description: "use answer".to_string(),
+                status: "Blocked".to_string(),
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            }],
+        );
+        let plan_id = plan.id.clone();
+        let invocation_id = crate::tools::ToolInvocationId::new();
+        session.plan = Some(plan);
+        session.events.push(crate::session::SessionEvent {
+            index: 0,
+            kind: "question_required".to_string(),
+            details: json!({
+                "invocation_id": invocation_id,
+                "question": "Which target?",
+                "options": ["alpha", "beta"],
+            }),
+            timestamp: Some(chrono::Utc::now()),
+        });
+        session
+            .clarifications
+            .push(crate::session::ClarificationRecord {
+                invocation_id,
+                plan_id: Some(plan_id),
+                question: "Which target?".to_string(),
+                options: vec!["alpha".to_string(), "beta".to_string()],
+                dependent_paths: Vec::new(),
+                status: crate::session::ClarificationStatus::Unresolved,
+                answer: None,
+                question_event_index: 0,
+                answer_message_index: None,
+                answer_event_index: None,
+                reason: Some("left unanswered".to_string()),
+                outcome: Some("left_unanswered".to_string()),
+            });
+        store.save(&mut session).expect("recoverable question");
+        (directory, store, session.id, invocation_id)
     }
 
     fn mock_config() -> LlmConfig {
@@ -6784,29 +7076,48 @@ mod tests {
     }
 
     #[test]
-    fn idle_ctrl_c_clears_a_draft_and_double_press_quits() {
+    fn ctrl_q_requires_two_uninterrupted_presses() {
         let now = Instant::now();
+        let arm = QuitArm {
+            armed_at: now,
+            consumer: InteractionLayer::Composer,
+        };
         assert_eq!(
-            idle_ctrl_c_action(false, None, now),
-            IdleCtrlCAction::ClearDraft
-        );
-        assert_eq!(
-            idle_ctrl_c_action(true, None, now),
-            IdleCtrlCAction::ArmQuit
-        );
-        assert_eq!(
-            idle_ctrl_c_action(true, Some(now), now + Duration::from_millis(400)),
-            IdleCtrlCAction::Quit
-        );
-        assert_eq!(
-            idle_ctrl_c_action(true, Some(now), now + Duration::from_millis(1001)),
-            IdleCtrlCAction::ArmQuit
-        );
-        assert_eq!(
-            quit_confirm_action(Some(now), now + Duration::from_millis(400)),
+            quit_confirm_action(
+                Some(arm),
+                now + Duration::from_millis(400),
+                InteractionLayer::Composer,
+            ),
             QuitConfirmAction::Confirm
         );
-        assert_eq!(quit_confirm_action(None, now), QuitConfirmAction::Arm);
+        assert_eq!(
+            quit_confirm_action(None, now, InteractionLayer::Composer),
+            QuitConfirmAction::Arm
+        );
+        assert_eq!(quit_arm_after_input(Some(arm), false), None);
+        assert_eq!(quit_arm_after_input(Some(arm), true), Some(arm));
+        assert_eq!(
+            quit_confirm_action(
+                quit_arm_after_input(Some(arm), false),
+                now + Duration::from_millis(400),
+                InteractionLayer::Composer,
+            ),
+            QuitConfirmAction::Arm
+        );
+        assert_eq!(
+            quit_confirm_action(
+                Some(arm),
+                now + QUIT_CONFIRM + Duration::from_millis(1),
+                InteractionLayer::Composer,
+            ),
+            QuitConfirmAction::Arm,
+            "the confirmation window must expire"
+        );
+        assert_eq!(
+            quit_arm_for_consumer(Some(arm), InteractionLayer::Approval),
+            None,
+            "a new modal consumer must disarm quit confirmation"
+        );
     }
 
     #[test]
@@ -8242,8 +8553,29 @@ mod tests {
             PermissionLevel::Destructive,
             reply_tx,
         ));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
+        assert!(!reply_rx.try_recv().unwrap().granted);
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task test"}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
         assert!(handle_approval_key(&mut pending, KeyCode::Down));
-        assert!(pending.as_ref().is_some_and(|req| req.selected_option == 1));
+        assert!(pending.as_ref().is_some_and(|req| req.selected_option == 2));
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
+        assert!(pending.as_ref().is_some_and(|req| req.details_open));
+        assert!(reply_rx.try_recv().is_err());
+        assert!(handle_approval_key(&mut pending, KeyCode::Esc));
+        assert!(pending.as_ref().is_some_and(|req| !req.details_open));
+        assert!(handle_approval_key(&mut pending, KeyCode::Up));
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         assert!(!reply_rx.try_recv().unwrap().granted);
     }
@@ -8268,6 +8600,38 @@ mod tests {
         let decision = reply_rx.try_recv().unwrap();
         assert!(!decision.granted);
         assert_eq!(decision.source, "denied");
+    }
+
+    #[test]
+    fn approval_details_are_labeled_scrollable_and_non_authorizing() {
+        let details = vec![format!("Command: {} END", "界".repeat(80))];
+        let first = approval_detail_view_rows(&details, 20, 0);
+        let later = approval_detail_view_rows(&details, 20, 4);
+        assert!(first.iter().any(|row| row.contains("Approval details")));
+        assert!(first.iter().any(|row| row.contains("more rows")));
+        assert_ne!(first, later);
+        let end = approval_detail_view_rows(&details, 20, usize::MAX);
+        assert!(end.iter().any(|row| row.contains("END")), "{end:?}");
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "run_terminal".to_string(),
+                arguments: json!({"command": "task verify"}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
+        pending.as_mut().expect("approval").selected_option = 2;
+        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
+        assert!(pending.as_ref().is_some_and(|req| req.details_open));
+        assert!(reply_rx.try_recv().is_err());
+        assert!(handle_approval_key(&mut pending, KeyCode::Esc));
+        assert!(pending.as_ref().is_some_and(|req| !req.details_open));
+        assert!(reply_rx.try_recv().is_err());
     }
 
     #[test]
@@ -8534,6 +8898,88 @@ mod tests {
             crate::agent::QuestionOutcome::Answered("main".to_string())
         );
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn question_modal_paste_preserves_unicode_multiline_and_filters_controls() {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut question = PendingQuestion::new(TuiQuestionRequest {
+            question: "Describe the result".to_string(),
+            options: vec!["short".to_string()],
+            reply: reply_tx,
+        });
+
+        paste_question_answer(&mut question, "first🙂\r\nsecond\tvalue\u{1b}");
+        assert_eq!(question.response, "first🙂\nsecond    value");
+        assert!(question
+            .error
+            .as_deref()
+            .is_some_and(|status| status.contains("unsafe paste control")));
+        let mut pending = Some(question);
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::Answered("first🙂\nsecond    value".to_string())
+        );
+    }
+
+    #[test]
+    fn f2_command_overlay_requires_a_prompt_and_preserves_question_draft() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let question = PendingQuestion::new(TuiQuestionRequest {
+            question: "Which target?".to_string(),
+            options: vec!["alpha".to_string()],
+            reply: reply_tx,
+        });
+        let mut overlay = None;
+        assert!(!open_prompt_command_overlay(
+            KeyCode::F(2),
+            false,
+            &mut overlay
+        ));
+        assert!(overlay.is_none(), "idle F2 must be a no-op");
+
+        let before = question.response.clone();
+        assert!(open_prompt_command_overlay(
+            KeyCode::F(2),
+            true,
+            &mut overlay
+        ));
+        assert_eq!(overlay.take().as_deref(), Some(""));
+        assert_eq!(question.response, before);
+        assert_eq!(
+            question.response, before,
+            "Escape/close preserves the draft"
+        );
+    }
+
+    #[test]
+    fn recovered_question_modal_persists_before_it_closes() {
+        let (_directory, store, session_id, invocation_id) = recoverable_question_session();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let mut pending = Some(PendingQuestion::recovered(
+            TuiQuestionRequest {
+                question: "Which target?".to_string(),
+                options: vec!["alpha".to_string(), "beta".to_string()],
+                reply: reply_tx,
+            },
+            RecoveredQuestionTarget {
+                store: store.clone(),
+                session_id: session_id.clone(),
+                invocation_id: invocation_id.to_string(),
+            },
+        ));
+
+        assert!(!handle_question_key(&mut pending, KeyCode::Char('2')));
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert!(pending.is_none());
+        let persisted = store.load(&session_id).expect("answered session");
+        assert_eq!(
+            persisted.clarifications[0].status,
+            crate::session::ClarificationStatus::Answered
+        );
+        assert_eq!(persisted.clarifications[0].answer.as_deref(), Some("beta"));
     }
 
     #[test]
@@ -9923,14 +10369,81 @@ mod tests {
 
         let mut live = Some(pointer);
         let mut focus = TuiFocus::Transcript;
-        let delivery =
-            copy_pointer_selection_and_clear(&mut live, &mut focus, &view, Some(0), &activities);
-        assert!(
-            matches!(delivery, Some("Copied") | Some("Copy requested")),
-            "{delivery:?}"
+        let failed = copy_pointer_selection_and_clear_with(
+            &mut live,
+            &mut focus,
+            &view,
+            Some(0),
+            &activities,
+            |text| {
+                assert_eq!(text, "inspect wrap");
+                ClipboardDelivery::Failed
+            },
         );
+        assert_eq!(
+            failed,
+            Some("Copy failed; text remains available for manual selection")
+        );
+        assert_eq!(live, Some(pointer));
+        assert_eq!(focus, TuiFocus::Transcript);
+
+        let copied = copy_pointer_selection_and_clear_with(
+            &mut live,
+            &mut focus,
+            &view,
+            Some(0),
+            &activities,
+            |_| ClipboardDelivery::Native,
+        );
+        assert_eq!(copied, Some("Copied"));
         assert!(live.is_none());
         assert_eq!(focus, TuiFocus::Composer);
+        assert!(ClipboardDelivery::Native.may_clear_selection());
+        assert!(ClipboardDelivery::Osc52Unconfirmed.may_clear_selection());
+        assert!(!ClipboardDelivery::Unavailable.may_clear_selection());
+        assert!(!ClipboardDelivery::Failed.may_clear_selection());
+    }
+
+    #[test]
+    fn clipboard_delivery_reports_every_backend_outcome_without_fallthrough() {
+        use std::cell::Cell;
+
+        let native_calls = Cell::new(0);
+        let osc52_calls = Cell::new(0);
+        let delivery = deliver_text_to_clipboard_with(
+            "copy me",
+            false,
+            |_| {
+                native_calls.set(native_calls.get() + 1);
+                true
+            },
+            |_| {
+                osc52_calls.set(osc52_calls.get() + 1);
+                true
+            },
+        );
+        assert_eq!(delivery, ClipboardDelivery::Unavailable);
+        assert_eq!((native_calls.get(), osc52_calls.get()), (0, 0));
+
+        let delivery = deliver_text_to_clipboard_with(
+            "copy me",
+            true,
+            |_| true,
+            |_| panic!("OSC52 must not run after native success"),
+        );
+        assert_eq!(delivery, ClipboardDelivery::Native);
+        assert_eq!(delivery.status(), "Copied");
+
+        let delivery = deliver_text_to_clipboard_with("copy me", true, |_| false, |_| true);
+        assert_eq!(delivery, ClipboardDelivery::Osc52Unconfirmed);
+        assert_eq!(delivery.status(), "Copy requested via OSC52 (unconfirmed)");
+
+        let delivery = deliver_text_to_clipboard_with("copy me", true, |_| false, |_| false);
+        assert_eq!(delivery, ClipboardDelivery::Failed);
+        assert_eq!(
+            delivery.status(),
+            "Copy failed; text remains available for manual selection"
+        );
     }
 
     #[test]

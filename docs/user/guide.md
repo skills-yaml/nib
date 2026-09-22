@@ -456,7 +456,11 @@ Both presentation modes expose these commands:
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
   display name. The first user message also names an unnamed session; `/rename`
   is not overwritten.
-- `/copy` copies the latest completed assistant output in supported terminals, or prints a labeled fallback.
+- `/copy` copies the latest completed assistant output through a native clipboard
+  backend when available. Otherwise an interactive terminal may receive an OSC52
+  request labeled as unconfirmed; unsupported and failed attempts are reported
+  explicitly with the transcript or selection retained for manual copying, and
+  redirected output never receives clipboard escapes.
 - `/compact` requests bounded compression for the active session through the configured
   provider. It may bypass the automatic usage threshold, but still respects the
   compression enabled switch, preserves every raw message, and reports the resulting
@@ -579,12 +583,19 @@ continues without waiting for you to approve the plan. nib asks only when the
 request is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
 options. The composer states what nib wants to do and shows the command or path;
-`Approve once` and `Deny` sit under the input, with Deny focused first. Type
+`Approve once`, `Deny`, and `View details` sit under the input, with Deny focused first.
+The details view shows the bounded redacted command, patch, or validated arguments;
+scroll with Up/Down and press Escape to return without deciding. Type
 `y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.
 Escape denies. While approval is open the footer reads `WAITING APPROVAL`. When nib
 asks a question, type a custom answer or move to the numbered suggestions. Bare
 numbers select one-based options; `text: 42` forces literal text. Escape leaves the
 question unanswered. Recover later with `/questions [id]` and `/continue <plan-id>`.
+While a question or approval owns the TUI input, F2 opens a prompt-local command
+editor for read-only inspection or an exact live control; Escape returns to the
+unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mode,
+`:command /status` provides the corresponding prompt-local command entry, while
+`text: :command /status` submits that text literally as a question answer.
 While a question is open the footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
@@ -620,9 +631,10 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript uses Grok-style structure instead of role labels. User and
-assistant speech are markdown with a muted colored `●` on the first line (dusty
-teal vs sage). There is no `you`, `nib`, or `system` tag on each block. Tool
+The colored transcript uses Grok-style structure instead of repeating role labels.
+User and assistant speech are markdown with a muted colored `●` on the first line
+(dusty teal vs sage). In `NO_COLOR` or monochrome presentation, textual `you`, `nib`,
+and lifecycle/tool labels replace color-only identity. Tool
 calls show the tool name and path or command (`● read_file  src/lib.rs`) without
 `running` or `ok` on the quiet row. Failed tools still include `failed`. A running
 `run_terminal` nests a spinner line (`Running command…`); the full command stays

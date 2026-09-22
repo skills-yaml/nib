@@ -244,3 +244,12 @@ Linux delegated-result assertion also failed on an intermediate run without enou
 error detail to establish a cause; final local, hosted, and coverage suites passed
 it without weakening its assertions. No production permission policy, persistence
 schema, or delegation/steering deadline was changed.
+
+## T047 supersession (2026-09-21)
+
+[T047](../development/T047_user_interaction_harmonization.md) retains T046's native
+prompt, deadline, and terminal-restoration mechanics while changing approval defaults,
+question recovery, Ctrl+C/Ctrl+Q semantics, one-shot interruption, and clipboard
+reporting. T046's completed native evidence remains valid for its exact historical
+revision only; T047 must rerun the Linux/macOS/Windows smoke matrix against its own
+exact binaries before completion.

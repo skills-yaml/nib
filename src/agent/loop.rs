@@ -1697,7 +1697,19 @@ async fn run_agent_loop_with_runtime_and_recovery(
         Err(error) => Err(error),
         Ok(()) if cfg.mode == "compact" => Ok(false),
         Ok(()) => recover_interrupted_continuation(&runtime.session_store, session_id),
-    };
+    }
+    .and_then(|recovered| {
+        if let Some(plan_id) = cfg.continuation_plan_id.as_deref() {
+            validate_continue_admission(
+                &runtime.session_store,
+                session_id,
+                plan_id,
+                goal,
+                &run_id,
+            )?;
+        }
+        Ok(recovered)
+    });
     cfg.run_id = Some(run_id.clone());
     let explicit_compaction = cfg.mode == "compact";
     let cancellation = cfg.cancellation.clone();
@@ -2127,7 +2139,7 @@ async fn run_agent_loop_inner(
         );
     }
     if let Some(plan_id) = cfg.continuation_plan_id.as_deref() {
-        prepare_continue_turn(&store, session_id, plan_id, &normalized_goal)?;
+        prepare_continue_turn(&store, session_id, plan_id, &normalized_goal, &run_id)?;
     }
     let answer_only_candidate = nib_cfg.agent.answer_only
         && cfg.interactive_request
@@ -2254,7 +2266,9 @@ async fn run_agent_loop_inner(
         }
     }
 
-    invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
+    if cfg.continuation_plan_id.is_none() {
+        invalidate_nonresumable_plan(&store, session_id, &normalized_goal)?;
+    }
     let mcp_manager = if nib_cfg.mcp.client_enabled && !nib_cfg.mcp.servers.is_empty() {
         Some(Arc::new(
             crate::integrations::mcp::McpManager::new(
@@ -6156,40 +6170,106 @@ fn record_curator_tool_call(
         })
 }
 
+fn continue_admission_error(
+    session: &Session,
+    plan_id: &str,
+    normalized_goal: &str,
+    current_run_id: &str,
+) -> Option<String> {
+    let Some(plan) = session.plan.as_ref() else {
+        return Some("continue requires a persisted plan".to_string());
+    };
+    if plan.id != plan_id {
+        return Some(format!(
+            "continue target {plan_id} is not the current plan {}",
+            plan.id
+        ));
+    }
+    if !plan.has_identity() {
+        return Some("persisted plan is missing goal or identity and cannot continue".to_string());
+    }
+    if !plan.matches_goal(normalized_goal) {
+        return Some("continue goal does not match persisted plan provenance".to_string());
+    }
+    if plan.is_complete() {
+        return Some(format!("plan {plan_id} is already complete"));
+    }
+    if !plan.approved {
+        return Some(format!("plan {plan_id} is not approved for execution"));
+    }
+    if !plan.is_structured() {
+        return Some(format!("plan {plan_id} is malformed and cannot continue"));
+    }
+    if plan.outcome.as_deref() == Some("provider_continuation_interrupted") {
+        return Some(format!(
+            "plan {plan_id} has an uncertain interrupted provider continuation and cannot be replayed"
+        ));
+    }
+    if session.has_unresolved_clarification(Some(&plan.id)) {
+        return Some("unresolved questions still block this plan".to_string());
+    }
+    if has_unterminated_prior_run(session, current_run_id) {
+        return Some(
+            "a prior run has not been reconciled and this plan cannot continue".to_string(),
+        );
+    }
+    None
+}
+
+fn validate_continue_admission(
+    store: &SessionStore,
+    session_id: &str,
+    plan_id: &str,
+    goal: &str,
+    current_run_id: &str,
+) -> Result<(), String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to validate continuation: {error}"))?
+        .ok_or_else(|| format!("session {session_id} disappeared before continuation"))?;
+    continue_admission_error(
+        &session,
+        plan_id,
+        &normalize_plan_goal(goal),
+        current_run_id,
+    )
+    .map_or(Ok(()), Err)
+}
+
 fn prepare_continue_turn(
     store: &SessionStore,
     session_id: &str,
     plan_id: &str,
     goal: &str,
+    run_id: &str,
 ) -> Result<(), String> {
     store
         .update_session(session_id, |session| {
+            if let Some(error) = continue_admission_error(session, plan_id, goal, run_id) {
+                return Err(crate::session::SessionError::InvalidMutation(error));
+            }
             let plan = session.plan.as_ref().ok_or_else(|| {
                 crate::session::SessionError::InvalidMutation(
                     "continue requires a persisted plan".to_string(),
                 )
             })?;
-            if plan.id != plan_id {
-                return Err(crate::session::SessionError::InvalidMutation(format!(
-                    "continue target {plan_id} is not the current plan {}",
-                    plan.id
-                )));
-            }
-            if plan.goal != goal {
-                return Err(crate::session::SessionError::InvalidMutation(
-                    "continue goal does not match persisted plan provenance".to_string(),
-                ));
-            }
-            if plan.is_complete() {
-                return Err(crate::session::SessionError::InvalidMutation(format!(
-                    "plan {plan_id} is already complete"
-                )));
-            }
-            if session.has_unresolved_clarification(Some(&plan.id)) {
-                return Err(crate::session::SessionError::InvalidMutation(
-                    "unresolved questions still block this plan".to_string(),
-                ));
-            }
+            let step = plan
+                .steps
+                .get(plan.current_step_index)
+                .map(|step| step.description.clone())
+                .unwrap_or_else(|| "remaining work".to_string());
+            let message_index = session.messages.len();
+            session.messages.push(SessionMessage {
+                index: message_index,
+                role: "user".to_string(),
+                content: format!("Continue with approved plan step: {step}"),
+                timestamp: Some(Utc::now()),
+                attachments: Vec::new(),
+            });
+            session.message_provenance.push(MessageProvenance {
+                message_index,
+                origin: MessageOrigin::RuntimeContinuation,
+            });
             let event_index = session.events.len();
             append_session_event(
                 session,
@@ -7317,12 +7397,23 @@ fn safe_persisted_provider_message(
     sensitive_values: &[String],
     preserve_layout: bool,
 ) -> String {
-    crate::interactive::bounded_public_text(
+    if value.len() > MAX_PERSISTED_PROVIDER_MESSAGE_BYTES {
+        return format!(
+            "[provider content omitted: exceeded the {MAX_PERSISTED_PROVIDER_MESSAGE_BYTES}-byte safety/storage limit and was not retained]"
+        );
+    }
+    let sanitized = crate::interactive::bounded_public_text(
         value,
         sensitive_values,
-        MAX_PERSISTED_PROVIDER_MESSAGE_BYTES,
+        usize::MAX,
         preserve_layout,
-    )
+    );
+    if sanitized.len() > MAX_PERSISTED_PROVIDER_MESSAGE_BYTES {
+        return format!(
+            "[provider content omitted: exceeded the {MAX_PERSISTED_PROVIDER_MESSAGE_BYTES}-byte safety/storage limit and was not retained]"
+        );
+    }
+    sanitized
 }
 
 fn safe_provider_plan_outcome(content: Option<&str>, sensitive_values: &[String]) -> String {
@@ -7862,6 +7953,12 @@ mod tests {
         assert!(!outcome.contains('\u{1b}'));
         assert!(!outcome.contains("OUTCOME_PRIVATE_TAIL"));
         assert!(outcome.len() <= MAX_PERSISTED_PROVIDER_MESSAGE_BYTES);
+
+        let expanding_controls = "\u{1b}".repeat(MAX_PERSISTED_PROVIDER_MESSAGE_BYTES / 2);
+        let omitted = safe_persisted_provider_message(&expanding_controls, &[], true);
+        assert!(omitted.contains("provider content omitted"));
+        assert!(omitted.contains("was not retained"));
+        assert!(!omitted.ends_with("..."));
     }
 
     #[tokio::test]
@@ -8713,6 +8810,46 @@ mod tests {
                 .details["reason"],
             "invalid_plan"
         );
+    }
+
+    #[test]
+    fn continuation_admission_keeps_required_checks_and_rejects_uncertain_prior_work() {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::new(directory.path());
+        let mut session = store.create_session_with_id("continue-admission");
+        let mut plan = pending_plan("resume verified work", "finish and verify");
+        plan.steps[0].status = "Blocked".to_string();
+        let mut obligation = crate::session::VerificationObligation::pending_tool(
+            "required-check",
+            "run the required check",
+            vec!["src/".to_string()],
+            "run_terminal",
+            json!({"command": "true", "affected_paths": ["src/"]}),
+            crate::session::VerificationExpectedOutcome::Success,
+        )
+        .expect("valid verification contract");
+        obligation.plan_id.clone_from(&plan.id);
+        obligation.step_index = Some(0);
+        plan.steps[0].verification_obligations.push(obligation);
+        plan.approve();
+        let plan_id = plan.id.clone();
+        session.plan = Some(plan);
+
+        assert_eq!(
+            continue_admission_error(&session, &plan_id, "resume verified work", "current-run"),
+            None,
+            "pending verification remains executable continuation work"
+        );
+
+        session.plan.as_mut().unwrap().outcome =
+            Some("provider_continuation_interrupted".to_string());
+        assert!(continue_admission_error(
+            &session,
+            &plan_id,
+            "resume verified work",
+            "current-run"
+        )
+        .is_some_and(|error| error.contains("uncertain interrupted")));
     }
 
     #[async_trait::async_trait]
@@ -10673,6 +10810,164 @@ mod tests {
             message.role == "tool" && message.content.contains("\"answer\":\"full\"")
         }));
         loaded.validate_message_sequence().unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovered_question_continues_the_exact_plan_with_answer_only_on_or_off() {
+        for answer_only in [false, true] {
+            let dir = tempdir().unwrap();
+            let mut config = NibConfig {
+                llm: mock_config(),
+                ..NibConfig::default()
+            };
+            config.agent.answer_only = answer_only;
+            config.skills.enabled = false;
+            config.daemons.cron_enabled = false;
+            config.daemons.curator_enabled = false;
+            save_nib_config_full(dir.path(), &mut config).expect("mock config");
+            let store = SessionStore::for_project(dir.path()).unwrap();
+            let session = store.create_session();
+            let goal = "ask a question before continuing";
+
+            let first = run_agent_loop(
+                dir.path().to_path_buf(),
+                &session.id,
+                goal,
+                AgentLoopConfig {
+                    max_steps: 5,
+                    auto_approve: true,
+                    interactive_request: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("initial question run");
+            assert_eq!(first.outcome, "waiting_for_user_input");
+            let waiting = store.load(&session.id).expect("waiting session");
+            let plan_id = waiting.plan.as_ref().expect("persisted plan").id.clone();
+            let question = waiting
+                .clarifications
+                .iter()
+                .find(|record| record.status != ClarificationStatus::Answered)
+                .expect("unresolved question");
+            crate::interactive::persist_recovered_question_answer(
+                &store,
+                &session.id,
+                &question.invocation_id.to_string(),
+                "full",
+            )
+            .expect("recover exact answer");
+
+            let continued = run_agent_loop(
+                dir.path().to_path_buf(),
+                &session.id,
+                goal,
+                AgentLoopConfig {
+                    max_steps: 5,
+                    auto_approve: true,
+                    interactive_request: true,
+                    continuation_plan_id: Some(plan_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("exact-plan continuation");
+            assert_eq!(continued.outcome, "completed");
+            let persisted = store.load(&session.id).expect("continued session");
+            assert_eq!(
+                persisted.plan.as_ref().map(|plan| plan.id.as_str()),
+                Some(plan_id.as_str())
+            );
+            assert_eq!(
+                persisted
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "plan_continue_requested")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                persisted
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "human_question_answer_received")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                persisted
+                    .tool_calls
+                    .iter()
+                    .filter(|call| call.tool_name.as_deref() == Some("list_directory"))
+                    .count(),
+                1,
+                "dependent continuation work must execute exactly once"
+            );
+            assert!(persisted.human_intent.iter().any(|intent| {
+                intent.kind == HumanIntentKind::Continue && intent.text == plan_id
+            }));
+            assert!(persisted.message_provenance.iter().any(|provenance| {
+                provenance.origin == MessageOrigin::RuntimeContinuation
+                    && persisted.messages[provenance.message_index]
+                        .content
+                        .starts_with("Continue with approved plan step:")
+            }));
+            persisted.validate_message_sequence().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_continuation_fails_closed_without_replanning_or_intent() {
+        let dir = tempdir().unwrap();
+        save_config(dir.path(), &mock_config()).unwrap();
+        let store = SessionStore::for_project(dir.path()).unwrap();
+        let mut session = store.create_session();
+        let mut plan = pending_plan("continue the exact malformed plan", "invalid step");
+        plan.approve();
+        plan.steps[0].description.clear();
+        let plan_id = plan.id.clone();
+        session.plan = Some(plan);
+        store
+            .save(&mut session)
+            .expect("malformed continuation fixture");
+
+        let error = run_agent_loop(
+            dir.path().to_path_buf(),
+            &session.id,
+            "continue the exact malformed plan",
+            AgentLoopConfig {
+                max_steps: 5,
+                auto_approve: true,
+                interactive_request: true,
+                continuation_plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("malformed continuation must fail closed");
+        assert!(error.contains("malformed"), "{error}");
+
+        let persisted = store
+            .load(&session.id)
+            .expect("rejected continuation session");
+        assert_eq!(
+            persisted.plan.as_ref().map(|plan| plan.id.as_str()),
+            Some(plan_id.as_str())
+        );
+        assert!(persisted
+            .plan
+            .as_ref()
+            .is_some_and(|plan| { plan.steps[0].description.is_empty() }));
+        assert!(!persisted.events.iter().any(|event| {
+            matches!(
+                event.kind.as_str(),
+                "plan_generated" | "plan_continue_requested"
+            )
+        }));
+        assert!(!persisted
+            .human_intent
+            .iter()
+            .any(|intent| intent.kind == HumanIntentKind::Continue));
     }
 
     #[tokio::test]
