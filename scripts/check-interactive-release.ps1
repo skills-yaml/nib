@@ -381,13 +381,15 @@ curator_enabled = false
             ExpectedEvent = "tool_started"
         }
     )) {
+        $interruptSessionId = "t047-native-interrupt-$($interruptCase.Label)"
+        $interruptSessionPath = Join-Path $sessionDirectory "$interruptSessionId.json"
         $sessionsBeforeInterrupt = @(
             Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
                 ForEach-Object { $_.FullName }
         )
         $oneShotArguments = @(
             "run", $interruptCase.Goal,
-            "--session", "t047-native-interrupt-$($interruptCase.Label)",
+            "--session", $interruptSessionId,
             "--provider", "mock", "--model", "mock-model", "--max-steps", "5"
         )
         if ($interruptCase.Yes) { $oneShotArguments += "--yes" }
@@ -404,6 +406,7 @@ curator_enabled = false
                     NativeCtrlC = $true
                     WaitForDirectory = $sessionDirectory
                     WaitForFileContents = @(
+                        ('"id": "' + $interruptSessionId + '"')
                         ('"goal": "' + $interruptCase.Goal + '"')
                         ('"kind": "' + $interruptCase.ExpectedEvent + '"')
                     )
@@ -418,8 +421,8 @@ curator_enabled = false
             Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
                 Where-Object { $sessionsBeforeInterrupt -notcontains $_.FullName }
         )
-        if ($newInterruptSessions.Count -eq 1) {
-            $lastInterruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
+        if (Test-Path -LiteralPath $interruptSessionPath -PathType Leaf) {
+            $lastInterruptSessionText = Get-Content -LiteralPath $interruptSessionPath -Raw
         }
         if ($oneShotResult.ExitCode -eq 0 -or
             -not $oneShotResult.ConsoleModesRestored -or
@@ -427,7 +430,8 @@ curator_enabled = false
             -not $oneShotResult.Output.Contains("Run cancelled.")) {
             throw "Windows one-shot Ctrl+C did not reconcile $($interruptCase.Goal)"
         }
-        if ($newInterruptSessions.Count -ne 1) {
+        if ($newInterruptSessions.Count -ne 1 -or
+            $newInterruptSessions[0].FullName -ne $interruptSessionPath) {
             throw "Windows one-shot Ctrl+C did not create one isolated session for $($interruptCase.Label)"
         }
         $interruptSessionText = $lastInterruptSessionText
