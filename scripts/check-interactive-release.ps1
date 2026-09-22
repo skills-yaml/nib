@@ -219,8 +219,14 @@ curator_enabled = false
             # Incremental redraws may split the command-overlay label with cursor
             # controls. Status output is the stable proof that F2 owned this input.
             [pscustomobject]@{ Text = "/status`r"; DelayMilliseconds = 300 },
-            [pscustomobject]@{ Text = "2`r"; WaitForOutput = "Verification:" },
-            [pscustomobject]@{ Text = "$([char]17)$([char]17)"; WaitForOutput = "Final answer: task complete" }
+            # The status row can become visible before command-overlay input
+            # ownership has returned to the question editor. Settle after the
+            # marker so option 2 cannot be consumed by the closing overlay.
+            [pscustomobject]@{ Text = "2`r"; WaitForOutput = "Verification:"; DelayMilliseconds = 300 },
+            # Differential TUI redraws can split the longer final-answer text
+            # with cursor controls. The terminal lifecycle label is shorter and
+            # the persisted session assertion below proves the exact answer.
+            [pscustomobject]@{ Text = "$([char]17)$([char]17)"; WaitForOutput = "completed" }
         ) `
         -TimeoutMilliseconds 60000
     if ($tuiQuestionResult.ExitCode -ne 0 -or
@@ -228,6 +234,18 @@ curator_enabled = false
         -not $tuiQuestionResult.ChildConsoleModesRestored -or
         -not $tuiQuestionResult.Output.Contains("Verification:")) {
         throw "Windows TUI F2 smoke did not preserve the pending question and command overlay"
+    }
+    $tuiQuestionSessions = @(
+        Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+            Where-Object {
+                $text = Get-Content -LiteralPath $_.FullName -Raw
+                $text.Contains("ask a question before continuing in TUI smoke") -and
+                $text.Contains('"answer": "full"') -and
+                $text.Contains('"outcome": "completed"')
+            }
+    )
+    if ($tuiQuestionSessions.Count -ne 1) {
+        throw "Windows TUI F2 smoke did not persist the exact answer and completed outcome"
     }
 
     $plainQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --plain --run 'ask a question before continuing'; exit `$LASTEXITCODE"
