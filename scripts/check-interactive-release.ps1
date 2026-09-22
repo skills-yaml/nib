@@ -383,6 +383,8 @@ curator_enabled = false
     )) {
         $interruptSessionId = "t047-native-interrupt-$($interruptCase.Label)"
         $interruptSessionPath = Join-Path $sessionDirectory "$interruptSessionId.json"
+        $lastInterruptSessionText = $null
+        $lastInterruptResult = $null
         $sessionsBeforeInterrupt = @(
             Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
                 ForEach-Object { $_.FullName }
@@ -561,6 +563,10 @@ curator_enabled = false
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
 } catch {
     if (-not [string]::IsNullOrWhiteSpace($env:NIB_INTERACTIVE_EVIDENCE_DIR)) {
+        if (-not [string]::IsNullOrWhiteSpace($interruptSessionPath) -and
+            (Test-Path -LiteralPath $interruptSessionPath -PathType Leaf)) {
+            $lastInterruptSessionText = Get-Content -LiteralPath $interruptSessionPath -Raw
+        }
         $failureEvidenceDirectory = Join-Path $env:NIB_INTERACTIVE_EVIDENCE_DIR "Windows"
         New-Item -ItemType Directory -Force -Path $failureEvidenceDirectory | Out-Null
         $failureText = @(

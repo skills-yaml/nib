@@ -355,6 +355,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "$interruptSessionId = \"t047-native-interrupt-$($interruptCase.Label)\"",
         "('\"id\": \"' + $interruptSessionId + '\"')",
         "Get-Content -LiteralPath $interruptSessionPath -Raw",
+        "$lastInterruptSessionText = $null",
+        "$lastInterruptResult = $null",
         "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
         "WaitForDirectory = $sessionDirectory",
         "WaitForFileContents = @(",
