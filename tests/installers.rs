@@ -269,6 +269,8 @@ fn delegation_task_pins_hosted_stabilization_fixtures() {
 fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let script = read_repository_text("scripts/check-interactive-release.sh");
     let windows_script = read_repository_text("scripts/check-interactive-release.ps1");
+    let windows_pty = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
+    let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
     let taskfile = read_repository_text("Taskfile.yml");
     let agent_loop = read_repository_text("src/agent/loop.rs");
     let workflow = read_repository_text(".github/workflows/ci.yml");
@@ -373,6 +375,15 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     ));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
+    assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));
+    assert!(windows_pty.contains("allow_interrupted_child_without_exit_marker"));
+    assert!(windows_pty_host.contains(
+        "$inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3"
+    ));
+    assert!(windows_pty_host.contains(
+        "$markerMatches.Count -eq 0 -and\n            $allowInterruptedChildWithoutExitMarker -and\n            $output.Contains(\"Run cancelled.\")"
+    ));
+    assert!(windows_pty_host.contains("$modeParts[0] -ne \"1\""));
 
     assert!(taskfile.contains("  test:interactive:\n"));
     assert!(taskfile.contains("      - task: test:interactive\n"));

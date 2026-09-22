@@ -66,6 +66,8 @@ function Invoke-WindowsPseudoTerminal {
 
         [object[]]$InputChunks = @(),
 
+        [switch]$AllowInterruptedChildWithoutExitMarker,
+
         [ValidateRange(5000, 60000)]
         [int]$HostGraceMilliseconds = 40000
     )
@@ -121,6 +123,7 @@ function Invoke-WindowsPseudoTerminal {
         arguments = @($Arguments)
         timeout_ms = $TimeoutMilliseconds
         input_chunks = @($normalizedChunks)
+        allow_interrupted_child_without_exit_marker = [bool]$AllowInterruptedChildWithoutExitMarker
     } | ConvertTo-Json -Compress -Depth 5
     $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($requestJson))
 
@@ -194,6 +197,7 @@ function Invoke-WindowsPseudoTerminal {
             ChildConsoleModesBefore = $response.console_modes_before
             ChildConsoleModesAfter = $response.console_modes_after
             ChildConsoleModesRestored = [bool]$response.console_modes_restored
+            InterruptedChildWithoutExitMarker = [bool]$response.interrupted_child_without_exit_marker
         }
     } catch {
         $pendingError = $_

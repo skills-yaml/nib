@@ -389,7 +389,8 @@ curator_enabled = false
                     DelayMilliseconds = $interruptCase.Delay
                 }
             ) `
-            -TimeoutMilliseconds 30000
+            -TimeoutMilliseconds 30000 `
+            -AllowInterruptedChildWithoutExitMarker
         $oneShotOutputs[$interruptCase.Label] = $oneShotResult.Output
         if ($oneShotResult.ExitCode -eq 0 -or
             -not $oneShotResult.ConsoleModesRestored -or

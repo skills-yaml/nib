@@ -18,12 +18,17 @@ try {
     $arguments = [string[]]@($request.arguments)
     $timeoutMilliseconds = [int]$request.timeout_ms
     $inputChunks = @($request.input_chunks)
+    $allowInterruptedChildWithoutExitMarker = [bool]$request.allow_interrupted_child_without_exit_marker
     if ([string]::IsNullOrWhiteSpace([string]$request.executable) -or
         $timeoutMilliseconds -lt 1) {
         throw "Windows pseudoterminal host request is invalid"
     }
     if ($inputChunks.Count -gt 64) {
         throw "Windows pseudoterminal input exceeds the 64 chunk limit"
+    }
+    if ($allowInterruptedChildWithoutExitMarker -and
+        ($inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3)) {
+        throw "Missing-exit interruption qualification requires one native Ctrl+C input"
     }
     $totalInputBytes = 0
     $totalDelayMilliseconds = 0L
@@ -149,10 +154,22 @@ try {
 
         $markerPattern = [regex]::Escape($exitMarker) + "(?<code>-?[0-9]+)"
         $markerMatches = [regex]::Matches($output, $markerPattern)
-        if ($markerMatches.Count -ne 1) {
+        $interruptedChildWithoutExitMarker = $false
+        if ($markerMatches.Count -eq 1) {
+            $exitCode = [int]$markerMatches[0].Groups["code"].Value
+        } elseif ($markerMatches.Count -eq 0 -and
+            $allowInterruptedChildWithoutExitMarker -and
+            $output.Contains("Run cancelled.")) {
+            # Native Ctrl+C reaches both nib and its enclosing PowerShell process.
+            # PowerShell can therefore run the adapter's finally block (publishing
+            # restoration evidence) and then stop before the following exit marker.
+            # Normalize that strictly qualified shell-interruption shape to a
+            # non-success result without weakening ordinary child-exit validation.
+            $exitCode = 1
+            $interruptedChildWithoutExitMarker = $true
+        } else {
             throw "Windows headless console child did not report one exit marker: $output"
         }
-        $exitCode = [int]$markerMatches[0].Groups["code"].Value
         $capturedOutput = [regex]::Replace($output, $markerPattern + "\r?\n?", "")
 
         $modePattern = [regex]::Escape($modeMarker) + "(?<evidence>[A-Za-z0-9+/=]+)"
@@ -194,6 +211,7 @@ try {
         console_modes_before = $consoleModesBefore
         console_modes_after = $consoleModesAfter
         console_modes_restored = $true
+        interrupted_child_without_exit_marker = $interruptedChildWithoutExitMarker
     } | ConvertTo-Json -Compress -Depth 6))
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
