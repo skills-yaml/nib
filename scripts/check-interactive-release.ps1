@@ -109,6 +109,7 @@ $environmentNames = @(
 $previousEnvironment = @{}
 $originalClipboard = $null
 $restoreClipboard = $false
+$activeStage = "initialization"
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
@@ -188,6 +189,7 @@ curator_enabled = false
     # Incremental redraw skips unchanged spaces, splitting complete status sentences.
     # These fresh segments are unique to consent success and quit confirmation in
     # this isolated startup, so each write still waits for its actual UI state.
+    $activeStage = "tui-startup"
     $tuiResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiCommand) `
@@ -211,6 +213,7 @@ curator_enabled = false
     }
 
     $tuiQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --tui --run 'ask a question before continuing in TUI smoke'; exit `$LASTEXITCODE"
+    $activeStage = "tui-f2-question"
     $tuiQuestionResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $tuiQuestionCommand) `
@@ -249,6 +252,7 @@ curator_enabled = false
     }
 
     $plainQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --plain --run 'ask a question before continuing'; exit `$LASTEXITCODE"
+    $activeStage = "plain-modal-command"
     $plainQuestionResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainQuestionCommand) `
@@ -286,6 +290,7 @@ curator_enabled = false
     $env:TERM = "dumb"
     $env:NO_COLOR = "1"
     $plainCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary; exit `$LASTEXITCODE"
+    $activeStage = "plain-dumb-terminal"
     $plainResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainCommand) `
@@ -311,6 +316,7 @@ curator_enabled = false
     }
 
     $copySeedCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run 'finish the release smoke' --session t047-copy-smoke --provider mock --model mock-model --max-steps 4 --yes; exit `$LASTEXITCODE"
+    $activeStage = "clipboard-seed"
     $copySeedResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $copySeedCommand) `
@@ -321,6 +327,7 @@ curator_enabled = false
     }
 
     $copyCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --plain --session t047-copy-smoke; exit `$LASTEXITCODE"
+    $activeStage = "clipboard-delivery"
     $copyResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $copyCommand) `
@@ -379,6 +386,7 @@ curator_enabled = false
         $quotedGoal = Quote-NibPowerShellLiteral $interruptCase.Goal
         $yesArgument = if ($interruptCase.Yes) { " --yes" } else { "" }
         $oneShotCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run $quotedGoal --provider mock --model mock-model --max-steps 5$yesArgument; exit `$LASTEXITCODE"
+        $activeStage = "one-shot-interrupt-$($interruptCase.Label)"
         $oneShotResult = Invoke-WindowsPseudoTerminal `
             -Executable $pwshPath `
             -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $oneShotCommand) `
@@ -546,6 +554,7 @@ curator_enabled = false
             "source_clean=$sourceClean"
             "binary_version=$binaryVersion"
             "acceptance_eligible=false"
+            "stage=$activeStage"
             "failure=$($_.Exception.Message)"
         ) -join "`n"
         [IO.File]::WriteAllText(
