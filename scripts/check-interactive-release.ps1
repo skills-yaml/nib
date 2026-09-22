@@ -387,6 +387,7 @@ curator_enabled = false
         )
         $oneShotArguments = @(
             "run", $interruptCase.Goal,
+            "--session", "t047-native-interrupt-$($interruptCase.Label)",
             "--provider", "mock", "--model", "mock-model", "--max-steps", "5"
         )
         if ($interruptCase.Yes) { $oneShotArguments += "--yes" }

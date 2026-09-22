@@ -111,8 +111,28 @@ try {
     }
     [Console]::Out.WriteLine("$processMarker$PID")
     try {
-        & ([string]$request.executable) @arguments
-        $childExitCode = [int]$LASTEXITCODE
+        # PowerShell's native-command invocation treats a console Ctrl+C as a
+        # pipeline stop and can terminate the child before its own handler has
+        # reconciled the run. Launch through the process API so the console
+        # event is handled by the child and this adapter independently.
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = [string]$request.executable
+        $startInfo.UseShellExecute = $false
+        $startInfo.WorkingDirectory = (Get-Location).ProviderPath
+        foreach ($argument in $arguments) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+        $child = [Diagnostics.Process]::new()
+        try {
+            $child.StartInfo = $startInfo
+            if (-not $child.Start()) {
+                throw "Unable to start the pseudoterminal target process"
+            }
+            $child.WaitForExit()
+            $childExitCode = [int]$child.ExitCode
+        } finally {
+            $child.Dispose()
+        }
     } finally {
         $consoleModesAfter = Get-NibPseudoTerminalChildModes
         $consoleModesRestored = (

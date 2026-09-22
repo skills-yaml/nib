@@ -352,6 +352,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "ExpectedEvent = \"question_required\"",
         "ExpectedEvent = \"approval_required\"",
         "ExpectedEvent = \"tool_started\"",
+        "\"--session\", \"t047-native-interrupt-$($interruptCase.Label)\"",
         "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
         "WaitForDirectory = $sessionDirectory",
         "WaitForFileContents = @(",
@@ -370,6 +371,10 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         );
     }
     assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
+    let child_adapter = include_str!("../scripts/start-windows-pseudoterminal-child.ps1");
+    assert!(child_adapter.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(child_adapter.contains("$child.WaitForExit()"));
+    assert!(!child_adapter.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_script.contains("could not remove its isolated fixture"));
     assert!(windows_script.contains(
         "$startInfo.RedirectStandardInput = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true"
@@ -621,7 +626,9 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_child.contains("GetConsoleMode"));
     assert!(windows_pty_child.contains("$consoleModesBefore"));
     assert!(windows_pty_child.contains("$consoleModesAfter"));
-    assert!(windows_pty_child.contains("& ([string]$request.executable) @arguments"));
+    assert!(windows_pty_child.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(windows_pty_child.contains("$child.WaitForExit()"));
+    assert!(!windows_pty_child.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_pty_child.contains("[Console]::Out.WriteLine"));
     assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
     assert!(windows_pty_invoke.contains("[object[]]$InputChunks"));
