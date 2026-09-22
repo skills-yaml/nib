@@ -356,14 +356,19 @@ curator_enabled = false
             Delay = 0
             Yes = $false
             Forbidden = ""
+            ExpectedEvent = "question_required"
         },
         [pscustomobject]@{
             Label = "approval"
             Goal = "one-shot interrupt approval"
-            Prompt = "Approval required"
-            Delay = 0
+            # The durable event below qualifies the exact interaction stage. A
+            # short post-start delay avoids depending on how ConPTY fragments or
+            # orders stderr prompt text relative to process exit.
+            Prompt = "nib run: starting"
+            Delay = 2000
             Yes = $false
             Forbidden = "one-shot-approval-ran.txt"
+            ExpectedEvent = "approval_required"
         },
         [pscustomobject]@{
             Label = "terminal"
@@ -372,8 +377,13 @@ curator_enabled = false
             Delay = 1500
             Yes = $true
             Forbidden = "one-shot-interrupt-completed.txt"
+            ExpectedEvent = "tool_started"
         }
     )) {
+        $sessionsBeforeInterrupt = @(
+            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+                ForEach-Object { $_.FullName }
+        )
         $quotedGoal = Quote-NibPowerShellLiteral $interruptCase.Goal
         $yesArgument = if ($interruptCase.Yes) { " --yes" } else { "" }
         $oneShotCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run $quotedGoal --provider mock --model mock-model --max-steps 5$yesArgument; exit `$LASTEXITCODE"
@@ -397,6 +407,27 @@ curator_enabled = false
             -not $oneShotResult.ChildConsoleModesRestored -or
             -not $oneShotResult.Output.Contains("Run cancelled.")) {
             throw "Windows one-shot Ctrl+C did not reconcile $($interruptCase.Goal)"
+        }
+        $newInterruptSessions = @(
+            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+                Where-Object { $sessionsBeforeInterrupt -notcontains $_.FullName }
+        )
+        if ($newInterruptSessions.Count -ne 1) {
+            throw "Windows one-shot Ctrl+C did not create one isolated session for $($interruptCase.Label)"
+        }
+        $interruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
+        $expectedStageIndex = $interruptSessionText.IndexOf(
+            '"kind": "' + $interruptCase.ExpectedEvent + '"',
+            [StringComparison]::Ordinal
+        )
+        $cancelledOutcomeIndex = $interruptSessionText.IndexOf(
+            '"outcome": "cancelled_by_user"',
+            [StringComparison]::Ordinal
+        )
+        if (-not $interruptSessionText.Contains('"goal": "' + $interruptCase.Goal + '"') -or
+            $expectedStageIndex -lt 0 -or
+            $cancelledOutcomeIndex -le $expectedStageIndex) {
+            throw "Windows one-shot Ctrl+C lacked exact durable stage evidence for $($interruptCase.Label)"
         }
         if (-not [string]::IsNullOrWhiteSpace($interruptCase.Forbidden) -and
             (Test-Path -LiteralPath (Join-Path $fixture $interruptCase.Forbidden))) {

@@ -349,6 +349,10 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
+        "ExpectedEvent = \"question_required\"",
+        "ExpectedEvent = \"approval_required\"",
+        "ExpectedEvent = \"tool_started\"",
+        "$cancelledOutcomeIndex -le $expectedStageIndex",
     ] {
         assert!(
             windows_script.contains(contract),
