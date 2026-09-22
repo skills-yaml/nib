@@ -99,9 +99,6 @@ jobs:
       - name: Check all targets and features
         run: task check:all-targets
 
-      - name: Run tests
-        run: task test
-
       - name: Build and qualify release binary
         run: task qualify:llm-release
 
@@ -149,6 +146,9 @@ jobs:
             }
             Remove-Item -Recurse -Force $fixture -ErrorAction SilentlyContinue
           }
+
+      - name: Run tests
+        run: task test
 
   macos-tests:
     name: macOS Tests

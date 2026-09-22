@@ -423,7 +423,11 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let windows_native_smoke = windows_job
         .find("run: task smoke:interactive:windows:binary")
         .expect("Windows native interactive smoke");
+    let windows_tests = windows_job
+        .find("run: task test\n")
+        .expect("Windows full test suite");
     assert!(windows_build < windows_native_smoke);
+    assert!(windows_native_smoke < windows_tests);
 
     let macos_job = workflow
         .split_once("  macos-tests:\n")
