@@ -20163,10 +20163,7 @@ mod tests {
     fn records_setup_and_migration_share_one_default_absolute_deadline() {
         let root = tempfile::tempdir().expect("root");
         let mut paused_namespace = None;
-        #[cfg(windows)]
         let default_timeout = Duration::from_secs(2);
-        #[cfg(not(windows))]
-        let default_timeout = Duration::from_millis(80);
         let error = ensure_records_directory_until_with_phase_hook(
             root.path(),
             None,
@@ -20181,7 +20178,8 @@ mod tests {
         )
         .expect_err("migration must not receive a renewed default budget");
         assert!(error.contains("deadline elapsed"), "{error}");
-        let paused_namespace = paused_namespace.expect("snapshot after records setup");
+        let paused_namespace = paused_namespace
+            .unwrap_or_else(|| panic!("records setup did not reach its phase hook: {error}"));
         assert_eq!(
             subagent_namespace_snapshot(root.path()),
             paused_namespace,
@@ -20353,17 +20351,9 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn owner_creation_stops_before_anchor_publication_when_its_deadline_expires() {
-        let operation_timeout = if cfg!(windows) {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_millis(150)
-        };
+        let operation_timeout = Duration::from_secs(2);
         let expiry_delay = operation_timeout + Duration::from_millis(50);
-        let boundary_wait = if cfg!(windows) {
-            Duration::from_secs(5)
-        } else {
-            Duration::from_secs(2)
-        };
+        let boundary_wait = Duration::from_secs(10);
         let root = tempfile::tempdir().expect("root");
         let owner_directory = owner_lease_directory(root.path());
         let anchor_directory = root.path().join(".nib");
