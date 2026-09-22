@@ -356,6 +356,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "WaitForDirectory = $sessionDirectory",
         "WaitForFileContents = @(",
         "NativeCtrlC = $true",
+        "-Arguments $oneShotArguments `",
+        "-WorkingDirectory $fixture `",
         "$_.details.outcome -eq \"cancelled_by_user\"",
         "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
         "\"stage=$activeStage\"",

@@ -60,6 +60,8 @@ function Invoke-WindowsPseudoTerminal {
         [Parameter(Mandatory = $true)]
         [string[]]$Arguments,
 
+        [string]$WorkingDirectory = "",
+
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 300000)]
         [int]$TimeoutMilliseconds,
@@ -74,6 +76,12 @@ function Invoke-WindowsPseudoTerminal {
 
     if ($InputChunks.Count -gt 64) {
         throw "Windows pseudoterminal input exceeds the 64 chunk limit"
+    }
+    if (-not [string]::IsNullOrEmpty($WorkingDirectory) -and
+        ($WorkingDirectory.Length -gt 32768 -or
+            -not [IO.Path]::IsPathFullyQualified($WorkingDirectory) -or
+            -not (Test-Path -LiteralPath $WorkingDirectory -PathType Container))) {
+        throw "Windows pseudoterminal working directory is invalid"
     }
     $normalizedChunks = [Collections.Generic.List[object]]::new()
     $totalInputBytes = 0
@@ -156,6 +164,7 @@ function Invoke-WindowsPseudoTerminal {
     $requestJson = @{
         executable = $Executable
         arguments = @($Arguments)
+        working_directory = $WorkingDirectory
         timeout_ms = $TimeoutMilliseconds
         input_chunks = @($normalizedChunks)
         allow_interrupted_child_without_exit_marker = [bool]$AllowInterruptedChildWithoutExitMarker

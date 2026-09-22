@@ -92,8 +92,17 @@ try {
     )
     $request = $requestJson | ConvertFrom-Json
     $arguments = [string[]]@($request.arguments)
+    $workingDirectory = [string]$request.working_directory
     if ([string]::IsNullOrWhiteSpace([string]$request.executable)) {
         throw "Windows pseudoterminal child request is invalid"
+    }
+    if (-not [string]::IsNullOrEmpty($workingDirectory)) {
+        if ($workingDirectory.Length -gt 32768 -or
+            -not [IO.Path]::IsPathFullyQualified($workingDirectory) -or
+            -not (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
+            throw "Windows pseudoterminal working directory is invalid"
+        }
+        Set-Location -LiteralPath $workingDirectory
     }
 
     $consoleModesBefore = Get-NibPseudoTerminalChildModes

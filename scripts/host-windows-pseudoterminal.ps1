@@ -65,12 +65,19 @@ namespace Nib.WindowsPseudoTerminal {
     )
     $request = $requestJson | ConvertFrom-Json
     $arguments = [string[]]@($request.arguments)
+    $workingDirectory = [string]$request.working_directory
     $timeoutMilliseconds = [int]$request.timeout_ms
     $inputChunks = @($request.input_chunks)
     $allowInterruptedChildWithoutExitMarker = [bool]$request.allow_interrupted_child_without_exit_marker
     if ([string]::IsNullOrWhiteSpace([string]$request.executable) -or
         $timeoutMilliseconds -lt 1) {
         throw "Windows pseudoterminal host request is invalid"
+    }
+    if (-not [string]::IsNullOrEmpty($workingDirectory) -and
+        ($workingDirectory.Length -gt 32768 -or
+            -not [IO.Path]::IsPathFullyQualified($workingDirectory) -or
+            -not (Test-Path -LiteralPath $workingDirectory -PathType Container))) {
+        throw "Windows pseudoterminal working directory is invalid"
     }
     if ($inputChunks.Count -gt 64) {
         throw "Windows pseudoterminal input exceeds the 64 chunk limit"
@@ -127,6 +134,7 @@ namespace Nib.WindowsPseudoTerminal {
     $childRequest = @{
         executable = [string]$request.executable
         arguments = @($arguments)
+        working_directory = $workingDirectory
     } | ConvertTo-Json -Compress
     $encodedChildRequest = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($childRequest)

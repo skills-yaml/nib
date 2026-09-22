@@ -385,13 +385,16 @@ curator_enabled = false
             Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
                 ForEach-Object { $_.FullName }
         )
-        $quotedGoal = Quote-NibPowerShellLiteral $interruptCase.Goal
-        $yesArgument = if ($interruptCase.Yes) { " --yes" } else { "" }
-        $oneShotCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary run $quotedGoal --provider mock --model mock-model --max-steps 5$yesArgument; exit `$LASTEXITCODE"
+        $oneShotArguments = @(
+            "run", $interruptCase.Goal,
+            "--provider", "mock", "--model", "mock-model", "--max-steps", "5"
+        )
+        if ($interruptCase.Yes) { $oneShotArguments += "--yes" }
         $activeStage = "one-shot-interrupt-$($interruptCase.Label)"
         $oneShotResult = Invoke-WindowsPseudoTerminal `
-            -Executable $pwshPath `
-            -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $oneShotCommand) `
+            -Executable $binaryPath `
+            -Arguments $oneShotArguments `
+            -WorkingDirectory $fixture `
             -InputChunks @(
                 # Attach to the ConPTY-backed console and generate the native Windows
                 # Ctrl+C control event; raw ETX input is not accepted as evidence.
@@ -410,21 +413,23 @@ curator_enabled = false
             -AllowInterruptedChildWithoutExitMarker
         $lastInterruptResult = $oneShotResult
         $oneShotOutputs[$interruptCase.Label] = $oneShotResult.Output
+        $newInterruptSessions = @(
+            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+                Where-Object { $sessionsBeforeInterrupt -notcontains $_.FullName }
+        )
+        if ($newInterruptSessions.Count -eq 1) {
+            $lastInterruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
+        }
         if ($oneShotResult.ExitCode -eq 0 -or
             -not $oneShotResult.ConsoleModesRestored -or
             -not $oneShotResult.ChildConsoleModesRestored -or
             -not $oneShotResult.Output.Contains("Run cancelled.")) {
             throw "Windows one-shot Ctrl+C did not reconcile $($interruptCase.Goal)"
         }
-        $newInterruptSessions = @(
-            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
-                Where-Object { $sessionsBeforeInterrupt -notcontains $_.FullName }
-        )
         if ($newInterruptSessions.Count -ne 1) {
             throw "Windows one-shot Ctrl+C did not create one isolated session for $($interruptCase.Label)"
         }
-        $interruptSessionText = Get-Content -LiteralPath $newInterruptSessions[0].FullName -Raw
-        $lastInterruptSessionText = $interruptSessionText
+        $interruptSessionText = $lastInterruptSessionText
         $interruptSession = $interruptSessionText | ConvertFrom-Json
         $expectedStageEvent = $interruptSession.events |
             Where-Object { $_.kind -eq $interruptCase.ExpectedEvent } |
