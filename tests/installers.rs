@@ -377,9 +377,8 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(!windows_script.contains("curl"));
     assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));
     assert!(windows_pty.contains("allow_interrupted_child_without_exit_marker"));
-    assert!(windows_pty_host.contains(
-        "$inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3"
-    ));
+    assert!(windows_pty_host
+        .contains("$inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3"));
     assert!(windows_pty_host.contains(
         "$markerMatches.Count -eq 0 -and\n            $allowInterruptedChildWithoutExitMarker -and\n            $output.Contains(\"Run cancelled.\")"
     ));
