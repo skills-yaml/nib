@@ -255,7 +255,11 @@ curator_enabled = false
         -InputChunks @(
             [pscustomobject]@{ Text = ":command /status`r`n"; WaitForOutput = "Answer (number or text):" },
             [pscustomobject]@{ Text = "2`r`n`r`n"; WaitForOutput = "Configured approval preset:" },
-            [pscustomobject]@{ Text = "/quit`r`n"; WaitForOutput = "You> " }
+            # ConPTY may divide the trailing prompt across incremental reads. The
+            # lifecycle event is emitted only after the modal answer has been
+            # consumed and the one-shot run has reconciled, so it is the stable
+            # synchronization point before returning to the interactive prompt.
+            [pscustomobject]@{ Text = "/quit`r`n"; WaitForOutput = "[stream ended] completed"; DelayMilliseconds = 200 }
         ) `
         -TimeoutMilliseconds 60000
     if ($plainQuestionResult.ExitCode -ne 0 -or
@@ -263,6 +267,18 @@ curator_enabled = false
         -not $plainQuestionResult.ChildConsoleModesRestored -or
         -not $plainQuestionResult.Output.Contains('"answer":"full"')) {
         throw "Windows plain :command smoke did not preserve and answer the pending question"
+    }
+    $plainQuestionSessions = @(
+        Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+            Where-Object {
+                $text = Get-Content -LiteralPath $_.FullName -Raw
+                $text.Contains("ask a question before continuing") -and
+                $text.Contains('"answer": "full"') -and
+                $text.Contains('"outcome": "completed"')
+            }
+    )
+    if ($plainQuestionSessions.Count -ne 1) {
+        throw "Windows plain :command smoke did not persist the exact answer and completed outcome"
     }
 
     $env:TERM = "dumb"
