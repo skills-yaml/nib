@@ -3,6 +3,72 @@ use std::sync::Arc;
 
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 
+#[cfg(windows)]
+mod one_shot_interrupt {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
+
+    static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "system" fn control_handler(control_type: u32) -> i32 {
+        if control_type == CTRL_C_EVENT {
+            CTRL_C_RECEIVED.store(true, Ordering::Release);
+            1
+        } else {
+            0
+        }
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install() -> Result<Self, String> {
+            CTRL_C_RECEIVED.store(false, Ordering::Release);
+            // SAFETY: the handler is a process-lifetime static function and performs
+            // only an async-signal-safe atomic store. This one-shot process owns the
+            // registration until the returned guard is dropped.
+            if unsafe { SetConsoleCtrlHandler(Some(control_handler), 1) } == 0 {
+                return Err(format!(
+                    "failed to register the Windows Ctrl+C handler: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(Self)
+        }
+
+        pub(super) async fn received(&self) {
+            while !CTRL_C_RECEIVED.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // SAFETY: this removes the exact static handler installed by `install`.
+            unsafe {
+                SetConsoleCtrlHandler(Some(control_handler), 0);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod one_shot_interrupt {
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install() -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        pub(super) async fn received(&self) {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 const MAX_RUN_GOAL_BYTES: usize = 20_000;
 const MAX_RUN_ANSWER_BYTES: usize = 64 * 1024;
 
@@ -117,6 +183,10 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     let worker_project = project.clone();
     let worker_session_id = sid.clone();
     let worker_goal = args.goal.clone();
+    // Install before the runtime can publish a prompt. On Windows, delaying
+    // registration until an async signal task is first scheduled leaves a native
+    // Ctrl+C race in which the OS default handler terminates the process abruptly.
+    let interrupt = one_shot_interrupt::Guard::install()?;
     let result = nib::agent::block_on_agent_runtime_worker(
         &rt,
         async move {
@@ -138,15 +208,10 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
                 &worker_goal,
                 loop_cfg,
             ));
-            // Poll signal registration before agent execution. A detached signal
-            // task can lose the first Windows console event if the run reaches a
-            // blocking prompt before that task is scheduled for its initial poll.
             let result = tokio::select! {
                 biased;
-                signal = tokio::signal::ctrl_c() => {
-                    if signal.is_ok() {
-                        cancel.cancel();
-                    }
+                _ = interrupt.received() => {
+                    cancel.cancel();
                     running.await
                 }
                 result = &mut running => result,
