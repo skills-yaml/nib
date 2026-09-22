@@ -104,6 +104,11 @@ function Invoke-WindowsPseudoTerminal {
         } else {
             [string[]]@($chunk.WaitForFileContents)
         }
+        $nativeCtrlC = if ($null -eq $chunk.PSObject.Properties["NativeCtrlC"]) {
+            $false
+        } else {
+            [bool]$chunk.NativeCtrlC
+        }
         if ([Text.Encoding]::UTF8.GetByteCount($waitForOutput) -gt 4096) {
             throw "Windows pseudoterminal prompt exceeds 4096 bytes"
         }
@@ -124,6 +129,9 @@ function Invoke-WindowsPseudoTerminal {
         if ($chunkBytes -gt 4096) {
             throw "Windows pseudoterminal input chunk exceeds 4096 bytes"
         }
+        if ($nativeCtrlC -and -not [string]::IsNullOrEmpty($text)) {
+            throw "Native Windows Ctrl+C input cannot include text"
+        }
         if ($delayMilliseconds -lt 0 -or $delayMilliseconds -gt 10000) {
             throw "Windows pseudoterminal input delay is outside 0..10000 milliseconds"
         }
@@ -141,6 +149,7 @@ function Invoke-WindowsPseudoTerminal {
             wait_for_output = $waitForOutput
             wait_for_directory = $waitForDirectory
             wait_for_file_contents = @($waitForFileContents)
+            native_ctrl_c = $nativeCtrlC
         })
     }
 

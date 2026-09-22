@@ -5,6 +5,55 @@ $ErrorActionPreference = "Stop"
 
 try {
     . (Join-Path $PSScriptRoot "windows-pseudoterminal-output.ps1")
+    if ($null -eq ("Nib.WindowsPseudoTerminal.ConsoleControl" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace Nib.WindowsPseudoTerminal {
+    public static class ConsoleControl {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FreeConsole();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AttachConsole(uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GenerateConsoleCtrlEvent(uint controlEvent, uint processGroupId);
+
+        public static void SendCtrlC(uint processId) {
+            FreeConsole();
+            if (!AttachConsole(processId)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to attach to the pseudoterminal child console");
+            }
+            try {
+                // The signal host shares the console only long enough to generate
+                // the event and must not terminate itself when Windows broadcasts it.
+                if (!SetConsoleCtrlHandler(IntPtr.Zero, true)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to ignore Ctrl+C in the signal host");
+                }
+                if (!GenerateConsoleCtrlEvent(0, 0)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to generate native Windows Ctrl+C");
+                }
+                Thread.Sleep(100);
+            } finally {
+                FreeConsole();
+                SetConsoleCtrlHandler(IntPtr.Zero, false);
+            }
+        }
+    }
+}
+'@
+    }
     $encodedRequest = $env:NIB_WINDOWS_PTY_REQUEST
     Remove-Item Env:NIB_WINDOWS_PTY_REQUEST -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace($encodedRequest)) {
@@ -27,7 +76,7 @@ try {
         throw "Windows pseudoterminal input exceeds the 64 chunk limit"
     }
     if ($allowInterruptedChildWithoutExitMarker -and
-        ($inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3)) {
+        ($inputChunks.Count -ne 1 -or -not [bool]$inputChunks[0].native_ctrl_c)) {
         throw "Missing-exit interruption qualification requires one native Ctrl+C input"
     }
     $totalInputBytes = 0
@@ -38,6 +87,7 @@ try {
         $promptBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.wait_for_output)
         $waitForDirectory = [string]$chunk.wait_for_directory
         $waitForFileContents = [string[]]@($chunk.wait_for_file_contents)
+        $nativeCtrlC = [bool]$chunk.native_ctrl_c
         if ($chunkBytes -gt 4096 -or
             $promptBytes -gt 4096 -or
             [Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
@@ -51,6 +101,9 @@ try {
                 [Text.Encoding]::UTF8.GetByteCount($expectedFileContent) -gt 4096) {
                 throw "Windows pseudoterminal durable wait text is invalid"
             }
+        }
+        if ($nativeCtrlC -and -not [string]::IsNullOrEmpty([string]$chunk.text)) {
+            throw "Native Windows Ctrl+C input cannot include text"
         }
         if ([string]::IsNullOrWhiteSpace($waitForDirectory) -ne
             ($waitForFileContents.Count -eq 0)) {
@@ -82,6 +135,7 @@ try {
     # Keep marker plus compact mode evidence below the configured console width so
     # conhost cannot visually wrap the Base64 payload.
     $modeMarker = "NM_$([guid]::NewGuid().ToString('N')):"
+    $processMarker = "NP_$([guid]::NewGuid().ToString('N')):"
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $conhostPath
@@ -105,6 +159,7 @@ try {
     $startInfo.Environment["NIB_WINDOWS_PTY_CHILD_REQUEST"] = $encodedChildRequest
     $startInfo.Environment["NIB_WINDOWS_PTY_EXIT_MARKER"] = $exitMarker
     $startInfo.Environment["NIB_WINDOWS_PTY_MODE_MARKER"] = $modeMarker
+    $startInfo.Environment["NIB_WINDOWS_PTY_PROCESS_MARKER"] = $processMarker
 
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -142,12 +197,30 @@ try {
             if ($remainingMilliseconds -lt 1) {
                 throw "The Windows pseudoterminal child exceeded its timeout"
             }
-            $writeTask = $process.StandardInput.WriteAsync([string]$chunk.text)
-            if (-not $writeTask.Wait($remainingMilliseconds)) {
-                throw "Timed out while writing Windows pseudoterminal input"
+            if ([bool]$chunk.native_ctrl_c) {
+                Wait-NibWindowsPseudoTerminalOutput `
+                    -Capture $stdoutCapture `
+                    -Expected $processMarker `
+                    -Stopwatch $stopwatch `
+                    -TimeoutMilliseconds $timeoutMilliseconds
+                $processMatches = [regex]::Matches(
+                    $stdoutCapture.Text,
+                    [regex]::Escape($processMarker) + "(?<pid>[0-9]+)"
+                )
+                if ($processMatches.Count -ne 1) {
+                    throw "Windows pseudoterminal child did not report one process marker"
+                }
+                [Nib.WindowsPseudoTerminal.ConsoleControl]::SendCtrlC(
+                    [uint32]$processMatches[0].Groups["pid"].Value
+                )
+            } else {
+                $writeTask = $process.StandardInput.WriteAsync([string]$chunk.text)
+                if (-not $writeTask.Wait($remainingMilliseconds)) {
+                    throw "Timed out while writing Windows pseudoterminal input"
+                }
+                $writeTask.GetAwaiter().GetResult() | Out-Null
+                $process.StandardInput.Flush()
             }
-            $writeTask.GetAwaiter().GetResult() | Out-Null
-            $process.StandardInput.Flush()
         }
         # Keep the headless-console input pipe open until the console child exits.
         # conhost treats pipe EOF as terminal closure, so closing it here races a
@@ -217,6 +290,11 @@ try {
         $capturedOutput = [regex]::Replace(
             $capturedOutput,
             $modePattern + "\r?\n?",
+            ""
+        )
+        $capturedOutput = [regex]::Replace(
+            $capturedOutput,
+            [regex]::Escape($processMarker) + "[0-9]+\r?\n?",
             ""
         )
     } finally {

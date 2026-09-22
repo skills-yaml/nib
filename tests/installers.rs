@@ -355,6 +355,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
         "WaitForDirectory = $sessionDirectory",
         "WaitForFileContents = @(",
+        "NativeCtrlC = $true",
         "$_.details.outcome -eq \"cancelled_by_user\"",
         "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
         "\"stage=$activeStage\"",
@@ -389,7 +390,9 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(windows_pty.contains("wait_for_file_contents"));
     assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalFileContents"));
     assert!(windows_pty_host
-        .contains("$inputChunks.Count -ne 1 -or [string]$inputChunks[0].text -ne [string][char]3"));
+        .contains("$inputChunks.Count -ne 1 -or -not [bool]$inputChunks[0].native_ctrl_c"));
+    assert!(windows_pty_host.contains("GenerateConsoleCtrlEvent"));
+    assert!(windows_pty_host.contains("ConsoleControl]::SendCtrlC"));
     assert!(windows_pty_host.contains(
         "$markerMatches.Count -eq 0 -and\n            $allowInterruptedChildWithoutExitMarker -and\n            $output.Contains(\"Run cancelled.\")"
     ));
@@ -635,6 +638,8 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input"));
     assert!(windows_pty_test.contains("test-windows-pseudoterminal-output.ps1"));
     assert!(windows_pty_test.contains("NIB_PROMPT_INPUT_COMPLETE"));
+    assert!(windows_pty_test.contains("NIB_NATIVE_CTRL_C_RECEIVED"));
+    assert!(windows_pty_test.contains("NativeCtrlC = $true"));
     assert!(windows_pty_test.contains("NIB_ABSENT_PROMPT"));
     assert!(windows_pty_test.contains("ChildConsoleModesRestored"));
     assert!(windows_pty_test.contains("NibConsoleModeEvidence"));

@@ -8,12 +8,32 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class NibPseudoTerminalChildModes {
+    public delegate bool ConsoleCtrlHandler(uint controlType);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr GetStdHandle(int handleKind);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
+
+    private static readonly ConsoleCtrlHandler ctrlCShield = HandleConsoleControl;
+
+    private static bool HandleConsoleControl(uint controlType) {
+        return controlType == 0;
+    }
+
+    public static bool InstallCtrlCShield() {
+        return SetConsoleCtrlHandler(ctrlCShield, true);
+    }
+
+    public static void RemoveCtrlCShield() {
+        SetConsoleCtrlHandler(ctrlCShield, false);
+    }
 }
 '@
 
@@ -55,12 +75,15 @@ try {
     $encodedRequest = $env:NIB_WINDOWS_PTY_CHILD_REQUEST
     $exitMarker = $env:NIB_WINDOWS_PTY_EXIT_MARKER
     $modeMarker = $env:NIB_WINDOWS_PTY_MODE_MARKER
+    $processMarker = $env:NIB_WINDOWS_PTY_PROCESS_MARKER
     Remove-Item Env:NIB_WINDOWS_PTY_CHILD_REQUEST -ErrorAction SilentlyContinue
     Remove-Item Env:NIB_WINDOWS_PTY_EXIT_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:NIB_WINDOWS_PTY_MODE_MARKER -ErrorAction SilentlyContinue
+    Remove-Item Env:NIB_WINDOWS_PTY_PROCESS_MARKER -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace($encodedRequest) -or
         [string]::IsNullOrWhiteSpace($exitMarker) -or
-        [string]::IsNullOrWhiteSpace($modeMarker)) {
+        [string]::IsNullOrWhiteSpace($modeMarker) -or
+        [string]::IsNullOrWhiteSpace($processMarker)) {
         throw "Windows pseudoterminal child request is missing"
     }
 
@@ -74,6 +97,10 @@ try {
     }
 
     $consoleModesBefore = Get-NibPseudoTerminalChildModes
+    if (-not [NibPseudoTerminalChildModes]::InstallCtrlCShield()) {
+        throw "Unable to protect the pseudoterminal adapter from child Ctrl+C"
+    }
+    [Console]::Out.WriteLine("$processMarker$PID")
     try {
         & ([string]$request.executable) @arguments
         $childExitCode = [int]$LASTEXITCODE
@@ -91,6 +118,7 @@ try {
             [Text.Encoding]::UTF8.GetBytes($modeText)
         )
         [Console]::Out.WriteLine("$modeMarker$encodedModes")
+        [NibPseudoTerminalChildModes]::RemoveCtrlCShield()
     }
     [Console]::Out.WriteLine("$exitMarker$childExitCode")
     exit 0

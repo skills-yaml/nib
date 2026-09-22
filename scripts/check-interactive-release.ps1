@@ -391,10 +391,11 @@ curator_enabled = false
             -Executable $pwshPath `
             -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $oneShotCommand) `
             -InputChunks @(
-                # This byte enters through ConPTY's console-input path, where processed
-                # input delivers the native Ctrl+C console event to the foreground child.
+                # Attach to the ConPTY-backed console and generate the native Windows
+                # Ctrl+C control event; raw ETX input is not accepted as evidence.
                 [pscustomobject]@{
-                    Text = [string][char]3
+                    Text = ""
+                    NativeCtrlC = $true
                     WaitForDirectory = $sessionDirectory
                     WaitForFileContents = @(
                         ('"goal": "' + $interruptCase.Goal + '"')
