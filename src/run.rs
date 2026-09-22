@@ -121,11 +121,6 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         &rt,
         async move {
             let cancel = cancellation.clone();
-            let signal = tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel.cancel();
-                }
-            });
             let printer = tokio::spawn(async move {
                 while let Some(event) = stream_rx.recv().await {
                     if let Some(display) =
@@ -137,14 +132,25 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
                     }
                 }
             });
-            let result = nib::agent::run_agent_loop(
+            let mut running = Box::pin(nib::agent::run_agent_loop(
                 worker_project,
                 &worker_session_id,
                 &worker_goal,
                 loop_cfg,
-            )
-            .await;
-            signal.abort();
+            ));
+            // Poll signal registration before agent execution. A detached signal
+            // task can lose the first Windows console event if the run reaches a
+            // blocking prompt before that task is scheduled for its initial poll.
+            let result = tokio::select! {
+                biased;
+                signal = tokio::signal::ctrl_c() => {
+                    if signal.is_ok() {
+                        cancel.cancel();
+                    }
+                    running.await
+                }
+                result = &mut running => result,
+            };
             let _ = printer.await;
             result
         },
