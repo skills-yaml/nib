@@ -88,6 +88,24 @@ report_error() {
   local status=$?
   trap - ERR
   report_smoke_context
+  if [ -n "${NIB_INTERACTIVE_EVIDENCE_DIR:-}" ]; then
+    local failure_evidence_directory="$NIB_INTERACTIVE_EVIDENCE_DIR/$platform"
+    mkdir -p "$failure_evidence_directory" || true
+    printf '%s\n' \
+      "platform=$platform" \
+      "source_revision=$source_revision" \
+      "source_clean=$source_clean" \
+      "binary_version=$binary_version" \
+      'acceptance_eligible=false' \
+      "failed_case=$current_case" \
+      "exit_status=$status" \
+      >"$failure_evidence_directory/failure-summary.txt" || true
+    if [ -f "$fixture/$current_case.txt" ]; then
+      sed "s/${private_sentinel:-interactive-private-sentinel-q7v9k2}/[fixture-secret]/g" \
+        "$fixture/$current_case.txt" \
+        >"$failure_evidence_directory/$current_case-failure.txt" || true
+    fi
+  fi
   if [ "${NIB_KEEP_INTERACTIVE_SMOKE_FIXTURE:-0}" = "1" ]; then
     trap - EXIT
     printf 'interactive release smoke failed in case %s near line %s; fixture retained at %s\n' \
@@ -601,7 +619,10 @@ tui_question_input() {
   printf '\033OQ'
   sleep 0.3
   printf '/status\r'
-  wait_for_pty_output "$output" 'configured preset' || return 1
+  # Full status rows are diff-rendered and can contain cursor controls within long
+  # labels on macOS. This short, unique status heading remains contiguous there.
+  wait_for_pty_output "$output" 'Verification' || return 1
+  sleep 0.3
   # Number keys type into the answer editor; Enter submits option 2 (full).
   printf '2\r'
   local session

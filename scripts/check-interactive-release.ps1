@@ -471,6 +471,23 @@ curator_enabled = false
 
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
 } catch {
+    if (-not [string]::IsNullOrWhiteSpace($env:NIB_INTERACTIVE_EVIDENCE_DIR)) {
+        $failureEvidenceDirectory = Join-Path $env:NIB_INTERACTIVE_EVIDENCE_DIR "Windows"
+        New-Item -ItemType Directory -Force -Path $failureEvidenceDirectory | Out-Null
+        $failureText = @(
+            "platform=Windows"
+            "source_revision=$sourceRevision"
+            "source_clean=$sourceClean"
+            "binary_version=$binaryVersion"
+            "acceptance_eligible=false"
+            "failure=$($_.Exception.Message)"
+        ) -join "`n"
+        [IO.File]::WriteAllText(
+            (Join-Path $failureEvidenceDirectory "failure-summary.txt"),
+            $failureText.Replace($privateSentinel, "[fixture-secret]") + "`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
     $hostDiagnostics = [string]$_.Exception.Data["NibHostDiagnostics"]
     if (-not [string]::IsNullOrWhiteSpace($hostDiagnostics)) {
         # This fixture has one explicit secret sentinel; never print it in errors.
