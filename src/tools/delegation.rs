@@ -17854,13 +17854,15 @@ mod tests {
             panic!("released direct cancellation must reconcile successfully: {resolved:?}");
         };
         assert_eq!(record.status, "cancelled");
-        assert_eq!(
+        // A clean first cleanup never sets this optional recovery marker;
+        // only a retry after a recorded cleanup error writes explicit false.
+        assert_ne!(
             record
                 .result
                 .as_ref()
                 .and_then(|result| result.get("cleanup_unverified"))
                 .and_then(Value::as_bool),
-            Some(false)
+            Some(true)
         );
         assert!(!owner_lease_path(root.path(), &lease_id)
             .expect("visible owner lease")

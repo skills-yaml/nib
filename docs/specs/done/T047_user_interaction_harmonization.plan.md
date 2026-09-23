@@ -414,3 +414,8 @@ expected fail-closed cleanup error, and the subsequent retained-quarantine and
 single-audit assertions remain unchanged. The holder's own budget is thirty
 seconds, safely beyond that expected ten-second wait; the exact fixture is now
 part of `task test:delegation` so this relationship is checked during iteration.
+The next hosted Linux run exposed a distinct direct-cancellation test assumption:
+successful first-attempt owner cleanup leaves the optional `cleanup_unverified`
+marker absent, while successful retry after an error writes explicit `false`.
+The fixture now rejects `true` in either valid path and still requires both owner
+lease artifacts to be gone; the exact case is also pinned in `task test:delegation`.
