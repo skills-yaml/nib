@@ -18174,6 +18174,8 @@ mod tests {
 
     #[test]
     fn dead_anchor_only_record_without_process_scope_requires_recovery() {
+        #[cfg(windows)]
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         crate::session::SessionStore::for_project(root.path())
             .expect("session store")
@@ -18255,6 +18257,8 @@ mod tests {
 
     #[tokio::test]
     async fn contradictory_terminal_record_and_manager_states_fail_closed() {
+        #[cfg(windows)]
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         let completed_id = format!("sub-terminal-cancelled-{}", uuid::Uuid::new_v4());
         let completed = record_fixture(root.path(), &completed_id, "completed");
@@ -18518,7 +18522,7 @@ mod tests {
         let error = update_subagent_record_until(
             &project_root,
             "expired-reconciliation-write",
-            Some(Instant::now() + Duration::from_millis(100)),
+            Some(Instant::now() + Duration::from_secs(2)),
             |record| {
                 record.status = "failed".to_string();
                 record.error = Some("must not publish".to_string());
@@ -18739,7 +18743,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let paused_namespace = subagent_namespace_snapshot(&records_dir(root.path()));
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(2_100));
         std::fs::write(&resume, b"resume").expect("resume bounded record writer");
 
         let status = child.wait().expect("wait for bounded record writer child");

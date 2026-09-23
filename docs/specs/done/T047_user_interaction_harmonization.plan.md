@@ -428,3 +428,15 @@ other plain PTY inputs also wait for `Goodbye.` after `/quit` so their assertion
 cannot pass on a partially processed input stream. This is harness
 determinism, not an application behavior change; exact-revision hosted
 qualification is still required after this correction.
+The next Windows full suite exposed three more fixture deadlines rather than a
+native interaction failure. The bounded-record child had only 100 ms to reach
+its injected precommit pause and could return a valid deadline error before
+the pause was installed. Its setup budget is now two seconds, and the parent
+holds the observed pause past that deadline before checking that no record or
+transaction artifact was published. Two cancellation fixtures used the shared
+250 ms test-only reconciliation budget; on hosted Windows this expired during
+legacy-lock migration before their intended dead-anchor or contradictory-state
+assertions. Those exact fixtures now use the existing ten-second Windows test
+budget without changing the production four-second reconciliation bound. All
+three are pinned in `task test:delegation`; exact-revision hosted qualification
+remains the completion gate.
