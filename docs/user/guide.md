@@ -562,8 +562,9 @@ the current project; it does not split the interface into separate coding and wo
 personas. Historical sessions are not a permanent pane. The first row shows the
 working directory and git branch on the left and the current model plus context
 usage on the right. The last row shows the command approval mode and the agent
-mode (`idle`, `execute`, `plan`, or `compact`). While an approval list is open the
-footer still keeps those fields and reads `WAITING APPROVAL` with the Y/N keys.
+mode (`idle`, `execute`, `plan`, or `compact`). While an approval is open the
+footer still keeps those fields and reads `WAITING APPROVAL`. A command approval
+uses Enter to confirm the highlighted row and Esc to cancel.
 `/status` retains the full session, transport, worktree path, context, and
 effective-permission diagnostics. If a requested session is missing, the
 ledger shows a shortened recovery notice instead of silently presenting its replacement.
@@ -582,8 +583,11 @@ you can follow the multi-step work. `/plan` still shows the full list. Execution
 continues without waiting for you to approve the plan. nib asks only when the
 request is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
-options. The composer states what nib wants to do and shows the command or path;
-`Approve once`, `Deny`, and `View details` sit under the input, with Deny focused first.
+options. A command approval asks whether to run the exact command. Yes is highlighted.
+The next row remembers that exact command for this project. No asks what to do
+differently. Enter confirms the highlighted row. `y` and `p` confirm only when that
+row is already highlighted. Esc cancels and does not run the command. Other tool
+approvals still start on Deny, with `Approve once`, `Deny`, and `View details`.
 The details view shows the bounded redacted command, patch, or validated arguments;
 scroll with Up/Down and press Escape to return without deciding. Type
 `y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.

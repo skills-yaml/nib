@@ -57,6 +57,61 @@ struct ResolvedExecutionConfig {
     instruction_posture: InstructionExecutionPosture,
 }
 
+struct CommandPresentation {
+    environment: String,
+    shown_command: Option<String>,
+    extras: Vec<String>,
+    remember_exact: Option<String>,
+    offer_grant: bool,
+}
+
+fn command_presentation(
+    call: &ToolCall,
+    secrets: &[String],
+    environment: &str,
+    allow_remember: bool,
+) -> CommandPresentation {
+    if call.tool_name != "run_terminal" {
+        return CommandPresentation {
+            environment: String::new(),
+            shown_command: None,
+            extras: Vec::new(),
+            remember_exact: None,
+            offer_grant: true,
+        };
+    }
+    let Some(invocation) = crate::interaction_card::terminal_invocation(call) else {
+        return CommandPresentation {
+            environment: environment.to_string(),
+            shown_command: Some(String::new()),
+            extras: Vec::new(),
+            remember_exact: None,
+            offer_grant: false,
+        };
+    };
+    let shown = crate::interactive::control_safe_text(
+        &redact_text_with_encoded_secrets_with_limit(
+            &invocation.command,
+            secrets,
+            MAX_APPROVAL_DETAIL_INPUT_BYTES,
+        ),
+        true,
+    );
+    let offer_grant =
+        shown == invocation.command && !shown.contains("[REDACTED]") && !shown.trim().is_empty();
+    let remember_exact = (allow_remember
+        && offer_grant
+        && crate::interaction_card::command_can_be_remembered(&invocation.command))
+    .then(|| invocation.command.clone());
+    CommandPresentation {
+        environment: environment.to_string(),
+        shown_command: Some(shown),
+        extras: crate::interaction_card::command_extra_lines(&invocation),
+        remember_exact,
+        offer_grant,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalContext {
     pub action: String,
@@ -71,11 +126,21 @@ pub struct ApprovalContext {
     pub reason: String,
     pub choices: String,
     pub details: Vec<String>,
+    /// `local` or `sandbox` for a command card. Empty for other tools.
+    pub command_environment: String,
+    /// Redacted command text. `None` when this approval is not `run_terminal`.
+    pub shown_command: Option<String>,
+    pub command_extras: Vec<String>,
+    /// Exact command that option 2 may remember. Absent when remembering is unsafe.
+    pub remember_exact: Option<String>,
+    pub offer_grant: bool,
+    pub input_error: Option<String>,
 }
 
 impl ApprovalContext {
     pub fn compatibility(call: &ToolCall, level: PermissionLevel) -> Self {
         let (display_subject, display_location) = normalized_approval_display(call, &[]);
+        let command = command_presentation(call, &[], "local", true);
         Self {
             action: normalized_approval_action(call, &[]),
             display_subject,
@@ -87,6 +152,12 @@ impl ApprovalContext {
             reason: "interactive approval requested".to_string(),
             choices: "approve once or deny".to_string(),
             details: approval_invocation_details(call, &[]),
+            command_environment: command.environment,
+            shown_command: command.shown_command,
+            command_extras: command.extras,
+            remember_exact: command.remember_exact,
+            offer_grant: command.offer_grant,
+            input_error: None,
         }
     }
 
@@ -658,6 +729,70 @@ impl ApprovalHandler for StdinApprovalHandler {
 
 impl StdinApprovalHandler {
     async fn prompt(&self, context: &ApprovalContext) -> ApprovalDecision {
+        if let Some(command) = context.shown_command.as_deref() {
+            let environment = if context.command_environment.is_empty() {
+                "local"
+            } else {
+                context.command_environment.as_str()
+            };
+            let card = crate::interaction_card::command_approval_card(
+                environment,
+                &context.reason,
+                command,
+                &context.command_extras,
+                context.remember_exact.as_deref(),
+                0,
+                false,
+            );
+            eprintln!("\n{}", card.text);
+            if let Some(error) = &context.input_error {
+                eprintln!("{error}");
+            }
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+            loop {
+                eprint!("> ");
+                let _ = io::stderr().flush();
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_err() {
+                    return ApprovalDecision::denied_input_closed();
+                }
+                match crate::interaction_card::plain_command_line(&card.rows, &line) {
+                    crate::interaction_card::PlainCommandLine::Retry(message) => {
+                        eprintln!("{message}");
+                    }
+                    crate::interaction_card::PlainCommandLine::GrantOnce => {
+                        return ApprovalDecision::granted_user();
+                    }
+                    crate::interaction_card::PlainCommandLine::Remember => {
+                        let Some(exact) = context.remember_exact.clone() else {
+                            eprintln!("this command cannot be remembered");
+                            continue;
+                        };
+                        return ApprovalDecision::granted_remembered(exact);
+                    }
+                    crate::interaction_card::PlainCommandLine::Deny => {
+                        return ApprovalDecision::denied();
+                    }
+                    crate::interaction_card::PlainCommandLine::NeedReason => {
+                        eprint!("Reason to record: ");
+                        let _ = io::stderr().flush();
+                        let mut reason = String::new();
+                        if reader.read_line(&mut reason).await.is_err() {
+                            return ApprovalDecision::denied_input_closed();
+                        }
+                        let reason = reason.trim();
+                        if reason.is_empty() {
+                            return ApprovalDecision::denied();
+                        }
+                        if reason.len() > 240 {
+                            eprintln!("Input error: the reason is too long");
+                            continue;
+                        }
+                        return ApprovalDecision::denied_with_reason(reason.to_string());
+                    }
+                }
+            }
+        }
         eprintln!("\nApproval required\n{}", context.render());
         eprint!("Approve? [y/N]: ");
         let _ = io::stderr().flush();
@@ -988,6 +1123,25 @@ impl ToolExecutor {
         {
             return false;
         }
+        if call.tool_name == "run_terminal" {
+            let presentation = command_presentation(
+                call,
+                &normalized_encoded_sensitive_values(self.redaction_secrets()),
+                "local",
+                false,
+            );
+            if !presentation.offer_grant {
+                return false;
+            }
+            if let Some(invocation) = crate::interaction_card::terminal_invocation(call) {
+                if crate::interaction_card::matching_remembered_invocation(
+                    &self.project_root,
+                    &invocation,
+                ) {
+                    return false;
+                }
+            }
+        }
         if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
             || risk == ToolRisk::ReadOnly
             || (call.tool_name == "run_terminal"
@@ -1219,11 +1373,21 @@ impl ToolExecutor {
             )
             .await;
         if !approval.granted {
+            let message = match approval.note.as_deref() {
+                Some(reason)
+                    if approval.source == "denied"
+                        && reason != "User denied"
+                        && !reason.is_empty() =>
+                {
+                    format!("Approval denied: {reason}")
+                }
+                _ => "Approval denied".to_string(),
+            };
             return self.finish_failure(
                 &call,
                 effective_session,
                 start,
-                "Approval denied".to_string(),
+                message,
                 approval,
                 level,
                 risk,
@@ -1828,11 +1992,16 @@ impl ToolExecutor {
         if let Some(decision) = self.approval_handler.approval_ceiling(call, level, risk) {
             return decision;
         }
+        if let Some(decision) =
+            self.refuse_hidden_or_closed_command(call, effective_execution_config)
+        {
+            return decision;
+        }
         if let Some(rule) = evaluations
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
         {
-            let context = self.approval_context(
+            let mut context = self.approval_context(
                 call,
                 level,
                 risk,
@@ -1842,11 +2011,12 @@ impl ToolExecutor {
                 session_id,
                 &format!("project or tool policy requires approval: {}", rule.reason),
             );
-            let mut decision = self
-                .approval_handler
-                .handle_approval_with_context(call, level, &context)
-                .await;
-            decision.note = Some(rule.reason.clone());
+            context.remember_exact = None;
+            let mut decision = self.prompt_approval(call, level, context).await;
+            decision.remember_command = None;
+            if decision.note.as_deref() == Some("User denied") || decision.note.is_none() {
+                decision.note = Some(rule.reason.clone());
+            }
             return decision;
         }
         if let Some(rule) = evaluations
@@ -1857,7 +2027,11 @@ impl ToolExecutor {
                 granted: true,
                 source: "policy".to_string(),
                 note: Some(rule.reason.clone()),
+                remember_command: None,
             };
+        }
+        if let Some(decision) = self.remembered_command_grant(call) {
+            return decision;
         }
 
         if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
@@ -1893,9 +2067,93 @@ impl ToolExecutor {
             session_id,
             "effective tool metadata and risk classification require interactive approval",
         );
-        self.approval_handler
-            .handle_approval_with_context(call, level, &context)
-            .await
+        self.prompt_approval(call, level, context).await
+    }
+
+    fn refuse_hidden_or_closed_command(
+        &self,
+        call: &ToolCall,
+        config: &ExecutionConfig,
+    ) -> Option<ApprovalDecision> {
+        if call.tool_name != "run_terminal" {
+            return None;
+        }
+        let presentation = command_presentation(
+            call,
+            &normalized_encoded_sensitive_values(self.redaction_secrets()),
+            "local",
+            false,
+        );
+        if !presentation.offer_grant {
+            return Some(ApprovalDecision::denied_unshowable());
+        }
+        match crate::sandbox::resolve_sandbox_execution_route(
+            &config.provider,
+            &config.default_profile,
+            &config.boundaries,
+        ) {
+            crate::sandbox::SandboxExecutionRoute::FailClosed(error) => {
+                Some(ApprovalDecision::denied_by_policy(error))
+            }
+            crate::sandbox::SandboxExecutionRoute::Direct
+            | crate::sandbox::SandboxExecutionRoute::Bwrap => None,
+        }
+    }
+
+    fn remembered_command_grant(&self, call: &ToolCall) -> Option<ApprovalDecision> {
+        let invocation = crate::interaction_card::terminal_invocation(call)?;
+        if !crate::interaction_card::command_can_be_remembered(&invocation.command) {
+            return None;
+        }
+        crate::interaction_card::matching_remembered_invocation(&self.project_root, &invocation)
+            .then(|| ApprovalDecision {
+                granted: true,
+                source: "command_prefix".to_string(),
+                note: Some("remembered command".to_string()),
+                remember_command: None,
+            })
+    }
+
+    async fn prompt_approval(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        mut context: ApprovalContext,
+    ) -> ApprovalDecision {
+        loop {
+            let decision = self
+                .approval_handler
+                .handle_approval_with_context(call, level, &context)
+                .await;
+            let Some(command) = decision.remember_command.clone() else {
+                return decision;
+            };
+            if !decision.granted || context.remember_exact.as_deref() != Some(command.as_str()) {
+                let mut decision = decision;
+                decision.remember_command = None;
+                return decision;
+            }
+            let Some(invocation) = crate::interaction_card::terminal_invocation(call) else {
+                return ApprovalDecision::denied_unshowable();
+            };
+            if invocation.command != command {
+                return ApprovalDecision::denied_unshowable();
+            }
+            match crate::interaction_card::remember_invocation(&self.project_root, &invocation) {
+                Ok(()) => {
+                    return ApprovalDecision {
+                        granted: true,
+                        source: "command_prefix".to_string(),
+                        note: Some("remembered command".to_string()),
+                        remember_command: None,
+                    };
+                }
+                Err(_) => {
+                    context.input_error =
+                        Some("Input error: the command prefix was not saved".to_string());
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1919,6 +2177,16 @@ impl ToolExecutor {
             "not required for this action"
         };
         let (display_subject, display_location) = normalized_approval_display(call, &secrets);
+        let environment = match crate::sandbox::resolve_sandbox_execution_route(
+            &effective_execution_config.provider,
+            &effective_execution_config.default_profile,
+            &effective_execution_config.boundaries,
+        ) {
+            crate::sandbox::SandboxExecutionRoute::Bwrap => "sandbox",
+            crate::sandbox::SandboxExecutionRoute::Direct
+            | crate::sandbox::SandboxExecutionRoute::FailClosed(_) => "local",
+        };
+        let command = command_presentation(call, &secrets, environment, true);
         ApprovalContext {
             action: normalized_approval_action(call, &secrets),
             display_subject,
@@ -1936,6 +2204,12 @@ impl ToolExecutor {
             reason: bounded_approval_field(reason, &secrets),
             choices: "approve once or deny".to_string(),
             details: approval_invocation_details(call, &secrets),
+            command_environment: command.environment,
+            shown_command: command.shown_command,
+            command_extras: command.extras,
+            remember_exact: command.remember_exact,
+            offer_grant: command.offer_grant,
+            input_error: None,
         }
     }
 
@@ -3394,14 +3668,19 @@ mod tests {
                 Some("approval-session"),
             )
             .await;
-        assert!(decision.granted);
-        assert_eq!(decision.source, "user");
-        let context = capture
-            .context
-            .lock()
-            .expect("context lock")
-            .clone()
-            .expect("context captured");
+        assert!(!decision.granted);
+        assert_eq!(decision.source, "redaction");
+        assert!(capture.context.lock().expect("context lock").is_none());
+        let context = executor.approval_context(
+            &call,
+            PermissionLevel::Destructive,
+            ToolRisk::Destructive,
+            &target,
+            &effective,
+            true,
+            Some("approval-session"),
+            "effective tool metadata and risk classification require interactive approval",
+        );
         let rendered = context.render();
         assert!(context.display_subject.contains("[REDACTED]"));
         assert!(!context
@@ -3436,6 +3715,38 @@ mod tests {
             .lines()
             .iter()
             .all(|line| !line.chars().any(char::is_control)));
+    }
+
+    #[tokio::test]
+    async fn showable_command_preserves_approval_handler_decision() {
+        let root = tempfile::tempdir().expect("root");
+        let capture = Arc::new(ContextCapturingApprovalHandler::default());
+        let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+            .with_approval_handler(capture.clone());
+        let safe_call = ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({"command": "task test:interactive"}),
+            session_id: Some("approval-session".to_string()),
+            project_root: Some(root.path().to_path_buf()),
+        };
+        let effective = executor
+            .effective_execution_config(PermissionLevel::Destructive, ToolRisk::Destructive);
+        let decision = executor
+            .handle_approval(
+                &safe_call,
+                PermissionLevel::Destructive,
+                ToolRisk::Destructive,
+                true,
+                true,
+                root.path(),
+                &effective,
+                Some("approval-session"),
+            )
+            .await;
+        assert!(decision.granted);
+        assert_eq!(decision.source, "user");
+        assert!(capture.context.lock().expect("context lock").is_some());
     }
 
     #[tokio::test]
@@ -4118,6 +4429,7 @@ mod tests {
             granted: true,
             source: PERCENT_SECRET.to_string(),
             note: Some(format!("{BASE64_SECRET}\u{202e}")),
+            remember_command: None,
         };
 
         executor

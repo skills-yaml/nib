@@ -1428,10 +1428,56 @@ fn plain_approval_decision(line: &str) -> InteractionReduction {
     reduce_interaction(&state, InteractionInput::ApprovalAnswer(line))
 }
 
+fn complete_command_approval_line(
+    line: &str,
+    context: &nib::tools::executor::ApprovalContext,
+) -> Result<Option<nib::tools::models::ApprovalDecision>, String> {
+    let Some(command) = context.shown_command.as_deref() else {
+        return Ok(Some(
+            nib::tools::models::ApprovalDecision::denied_unshowable(),
+        ));
+    };
+    let environment = if context.command_environment.is_empty() {
+        "local"
+    } else {
+        context.command_environment.as_str()
+    };
+    let card = nib::interaction_card::command_approval_card(
+        environment,
+        &context.reason,
+        command,
+        &context.command_extras,
+        context.remember_exact.as_deref(),
+        0,
+        false,
+    );
+    match nib::interaction_card::plain_command_line(&card.rows, line) {
+        nib::interaction_card::PlainCommandLine::Retry(message) => Err(message),
+        nib::interaction_card::PlainCommandLine::GrantOnce => {
+            Ok(Some(nib::tools::models::ApprovalDecision::granted_user()))
+        }
+        nib::interaction_card::PlainCommandLine::Remember => {
+            let Some(exact) = context.remember_exact.clone() else {
+                return Err("this command cannot be remembered".to_string());
+            };
+            Ok(Some(
+                nib::tools::models::ApprovalDecision::granted_remembered(exact),
+            ))
+        }
+        nib::interaction_card::PlainCommandLine::Deny => {
+            Ok(Some(nib::tools::models::ApprovalDecision::denied()))
+        }
+        nib::interaction_card::PlainCommandLine::NeedReason => Err("REASON".to_string()),
+    }
+}
+
 fn complete_plain_approval_line(
     line: &str,
     context: &nib::tools::executor::ApprovalContext,
 ) -> Result<Option<nib::tools::models::ApprovalDecision>, String> {
+    if context.shown_command.is_some() {
+        return complete_command_approval_line(line, context);
+    }
     if line.trim().eq_ignore_ascii_case("details") {
         eprintln!("{}", context.render());
         return Ok(None);
@@ -1565,6 +1611,7 @@ fn execute_prepared_agent_step(
         let mut buffered_modal_line: Option<String> = None;
         let mut input_open = true;
         let mut quit_requested = false;
+        let mut awaiting_command_reason = false;
 
         loop {
             tokio::select! {
@@ -1584,8 +1631,30 @@ fn execute_prepared_agent_step(
                 }
                 Some(prompt) = approval_rx.recv(), if pending_approval.is_none() => {
                     if input_open {
-                        eprintln!("\nApproval required\n{}", prompt.context.render());
-                        eprint!("Approve? [y/N]: ");
+                        if prompt.context.shown_command.is_some() {
+                            let environment = if prompt.context.command_environment.is_empty() {
+                                "local"
+                            } else {
+                                prompt.context.command_environment.as_str()
+                            };
+                            let card = nib::interaction_card::command_approval_card(
+                                environment,
+                                &prompt.context.reason,
+                                prompt.context.shown_command.as_deref().unwrap_or_default(),
+                                &prompt.context.command_extras,
+                                prompt.context.remember_exact.as_deref(),
+                                0,
+                                false,
+                            );
+                            eprintln!("\n{}", card.text);
+                            if let Some(error) = &prompt.context.input_error {
+                                eprintln!("{error}");
+                            }
+                            eprint!("> ");
+                        } else {
+                            eprintln!("\nApproval required\n{}", prompt.context.render());
+                            eprint!("Approve? [y/N]: ");
+                        }
                         let _ = io::stderr().flush();
                         pending_approval = Some(prompt);
                         if let Some(line) = buffered_modal_line.take() {
@@ -1600,6 +1669,11 @@ fn execute_prepared_agent_step(
                                         request_plain_modal_frame_delimiter();
                                     }
                                     Ok(None) => {}
+                                    Err(message) if message == "REASON" => {
+                                        awaiting_command_reason = true;
+                                        eprint!("Reason to record: ");
+                                        let _ = io::stderr().flush();
+                                    }
                                     Err(message) => eprintln!("{message}"),
                                 }
                             }
@@ -1678,6 +1752,30 @@ fn execute_prepared_agent_step(
                         continue;
                     }
                     if pending_approval.is_some() {
+                        if awaiting_command_reason {
+                            let reason = line.trim();
+                            if reason.len() > 240 {
+                                eprintln!("Input error: the reason is too long");
+                                eprint!("Reason to record: ");
+                                let _ = io::stderr().flush();
+                                continue;
+                            }
+                            awaiting_command_reason = false;
+                            let decision = if reason.is_empty() {
+                                nib::tools::models::ApprovalDecision::denied()
+                            } else {
+                                nib::tools::models::ApprovalDecision::denied_with_reason(
+                                    reason.to_string(),
+                                )
+                            };
+                            let prompt = pending_approval.take().expect("approval");
+                            pending_modal_response = Some(PendingPlainModalResponse::Approval {
+                                decision,
+                                reply: prompt.reply,
+                            });
+                            request_plain_modal_frame_delimiter();
+                            continue;
+                        }
                         let context = pending_approval
                             .as_ref()
                             .expect("approval")
@@ -1693,6 +1791,11 @@ fn execute_prepared_agent_step(
                                 request_plain_modal_frame_delimiter();
                             }
                             Ok(None) => {}
+                            Err(message) if message == "REASON" => {
+                                awaiting_command_reason = true;
+                                eprint!("Reason to record: ");
+                                let _ = io::stderr().flush();
+                            }
                             Err(message) => eprintln!("{message}"),
                         }
                         continue;

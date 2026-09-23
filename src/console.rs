@@ -180,6 +180,9 @@ impl ApprovalHandler for ConsoleApprovalHandler {
 
 impl ConsoleApprovalHandler {
     async fn prompt(&self, context: &ApprovalContext) -> ApprovalDecision {
+        if context.shown_command.is_some() {
+            return self.prompt_command_card(context).await;
+        }
         eprintln!("\nApproval required\n{}", context.render());
         loop {
             eprint!("Approve? [y/N] (details): ");
@@ -207,6 +210,69 @@ impl ConsoleApprovalHandler {
                     eprintln!("{message}");
                 }
                 _ => return ApprovalDecision::denied(),
+            }
+        }
+    }
+
+    async fn prompt_command_card(&self, context: &ApprovalContext) -> ApprovalDecision {
+        let Some(command) = context.shown_command.as_deref() else {
+            return ApprovalDecision::denied_unshowable();
+        };
+        let environment = if context.command_environment.is_empty() {
+            "local"
+        } else {
+            context.command_environment.as_str()
+        };
+        let card = nib::interaction_card::command_approval_card(
+            environment,
+            &context.reason,
+            command,
+            &context.command_extras,
+            context.remember_exact.as_deref(),
+            0,
+            false,
+        );
+        eprintln!("\n{}", card.text);
+        if let Some(error) = &context.input_error {
+            eprintln!("{error}");
+        }
+        loop {
+            eprint!("> ");
+            let _ = io::stderr().flush();
+            let line = match self.input.read_line_async().await {
+                Ok(line) => line,
+                Err(_) => return ApprovalDecision::denied_input_closed(),
+            };
+            match nib::interaction_card::plain_command_line(&card.rows, &line) {
+                nib::interaction_card::PlainCommandLine::Retry(message) => eprintln!("{message}"),
+                nib::interaction_card::PlainCommandLine::GrantOnce => {
+                    return ApprovalDecision::granted_user();
+                }
+                nib::interaction_card::PlainCommandLine::Remember => {
+                    let Some(exact) = context.remember_exact.clone() else {
+                        eprintln!("this command cannot be remembered");
+                        continue;
+                    };
+                    return ApprovalDecision::granted_remembered(exact);
+                }
+                nib::interaction_card::PlainCommandLine::Deny => return ApprovalDecision::denied(),
+                nib::interaction_card::PlainCommandLine::NeedReason => {
+                    eprint!("Reason to record: ");
+                    let _ = io::stderr().flush();
+                    let reason = match self.input.read_line_async().await {
+                        Ok(reason) => reason,
+                        Err(_) => return ApprovalDecision::denied_input_closed(),
+                    };
+                    let reason = reason.trim();
+                    if reason.is_empty() {
+                        return ApprovalDecision::denied();
+                    }
+                    if reason.len() > 240 {
+                        eprintln!("Input error: the reason is too long");
+                        continue;
+                    }
+                    return ApprovalDecision::denied_with_reason(reason.to_string());
+                }
             }
         }
     }
@@ -390,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contextual_console_approval_preserves_yes_and_default_deny() {
+    async fn contextual_console_approval_grants_yes_and_retries_empty_input() {
         let call = ToolCall {
             invocation_id: nib::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".to_string(),
@@ -409,7 +475,7 @@ mod tests {
             .handle_approval_with_context(&call, PermissionLevel::Destructive, &context)
             .await;
         assert!(!denied.granted);
-        assert_eq!(denied.source, "denied");
+        assert_eq!(denied.source, "input_closed");
     }
 
     #[tokio::test]

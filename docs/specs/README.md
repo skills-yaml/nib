@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **52 done, 3 development, and 2 backlog**.
+The current lifecycle is **52 done, 4 development, and 2 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -102,6 +102,7 @@ work or narrower guarantees.
 - [T046: Cross-platform CI repairs](done/T046_cross_platform_ci_repairs.md)
 - [T047: User Interaction Harmonization](done/T047_user_interaction_harmonization.md)
   ([implementation plan](done/T047_user_interaction_harmonization.plan.md))
+- [T049: Command Approval Card](development/T049_interaction_card.md)
 
 ### Feature specs
 
