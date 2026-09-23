@@ -112,6 +112,10 @@ tasks:
         -- --exact --test-threads=1
       - >-
         cargo test --lib
+        tools::delegation::tests::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
         tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
         -- --exact --test-threads=1
       - >-

@@ -411,4 +411,6 @@ The Windows full suite separately showed that the owner-cleanup retry fixture's
 two-second budget could expire in legacy-lock migration before reaching its held
 owner lease. Its budget is now ten seconds; the lock remains held until the
 expected fail-closed cleanup error, and the subsequent retained-quarantine and
-single-audit assertions remain unchanged.
+single-audit assertions remain unchanged. The holder's own budget is thirty
+seconds, safely beyond that expected ten-second wait; the exact fixture is now
+part of `task test:delegation` so this relationship is checked during iteration.

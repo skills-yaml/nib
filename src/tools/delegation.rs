@@ -17629,7 +17629,7 @@ mod tests {
             with_bounded_delegation_lock_in(
                 &owner_lease_namespace_lock_path(&project_root),
                 &project_root.join(".nib"),
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 |_, _| {
                     ready_tx.send(()).expect("publish held owner namespace");
                     release_rx.recv().expect("release owner namespace");
