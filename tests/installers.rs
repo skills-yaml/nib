@@ -309,6 +309,9 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("script -q /dev/null /bin/sh -c"));
     assert!(script.contains("terminate_process_tree"));
     assert!(script.contains("printf '/status\\n/quit\\n'"));
+    assert!(script.contains("printf '/copy\\n'"));
+    assert!(script.contains("wait_for_pty_output \"$output\" 'Goodbye.'"));
+    assert!(script.contains("PTY clipboard command did not report delivery"));
     assert!(script.contains("printf 'y\\n\\n'"));
     assert!(script.contains("wait_for_pty_output \"$resume_output\" 'You> '"));
     assert!(script.contains("while [ \"$attempts\" -lt 100 ]; do"));

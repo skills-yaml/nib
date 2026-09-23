@@ -396,3 +396,19 @@ exact-session targeting, permissive observer file sharing, fail-closed authority
 durable cancellation, restoration, and privacy scans; no blocker remained.
 Documentation integrity and whitespace checks pass after the lifecycle move.
 No paid/live provider qualification is implied by these offline Mock-backed gates.
+
+The documentation-closure CI rerun exposed an unrelated instrumentation race in
+`scope_publication_rechecks_deadline_at_the_commit_boundary`: its 40 ms absolute
+deadline could expire before the test reached its precommit hook. The fixture now
+allows two seconds to reach that hook while preserving the same forced-expiry and
+no-publication assertions. This changes test scheduling only, not runtime behavior.
+The final CI rerun must pass before the closure is handed off.
+That rerun also exposed a macOS PTY-harness race: closing the input pipe after
+sending `/copy` and `/quit` could inject Ctrl+D before nib processed `/copy`.
+The smoke now keeps the pipe open until it observes a clipboard outcome, sends
+`/quit`, and waits for `Goodbye.`; the installer contract pins this ordering.
+The Windows full suite separately showed that the owner-cleanup retry fixture's
+two-second budget could expire in legacy-lock migration before reaching its held
+owner lease. Its budget is now ten seconds; the lock remains held until the
+expected fail-closed cleanup error, and the subsequent retained-quarantine and
+single-audit assertions remain unchanged.

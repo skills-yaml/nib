@@ -17643,7 +17643,10 @@ mod tests {
         let error = reconcile_subagent_ownership_until(
             root.path(),
             id,
-            Instant::now() + Duration::from_secs(2),
+            // Windows legacy-lock migration can consume two seconds before
+            // owner cleanup is reached. Keep this deadline on the held
+            // cleanup lock, which is the boundary this test exercises.
+            Instant::now() + Duration::from_secs(10),
         )
         .expect_err("owner cleanup deadline must fail closed");
         assert!(error.contains("owner lease cleanup"), "{error}");

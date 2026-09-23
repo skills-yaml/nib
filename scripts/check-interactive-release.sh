@@ -315,8 +315,27 @@ quit_plain_input() {
 }
 
 copy_plain_input() {
-  wait_for_pty_output "$fixture/$current_case.txt" 'You> '
-  printf '/copy\n/quit\n'
+  local output="$fixture/$current_case.txt"
+  local attempts=0
+  wait_for_pty_output "$output" 'You> '
+  printf '/copy\n'
+  # macOS script may forward EOF as Ctrl+D as soon as this input pipe closes.
+  # Keep it open until nib has actually handled /copy and then /quit.
+  while [ "$attempts" -lt 100 ]; do
+    if [ -f "$output" ] &&
+      { grep -Fq 'Copied' "$output" 2>/dev/null ||
+        grep -Fq 'Copy requested via OSC52 (unconfirmed)' "$output" 2>/dev/null; }; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  if [ "$attempts" -ge 100 ]; then
+    printf '%s\n' 'PTY clipboard command did not report delivery' >&2
+    return 1
+  fi
+  printf '/quit\n'
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 wait_for_pty_output() {
