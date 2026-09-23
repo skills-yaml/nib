@@ -107,6 +107,11 @@ function Invoke-WindowsPseudoTerminal {
         } else {
             [string]$chunk.WaitForDirectory
         }
+        $waitForFileName = if ($null -eq $chunk.PSObject.Properties["WaitForFileName"]) {
+            ""
+        } else {
+            [string]$chunk.WaitForFileName
+        }
         $waitForFileContents = if ($null -eq $chunk.PSObject.Properties["WaitForFileContents"]) {
             @()
         } else {
@@ -121,7 +126,9 @@ function Invoke-WindowsPseudoTerminal {
             throw "Windows pseudoterminal prompt exceeds 4096 bytes"
         }
         if ([Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
-            $waitForFileContents.Count -gt 4) {
+            $waitForFileContents.Count -gt 4 -or
+            (-not [string]::IsNullOrEmpty($waitForFileName) -and
+                $waitForFileName -notmatch '^[A-Za-z0-9_-]{1,128}\.json$')) {
             throw "Windows pseudoterminal durable wait exceeds its bounds"
         }
         foreach ($expectedFileContent in $waitForFileContents) {
@@ -156,6 +163,7 @@ function Invoke-WindowsPseudoTerminal {
             delay_ms = $delayMilliseconds
             wait_for_output = $waitForOutput
             wait_for_directory = $waitForDirectory
+            wait_for_file_name = $waitForFileName
             wait_for_file_contents = @($waitForFileContents)
             native_ctrl_c = $nativeCtrlC
         })

@@ -93,12 +93,15 @@ namespace Nib.WindowsPseudoTerminal {
         $delayMilliseconds = [int]$chunk.delay_ms
         $promptBytes = [Text.Encoding]::UTF8.GetByteCount([string]$chunk.wait_for_output)
         $waitForDirectory = [string]$chunk.wait_for_directory
+        $waitForFileName = [string]$chunk.wait_for_file_name
         $waitForFileContents = [string[]]@($chunk.wait_for_file_contents)
         $nativeCtrlC = [bool]$chunk.native_ctrl_c
         if ($chunkBytes -gt 4096 -or
             $promptBytes -gt 4096 -or
             [Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
             $waitForFileContents.Count -gt 4 -or
+            (-not [string]::IsNullOrEmpty($waitForFileName) -and
+                $waitForFileName -notmatch '^[A-Za-z0-9_-]{1,128}\.json$') -or
             $delayMilliseconds -lt 0 -or
             $delayMilliseconds -gt 10000) {
             throw "Windows pseudoterminal input chunk is invalid"
@@ -183,8 +186,13 @@ namespace Nib.WindowsPseudoTerminal {
         $stderrTask = $process.StandardError.ReadToEndAsync()
         foreach ($chunk in $inputChunks) {
             if (-not [string]::IsNullOrWhiteSpace([string]$chunk.wait_for_directory)) {
+                $waitForFileName = [string]$chunk.wait_for_file_name
+                if ([string]::IsNullOrEmpty($waitForFileName)) {
+                    $waitForFileName = "*.json"
+                }
                 Wait-NibWindowsPseudoTerminalFileContents `
                     -Directory ([string]$chunk.wait_for_directory) `
+                    -FileName $waitForFileName `
                     -Expected ([string[]]@($chunk.wait_for_file_contents)) `
                     -Stopwatch $stopwatch `
                     -TimeoutMilliseconds $timeoutMilliseconds

@@ -361,6 +361,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "$lastInterruptResult = $null",
         "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
         "WaitForDirectory = $sessionDirectory",
+        "WaitForFileName = \"$interruptSessionId.json\"",
         "WaitForFileContents = @(",
         "NativeCtrlC = $true",
         "-Arguments $oneShotArguments `",
@@ -642,11 +643,15 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_invoke.contains("4096 bytes"));
     assert!(windows_pty_invoke.contains("32768 bytes"));
     assert!(windows_pty_invoke.contains("WaitForOutput"));
+    assert!(windows_pty_invoke.contains("wait_for_file_name = $waitForFileName"));
+    assert!(windows_pty_host.contains("-FileName $waitForFileName"));
     assert!(windows_pty_invoke.contains("NibHostDiagnostics"));
     assert!(windows_pty_host.contains("windows-pseudoterminal-output.ps1"));
     assert!(windows_pty_host.contains("ConPTY output tail:"));
     assert!(windows_pty_host.contains("$env:NIB_ENABLE_INTERACTIVE_SMOKE -eq \"1\""));
     assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalOutput"));
+    let windows_pty_output = include_str!("../scripts/windows-pseudoterminal-output.ps1");
+    assert!(windows_pty_output.contains("[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete"));
     assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
     assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));

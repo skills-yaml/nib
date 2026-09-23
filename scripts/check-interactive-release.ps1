@@ -420,6 +420,7 @@ curator_enabled = false
                     Text = ""
                     NativeCtrlC = $true
                     WaitForDirectory = $sessionDirectory
+                    WaitForFileName = "$interruptSessionId.json"
                     WaitForFileContents = @(
                         ('"id": "' + $interruptSessionId + '"')
                         ('"goal": "' + $interruptCase.Goal + '"')
