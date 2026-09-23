@@ -269,6 +269,8 @@ fn delegation_task_pins_hosted_stabilization_fixtures() {
 fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let script = read_repository_text("scripts/check-interactive-release.sh");
     let windows_script = read_repository_text("scripts/check-interactive-release.ps1");
+    let windows_pty = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
+    let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
     let taskfile = read_repository_text("Taskfile.yml");
     let agent_loop = read_repository_text("src/agent/loop.rs");
     let workflow = read_repository_text(".github/workflows/ci.yml");
@@ -307,6 +309,9 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("script -q /dev/null /bin/sh -c"));
     assert!(script.contains("terminate_process_tree"));
     assert!(script.contains("printf '/status\\n/quit\\n'"));
+    assert!(script.contains("printf '/copy\\n'"));
+    assert!(script.contains("wait_for_pty_output \"$output\" 'Goodbye.'"));
+    assert!(script.contains("PTY clipboard command did not report delivery"));
     assert!(script.contains("printf 'y\\n\\n'"));
     assert!(script.contains("wait_for_pty_output \"$resume_output\" 'You> '"));
     assert!(script.contains("while [ \"$attempts\" -lt 100 ]; do"));
@@ -347,6 +352,28 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
+        "ExpectedEvent = \"question_required\"",
+        "ExpectedEvent = \"approval_required\"",
+        "& git -C $fixture add .gitignore README.md",
+        "& git -C $fixture commit --quiet -m initial",
+        "ExpectedEvent = \"tool_started\"",
+        "$interruptSessionId = \"t047-native-interrupt-$($interruptCase.Label)\"",
+        "('\"id\": \"' + $interruptSessionId + '\"')",
+        "Get-Content -LiteralPath $interruptSessionPath -Raw",
+        "$lastInterruptSessionText = $null",
+        "$lastInterruptResult = $null",
+        "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
+        "WaitForDirectory = $sessionDirectory",
+        "WaitForFileName = \"$interruptSessionId.json\"",
+        "WaitForFileContents = @(",
+        "NativeCtrlC = $true",
+        "-Arguments $oneShotArguments `",
+        "-WorkingDirectory $fixture `",
+        "$_.details.outcome -eq \"cancelled_by_user\"",
+        "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
+        "\"stage=$activeStage\"",
+        "interrupt_exit_code=$($lastInterruptResult.ExitCode)",
+        "failure-interrupt-output.txt",
     ] {
         assert!(
             windows_script.contains(contract),
@@ -354,6 +381,10 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         );
     }
     assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
+    let child_adapter = include_str!("../scripts/start-windows-pseudoterminal-child.ps1");
+    assert!(child_adapter.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(child_adapter.contains("$child.WaitForExit()"));
+    assert!(!child_adapter.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_script.contains("could not remove its isolated fixture"));
     assert!(windows_script.contains(
         "$startInfo.RedirectStandardInput = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true"
@@ -373,6 +404,18 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     ));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
+    assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));
+    assert!(windows_pty.contains("allow_interrupted_child_without_exit_marker"));
+    assert!(windows_pty.contains("wait_for_file_contents"));
+    assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalFileContents"));
+    assert!(windows_pty_host
+        .contains("$inputChunks.Count -ne 1 -or -not [bool]$inputChunks[0].native_ctrl_c"));
+    assert!(windows_pty_host.contains("GenerateConsoleCtrlEvent"));
+    assert!(windows_pty_host.contains("ConsoleControl]::SendCtrlC"));
+    assert!(windows_pty_host.contains(
+        "$markerMatches.Count -eq 0 -and\n            $allowInterruptedChildWithoutExitMarker -and\n            $output.Contains(\"Run cancelled.\")"
+    ));
+    assert!(windows_pty_host.contains("$modeParts[0] -ne \"1\""));
 
     assert!(taskfile.contains("  test:interactive:\n"));
     assert!(taskfile.contains("      - task: test:interactive\n"));
@@ -409,7 +452,11 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let windows_native_smoke = windows_job
         .find("run: task smoke:interactive:windows:binary")
         .expect("Windows native interactive smoke");
+    let windows_tests = windows_job
+        .find("run: task test\n")
+        .expect("Windows full test suite");
     assert!(windows_build < windows_native_smoke);
+    assert!(windows_native_smoke < windows_tests);
 
     let macos_job = workflow
         .split_once("  macos-tests:\n")
@@ -589,7 +636,9 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_child.contains("GetConsoleMode"));
     assert!(windows_pty_child.contains("$consoleModesBefore"));
     assert!(windows_pty_child.contains("$consoleModesAfter"));
-    assert!(windows_pty_child.contains("& ([string]$request.executable) @arguments"));
+    assert!(windows_pty_child.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(windows_pty_child.contains("$child.WaitForExit()"));
+    assert!(!windows_pty_child.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_pty_child.contains("[Console]::Out.WriteLine"));
     assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
     assert!(windows_pty_invoke.contains("[object[]]$InputChunks"));
@@ -597,9 +646,15 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_invoke.contains("4096 bytes"));
     assert!(windows_pty_invoke.contains("32768 bytes"));
     assert!(windows_pty_invoke.contains("WaitForOutput"));
+    assert!(windows_pty_invoke.contains("wait_for_file_name = $waitForFileName"));
+    assert!(windows_pty_host.contains("-FileName $waitForFileName"));
     assert!(windows_pty_invoke.contains("NibHostDiagnostics"));
     assert!(windows_pty_host.contains("windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_host.contains("ConPTY output tail:"));
+    assert!(windows_pty_host.contains("$env:NIB_ENABLE_INTERACTIVE_SMOKE -eq \"1\""));
     assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalOutput"));
+    let windows_pty_output = include_str!("../scripts/windows-pseudoterminal-output.ps1");
+    assert!(windows_pty_output.contains("[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete"));
     assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
     assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));
@@ -610,6 +665,8 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input"));
     assert!(windows_pty_test.contains("test-windows-pseudoterminal-output.ps1"));
     assert!(windows_pty_test.contains("NIB_PROMPT_INPUT_COMPLETE"));
+    assert!(windows_pty_test.contains("NIB_NATIVE_CTRL_C_RECEIVED"));
+    assert!(windows_pty_test.contains("NativeCtrlC = $true"));
     assert!(windows_pty_test.contains("NIB_ABSENT_PROMPT"));
     assert!(windows_pty_test.contains("ChildConsoleModesRestored"));
     assert!(windows_pty_test.contains("NibConsoleModeEvidence"));

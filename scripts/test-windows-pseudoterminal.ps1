@@ -65,6 +65,54 @@ if ($promptResult.ExitCode -ne 0 -or
     throw "Windows pseudoterminal did not preserve prompt-synchronized repeated input"
 }
 
+$nativeCtrlCProbe = @'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class NibNativeCtrlCProbe {
+    public delegate bool ConsoleCtrlHandler(uint controlType);
+    private static readonly ManualResetEvent received = new ManualResetEvent(false);
+    private static readonly ConsoleCtrlHandler handler = Handle;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
+
+    private static bool Handle(uint controlType) {
+        if (controlType != 0) { return false; }
+        received.Set();
+        return true;
+    }
+
+    public static bool Install() { return SetConsoleCtrlHandler(handler, true); }
+    public static bool Wait(int milliseconds) { return received.WaitOne(milliseconds); }
+}
+"@
+if (-not [NibNativeCtrlCProbe]::Install()) { exit 48 }
+[Console]::WriteLine("NIB_NATIVE_CTRL_C_READY")
+if (-not [NibNativeCtrlCProbe]::Wait(10000)) { exit 49 }
+[Console]::WriteLine("NIB_NATIVE_CTRL_C_RECEIVED")
+'@
+$nativeCtrlCResult = Invoke-WindowsPseudoTerminal `
+    -Executable $pwshPath `
+    -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $nativeCtrlCProbe) `
+    -InputChunks @(
+        [pscustomobject]@{
+            Text = ""
+            NativeCtrlC = $true
+            WaitForOutput = "NIB_NATIVE_CTRL_C_READY"
+        }
+    ) `
+    -TimeoutMilliseconds 30000
+if ($nativeCtrlCResult.ExitCode -ne 0 -or
+    -not $nativeCtrlCResult.Output.Contains("NIB_NATIVE_CTRL_C_RECEIVED") -or
+    -not $nativeCtrlCResult.ConsoleModesRestored -or
+    -not $nativeCtrlCResult.ChildConsoleModesRestored) {
+    throw "Windows pseudoterminal did not deliver a native Ctrl+C control event"
+}
+
 $missingPromptProbe = @'
 [Console]::WriteLine("NIB_MISSING_PROMPT_PROBE_READY")
 $line = [Console]::ReadLine()

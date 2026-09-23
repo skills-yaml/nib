@@ -60,11 +60,15 @@ function Invoke-WindowsPseudoTerminal {
         [Parameter(Mandatory = $true)]
         [string[]]$Arguments,
 
+        [string]$WorkingDirectory = "",
+
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 300000)]
         [int]$TimeoutMilliseconds,
 
         [object[]]$InputChunks = @(),
+
+        [switch]$AllowInterruptedChildWithoutExitMarker,
 
         [ValidateRange(5000, 60000)]
         [int]$HostGraceMilliseconds = 40000
@@ -72,6 +76,12 @@ function Invoke-WindowsPseudoTerminal {
 
     if ($InputChunks.Count -gt 64) {
         throw "Windows pseudoterminal input exceeds the 64 chunk limit"
+    }
+    if (-not [string]::IsNullOrEmpty($WorkingDirectory) -and
+        ($WorkingDirectory.Length -gt 32768 -or
+            -not [IO.Path]::IsPathFullyQualified($WorkingDirectory) -or
+            -not (Test-Path -LiteralPath $WorkingDirectory -PathType Container))) {
+        throw "Windows pseudoterminal working directory is invalid"
     }
     $normalizedChunks = [Collections.Generic.List[object]]::new()
     $totalInputBytes = 0
@@ -92,11 +102,50 @@ function Invoke-WindowsPseudoTerminal {
         } else {
             [string]$chunk.WaitForOutput
         }
+        $waitForDirectory = if ($null -eq $chunk.PSObject.Properties["WaitForDirectory"]) {
+            ""
+        } else {
+            [string]$chunk.WaitForDirectory
+        }
+        $waitForFileName = if ($null -eq $chunk.PSObject.Properties["WaitForFileName"]) {
+            ""
+        } else {
+            [string]$chunk.WaitForFileName
+        }
+        $waitForFileContents = if ($null -eq $chunk.PSObject.Properties["WaitForFileContents"]) {
+            @()
+        } else {
+            [string[]]@($chunk.WaitForFileContents)
+        }
+        $nativeCtrlC = if ($null -eq $chunk.PSObject.Properties["NativeCtrlC"]) {
+            $false
+        } else {
+            [bool]$chunk.NativeCtrlC
+        }
         if ([Text.Encoding]::UTF8.GetByteCount($waitForOutput) -gt 4096) {
             throw "Windows pseudoterminal prompt exceeds 4096 bytes"
         }
+        if ([Text.Encoding]::UTF8.GetByteCount($waitForDirectory) -gt 32768 -or
+            $waitForFileContents.Count -gt 4 -or
+            (-not [string]::IsNullOrEmpty($waitForFileName) -and
+                $waitForFileName -notmatch '^[A-Za-z0-9_-]{1,128}\.json$')) {
+            throw "Windows pseudoterminal durable wait exceeds its bounds"
+        }
+        foreach ($expectedFileContent in $waitForFileContents) {
+            if ([string]::IsNullOrEmpty($expectedFileContent) -or
+                [Text.Encoding]::UTF8.GetByteCount($expectedFileContent) -gt 4096) {
+                throw "Windows pseudoterminal durable wait text is invalid"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($waitForDirectory) -ne
+            ($waitForFileContents.Count -eq 0)) {
+            throw "Windows pseudoterminal durable wait requires a directory and content"
+        }
         if ($chunkBytes -gt 4096) {
             throw "Windows pseudoterminal input chunk exceeds 4096 bytes"
+        }
+        if ($nativeCtrlC -and -not [string]::IsNullOrEmpty($text)) {
+            throw "Native Windows Ctrl+C input cannot include text"
         }
         if ($delayMilliseconds -lt 0 -or $delayMilliseconds -gt 10000) {
             throw "Windows pseudoterminal input delay is outside 0..10000 milliseconds"
@@ -113,14 +162,20 @@ function Invoke-WindowsPseudoTerminal {
             text = $text
             delay_ms = $delayMilliseconds
             wait_for_output = $waitForOutput
+            wait_for_directory = $waitForDirectory
+            wait_for_file_name = $waitForFileName
+            wait_for_file_contents = @($waitForFileContents)
+            native_ctrl_c = $nativeCtrlC
         })
     }
 
     $requestJson = @{
         executable = $Executable
         arguments = @($Arguments)
+        working_directory = $WorkingDirectory
         timeout_ms = $TimeoutMilliseconds
         input_chunks = @($normalizedChunks)
+        allow_interrupted_child_without_exit_marker = [bool]$AllowInterruptedChildWithoutExitMarker
     } | ConvertTo-Json -Compress -Depth 5
     $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($requestJson))
 
@@ -194,6 +249,7 @@ function Invoke-WindowsPseudoTerminal {
             ChildConsoleModesBefore = $response.console_modes_before
             ChildConsoleModesAfter = $response.console_modes_after
             ChildConsoleModesRestored = [bool]$response.console_modes_restored
+            InterruptedChildWithoutExitMarker = [bool]$response.interrupted_child_without_exit_marker
         }
     } catch {
         $pendingError = $_

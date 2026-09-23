@@ -1,6 +1,6 @@
 # Implementation Plan for T047 User Interaction Harmonization
 
-**Status:** Development
+**Status:** Done
 Created: 2026-09-19
 Decision revision: 2026-09-19 — integrates review questions Q1–Q20
 Parent: [T047 specification](T047_user_interaction_harmonization.md)
@@ -345,3 +345,98 @@ reorganization or context-budget work needs its own owning spec.
   parent acceptance criteria and native implementation qualification remain open.
 - The recommendation-integration revision reruns documentation integrity and whitespace
   checks only; it does not claim a new full-runtime or native qualification result.
+
+## Implementation Checkpoint (2026-09-21)
+
+- Implemented the remaining source-audit gaps in durable question recovery, exact-plan
+  continuation, approval detail inspection, Ctrl+Q disarming, one-shot final output,
+  truthful clipboard behavior, and native one-shot interruption handling.
+- Added deterministic recovery/continuation, TUI/plain interaction, redirected-copy,
+  and real Unix SIGINT fixtures. Extended the Unix PTY and Windows ConPTY release
+  scripts for interruption during a question, approval, and foreground tool.
+- Passed `task check`, `task test:interactive`, `task test:agent-context`,
+  `task test:runtime-e2e`, `task test:tui-shutdown`, `task docs:check`,
+  `git diff --check`, the complete local `task verify`, `task coverage` at 85.78%
+  (113,996/132,896 lines), and the final Linux optimized sequence `task build` plus
+  `task smoke:interactive:binary`. The successful full gate ran 1,174 library tests,
+  89 binary tests, and every ordinary integration target; only
+  the repository's explicitly opt-in paid/live and release qualification tests were
+  ignored under their existing contracts. Sanitized Linux evidence under
+  `target/t047-local-evidence/Linux/` retains F2/question, clipboard,
+  interruption, privacy-scan, and before/after terminal-mode results for this working
+  tree, with source/binary identity recorded and acceptance eligibility false because
+  the source tree is dirty. The smoke-driven review also closed a plain resumed-history
+  privacy gap by routing it through the shared public conversation projection.
+- Local Windows qualification could not start because `pwsh` is not installed; macOS
+  was not available on this Linux host. Native clipboard qualification and a recorded
+  exact revision also remain open. The parent and companion therefore stay in
+  `development/`; their unchecked native/completion criteria are not waived.
+
+## Exact-Revision Qualification Checkpoint (2026-09-23)
+
+The final implementation revision `62d45bd468bc78af2f7f38efe170cdfdcd938498`
+passed local `task verify`; the separate exact-HEAD installer contract task passed
+42/42. [CI run 35800536448](https://github.com/skills-yaml/nib/actions/runs/35800536448)
+is testing the clean merge revision `5a31c4c739fc3f0190e6c74395e6e282cd9a5db4`.
+Linux validation passed, including `task coverage` at 85.80% (114,022/132,898).
+The [Linux](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697),
+[macOS](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726782294),
+and [Windows](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702)
+native evidence artifacts passed with exact binary/source identity, clean acceptance
+eligibility, F2 and plain-modal routing, three durable cancellations, restoration,
+and privacy scans. Windows and macOS delivered native clipboard copies; Linux
+reported the unconfirmed OSC52 fallback. The parent's
+[per-criterion evidence map](T047_user_interaction_harmonization.md#exact-revision-qualification-evidence-2026-09-23)
+links every AC to its own fixture or native capture.
+
+The Windows ordinary full-test step subsequently passed, making all three CI jobs
+green. Spec-compliance review checked each parent's AC against its linked fixture
+and native artifact. A separate quality/security review checked bounded waits,
+exact-session targeting, permissive observer file sharing, fail-closed authority,
+durable cancellation, restoration, and privacy scans; no blocker remained.
+Documentation integrity and whitespace checks pass after the lifecycle move.
+No paid/live provider qualification is implied by these offline Mock-backed gates.
+
+The documentation-closure CI rerun exposed an unrelated instrumentation race in
+`scope_publication_rechecks_deadline_at_the_commit_boundary`: its 40 ms absolute
+deadline could expire before the test reached its precommit hook. The fixture now
+allows two seconds to reach that hook while preserving the same forced-expiry and
+no-publication assertions. This changes test scheduling only, not runtime behavior.
+The final CI rerun must pass before the closure is handed off.
+That rerun also exposed a macOS PTY-harness race: closing the input pipe after
+sending `/copy` and `/quit` could inject Ctrl+D before nib processed `/copy`.
+The smoke now keeps the pipe open until it observes a clipboard outcome, sends
+`/quit`, and waits for `Goodbye.`; the installer contract pins this ordering.
+The Windows full suite separately showed that the owner-cleanup retry fixture's
+two-second budget could expire in legacy-lock migration before reaching its held
+owner lease. Its budget is now ten seconds; the lock remains held until the
+expected fail-closed cleanup error, and the subsequent retained-quarantine and
+single-audit assertions remain unchanged. The holder's own budget is thirty
+seconds, safely beyond that expected ten-second wait; the exact fixture is now
+part of `task test:delegation` so this relationship is checked during iteration.
+The next hosted Linux run exposed a distinct direct-cancellation test assumption:
+successful first-attempt owner cleanup leaves the optional `cleanup_unverified`
+marker absent, while successful retry after an error writes explicit `false`.
+The fixture now rejects `true` in either valid path and still requires both owner
+lease artifacts to be gone; the exact case is also pinned in `task test:delegation`.
+The subsequent macOS native smoke exposed the same `script` stdin-close/early-EOF
+behavior in the plain semantics sequence: the batched commands were echoed after
+Ctrl+D rather than consumed, leaving the completion assertion unexercised. The
+fixture now waits for the denied run to finish, observes the completion menu
+before sending its selection, and keeps the writer open through `Goodbye.`. The
+other plain PTY inputs also wait for `Goodbye.` after `/quit` so their assertions
+cannot pass on a partially processed input stream. This is harness
+determinism, not an application behavior change; exact-revision hosted
+qualification is still required after this correction.
+The next Windows full suite exposed three more fixture deadlines rather than a
+native interaction failure. The bounded-record child had only 100 ms to reach
+its injected precommit pause and could return a valid deadline error before
+the pause was installed. Its setup budget is now two seconds, and the parent
+holds the observed pause past that deadline before checking that no record or
+transaction artifact was published. Two cancellation fixtures used the shared
+250 ms test-only reconciliation budget; on hosted Windows this expired during
+legacy-lock migration before their intended dead-anchor or contradictory-state
+assertions. Those exact fixtures now use the existing ten-second Windows test
+budget without changing the production four-second reconciliation bound. All
+three are pinned in `task test:delegation`; exact-revision hosted qualification
+remains the completion gate.

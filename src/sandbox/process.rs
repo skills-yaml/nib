@@ -5299,7 +5299,9 @@ mod tests {
             .expect("scope fixture");
         let path = store.record_path(&record.scope_id).expect("scope path");
         let original = std::fs::read(&path).expect("original scope bytes");
-        let deadline = Instant::now() + Duration::from_millis(40);
+        // Coverage instrumentation can spend longer than 40 ms reaching the
+        // precommit hook. Keep the assertion about expiry at that hook.
+        let deadline = Instant::now() + Duration::from_secs(2);
         let bounded = ProcessScopeStore {
             project_root: store.project_root.clone(),
             directory: store.directory.clone(),

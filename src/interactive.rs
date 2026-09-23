@@ -2669,6 +2669,22 @@ fn approved_plan_continuation<'a>(
         .then_some(step)
 }
 
+/// Project only human-visible conversation messages for compact history surfaces.
+/// Provider transport envelopes, tool-result payloads, and runtime-authored
+/// continuation prompts remain private even when loading legacy sessions.
+pub fn project_session_conversation(
+    session: &Session,
+    sensitive_values: &[String],
+) -> Vec<ActivityEntry> {
+    session
+        .messages
+        .iter()
+        .filter(|message| !is_transport_only_message(message))
+        .filter(|message| approved_plan_continuation(session, message).is_none())
+        .map(|message| project_session_message(message, sensitive_values))
+        .collect()
+}
+
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn project_session_activities(
     session: &Session,
@@ -5121,6 +5137,17 @@ fn load_continue_plan_effect(
     if plan.is_complete() {
         return Err(format!("plan {plan_id} is already complete"));
     }
+    if !plan.approved {
+        return Err(format!("plan {plan_id} is not approved for execution"));
+    }
+    if !plan.is_structured() {
+        return Err(format!("plan {plan_id} is malformed and cannot continue"));
+    }
+    if plan.outcome.as_deref() == Some("provider_continuation_interrupted") {
+        return Err(format!(
+            "plan {plan_id} has an uncertain interrupted provider continuation and cannot be replayed"
+        ));
+    }
     if session.has_unresolved_clarification(Some(&plan.id)) {
         return Err(
             "unresolved questions still block this plan; answer them with /questions first"
@@ -5143,9 +5170,24 @@ pub fn persist_recovered_question_answer(
     if answer.is_empty() {
         return Err("recovered question answer cannot be empty".to_string());
     }
-    store
+    // UI-local idleness is not sufficient because another process may own this
+    // session. Hold the authoritative run lease across the identity re-read and
+    // durable answer publication.
+    let run_lease = store
+        .try_acquire_run_lease(session_id)
+        .map_err(|error| error.to_string())?;
+    run_lease.verify().map_err(|error| error.to_string())?;
+    let result = store
         .update_session(session_id, |session| {
-            let active_plan = session.plan.as_ref().map(|plan| plan.id.clone());
+            let active_plan = session
+                .plan
+                .as_ref()
+                .map(|plan| plan.id.clone())
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(
+                        "recovered questions require an active plan".to_string(),
+                    )
+                })?;
             let index = session
                 .clarifications
                 .iter()
@@ -5156,7 +5198,7 @@ pub fn persist_recovered_question_answer(
                     ))
                 })?;
             let record = &session.clarifications[index];
-            if record.plan_id != active_plan {
+            if record.plan_id.as_deref() != Some(active_plan.as_str()) {
                 return Err(crate::session::SessionError::InvalidMutation(
                     "question does not belong to the current plan".to_string(),
                 ));
@@ -5191,10 +5233,11 @@ pub fn persist_recovered_question_answer(
             record.outcome = Some("answered".to_string());
             record.reason = Some("recovered via /questions".to_string());
             record.answer_event_index = Some(event_index);
-            let plan_id = record.plan_id.clone().unwrap_or_default();
-            Ok(plan_id)
+            Ok(active_plan)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    drop(run_lease);
+    result
 }
 
 pub fn set_active_model(project_root: &Path, model: &str) -> Result<String, String> {
@@ -5267,6 +5310,161 @@ mod tests {
             "fixture",
         ]);
         repository
+    }
+
+    fn recoverable_question_fixture() -> (
+        tempfile::TempDir,
+        SessionStore,
+        String,
+        crate::tools::ToolInvocationId,
+        String,
+    ) {
+        let directory = tempdir().expect("session directory");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        let mut session = store.try_create_session().expect("session");
+        let mut plan = crate::session::Plan::new(
+            "finish the exact plan",
+            vec![crate::session::PlanStep {
+                description: "use the clarification".to_string(),
+                status: "Blocked".to_string(),
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            }],
+        );
+        plan.approve();
+        let plan_id = plan.id.clone();
+        let invocation_id = crate::tools::ToolInvocationId::new();
+        session.plan = Some(plan);
+        session.events.push(SessionEvent {
+            index: 0,
+            kind: "question_required".to_string(),
+            details: serde_json::json!({
+                "invocation_id": invocation_id,
+                "question": "Which target?",
+                "options": ["alpha", "beta"],
+            }),
+            timestamp: Some(Utc::now()),
+        });
+        session
+            .clarifications
+            .push(crate::session::ClarificationRecord {
+                invocation_id,
+                plan_id: Some(plan_id.clone()),
+                question: "Which target?".to_string(),
+                options: vec!["alpha".to_string(), "beta".to_string()],
+                dependent_paths: Vec::new(),
+                status: crate::session::ClarificationStatus::Unresolved,
+                answer: None,
+                question_event_index: 0,
+                answer_message_index: None,
+                answer_event_index: None,
+                reason: Some("left unanswered".to_string()),
+                outcome: Some("left_unanswered".to_string()),
+            });
+        store.save(&mut session).expect("recoverable question");
+        (directory, store, session.id, invocation_id, plan_id)
+    }
+
+    #[test]
+    fn recovered_question_answer_is_exact_durable_and_run_lease_fenced() {
+        let (directory, store, session_id, invocation_id, plan_id) = recoverable_question_fixture();
+        let blocked = execute_interactive_command(
+            InteractiveCommand::Continue {
+                plan_id: plan_id.clone(),
+            },
+            directory.path(),
+            &store,
+            &session_id,
+        )
+        .expect_err("unresolved clarification must block continuation");
+        assert!(blocked.contains("unresolved questions"), "{blocked}");
+        let lease = store
+            .try_acquire_run_lease(&session_id)
+            .expect("competing run lease");
+
+        let error = persist_recovered_question_answer(
+            &store,
+            &session_id,
+            &invocation_id.to_string(),
+            "beta",
+        )
+        .expect_err("concurrent owner must fence recovery");
+        assert!(error.contains("active agent run"), "{error}");
+        assert_eq!(
+            store
+                .load(&session_id)
+                .expect("unchanged session")
+                .clarifications[0]
+                .status,
+            crate::session::ClarificationStatus::Unresolved
+        );
+
+        drop(lease);
+        assert_eq!(
+            persist_recovered_question_answer(
+                &store,
+                &session_id,
+                &invocation_id.to_string(),
+                "beta",
+            )
+            .expect("persist exact recovery"),
+            plan_id
+        );
+        let persisted = store.load(&session_id).expect("answered session");
+        let clarification = &persisted.clarifications[0];
+        assert_eq!(
+            clarification.status,
+            crate::session::ClarificationStatus::Answered
+        );
+        assert_eq!(clarification.answer.as_deref(), Some("beta"));
+        assert!(persisted.events.iter().any(|event| {
+            event.kind == "human_question_answer_received"
+                && event.details["invocation_id"] == invocation_id.to_string()
+                && event.details["recovered"] == true
+        }));
+        assert_eq!(
+            persisted
+                .human_intent
+                .last()
+                .map(|intent| intent.text.as_str()),
+            Some("beta")
+        );
+        assert_eq!(
+            execute_interactive_command(
+                InteractiveCommand::Continue {
+                    plan_id: plan_id.clone(),
+                },
+                directory.path(),
+                &store,
+                &session_id,
+            )
+            .expect("exact plan is eligible after recovery"),
+            InteractiveEffect::ContinuePlan {
+                plan_id: plan_id.clone(),
+                goal: "finish the exact plan".to_string(),
+            }
+        );
+        assert!(execute_interactive_command(
+            InteractiveCommand::Continue {
+                plan_id: "plan-foreign".to_string(),
+            },
+            directory.path(),
+            &store,
+            &session_id,
+        )
+        .expect_err("foreign plan must fail closed")
+        .contains("is not the current session plan"));
+        assert!(persist_recovered_question_answer(
+            &store,
+            &session_id,
+            &invocation_id.to_string(),
+            "different",
+        )
+        .expect_err("duplicate answer must fail")
+        .contains("already answered"));
     }
 
     #[test]
@@ -5591,6 +5789,58 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn prompt_prefix_grammar_is_exact_single_pass_and_fail_closed() {
+        let question = InteractionState {
+            question_pending: true,
+            ..InteractionState::default()
+        };
+        let reduce = |answer| {
+            reduce_interaction(
+                &question,
+                InteractionInput::QuestionAnswer {
+                    answer,
+                    options: &[],
+                    selected_option: None,
+                },
+            )
+        };
+
+        assert_eq!(
+            reduce("  :command /status"),
+            InteractionReduction::ModalCommand(InteractiveCommand::Status)
+        );
+        assert_eq!(
+            reduce(":COMMAND /status"),
+            InteractionReduction::QuestionAnswered(":COMMAND /status".to_string()),
+            "the reserved prefix is case-sensitive"
+        );
+        for malformed in [
+            ":command",
+            ":command ",
+            ":command\t/status",
+            ":command/status",
+            ":command :command /status",
+        ] {
+            assert!(matches!(
+                reduce(malformed),
+                InteractionReduction::Error {
+                    consumer: InteractionConsumer::Question,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            reduce("text: :command /status"),
+            InteractionReduction::QuestionAnswered(":command /status".to_string())
+        );
+        assert_eq!(
+            reduce("text: text: retained once"),
+            InteractionReduction::QuestionAnswered("text: retained once".to_string()),
+            "prefixes are interpreted once rather than recursively"
+        );
     }
 
     #[test]

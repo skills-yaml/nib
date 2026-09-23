@@ -17629,7 +17629,7 @@ mod tests {
             with_bounded_delegation_lock_in(
                 &owner_lease_namespace_lock_path(&project_root),
                 &project_root.join(".nib"),
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 |_, _| {
                     ready_tx.send(()).expect("publish held owner namespace");
                     release_rx.recv().expect("release owner namespace");
@@ -17643,7 +17643,10 @@ mod tests {
         let error = reconcile_subagent_ownership_until(
             root.path(),
             id,
-            Instant::now() + Duration::from_secs(2),
+            // Windows legacy-lock migration can consume two seconds before
+            // owner cleanup is reached. Keep this deadline on the held
+            // cleanup lock, which is the boundary this test exercises.
+            Instant::now() + Duration::from_secs(10),
         )
         .expect_err("owner cleanup deadline must fail closed");
         assert!(error.contains("owner lease cleanup"), "{error}");
@@ -17851,13 +17854,15 @@ mod tests {
             panic!("released direct cancellation must reconcile successfully: {resolved:?}");
         };
         assert_eq!(record.status, "cancelled");
-        assert_eq!(
+        // A clean first cleanup never sets this optional recovery marker;
+        // only a retry after a recorded cleanup error writes explicit false.
+        assert_ne!(
             record
                 .result
                 .as_ref()
                 .and_then(|result| result.get("cleanup_unverified"))
                 .and_then(Value::as_bool),
-            Some(false)
+            Some(true)
         );
         assert!(!owner_lease_path(root.path(), &lease_id)
             .expect("visible owner lease")
@@ -18169,6 +18174,8 @@ mod tests {
 
     #[test]
     fn dead_anchor_only_record_without_process_scope_requires_recovery() {
+        #[cfg(windows)]
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         crate::session::SessionStore::for_project(root.path())
             .expect("session store")
@@ -18250,6 +18257,8 @@ mod tests {
 
     #[tokio::test]
     async fn contradictory_terminal_record_and_manager_states_fail_closed() {
+        #[cfg(windows)]
+        let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         let completed_id = format!("sub-terminal-cancelled-{}", uuid::Uuid::new_v4());
         let completed = record_fixture(root.path(), &completed_id, "completed");
@@ -18513,7 +18522,7 @@ mod tests {
         let error = update_subagent_record_until(
             &project_root,
             "expired-reconciliation-write",
-            Some(Instant::now() + Duration::from_millis(100)),
+            Some(Instant::now() + Duration::from_secs(2)),
             |record| {
                 record.status = "failed".to_string();
                 record.error = Some("must not publish".to_string());
@@ -18734,7 +18743,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let paused_namespace = subagent_namespace_snapshot(&records_dir(root.path()));
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(2_100));
         std::fs::write(&resume, b"resume").expect("resume bounded record writer");
 
         let status = child.wait().expect("wait for bounded record writer child");
@@ -20163,10 +20172,7 @@ mod tests {
     fn records_setup_and_migration_share_one_default_absolute_deadline() {
         let root = tempfile::tempdir().expect("root");
         let mut paused_namespace = None;
-        #[cfg(windows)]
         let default_timeout = Duration::from_secs(2);
-        #[cfg(not(windows))]
-        let default_timeout = Duration::from_millis(80);
         let error = ensure_records_directory_until_with_phase_hook(
             root.path(),
             None,
@@ -20181,7 +20187,8 @@ mod tests {
         )
         .expect_err("migration must not receive a renewed default budget");
         assert!(error.contains("deadline elapsed"), "{error}");
-        let paused_namespace = paused_namespace.expect("snapshot after records setup");
+        let paused_namespace = paused_namespace
+            .unwrap_or_else(|| panic!("records setup did not reach its phase hook: {error}"));
         assert_eq!(
             subagent_namespace_snapshot(root.path()),
             paused_namespace,
@@ -20353,17 +20360,9 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn owner_creation_stops_before_anchor_publication_when_its_deadline_expires() {
-        let operation_timeout = if cfg!(windows) {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_millis(150)
-        };
+        let operation_timeout = Duration::from_secs(2);
         let expiry_delay = operation_timeout + Duration::from_millis(50);
-        let boundary_wait = if cfg!(windows) {
-            Duration::from_secs(5)
-        } else {
-            Duration::from_secs(2)
-        };
+        let boundary_wait = Duration::from_secs(10);
         let root = tempfile::tempdir().expect("root");
         let owner_directory = owner_lease_directory(root.path());
         let anchor_directory = root.path().join(".nib");

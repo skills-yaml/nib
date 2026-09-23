@@ -2347,7 +2347,7 @@ impl Session {
             if let Some(index) = intent.source_event_index {
                 if !matches!(
                     self.events[index].kind.as_str(),
-                    "steering_input" | "human_question_answer_received"
+                    "steering_input" | "human_question_answer_received" | "plan_continue_requested"
                 ) {
                     return Err(SessionError::InvalidMutation(
                         "human intent event source is not a trusted human-input boundary"

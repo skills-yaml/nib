@@ -112,6 +112,26 @@ tasks:
         -- --exact --test-threads=1
       - >-
         cargo test --lib
+        tools::delegation::tests::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::bounded_reconciliation_record_does_not_publish_after_precommit_expiry
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::contradictory_terminal_record_and_manager_states_fail_closed
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::dead_anchor_only_record_without_process_scope_requires_recovery
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
         tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
         -- --exact --test-threads=1
       - >-

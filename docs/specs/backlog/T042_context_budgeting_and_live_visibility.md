@@ -319,7 +319,7 @@ quality and provider cost need exact-revision, budget-authorized T023 evidence.
   metadata with T041; neither may bypass tool permission checks.
 - Select modal-safe inspection controls and exact CLI session/JSON flags, preserving
   existing input semantics. Monitoring performance must not slow active execution.
-  [T047](../development/T047_user_interaction_harmonization.md) ships live/modal
+  [T047](../done/T047_user_interaction_harmonization.md) ships live/modal
   `/context` access and honest labels for the current estimate; this spec later
   replaces the payload behind that same command without a second entry path.
 

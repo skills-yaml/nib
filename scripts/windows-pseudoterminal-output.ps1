@@ -72,3 +72,52 @@ function Wait-NibWindowsPseudoTerminalInputDelay {
         Start-Sleep -Milliseconds $DelayMilliseconds
     }
 }
+
+function Wait-NibWindowsPseudoTerminalFileContents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [string]$FileName = "*.json",
+        [Parameter(Mandatory = $true)][string[]]$Expected,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Stopwatch,
+        [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+    )
+
+    while ($true) {
+        if (Test-Path -LiteralPath $Directory -PathType Container) {
+            foreach ($candidate in Get-ChildItem -LiteralPath $Directory -Filter $FileName -File) {
+                $stream = $null
+                $reader = $null
+                try {
+                    # A default PowerShell file read can deny nib's concurrent
+                    # Windows session open. The observer grants write/delete sharing.
+                    $stream = [IO.FileStream]::new(
+                        $candidate.FullName,
+                        [IO.FileMode]::Open,
+                        [IO.FileAccess]::Read,
+                        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+                    )
+                    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true, 4096, $false)
+                    $content = $reader.ReadToEnd()
+                    $matches = $true
+                    foreach ($needle in $Expected) {
+                        if (-not $content.Contains($needle)) {
+                            $matches = $false
+                            break
+                        }
+                    }
+                    if ($matches) { return }
+                } catch {
+                    # Session publication is atomic. A transient replacement/read
+                    # race is retried under the same absolute host deadline.
+                } finally {
+                    if ($null -ne $reader) { $reader.Dispose() }
+                    if ($null -ne $stream) { $stream.Dispose() }
+                }
+            }
+        }
+        if ($Stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            throw "Timed out waiting for Windows pseudoterminal durable file evidence"
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}

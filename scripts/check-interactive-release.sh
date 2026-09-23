@@ -30,6 +30,22 @@ if [ ! -x "$binary" ]; then
 fi
 binary_directory="$(cd "$(dirname "$binary")" && pwd -P)"
 binary="$binary_directory/$(basename "$binary")"
+repository_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+source_revision="$(git -C "$repository_root" rev-parse HEAD)"
+source_clean=true
+if [ -n "$(git -C "$repository_root" status --porcelain)" ]; then
+  source_clean=false
+fi
+binary_version="$($binary version)"
+case "$binary_version" in
+  *"$source_revision"*) ;;
+  *)
+    printf 'release binary identity does not match source revision %s: %s\n' \
+      "$source_revision" "$binary_version" >&2
+    exit 1
+    ;;
+esac
+acceptance_eligible=$source_clean
 temporary_root="${TMPDIR:-/tmp}"
 fixture="$(mktemp -d "$temporary_root/nib-interactive-smoke.XXXXXX")"
 current_case='preflight'
@@ -38,6 +54,10 @@ cleanup() {
   # Pipeline producers and command substitutions share this fixture. Only the
   # outer script may remove it, after the bounded terminal process has returned.
   if [ "${BASH_SUBSHELL:-0}" -ne 0 ]; then
+    return
+  fi
+  if [ "${NIB_KEEP_INTERACTIVE_SMOKE_FIXTURE:-0}" = "1" ]; then
+    printf 'interactive release smoke fixture retained at %s\n' "$fixture" >&2
     return
   fi
   if [[ -n "${fixture:-}" && "$fixture" == "$temporary_root"/nib-interactive-smoke.* ]]; then
@@ -68,6 +88,24 @@ report_error() {
   local status=$?
   trap - ERR
   report_smoke_context
+  if [ -n "${NIB_INTERACTIVE_EVIDENCE_DIR:-}" ]; then
+    local failure_evidence_directory="$NIB_INTERACTIVE_EVIDENCE_DIR/$platform"
+    mkdir -p "$failure_evidence_directory" || true
+    printf '%s\n' \
+      "platform=$platform" \
+      "source_revision=$source_revision" \
+      "source_clean=$source_clean" \
+      "binary_version=$binary_version" \
+      'acceptance_eligible=false' \
+      "failed_case=$current_case" \
+      "exit_status=$status" \
+      >"$failure_evidence_directory/failure-summary.txt" || true
+    if [ -f "$fixture/$current_case.txt" ]; then
+      sed "s/${private_sentinel:-interactive-private-sentinel-q7v9k2}/[fixture-secret]/g" \
+        "$fixture/$current_case.txt" \
+        >"$failure_evidence_directory/$current_case-failure.txt" || true
+    fi
+  fi
   if [ "${NIB_KEEP_INTERACTIVE_SMOKE_FIXTURE:-0}" = "1" ]; then
     trap - EXIT
     printf 'interactive release smoke failed in case %s near line %s; fixture retained at %s\n' \
@@ -236,7 +274,7 @@ current_case='one-shot-contract'
 (
   cd "$fixture"
   run_bounded_command 60 "$fixture/run-output.txt" "${offline_environment[@]}" "$binary" run \
-    'finish the release smoke' \
+    'finish the release smoke' --session t047-copy-smoke \
     --provider mock --model mock-model --max-steps 4 --yes
 )
 grep -Fq 'Agent run completed for session' "$fixture/run-output.txt"
@@ -274,6 +312,31 @@ consent_tui_input() {
 quit_plain_input() {
   sleep 0.5
   printf '/status\n/quit\n'
+  wait_for_pty_output "$fixture/$current_case.txt" 'Goodbye.'
+}
+
+copy_plain_input() {
+  local output="$fixture/$current_case.txt"
+  local attempts=0
+  wait_for_pty_output "$output" 'You> '
+  printf '/copy\n'
+  # macOS script may forward EOF as Ctrl+D as soon as this input pipe closes.
+  # Keep it open until nib has actually handled /copy and then /quit.
+  while [ "$attempts" -lt 100 ]; do
+    if [ -f "$output" ] &&
+      { grep -Fq 'Copied' "$output" 2>/dev/null ||
+        grep -Fq 'Copy requested via OSC52 (unconfirmed)' "$output" 2>/dev/null; }; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  if [ "$attempts" -ge 100 ]; then
+    printf '%s\n' 'PTY clipboard command did not report delivery' >&2
+    return 1
+  fi
+  printf '/quit\n'
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 wait_for_pty_output() {
@@ -315,6 +378,7 @@ run_pty_case() {
   local terminal_environment=$3
   local arguments=$4
   local resize=${5:-no}
+  local expected_status=${6:-0}
   local output="$fixture/$label.txt"
   current_case="$label"
   local resize_setup=''
@@ -323,19 +387,25 @@ run_pty_case() {
     resize_setup='(sleep 3; stty rows 32 cols 100 </dev/tty) & resize_pid=$!;'
     resize_finish='wait "$resize_pid" || true; stty rows 18 cols 50;'
   fi
-  local child_command="cd $quoted_fixture || exit 81; stty rows 18 cols 50 || exit 82; before=\$(stty -g) || exit 83; $resize_setup $offline_prefix $terminal_environment $quoted_binary $arguments; child_status=\$?; $resize_finish after=\$(stty -g) || exit 84; if [ \"\$before\" != \"\$after\" ]; then printf '%s\\n' '__NIB_TERMINAL_NOT_RESTORED__'; exit 85; fi; printf '%s\\n' '$terminal_restored_marker'; printf '%s:%s\\n' '$child_status_marker' \"\$child_status\"; exit \"\$child_status\""
+  local child_command="cd $quoted_fixture || exit 81; stty rows 18 cols 50 || exit 82; before=\$(stty -g) || exit 83; $resize_setup $offline_prefix $terminal_environment $quoted_binary $arguments; child_status=\$?; $resize_finish after=\$(stty -g) || exit 84; printf '%s:%s:%s\\n' '__NIB_TERMINAL_MODES__' \"\$before\" \"\$after\"; if [ \"\$before\" != \"\$after\" ]; then printf '%s\\n' '__NIB_TERMINAL_NOT_RESTORED__'; exit 85; fi; printf '%s\\n' '$terminal_restored_marker'; printf '%s:%s\\n' '$child_status_marker' \"\$child_status\"; exit \"\$child_status\""
 
+  local pty_status=0
   if [ "$platform" = "Linux" ]; then
     "$input_function" |
-      run_bounded_command 40 "$output" script -q -e -c "$child_command" /dev/null
+      run_bounded_command 40 "$output" script -q -e -c "$child_command" /dev/null || pty_status=$?
   else
     "$input_function" |
-      run_bounded_command 40 "$output" script -q /dev/null /bin/sh -c "$child_command"
+      run_bounded_command 40 "$output" script -q /dev/null /bin/sh -c "$child_command" || pty_status=$?
+  fi
+  if [ "$pty_status" -ne 0 ] && [ "$pty_status" -ne "$expected_status" ]; then
+    printf 'PTY case %s input/host pipeline failed with status %s\n' "$label" "$pty_status" >&2
+    return "$pty_status"
   fi
   grep -Fq "$terminal_restored_marker" "$output"
   if [ "$(grep -F -c "$child_status_marker:" "$output")" -ne 1 ] ||
-    ! grep -Fq "$child_status_marker:0" "$output"; then
-    printf 'PTY case %s did not report one successful child status\n' "$label" >&2
+    ! grep -Fq "$child_status_marker:$expected_status" "$output"; then
+    printf 'PTY case %s did not report expected child status %s (host status %s)\n' \
+      "$label" "$expected_status" "$pty_status" >&2
     exit 1
   fi
   if grep -Fq '__NIB_TERMINAL_NOT_RESTORED__' "$output"; then
@@ -372,6 +442,73 @@ if grep -Fq "$alternate_screen_exit" "$fixture/dumb-terminal-fallback.txt"; then
   exit 1
 fi
 
+run_pty_case \
+  interactive-copy \
+  copy_plain_input \
+  'TERM=xterm-256color NO_COLOR=1' \
+  '--plain --session t047-copy-smoke'
+if grep -Fq 'Copy requested via OSC52 (unconfirmed)' "$fixture/interactive-copy.txt"; then
+  clipboard_result=osc52_unconfirmed
+  grep -Fq "$(printf '\033]52;c;')" "$fixture/interactive-copy.txt"
+else
+  clipboard_result=native
+  grep -Fq 'Copied' "$fixture/interactive-copy.txt"
+  if [ "$platform" = "Darwin" ]; then
+    pbpaste | grep -Fq 'Final answer: task complete'
+  fi
+fi
+
+interrupt_question_input() {
+  wait_for_pty_output "$fixture/$current_case.txt" 'Question:'
+  printf '\003'
+}
+
+interrupt_approval_input() {
+  wait_for_pty_output "$fixture/$current_case.txt" 'Approval required'
+  printf '\003'
+}
+
+interrupt_terminal_input() {
+  local session_file
+  local attempts=0
+  session_file="$(wait_for_goal_session 'one-shot interrupt terminal')"
+  while [ "$attempts" -lt 100 ]; do
+    if grep -Fq '"kind": "tool_started"' "$session_file" 2>/dev/null; then
+      printf '\003'
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf '%s\n' 'one-shot terminal interrupt did not reach tool_started' >&2
+  return 1
+}
+
+run_pty_case one-shot-interrupt-question interrupt_question_input 'TERM=xterm-256color' \
+  "run 'ask a question before continuing' --provider mock --model mock-model --max-steps 5" \
+  no 130
+run_pty_case one-shot-interrupt-approval interrupt_approval_input 'TERM=xterm-256color' \
+  "run 'one-shot interrupt approval' --provider mock --model mock-model --max-steps 5" \
+  no 130
+run_pty_case one-shot-interrupt-terminal interrupt_terminal_input 'TERM=xterm-256color' \
+  "run 'one-shot interrupt terminal' --provider mock --model mock-model --max-steps 5 --yes" \
+  no 130
+for interrupt_output in \
+  "$fixture/one-shot-interrupt-question.txt" \
+  "$fixture/one-shot-interrupt-approval.txt" \
+  "$fixture/one-shot-interrupt-terminal.txt"; do
+  grep -Fq 'Run cancelled.' "$interrupt_output"
+done
+if [ -e "$fixture/one-shot-approval-ran.txt" ] ||
+  [ -e "$fixture/one-shot-interrupt-completed.txt" ]; then
+  printf '%s\n' 'one-shot interruption allowed a cancelled action to complete' >&2
+  exit 1
+fi
+if [ "$(grep -F -l '"outcome": "cancelled_by_user"' "$session_directory"/*.json | wc -l | tr -d ' ')" -lt 3 ]; then
+  printf '%s\n' 'one-shot interruption did not persist three cancellation outcomes' >&2
+  exit 1
+fi
+
 # Keep the project dirty so /review and /diff have an authoritative, harmless target.
 printf 'interactive review smoke change\n' >>"$fixture/README.md"
 # Plans now print and continue. Request approval for a harmless action explicitly
@@ -379,12 +516,15 @@ printf 'interactive review smoke change\n' >>"$fixture/README.md"
 printf '%s\n' '- nib-policy: require-approval list_directory' >"$fixture/AGENTS.md"
 
 plain_semantics_input() {
+  local output="$fixture/plain-semantics.txt"
+  wait_for_pty_output "$output" 'You> '
   printf '%s\n' 'inspect @README.md'
-  wait_for_pty_output "$fixture/plain-semantics.txt" 'Approve? [y/N]: '
+  wait_for_pty_output "$output" 'Approve? [y/N]: '
   printf '%s\n' 'n' ''
-  sleep 0.8
+  wait_for_pty_output "$output" '[stream ended] tool_execution_failed'
+  printf '/sta\n'
+  wait_for_pty_output "$output" 'Command completions:'
   printf '%s\n' \
-    '/sta' \
     '1' \
     '/permissions' \
     '/review' \
@@ -395,6 +535,9 @@ plain_semantics_input() {
     'n' \
     '/fork' \
     '/quit'
+  # macOS script forwards closed input as Ctrl+D. Keep the writer alive until
+  # the whole modal sequence, including /quit, has been consumed.
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 run_pty_case plain-semantics plain_semantics_input 'TERM=xterm-256color NO_COLOR=1' '--plain'
@@ -410,9 +553,12 @@ grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
 plain_question_input() {
   local question_output="$fixture/plain-question.txt"
   wait_for_pty_output "$question_output" 'Answer (number or text):'
+  printf ':command /status\n'
+  wait_for_pty_output "$question_output" 'Configured approval preset:'
   printf '2\n\n'
   wait_for_pty_output "$question_output" 'You> '
   printf '/quit\n'
+  wait_for_pty_output "$question_output" 'Goodbye.'
 }
 
 run_pty_case \
@@ -435,6 +581,7 @@ plain_failure_recovery_input() {
   printf 'y\n\n'
   wait_for_pty_output "$output" '[stream ended] completed'
   printf '/status\n/quit\n'
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 run_pty_case \
@@ -492,13 +639,24 @@ grep -Fq 'Approve once (y)' "$fixture/tui-approval-dock.txt"
 
 tui_question_input() {
   local output="$fixture/tui-question-dock.txt"
-  wait_for_pty_output "$output" 'Which verification mode?'
+  wait_for_pty_output "$output" 'Which verification mode?' || return 1
+  # xterm-compatible F2 must open prompt-local command entry without consuming
+  # the question or its draft. The renderer is incremental, so the overlay's
+  # label may be split by cursor controls; successful command output is the
+  # stable native proof that F2 changed the active consumer.
+  printf '\033OQ'
+  sleep 0.3
+  printf '/status\r'
+  # Full status rows are diff-rendered and can contain cursor controls within long
+  # labels on macOS. This short, unique status heading remains contiguous there.
+  wait_for_pty_output "$output" 'Verification' || return 1
+  sleep 0.3
   # Number keys type into the answer editor; Enter submits option 2 (full).
   printf '2\r'
   local session
-  session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')"
-  wait_for_pty_output "$session" '"answer": "full"'
-  wait_for_pty_output "$session" '"outcome": "completed"'
+  session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')" || return 1
+  wait_for_pty_output "$session" '"answer": "full"' || return 1
+  wait_for_pty_output "$session" '"outcome": "completed"' || return 1
   printf '\021\021'
 }
 
@@ -711,6 +869,7 @@ resume_input() {
     "$resume_output" \
     "Resumed session $target_session from persisted state."
   printf '/quit\n'
+  wait_for_pty_output "$resume_output" 'Goodbye.'
 }
 run_pty_case \
   plain-resume \
@@ -753,5 +912,35 @@ for output in "$fixture"/*.txt; do
     fi
   done <"$private_run_ids_file"
 done
+
+if [ -n "${NIB_INTERACTIVE_EVIDENCE_DIR:-}" ]; then
+  evidence_directory="$NIB_INTERACTIVE_EVIDENCE_DIR/$platform"
+  mkdir -p "$evidence_directory"
+  printf '%s\n' "$source_revision" >"$evidence_directory/revision.txt"
+  for evidence_name in \
+    tui-question-dock \
+    plain-question \
+    interactive-copy \
+    one-shot-interrupt-question \
+    one-shot-interrupt-approval \
+    one-shot-interrupt-terminal; do
+    sed "s/$private_sentinel/[fixture-secret]/g" \
+      "$fixture/$evidence_name.txt" >"$evidence_directory/$evidence_name.txt"
+  done
+  printf '%s\n' \
+    "platform=$platform" \
+    "source_revision=$source_revision" \
+    "source_clean=$source_clean" \
+    "binary_version=$binary_version" \
+    "acceptance_eligible=$acceptance_eligible" \
+    'f2_prompt_command=passed' \
+    'plain_modal_command=passed' \
+    "clipboard=$clipboard_result" \
+    'interruption_cases=3' \
+    'durable_cancellations=3' \
+    'terminal_restoration=passed' \
+    'privacy_scan=passed' \
+    >"$evidence_directory/summary.txt"
+fi
 
 printf 'Interactive release smoke passed (offline %s PTY and redirected modes).\n' "$platform"
