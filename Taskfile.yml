@@ -66,6 +66,11 @@ tasks:
     cmds:
       - "cargo test --test '*' -- --test-threads=1"
 
+  test:llm-failure-cli:
+    desc: Verify local HTTP failure and plain-chat recovery fixtures
+    cmds:
+      - 'cargo test --test llm_failure_cli -- --test-threads=1'
+
   verify:
     desc: Run the complete local static and test gates once
     cmds:

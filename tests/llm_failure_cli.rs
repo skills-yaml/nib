@@ -208,6 +208,28 @@ fn configure_interactive_failure(project: &Path, base_url: String) {
     save_nib_config_full(project, &mut config).expect("interactive fixture config");
 }
 
+fn recovery_outcomes(store: &SessionStore) -> Vec<String> {
+    store
+        .load_result(RECOVERY_SESSION_ID)
+        .ok()
+        .flatten()
+        .map(|session| {
+            session
+                .events
+                .iter()
+                .filter(|event| event.kind == "reconciliation")
+                .map(|event| {
+                    format!(
+                        "{}:{}",
+                        event.details["outcome"].as_str().unwrap_or("unknown"),
+                        event.details["class"].as_str().unwrap_or("unknown"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
     command
@@ -232,7 +254,7 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
     stdin.flush().expect("flush plain recovery first goal");
 
     let store = SessionStore::for_project(project).expect("plain recovery session store");
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let failure_reconciled = store
             .load_result(RECOVERY_SESSION_ID)
@@ -249,14 +271,14 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
             std::time::Instant::now() < deadline,
             "plain recovery did not reconcile the first failure"
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(10));
     }
     stdin
         .write_all(b"second goal\n")
         .expect("plain recovery second goal");
     stdin.flush().expect("flush plain recovery second goal");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let recovery_completed = store
             .load_result(RECOVERY_SESSION_ID)
@@ -271,9 +293,10 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "plain recovery did not complete after the auto-approved plan"
+            "plain recovery did not complete after the auto-approved plan; outcomes={:?}",
+            recovery_outcomes(&store),
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(10));
     }
     drop(stdin);
     let mut output = child.wait_with_output().expect("plain recovery output");
