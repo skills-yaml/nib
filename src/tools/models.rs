@@ -101,63 +101,68 @@ pub struct ApprovalDecision {
     pub granted: bool,
     pub source: String,
     pub note: Option<String>,
+    /// Exact raw command to remember after this grant. The executor writes it.
+    pub remember_command: Option<String>,
 }
 
 impl ApprovalDecision {
-    pub fn granted_policy() -> Self {
+    fn new(granted: bool, source: impl Into<String>, note: Option<String>) -> Self {
         Self {
-            granted: true,
-            source: "policy".to_string(),
-            note: Some("read-only".to_string()),
+            granted,
+            source: source.into(),
+            note,
+            remember_command: None,
         }
+    }
+
+    pub fn granted_policy() -> Self {
+        Self::new(true, "policy", Some("read-only".to_string()))
     }
 
     pub fn denied() -> Self {
-        Self {
-            granted: false,
-            source: "denied".to_string(),
-            note: Some("User denied".to_string()),
-        }
+        Self::new(false, "denied", Some("User denied".to_string()))
+    }
+
+    pub fn denied_with_reason(reason: impl Into<String>) -> Self {
+        Self::new(false, "denied", Some(reason.into()))
     }
 
     pub fn denied_input_closed() -> Self {
-        Self {
-            granted: false,
-            source: "input_closed".to_string(),
-            note: Some("Input closed".to_string()),
-        }
+        Self::new(false, "input_closed", Some("Input closed".to_string()))
     }
 
     pub fn denied_by_policy(note: impl Into<String>) -> Self {
-        Self {
-            granted: false,
-            source: "policy".to_string(),
-            note: Some(note.into()),
-        }
+        Self::new(false, "policy", Some(note.into()))
+    }
+
+    pub fn denied_unshowable() -> Self {
+        Self::new(
+            false,
+            "redaction",
+            Some("the command cannot be shown".to_string()),
+        )
     }
 
     pub fn granted_classifier() -> Self {
-        Self {
-            granted: true,
-            source: "classifier".to_string(),
-            note: Some("Smart classifier approved".to_string()),
-        }
+        Self::new(
+            true,
+            "classifier",
+            Some("Smart classifier approved".to_string()),
+        )
     }
 
     pub fn granted_user() -> Self {
-        Self {
-            granted: true,
-            source: "user".to_string(),
-            note: Some("CLI confirmation".to_string()),
-        }
+        Self::new(true, "user", Some("CLI confirmation".to_string()))
+    }
+
+    pub fn granted_remembered(command: impl Into<String>) -> Self {
+        let mut decision = Self::new(true, "user", Some("CLI confirmation".to_string()));
+        decision.remember_command = Some(command.into());
+        decision
     }
 
     pub fn granted_yolo() -> Self {
-        Self {
-            granted: true,
-            source: "yolo".to_string(),
-            note: Some("YOLO mode".to_string()),
-        }
+        Self::new(true, "yolo", Some("YOLO mode".to_string()))
     }
 }
 

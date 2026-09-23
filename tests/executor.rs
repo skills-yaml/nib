@@ -275,7 +275,13 @@ async fn terminal_audit_redacts_before_retained_tail_truncation() {
     store.create_session_with_id("terminal-redaction-boundary");
     let secret = "active/credential";
     let percent_secret = "active%2Fcredential";
-    let environment = HashMap::from([("DEPLOY_TOKEN".to_string(), secret.to_string())]);
+    let environment = HashMap::from([
+        ("DEPLOY_TOKEN".to_string(), secret.to_string()),
+        (
+            "DEPLOY_TOKEN_ENCODED".to_string(),
+            percent_secret.to_string(),
+        ),
+    ]);
     let mut executor = ToolExecutor::new(root.path().to_path_buf(), execution_without_plan_gate())
         .with_auto_approve(true)
         .with_session_store(store.clone())
@@ -302,7 +308,7 @@ async fn terminal_audit_redacts_before_retained_tail_truncation() {
             call(
                 "run_terminal",
                 json!({
-                    "command": format!("printf %s '{percent_secret}' >&2; exit 7"),
+                    "command": "printf %s \"$DEPLOY_TOKEN_ENCODED\" >&2; exit 7",
                     "max_output_bytes": 8
                 }),
                 root.path(),

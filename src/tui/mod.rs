@@ -39,6 +39,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -207,6 +208,119 @@ struct TranscriptView {
     top_row: usize,
     plain_rows: Vec<String>,
     owners: Vec<usize>,
+    source_session: String,
+    source_generation: u64,
+    render_cache: Option<TranscriptRenderCache>,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptRenderCache {
+    session_id: String,
+    generation: u64,
+    width: u16,
+    no_color: bool,
+    live_second: Option<u64>,
+    live_tokens: Option<String>,
+    rows: Arc<Vec<Line<'static>>>,
+    owners: Arc<Vec<usize>>,
+    activity_rows: Vec<CachedActivityRows>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedActivityRows {
+    source: Arc<ActivityEntry>,
+    lines: Arc<Vec<Line<'static>>>,
+}
+
+impl TranscriptRenderCache {
+    fn matches(
+        &self,
+        view: &TranscriptView,
+        width: u16,
+        no_color: bool,
+        live: Option<&TranscriptLive>,
+    ) -> bool {
+        self.session_id == view.source_session
+            && self.generation == view.source_generation
+            && self.width == width
+            && self.no_color == no_color
+            && self.live_second == live.map(|state| state.elapsed.as_secs())
+            && self.live_tokens.as_deref() == live.and_then(|state| state.tokens.as_deref())
+    }
+}
+
+#[derive(Debug, Default)]
+struct SessionDisplayCache {
+    session_id: String,
+    session: Option<crate::session::Session>,
+    token_label: String,
+    last_attempt: Option<Instant>,
+    pending: Option<mpsc::Receiver<Result<Option<crate::session::Session>, ()>>>,
+}
+
+impl SessionDisplayCache {
+    fn with_session(session: crate::session::Session) -> Self {
+        let token_label = approximate_visible_tokens(Some(&session));
+        Self {
+            session_id: session.id.clone(),
+            session: Some(session),
+            token_label,
+            last_attempt: Some(Instant::now()),
+            pending: None,
+        }
+    }
+
+    fn set_session(&mut self, session: Option<crate::session::Session>) {
+        self.token_label = approximate_visible_tokens(session.as_ref());
+        self.session = session;
+    }
+
+    fn refresh(&mut self, store: &SessionStore, session_id: &str, now: Instant) {
+        if self.session_id != session_id {
+            self.session_id = session_id.to_string();
+            self.set_session(None);
+            self.last_attempt = None;
+            self.pending = None;
+        }
+        if let Some(receiver) = self.pending.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(session)) => {
+                    self.set_session(session);
+                    self.pending = None;
+                }
+                Ok(Err(())) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self
+            .last_attempt
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+            || self.pending.is_some()
+        {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let store = store.clone();
+        let session_id = session_id.to_string();
+        if std::thread::Builder::new()
+            .name("nib-tui-session-display".to_string())
+            .spawn(move || {
+                let result = store
+                    .load_result_with_deadline(
+                        &session_id,
+                        Instant::now() + Duration::from_millis(10),
+                    )
+                    .map_err(|_| ());
+                let _ = sender.send(result);
+            })
+            .is_ok()
+        {
+            self.pending = Some(receiver);
+            self.last_attempt = Some(now);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -250,6 +364,9 @@ impl InteractionBand<'_> {
                 }
             }
             Self::History(search) => search.search.matches.len().max(1).saturating_add(1),
+            Self::Approval(request) if request.call.tool_name == "run_terminal" => {
+                command_approval_lines(request).len().max(2)
+            }
             Self::Approval(_) | Self::Workspace { .. } => 2,
             Self::Question(question) if question.request.options.is_empty() => 1,
             Self::Question(question) => question.request.options.len().saturating_add(1),
@@ -265,6 +382,9 @@ impl InteractionBand<'_> {
             }
             Self::Sessions { .. } => "Enter resume · Esc close",
             Self::History(_) => "Enter restore · Esc close",
+            Self::Approval(request) if request.call.tool_name == "run_terminal" => {
+                "Press enter to confirm or esc to cancel"
+            }
             Self::Approval(_) => "Y/Enter approve once · N deny · Esc deny",
             Self::Question(_) => "Enter / 1-9 answer · Esc skip",
             Self::Workspace { .. } => "Y/Enter allow this directory · N decline",
@@ -508,6 +628,7 @@ fn truncate_session_detail_rows(text: &mut String) {
 #[derive(Debug, Default)]
 struct ActiveTimeline {
     session_id: String,
+    render_generation: u64,
     active_run_id: Option<String>,
     reconciled_terminal: Option<InteractionTerminalOutcome>,
     reconciled_outcome: Option<String>,
@@ -519,6 +640,13 @@ struct ActiveTimeline {
 
 impl ActiveTimeline {
     fn load(store: &SessionStore, session_id: &str) -> io::Result<Self> {
+        Self::load_with_session(store, session_id).map(|(timeline, _)| timeline)
+    }
+
+    fn load_with_session(
+        store: &SessionStore,
+        session_id: &str,
+    ) -> io::Result<(Self, crate::session::Session)> {
         let session = store
             .load_result(session_id)
             .map_err(|error| {
@@ -530,16 +658,15 @@ impl ActiveTimeline {
                     format!("session {session_id} no longer exists"),
                 )
             })?;
-        Ok(Self::from_session(
-            &session,
-            store.public_sensitive_values().to_vec(),
-        ))
+        let timeline = Self::from_session(&session, store.public_sensitive_values().to_vec());
+        Ok((timeline, session))
     }
 
     fn from_session(session: &crate::session::Session, sensitive_values: Vec<String>) -> Self {
         let activities = project_session_activities(session, &sensitive_values);
         Self {
             session_id: session.id.clone(),
+            render_generation: 0,
             active_run_id: None,
             reconciled_terminal: None,
             reconciled_outcome: None,
@@ -551,6 +678,7 @@ impl ActiveTimeline {
     }
 
     fn push_status(&mut self, status: String) {
+        self.render_generation = self.render_generation.wrapping_add(1);
         let status =
             bounded_public_text(&status, &self.sensitive_values, MAX_LIVE_OUTPUT_BYTES, true);
         self.live.push_status(status.clone());
@@ -562,6 +690,7 @@ impl ActiveTimeline {
     }
 
     fn push_steering(&mut self, _text: &str, sequence: usize) {
+        self.render_generation = self.render_generation.wrapping_add(1);
         self.activities.push(ActivityEntry::new(
             ActivityKind::User,
             format!("steer {sequence}"),
@@ -572,6 +701,7 @@ impl ActiveTimeline {
     }
 
     fn apply_event(&mut self, event: StreamEvent) {
+        self.render_generation = self.render_generation.wrapping_add(1);
         if let StreamEvent::Reconciled { outcome } = &event {
             if !matches!(outcome.as_str(), "step_completed" | "verification_recovery") {
                 if let InteractionReduction::Reconciled { terminal, outcome } = reduce_interaction(
@@ -689,6 +819,7 @@ pub struct TuiApprovalRequest {
     pub context: ApprovalContext,
     pub selected_option: usize,
     pub typed: String,
+    reason_draft: Option<String>,
     details_open: bool,
     detail_offset: usize,
     error: Option<String>,
@@ -728,8 +859,9 @@ impl TuiApprovalHandler {
             call: call.clone(),
             level,
             context,
-            selected_option: 1,
+            selected_option: usize::from(call.tool_name != "run_terminal"),
             typed: String::new(),
+            reason_draft: None,
             details_open: false,
             detail_offset: 0,
             error: None,
@@ -1677,10 +1809,152 @@ fn approval_decision_from_answer(answer: &str) -> Result<ApprovalDecision, Strin
     }
 }
 
+fn card_input_for_key(code: KeyCode) -> crate::interaction_card::CardInput {
+    match code {
+        KeyCode::Esc => crate::interaction_card::CardInput::Esc,
+        KeyCode::Up => crate::interaction_card::CardInput::Up,
+        KeyCode::Down => crate::interaction_card::CardInput::Down,
+        KeyCode::Enter => crate::interaction_card::CardInput::Enter,
+        KeyCode::Backspace => crate::interaction_card::CardInput::Backspace,
+        KeyCode::Char(character) => crate::interaction_card::CardInput::Char(character),
+        _ => crate::interaction_card::CardInput::Other,
+    }
+}
+
+fn command_rows(req: &TuiApprovalRequest) -> Vec<crate::interaction_card::CardRow> {
+    let command = req.context.shown_command.clone().unwrap_or_else(|| {
+        req.call
+            .arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string()
+    });
+    let remember = req.context.remember_exact.as_deref();
+    crate::interaction_card::command_approval_card(
+        "local",
+        &req.context.reason,
+        &command,
+        &req.context.command_extras,
+        remember,
+        req.selected_option,
+        true,
+    )
+    .rows
+}
+
+fn finish_command_reason(approval: &mut Option<TuiApprovalRequest>) {
+    let Some(pending) = approval.as_mut() else {
+        return;
+    };
+    let draft = pending.reason_draft.clone().unwrap_or_default();
+    let reason = draft.trim();
+    if reason.len() > 240 {
+        pending.error = Some("Input error: the reason is too long".to_string());
+        return;
+    }
+    let decision = if reason.is_empty() {
+        ApprovalDecision::denied()
+    } else {
+        ApprovalDecision::denied_with_reason(reason.to_string())
+    };
+    if let Some(request) = approval.take() {
+        let _ = request.reply.send(decision);
+    }
+}
+
+fn handle_command_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode) -> bool {
+    let Some(pending) = approval.as_ref() else {
+        return false;
+    };
+    let rows = command_rows(pending);
+    let editing = pending.reason_draft.is_some();
+    let selected = pending.selected_option;
+    let action =
+        crate::interaction_card::card_key(&rows, selected, card_input_for_key(code), editing);
+    match action {
+        crate::interaction_card::CardKey::Ignored => true,
+        crate::interaction_card::CardKey::Moved(index) => {
+            if let Some(pending) = approval.as_mut() {
+                pending.selected_option = index;
+                if editing {
+                    pending.reason_draft = None;
+                }
+                pending.error = None;
+            }
+            true
+        }
+        crate::interaction_card::CardKey::Cancel => {
+            if let Some(request) = approval.take() {
+                let _ = request.reply.send(ApprovalDecision::denied());
+            }
+            true
+        }
+        crate::interaction_card::CardKey::Edit(character) => {
+            if let Some(pending) = approval.as_mut() {
+                if let Some(draft) = pending.reason_draft.as_mut() {
+                    if draft.len().saturating_add(character.len_utf8()) <= 240 {
+                        draft.push(character);
+                        pending.error = None;
+                    } else {
+                        pending.error = Some("Input error: the reason is too long".to_string());
+                    }
+                }
+            }
+            true
+        }
+        crate::interaction_card::CardKey::Backspace => {
+            if let Some(pending) = approval.as_mut() {
+                if let Some(draft) = pending.reason_draft.as_mut() {
+                    draft.pop();
+                    pending.error = None;
+                }
+            }
+            true
+        }
+        crate::interaction_card::CardKey::Activate(index) => {
+            if editing {
+                finish_command_reason(approval);
+                return true;
+            }
+            let role = rows.get(index).map(|row| row.role);
+            match role {
+                Some(crate::interaction_card::CommandRowRole::Yes) => {
+                    if let Some(request) = approval.take() {
+                        let _ = request.reply.send(ApprovalDecision::granted_user());
+                    }
+                }
+                Some(crate::interaction_card::CommandRowRole::Remember) => {
+                    let command = approval
+                        .as_ref()
+                        .and_then(|pending| pending.context.remember_exact.clone())
+                        .unwrap_or_default();
+                    if let Some(request) = approval.take() {
+                        let _ = request
+                            .reply
+                            .send(ApprovalDecision::granted_remembered(command));
+                    }
+                }
+                Some(crate::interaction_card::CommandRowRole::No) => {
+                    if let Some(pending) = approval.as_mut() {
+                        pending.reason_draft = Some(String::new());
+                        pending.error = None;
+                    }
+                }
+                None => {}
+            }
+            true
+        }
+    }
+}
+
 fn handle_approval_key(approval: &mut Option<TuiApprovalRequest>, code: KeyCode) -> bool {
     let Some(pending) = approval.as_mut() else {
         return false;
     };
+    if pending.call.tool_name == "run_terminal" {
+        return handle_command_approval_key(approval, code);
+    }
     if pending.details_open {
         match code {
             KeyCode::Esc => pending.details_open = false,
@@ -2091,6 +2365,22 @@ fn completion_reserved_height(
     desired.min(area_height.saturating_sub(chrome))
 }
 
+fn command_approval_reserved_height(
+    area_height: u16,
+    row_count: usize,
+    composer_height: u16,
+    meter_height: u16,
+) -> u16 {
+    let chrome = 1u16
+        .saturating_add(3)
+        .saturating_add(composer_height)
+        .saturating_add(meter_height)
+        .saturating_add(1);
+    u16::try_from(row_count)
+        .unwrap_or(u16::MAX)
+        .min(area_height.saturating_sub(chrome))
+}
+
 fn split_session_layout(
     area: Rect,
     composer_height: u16,
@@ -2363,7 +2653,75 @@ fn render_choice_band(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn command_approval_lines(req: &TuiApprovalRequest) -> Vec<String> {
+    let command = req
+        .context
+        .shown_command
+        .clone()
+        .or_else(|| {
+            req.call
+                .arguments
+                .get("command")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let environment = if req.context.command_environment.is_empty() {
+        "local"
+    } else {
+        req.context.command_environment.as_str()
+    };
+    let remember = req.context.remember_exact.as_deref();
+    let mut card = crate::interaction_card::command_approval_card(
+        environment,
+        &req.context.reason,
+        &command,
+        &req.context.command_extras,
+        remember,
+        req.selected_option,
+        true,
+    );
+    if let Some(draft) = &req.reason_draft {
+        card.text.push_str(&format!("\nReason to record: {draft}"));
+    }
+    if let Some(error) = req.error.as_ref().or(req.context.input_error.as_ref()) {
+        card.text.push_str(&format!("\n{error}"));
+    }
+    card.text.lines().map(str::to_string).collect()
+}
+
+fn render_command_approval_card(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    req: &TuiApprovalRequest,
+) {
+    let inner = completion_inner_rect(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let lines = command_approval_lines(req);
+    let capacity = usize::from(inner.height).max(1);
+    let start = lines.len().saturating_sub(capacity);
+    let rendered = lines[start..]
+        .iter()
+        .map(|line| {
+            let style = if line.starts_with("› ") {
+                selected_option_style(no_color)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(line.clone(), style))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rendered), inner);
+}
+
 fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApprovalRequest) {
+    if req.call.tool_name == "run_terminal" {
+        render_command_approval_card(frame, area, req);
+        return;
+    }
     if req.details_open {
         render_choice_band(
             frame,
@@ -2932,7 +3290,20 @@ fn drain_stream_events(
     stream_rx: &mut tokio::sync::mpsc::Receiver<SessionStreamEvent>,
     timeline: &mut ActiveTimeline,
 ) {
-    while let Ok(event) = stream_rx.try_recv() {
+    let _ = drain_stream_events_bounded(stream_rx, timeline, usize::MAX);
+}
+
+fn drain_stream_events_bounded(
+    stream_rx: &mut tokio::sync::mpsc::Receiver<SessionStreamEvent>,
+    timeline: &mut ActiveTimeline,
+    limit: usize,
+) -> usize {
+    let mut drained = 0;
+    while drained < limit {
+        let Ok(event) = stream_rx.try_recv() else {
+            break;
+        };
+        drained += 1;
         let reduction = reduce_interaction(
             &InteractionState::default(),
             InteractionInput::SessionRunEvent {
@@ -2946,6 +3317,7 @@ fn drain_stream_events(
             timeline.apply_event(event.event);
         }
     }
+    drained
 }
 
 fn shutdown_agent_worker(
@@ -4826,6 +5198,51 @@ fn flatten_activity_lines(
     (rows, owners)
 }
 
+fn flatten_activity_lines_reusing(
+    activities: &[ActivityEntry],
+    width: u16,
+    no_color: bool,
+    live: Option<&TranscriptLive>,
+    previous: Option<&TranscriptRenderCache>,
+) -> (Vec<Line<'static>>, Vec<usize>, Vec<CachedActivityRows>) {
+    let mut rows = Vec::new();
+    let mut owners = Vec::new();
+    let mut activity_rows = Vec::with_capacity(activities.len());
+    let mut previous_channel = None;
+    for (index, entry) in activities.iter().enumerate() {
+        let old = previous.and_then(|cache| cache.activity_rows.get(index));
+        let live_sensitive = entry.live_since.is_some()
+            || old.is_some_and(|cached| cached.source.live_since.is_some())
+            || tool_is_live(entry)
+            || entry.kind == ActivityKind::Thinking
+                && (entry.title.is_empty() || is_legacy_thought_title(&entry.title));
+        let unchanged = old.filter(|cached| cached.source.as_ref() == entry);
+        let lines = unchanged
+            .filter(|_| !live_sensitive)
+            .map(|cached| Arc::clone(&cached.lines))
+            .unwrap_or_else(|| Arc::new(activity_lines(entry, width, no_color, live)));
+        if !lines.is_empty() {
+            let channel = visual_channel(entry.kind);
+            if previous_channel.is_some_and(|previous| previous != channel) {
+                rows.push(Line::from(""));
+                owners.push(index);
+            }
+            previous_channel = Some(channel);
+            for line in lines.iter() {
+                rows.push(line.clone());
+                owners.push(index);
+            }
+        }
+        activity_rows.push(CachedActivityRows {
+            source: unchanged
+                .map(|cached| Arc::clone(&cached.source))
+                .unwrap_or_else(|| Arc::new(entry.clone())),
+            lines,
+        });
+    }
+    (rows, owners, activity_rows)
+}
+
 fn ensure_selected_visible(viewport: &mut TranscriptViewport, owners: &[usize], selected: usize) {
     let Some(first) = owners.iter().position(|owner| *owner == selected) else {
         return;
@@ -5015,7 +5432,7 @@ fn render_session_activities(
     welcome: &StartupWelcome,
     band: Option<&InteractionBand<'_>>,
     pointer: Option<PointerSelection>,
-    view: Option<&mut TranscriptView>,
+    mut view: Option<&mut TranscriptView>,
 ) {
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let waiting = if pending_approval.is_some() {
@@ -5057,7 +5474,21 @@ fn render_session_activities(
     let band = waiting_band.as_ref().or(band).or(completion_band.as_ref());
     let completion_h = band
         .map(|band| {
-            completion_reserved_height(frame.area().height, band.row_count(), composer_h, meter_h)
+            if matches!(band, InteractionBand::Approval(req) if req.call.tool_name == "run_terminal") {
+                command_approval_reserved_height(
+                    frame.area().height,
+                    band.row_count(),
+                    composer_h,
+                    meter_h,
+                )
+            } else {
+                completion_reserved_height(
+                    frame.area().height,
+                    band.row_count(),
+                    composer_h,
+                    meter_h,
+                )
+            }
         })
         .unwrap_or(0);
     let layout = split_session_layout(frame.area(), composer_h, meter_h, completion_h);
@@ -5074,18 +5505,61 @@ fn render_session_activities(
         .constraints([Constraint::Min(1)])
         .split(layout.transcript);
     let empty = activities.is_empty();
-    let (rendered_rows, owners) = if empty {
-        (
-            vec![Line::from(""); empty_state_lines(welcome, no_color).len()],
-            Vec::new(),
-        )
+    let live = meter.map(|meter| TranscriptLive {
+        elapsed: meter.elapsed,
+        tokens: meter_token_label(&meter.tokens),
+        tick: meter.tick / 1_000,
+    });
+    let width = body[0].width.max(1);
+    let (rendered_rows, owners) = if let Some(view) = view.as_deref_mut() {
+        let rebuild = !view
+            .render_cache
+            .as_ref()
+            .is_some_and(|cache| cache.matches(view, width, no_color, live.as_ref()));
+        if rebuild {
+            let previous = view.render_cache.as_ref().filter(|cache| {
+                cache.session_id == view.source_session
+                    && cache.width == width
+                    && cache.no_color == no_color
+            });
+            let (rows, owners, activity_rows) = if empty {
+                (
+                    vec![Line::from(""); empty_state_lines(welcome, no_color).len()],
+                    Vec::new(),
+                    Vec::new(),
+                )
+            } else {
+                flatten_activity_lines_reusing(activities, width, no_color, live.as_ref(), previous)
+            };
+            view.plain_rows = rows.iter().map(line_plain_text).collect();
+            view.owners = owners.clone();
+            view.render_cache = Some(TranscriptRenderCache {
+                session_id: view.source_session.clone(),
+                generation: view.source_generation,
+                width,
+                no_color,
+                live_second: live.as_ref().map(|state| state.elapsed.as_secs()),
+                live_tokens: live.as_ref().and_then(|state| state.tokens.clone()),
+                rows: Arc::new(rows),
+                owners: Arc::new(owners),
+                activity_rows,
+            });
+        }
+        let cache = view
+            .render_cache
+            .as_ref()
+            .expect("render cache initialized");
+        (Arc::clone(&cache.rows), Arc::clone(&cache.owners))
     } else {
-        let live = meter.map(|meter| TranscriptLive {
-            elapsed: meter.elapsed,
-            tokens: meter_token_label(&meter.tokens),
-            tick: meter.tick,
-        });
-        flatten_activity_lines(activities, body[0].width.max(1), no_color, live.as_ref())
+        let (rows, owners) = if empty {
+            (
+                vec![Line::from(""); empty_state_lines(welcome, no_color).len()],
+                Vec::new(),
+            )
+        } else {
+            flatten_activity_lines(activities, width, no_color, live.as_ref())
+        };
+        (Arc::new(rows), Arc::new(owners))
     };
     viewport.observe_layout(rendered_rows.len(), usize::from(body[0].height.max(1)));
     if let Some(selected) = selected {
@@ -5095,8 +5569,6 @@ fn render_session_activities(
         view.area = body[0];
         view.composer_area = layout.composer;
         view.top_row = viewport.top_row();
-        view.plain_rows = rendered_rows.iter().map(line_plain_text).collect();
-        view.owners = owners.clone();
     }
     if empty {
         let welcome_lines = empty_state_lines(welcome, no_color);
@@ -5247,14 +5719,29 @@ fn render_session_activities(
         }
         None => {}
     }
-    let footer = footer_line(
-        &chrome,
-        viewport,
-        queued,
-        waiting,
-        band.map(InteractionBand::footer_hint),
-        pointer_selection_is_active(pointer),
+    let command_approval = matches!(
+        band,
+        Some(InteractionBand::Approval(request)) if request.call.tool_name == "run_terminal"
     );
+    let footer = if command_approval {
+        footer_line(
+            &chrome,
+            viewport,
+            queued,
+            WaitingKind::None,
+            Some("Press enter to confirm or esc to cancel"),
+            pointer_selection_is_active(pointer),
+        )
+    } else {
+        footer_line(
+            &chrome,
+            viewport,
+            queued,
+            waiting,
+            band.map(InteractionBand::footer_hint),
+            pointer_selection_is_active(pointer),
+        )
+    };
     frame.render_widget(
         Paragraph::new(footer).style(muted_style(no_color)),
         layout.footer,
@@ -5294,7 +5781,8 @@ fn draw_loop(
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
-    let mut timeline = ActiveTimeline::load(&store, &active_session_id)?;
+    let (mut timeline, initial_session) =
+        ActiveTimeline::load_with_session(&store, &active_session_id)?;
     if let Some(notice) = session_notice {
         timeline.push_status(notice);
     }
@@ -5340,11 +5828,12 @@ fn draw_loop(
     let spinner_origin = Instant::now();
     let mut chrome_generation: u64 = 0;
     let mut chrome_cache: Option<ChromeCache> = None;
+    let mut session_display_cache = SessionDisplayCache::with_session(initial_session);
     let mut exit_requested = false;
     let mut exit_requested_with_active_run = false;
 
     let loop_result = loop {
-        drain_stream_events(&mut stream_rx, &mut timeline);
+        drain_stream_events_bounded(&mut stream_rx, &mut timeline, 64);
         let worker_finished = worker.as_ref().is_some_and(TuiAgentWorker::is_finished);
         if let Err(error) = reap_finished_worker(
             &mut worker,
@@ -5431,15 +5920,15 @@ fn draw_loop(
         )
         .lifecycle()
         .status_label();
-        let session = store.load_result(&timeline.session_id).ok().flatten();
+        session_display_cache.refresh(&store, &timeline.session_id, Instant::now());
+        let session = session_display_cache.session.as_ref();
         let queued = session
-            .as_ref()
             .map(|session| session.queued_follow_ups.len())
             .unwrap_or(0);
         if let Err(error) = terminal.size() {
             break Err(error);
         }
-        let session_revision = session.as_ref().map(|session| session.revision);
+        let session_revision = session.map(|session| session.revision);
         let mut chrome = if chrome_cache.as_ref().is_some_and(|cache| {
             cache.matches(
                 chrome_generation,
@@ -5450,9 +5939,8 @@ fn draw_loop(
         }) {
             chrome_cache.as_ref().expect("checked").chrome.clone()
         } else {
-            let chrome =
-                format_tui_interaction_chrome(project_root, session.as_ref(), &timeline.session_id)
-                    .unwrap_or_else(TuiChrome::error);
+            let chrome = format_tui_interaction_chrome(project_root, session, &timeline.session_id)
+                .unwrap_or_else(TuiChrome::error);
             chrome_cache = Some(ChromeCache {
                 generation: chrome_generation,
                 session_id: timeline.session_id.clone(),
@@ -5490,12 +5978,12 @@ fn draw_loop(
         let meter = if worker.is_some() || waiting != WaitingKind::None {
             Some(WaitingMeter {
                 job: live_job_label(&timeline.activities, timeline.live.state.as_deref()),
-                step: plan_step_label(session.as_ref()),
+                step: plan_step_label(session),
                 elapsed: timeline
                     .run_started_at
                     .map(|started| started.elapsed())
                     .unwrap_or_default(),
-                tokens: approximate_visible_tokens(session.as_ref()),
+                tokens: session_display_cache.token_label.clone(),
                 status: meter_status_label(waiting, worker_status),
                 tick: spinner_origin.elapsed().as_millis(),
             })
@@ -5514,6 +6002,10 @@ fn draw_loop(
                         active: &active_session_id,
                     })
             });
+        transcript_view
+            .source_session
+            .clone_from(&timeline.session_id);
+        transcript_view.source_generation = timeline.render_generation;
         if let Err(error) = terminal.draw(|f| {
             render_session_activities(
                 f,
@@ -6132,6 +6624,8 @@ fn draw_loop(
                                 if let Some(entry) = timeline.activities.get_mut(index) {
                                     if !entry.body.is_empty() {
                                         entry.folded = !entry.folded;
+                                        timeline.render_generation =
+                                            timeline.render_generation.wrapping_add(1);
                                     }
                                 }
                             }
@@ -6565,11 +7059,12 @@ mod tests {
     ) -> TuiApprovalRequest {
         let context = ApprovalContext::compatibility(&call, level);
         TuiApprovalRequest {
-            call,
+            call: call.clone(),
             level,
             context,
-            selected_option: 1,
+            selected_option: usize::from(call.tool_name != "run_terminal"),
             typed: String::new(),
+            reason_draft: None,
             details_open: false,
             detail_offset: 0,
             error: None,
@@ -6821,6 +7316,235 @@ mod tests {
         assert!(!cache.matches(1, "other", Some(4), "new"));
         assert!(!cache.matches(2, "abc", Some(4), "new"));
         assert!(!cache.matches(1, "abc", Some(4), "resumed"));
+    }
+
+    #[test]
+    fn session_display_cache_refreshes_on_cadence_and_session_switch() {
+        fn settle(
+            cache: &mut SessionDisplayCache,
+            store: &SessionStore,
+            id: &str,
+            now: Instant,
+            min_revision: u64,
+        ) {
+            let start = Instant::now();
+            let mut refresh_at = now;
+            loop {
+                cache.refresh(store, id, refresh_at);
+                if cache.pending.is_none()
+                    && cache
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.id == id && session.revision >= min_revision)
+                {
+                    break;
+                }
+                assert!(start.elapsed() < Duration::from_secs(5));
+                if cache.pending.is_none() {
+                    refresh_at += Duration::from_secs(1);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let directory = tempdir().expect("tempdir");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        store.create_session_with_id("session-a");
+        store.create_session_with_id("session-b");
+        let now = Instant::now();
+        let mut cache = SessionDisplayCache::default();
+        cache.refresh(&store, "session-a", now);
+        settle(&mut cache, &store, "session-a", now, 0);
+        let initial_revision = cache.session.as_ref().unwrap().revision;
+        store
+            .try_append_message("session-a", "user", "new message")
+            .expect("append message");
+        cache.refresh(&store, "session-a", now + Duration::from_millis(999));
+        assert_eq!(cache.session.as_ref().unwrap().revision, initial_revision);
+        cache.refresh(&store, "session-a", now + Duration::from_secs(1));
+        settle(
+            &mut cache,
+            &store,
+            "session-a",
+            now + Duration::from_secs(1),
+            initial_revision + 1,
+        );
+        assert!(cache.session.as_ref().unwrap().revision > initial_revision);
+        cache.refresh(&store, "session-b", now + Duration::from_secs(1));
+        settle(
+            &mut cache,
+            &store,
+            "session-b",
+            now + Duration::from_secs(1),
+            0,
+        );
+        assert_eq!(cache.session.as_ref().unwrap().id, "session-b");
+    }
+
+    fn draw_cached_test_transcript(
+        terminal: &mut Terminal<TestBackend>,
+        activities: &[ActivityEntry],
+        composer: &Composer,
+        viewport: &mut TranscriptViewport,
+        view: &mut TranscriptView,
+        meter: &WaitingMeter,
+    ) {
+        terminal
+            .draw(|frame| {
+                render_session_activities(
+                    frame,
+                    &TuiChrome::fixture(),
+                    activities,
+                    composer,
+                    None,
+                    None,
+                    true,
+                    viewport,
+                    TuiFocus::Composer,
+                    None,
+                    0,
+                    None,
+                    Some(meter),
+                    &StartupWelcome::fixture(),
+                    None,
+                    None,
+                    Some(view),
+                );
+            })
+            .expect("render test transcript");
+    }
+
+    fn long_test_activity(index: usize) -> ActivityEntry {
+        ActivityEntry::new(
+            ActivityKind::Assistant,
+            "",
+            format!("**reply {index}** with a wrapped markdown body"),
+        )
+    }
+
+    #[test]
+    fn long_transcript_reuses_layout_until_source_or_live_second_changes() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let mut viewport = TranscriptViewport::default();
+        let mut view = TranscriptView {
+            source_session: "session-a".to_string(),
+            ..TranscriptView::default()
+        };
+        let mut composer = Composer::default();
+        let mut activities = (0..300).map(long_test_activity).collect::<Vec<_>>();
+        let mut meter = WaitingMeter {
+            job: "working".to_string(),
+            step: "1/2".to_string(),
+            elapsed: Duration::ZERO,
+            tokens: "tok 1k".to_string(),
+            status: "running".to_string(),
+            tick: 0,
+        };
+        let mut first = None;
+        for frame_index in 0..2 {
+            draw_cached_test_transcript(
+                &mut terminal,
+                &activities,
+                &composer,
+                &mut viewport,
+                &mut view,
+                &meter,
+            );
+            let rows = Arc::clone(&view.render_cache.as_ref().unwrap().rows);
+            if let Some(initial) = first.as_ref() {
+                assert!(Arc::ptr_eq(initial, &rows));
+            } else {
+                first = Some(rows);
+            }
+            if frame_index == 0 {
+                meter.tick += 500;
+                meter.elapsed += Duration::from_millis(500);
+            }
+        }
+        let first = first.expect("initial transcript rows");
+        composer.insert_str("typing while the agent runs");
+        draw_cached_test_transcript(
+            &mut terminal,
+            &activities,
+            &composer,
+            &mut viewport,
+            &mut view,
+            &meter,
+        );
+        assert!(Arc::ptr_eq(
+            &first,
+            &view.render_cache.as_ref().unwrap().rows
+        ));
+        assert_eq!(view.plain_rows.len(), view.owners.len());
+        assert!(view.plain_rows.iter().any(|row| row.contains("reply 299")));
+        meter.tick += 500;
+        meter.elapsed += Duration::from_millis(500);
+        draw_cached_test_transcript(
+            &mut terminal,
+            &activities,
+            &composer,
+            &mut viewport,
+            &mut view,
+            &meter,
+        );
+        assert!(!Arc::ptr_eq(
+            &first,
+            &view.render_cache.as_ref().unwrap().rows
+        ));
+        let unchanged_first =
+            Arc::clone(&view.render_cache.as_ref().unwrap().activity_rows[0].lines);
+        let changed_last =
+            Arc::clone(&view.render_cache.as_ref().unwrap().activity_rows[299].lines);
+        activities[299].body = "updated final answer".to_string();
+        view.source_generation += 1;
+        draw_cached_test_transcript(
+            &mut terminal,
+            &activities,
+            &composer,
+            &mut viewport,
+            &mut view,
+            &meter,
+        );
+        let cache = view.render_cache.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&unchanged_first, &cache.activity_rows[0].lines));
+        assert!(!Arc::ptr_eq(&changed_last, &cache.activity_rows[299].lines));
+        assert!(view
+            .plain_rows
+            .iter()
+            .any(|row| row.contains("updated final answer")));
+        view.source_session = "session-b".to_string();
+        assert!(!view
+            .render_cache
+            .as_ref()
+            .unwrap()
+            .matches(&view, 80, false, None,));
+    }
+
+    #[test]
+    fn bounded_stream_drain_keeps_remaining_events_ordered() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+        for index in 0..100 {
+            tx.try_send(SessionStreamEvent {
+                session_id: "session-a".to_string(),
+                run_id: "run-a".to_string(),
+                event: StreamEvent::Content(format!("{index:03},")),
+            })
+            .expect("enqueue event");
+        }
+        let mut timeline = ActiveTimeline {
+            session_id: "session-a".to_string(),
+            active_run_id: Some("run-a".to_string()),
+            ..ActiveTimeline::default()
+        };
+        assert_eq!(drain_stream_events_bounded(&mut rx, &mut timeline, 64), 64);
+        assert_eq!(timeline.render_generation, 64);
+        assert_eq!(drain_stream_events_bounded(&mut rx, &mut timeline, 64), 36);
+        assert_eq!(timeline.render_generation, 100);
+        assert_eq!(
+            timeline.live.text,
+            (0..100)
+                .map(|index| format!("{index:03},"))
+                .collect::<String>()
+        );
     }
 
     #[test]
@@ -8500,12 +9224,11 @@ mod tests {
         assert!(pending.is_some());
         assert!(reply_rx.try_recv().is_err());
 
-        assert!(handle_approval_key(&mut pending, KeyCode::Backspace));
         assert!(handle_approval_key(&mut pending, KeyCode::Char('Y')));
-        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         let decision = reply_rx.try_recv().unwrap();
         assert!(decision.granted);
         assert_eq!(decision.source, "user");
+        assert!(decision.remember_command.is_none());
     }
 
     #[test]
@@ -8523,7 +9246,9 @@ mod tests {
             reply_tx,
         ));
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
-        assert!(!reply_rx.try_recv().unwrap().granted);
+        let granted = reply_rx.try_recv().unwrap();
+        assert!(granted.granted);
+        assert!(granted.remember_command.is_none());
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(approval_request(
@@ -8537,24 +9262,12 @@ mod tests {
             PermissionLevel::Destructive,
             reply_tx,
         ));
-        assert!(handle_approval_key(&mut pending, KeyCode::Up));
+        assert!(handle_approval_key(&mut pending, KeyCode::Char('p')));
+        assert!(pending.as_ref().is_some_and(|req| req.selected_option == 1));
+        assert!(reply_rx.try_recv().is_err());
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
-        assert!(reply_rx.try_recv().unwrap().granted);
-
-        let (reply_tx, mut reply_rx) = oneshot::channel();
-        let mut pending = Some(approval_request(
-            ToolCall {
-                invocation_id: crate::tools::ToolInvocationId::new(),
-                tool_name: "run_terminal".to_string(),
-                arguments: json!({"command": "task test"}),
-                session_id: None,
-                project_root: None,
-            },
-            PermissionLevel::Destructive,
-            reply_tx,
-        ));
-        assert!(handle_approval_key(&mut pending, KeyCode::Enter));
-        assert!(!reply_rx.try_recv().unwrap().granted);
+        let remembered = reply_rx.try_recv().unwrap();
+        assert_eq!(remembered.remember_command.as_deref(), Some("task test"));
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(approval_request(
@@ -8569,13 +9282,27 @@ mod tests {
             reply_tx,
         ));
         assert!(handle_approval_key(&mut pending, KeyCode::Down));
-        assert!(pending.as_ref().is_some_and(|req| req.selected_option == 2));
+        assert!(handle_approval_key(&mut pending, KeyCode::Down));
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
-        assert!(pending.as_ref().is_some_and(|req| req.details_open));
+        assert!(pending
+            .as_ref()
+            .is_some_and(|req| req.reason_draft.is_some()));
         assert!(reply_rx.try_recv().is_err());
         assert!(handle_approval_key(&mut pending, KeyCode::Esc));
-        assert!(pending.as_ref().is_some_and(|req| !req.details_open));
-        assert!(handle_approval_key(&mut pending, KeyCode::Up));
+        assert!(!reply_rx.try_recv().unwrap().granted);
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(approval_request(
+            ToolCall {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                tool_name: "apply_patch".to_string(),
+                arguments: json!({}),
+                session_id: None,
+                project_root: None,
+            },
+            PermissionLevel::Destructive,
+            reply_tx,
+        ));
         assert!(handle_approval_key(&mut pending, KeyCode::Enter));
         assert!(!reply_rx.try_recv().unwrap().granted);
     }
@@ -8617,8 +9344,8 @@ mod tests {
         let mut pending = Some(approval_request(
             ToolCall {
                 invocation_id: crate::tools::ToolInvocationId::new(),
-                tool_name: "run_terminal".to_string(),
-                arguments: json!({"command": "task verify"}),
+                tool_name: "apply_patch".to_string(),
+                arguments: json!({"patch": "diff"}),
                 session_id: None,
                 project_root: None,
             },
@@ -10025,10 +10752,10 @@ mod tests {
         assert!(rendered.contains("inspect wrap"));
         assert!(rendered.contains("WAITING APPROVAL"));
         assert!(rendered.contains("mock-model"));
-        assert!(rendered.contains("Run this command"));
+        assert!(rendered.contains("Would you like to run the following command?"));
         assert!(rendered.contains("task test"));
-        assert!(rendered.contains("Approve once"));
-        assert!(rendered.contains("Deny"));
+        assert!(rendered.contains("Yes, proceed"));
+        assert!(rendered.contains("tell Codex"));
         assert!(!rendered.contains("Approval required"));
         assert!(!rendered.contains("command="));
         assert!(!rendered.contains("{\"command\""));
@@ -10113,30 +10840,22 @@ mod tests {
             .expect("render narrow approval");
         let rows = buffer_rows(&terminal);
         let joined = rows.concat();
-        assert!(joined.contains("Run this command"), "{joined}");
         assert!(joined.contains("git status --short --branch"), "{joined}");
         assert!(rows.iter().any(|row| row.contains("task")), "{rows:?}");
-        assert!(joined.contains("Approve once"), "{joined}");
-        assert!(joined.contains("Deny"), "{joined}");
+        assert!(joined.contains("Yes, proceed"), "{joined}");
+        assert!(joined.contains("tell Codex"), "{joined}");
+        assert!(joined.contains("Press enter to confirm"), "{joined}");
         assert!(joined.contains("keep this visible"), "{joined}");
         assert!(!joined.contains("command="), "{joined}");
         assert!(!joined.contains("background=false"), "{joined}");
         let command = row_index_containing(&rows, "git status").expect("command row");
-        let approve = row_index_containing(&rows, "Approve once").expect("approve row");
-        let deny = row_index_containing(&rows, "Deny").expect("deny row");
+        let approve = row_index_containing(&rows, "Yes, proceed").expect("approve row");
+        let deny = row_index_containing(&rows, "tell Codex").expect("deny row");
         assert!(
             command < approve,
             "command must sit above the choices: {rows:?}"
         );
-        assert!(approve < deny, "approve must sit above deny: {rows:?}");
-        let prompt = rows
-            .iter()
-            .position(|row| row.contains("> Run this command") || row.contains("Run this command"))
-            .expect("composer prompt");
-        assert!(
-            prompt < approve,
-            "approval choices must sit under the composer: {rows:?}"
-        );
+        assert!(approve < deny, "yes must sit above no: {rows:?}");
     }
 
     #[test]
