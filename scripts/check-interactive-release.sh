@@ -312,6 +312,7 @@ consent_tui_input() {
 quit_plain_input() {
   sleep 0.5
   printf '/status\n/quit\n'
+  wait_for_pty_output "$fixture/$current_case.txt" 'Goodbye.'
 }
 
 copy_plain_input() {
@@ -515,12 +516,15 @@ printf 'interactive review smoke change\n' >>"$fixture/README.md"
 printf '%s\n' '- nib-policy: require-approval list_directory' >"$fixture/AGENTS.md"
 
 plain_semantics_input() {
+  local output="$fixture/plain-semantics.txt"
+  wait_for_pty_output "$output" 'You> '
   printf '%s\n' 'inspect @README.md'
-  wait_for_pty_output "$fixture/plain-semantics.txt" 'Approve? [y/N]: '
+  wait_for_pty_output "$output" 'Approve? [y/N]: '
   printf '%s\n' 'n' ''
-  sleep 0.8
+  wait_for_pty_output "$output" '[stream ended] tool_execution_failed'
+  printf '/sta\n'
+  wait_for_pty_output "$output" 'Command completions:'
   printf '%s\n' \
-    '/sta' \
     '1' \
     '/permissions' \
     '/review' \
@@ -531,6 +535,9 @@ plain_semantics_input() {
     'n' \
     '/fork' \
     '/quit'
+  # macOS script forwards closed input as Ctrl+D. Keep the writer alive until
+  # the whole modal sequence, including /quit, has been consumed.
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 run_pty_case plain-semantics plain_semantics_input 'TERM=xterm-256color NO_COLOR=1' '--plain'
@@ -551,6 +558,7 @@ plain_question_input() {
   printf '2\n\n'
   wait_for_pty_output "$question_output" 'You> '
   printf '/quit\n'
+  wait_for_pty_output "$question_output" 'Goodbye.'
 }
 
 run_pty_case \
@@ -573,6 +581,7 @@ plain_failure_recovery_input() {
   printf 'y\n\n'
   wait_for_pty_output "$output" '[stream ended] completed'
   printf '/status\n/quit\n'
+  wait_for_pty_output "$output" 'Goodbye.'
 }
 
 run_pty_case \
@@ -860,6 +869,7 @@ resume_input() {
     "$resume_output" \
     "Resumed session $target_session from persisted state."
   printf '/quit\n'
+  wait_for_pty_output "$resume_output" 'Goodbye.'
 }
 run_pty_case \
   plain-resume \

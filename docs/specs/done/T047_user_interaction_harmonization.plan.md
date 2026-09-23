@@ -419,3 +419,12 @@ successful first-attempt owner cleanup leaves the optional `cleanup_unverified`
 marker absent, while successful retry after an error writes explicit `false`.
 The fixture now rejects `true` in either valid path and still requires both owner
 lease artifacts to be gone; the exact case is also pinned in `task test:delegation`.
+The subsequent macOS native smoke exposed the same `script` stdin-close/early-EOF
+behavior in the plain semantics sequence: the batched commands were echoed after
+Ctrl+D rather than consumed, leaving the completion assertion unexercised. The
+fixture now waits for the denied run to finish, observes the completion menu
+before sending its selection, and keeps the writer open through `Goodbye.`. The
+other plain PTY inputs also wait for `Goodbye.` after `/quit` so their assertions
+cannot pass on a partially processed input stream. This is harness
+determinism, not an application behavior change; exact-revision hosted
+qualification is still required after this correction.
