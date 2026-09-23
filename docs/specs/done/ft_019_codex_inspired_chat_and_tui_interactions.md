@@ -946,7 +946,7 @@ umbrella transition, satisfying the FT-019 dependency order.
 
 ## T047 supersession (2026-09-21)
 
-[T047](../development/T047_user_interaction_harmonization.md) extends the shared
+[T047](T047_user_interaction_harmonization.md) extends the shared
 interactive command and runtime contract with durable `/questions [id]` recovery and
 exact-plan `/continue <plan-id>`. It also owns the revised default-negative approval,
 Ctrl+C/Ctrl+Q, modal command, one-shot output, and truthful clipboard behavior. The

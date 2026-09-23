@@ -132,7 +132,7 @@ says `awaiting you`.
 
 ## T047 supersession (2026-09-19)
 
-[T047](../development/T047_user_interaction_harmonization.md) revises T039 defaults
+[T047](T047_user_interaction_harmonization.md) revises T039 defaults
 for `Ctrl+C` copy-on-selection, Approve-first Enter, immediate `y`/`n`/`1`/`2`,
 number-key question submit, `Skip`, and no printed role labels. Historical checked
 criteria below remain the T039-era contract. Shipped T047 behavior: Deny-first

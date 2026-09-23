@@ -101,7 +101,7 @@ Status: pending
 
 ## T047 coordination (2026-09-21)
 
-[T047](T047_user_interaction_harmonization.md) retains T045's drag-release copy
+[T047](../done/T047_user_interaction_harmonization.md) retains T045's drag-release copy
 interaction and scan-list presentation while owning truthful native/OSC52/failure
 feedback and the rule that redirected output receives no clipboard escape sequence.
 T045's focused rendering evidence does not qualify those changed clipboard semantics;

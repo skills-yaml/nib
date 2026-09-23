@@ -1,6 +1,6 @@
 # T047: User Interaction Harmonization
 
-**Status:** Development
+**Status:** Done
 Created: 2026-09-19
 Decision revision: 2026-09-19 — integrate the accepted review recommendations
 Companion: [Implementation plan](T047_user_interaction_harmonization.plan.md)
@@ -412,7 +412,7 @@ no crash-time automatic queue replay.
 [FT-019](../done/ft_019_codex_inspired_chat_and_tui_interactions.md) remains the umbrella.
 This proposal explicitly revises selected T038/T039 defaults for Ctrl+C, role labels,
 approval focus, and custom question answers. Coordinate with
-[T045](T045_codex_style_thought_and_tool_rows.md) and
+[T045](../development/T045_codex_style_thought_and_tool_rows.md) and
 [T046](../done/T046_cross_platform_ci_repairs.md); preserve scan-list presentation,
 native terminal restoration, and platform-path fixes. T042 owns richer context
 snapshots; T047 owns command availability and modal-safe access to whichever truthful
@@ -516,18 +516,18 @@ then quality/security, and record exact-revision evidence before moving to `done
   selection/modal input, and idle clearing does not authorize or submit work.
 - [x] AC7b: Ctrl+Q's first press only arms; its second within 1000ms quits through
   bounded reconciliation. Timeout, intervening input, and consumer changes disarm it.
-- [ ] AC7c: F2 and `:command` preserve prompt/draft ownership; idle F2 is a no-op.
+- [x] AC7c: F2 and `:command` preserve prompt/draft ownership; idle F2 is a no-op.
   Prefix case, separators, empty/nested payloads, and modal frame behavior are tested.
 - [x] AC7d: Enter send/queue, Ctrl+S exact-run steering, persisted queue retention,
   and cancellation/quit reconciliation retain their existing authority guarantees.
-- [ ] AC7e: One-shot Unix SIGINT exits 130 after bounded reconciliation; native
+- [x] AC7e: One-shot Unix SIGINT exits 130 after bounded reconciliation; native
   Windows interruption proves non-success, cancellation, cleanup, and restoration
   against the exact binary. Missing native evidence is not N/A or a pass.
 - [x] AC8: One-shot plan/final output is complete within declared safety limits,
   structured, redaction-safe, and compatible with existing outcome/exit-code contracts.
 - [x] AC9a: No-color/narrow layouts expose roles, focus, states, actionable errors,
   and readable session choices without hidden-only actions.
-- [ ] AC9b: `/copy` and retained drag-release copy report native success, unconfirmed
+- [x] AC9b: `/copy` and retained drag-release copy report native success, unconfirmed
   OSC52, and failure accurately; redirected output contains no clipboard sequences.
 - [x] AC9c: `/review` explicitly means diff inspection, not performed code review.
 - [x] AC10a: Docs/help and dated supersession notes match implemented behavior;
@@ -538,7 +538,7 @@ then quality/security, and record exact-revision evidence before moving to `done
 - [x] AC10c: Typed question adapters preserve legacy implementer compatibility;
   absent handlers, explicit deny/require-approval policies, external schemas, and
   legacy `approve_plan` compatibility remain fail-closed without adding a plan gate.
-- [ ] AC10d: All implementation gates and exact-revision native evidence are recorded;
+- [x] AC10d: All implementation gates and exact-revision native evidence are recorded;
   every subcriterion has its own linked fixture/evidence, not only an aggregate claim.
 
 ## Validation Gates
@@ -639,3 +639,54 @@ native F2, clipboard, and interruption evidence still need the hosted Windows/ma
 matrix. Therefore AC7c,
 AC7e, AC9b, and AC10d remain open, and no exact-revision completion claim is made from
 this uncommitted working tree.
+
+## Exact-Revision Qualification Evidence (2026-09-23)
+
+The implementation revision `62d45bd468bc78af2f7f38efe170cdfdcd938498`
+passed local `task verify`, including 1,174 library tests, 89 binary tests, and
+the ordinary integration suites. [CI run 35800536448](https://github.com/skills-yaml/nib/actions/runs/35800536448)
+built the clean merge revision `5a31c4c739fc3f0190e6c74395e6e282cd9a5db4`.
+Linux validation passed with 85.80% runtime line coverage (114,022/132,898).
+The [Linux](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697),
+[macOS](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726782294),
+and [Windows](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702)
+native artifacts each record that exact revision, a clean source tree, eligible
+binary identity, F2 and plain-modal command success, three durable interruption
+cancellations, terminal restoration, and a passed privacy scan. macOS and Windows
+reported native clipboard success; Linux accurately reported an unconfirmed OSC52
+request. All three CI jobs, including the ordinary Windows full test suite, passed.
+The final spec-compliance review found each AC covered by its own fixture or native
+capture. The subsequent quality/security review found no unresolved blocker:
+session reads permit Windows writer/delete sharing, native waits are bounded and
+exact-session scoped, approval and cancellation retain durable reconciliation,
+and the captured output passed the privacy scans. The dated checkpoint above is
+historical; its open-gate statement was superseded by this qualification.
+
+Each acceptance subcriterion has distinct observable evidence rather than inheriting
+an aggregate suite result. Source links identify the named fixture in that file;
+the three artifact links above hold sanitized native captures and summaries.
+
+| Criterion | Linked fixture or qualification evidence |
+| --- | --- |
+| AC1 | [Shared prefix/retry grammar](../../../src/interactive.rs#L5795), [plain modal retry](../../../src/chat.rs#L3105), [TUI typed response](../../../src/tui/mod.rs#L8880) |
+| AC2 | [TUI typed response](../../../src/tui/mod.rs#L8880), [Unicode/multiline paste](../../../src/tui/mod.rs#L8904), [question card](../../../src/tui/mod.rs#L10038) |
+| AC3 | [Shared modal outcome reducer](../../../src/interactive.rs#L5895), [closed plain input](../../../src/chat.rs#L3054), [legacy handler fallback](../../../src/tools/executor.rs#L3442) |
+| AC4a | [Durable exact recovered answer and run lease](../../../src/interactive.rs#L5372), [TUI persistence before close](../../../src/tui/mod.rs#L8957) |
+| AC4b | [Exact-plan recovery with answer-only on/off](../../../src/agent/loop.rs#L10816), [redacted display remains non-authoritative](../../../src/interactive.rs#L5372) |
+| AC4c | [Continuation eligibility and required checks](../../../src/agent/loop.rs#L8816), [malformed target fails closed](../../../src/agent/loop.rs#L10920) |
+| AC4d | [Premature-completion corrective runtime fixture](../../../tests/test_runtime_e2e.rs#L895), [required-check admission](../../../src/agent/loop.rs#L8816) |
+| AC5 | [Bounded redacted approval context](../../../src/tools/executor.rs#L3361), [narrow approval card](../../../src/tui/mod.rs#L10081) |
+| AC6 | [Live queue/steer reducer](../../../src/interactive.rs#L6570), [plain exact-run router](../../../src/chat.rs#L2381), [native modal capture](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC7a | [TUI question cancellation](../../../src/tui/mod.rs#L9075), [approval-blocked shutdown](../../../src/tui/mod.rs#L9122), [native question/approval/tool cancellation captures](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC7b | [Uninterrupted two-press Ctrl+Q fixture](../../../src/tui/mod.rs#L7079) |
+| AC7c | [Case/separator/empty/nested grammar](../../../src/interactive.rs#L5795), [idle F2/draft ownership](../../../src/tui/mod.rs#L8927), [native F2 and plain captures](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC7d | [Durable FIFO queue/start failure](../../../src/interactive.rs#L6930), [exact-run steering admission](../../../src/agent/loop.rs#L8228), [plain cancellation retention](../../../src/chat.rs#L2588) |
+| AC7e | [Unix exit-130 SIGINT fixture](../../../tests/interactive_cli.rs#L518), [Windows native three-stage captures and restoration](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC8 | [Ordered one-shot plan/no execution](../../../tests/interactive_cli.rs#L296), [long structured final output](../../../tests/interactive_cli.rs#L267) |
+| AC9a | [Narrow/Unicode transcript fixture](../../../src/interactive.rs#L6109), [no-color approval signaling](../../../src/tui/mod.rs#L6673), [narrow question/approval cards](../../../src/tui/mod.rs#L10038) |
+| AC9b | [Backend success/OSC52/failure outcomes](../../../src/tui/mod.rs#L10408), [drag-release route](../../../src/tui/mod.rs#L10329), [redirected pipe omits escapes](../../../tests/interactive_cli.rs#L335), [Windows native clipboard](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702), [Linux OSC52 labeling](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697) |
+| AC9c | [Owned-worktree `/review` fixture](../../../src/interactive.rs#L6824), [user-facing review wording](../../../README.md) |
+| AC10a | [Documentation integrity fixtures](../../../tests/docs_integrity.rs), [supersession ownership](#review-question-decisions), [release smoke contract](../../../tests/installers.rs#L324) |
+| AC10b | [TUI workspace consent](../../../src/tui/mod.rs#L7001), [plain session switch/deny](../../../src/chat.rs#L2771) |
+| AC10c | [Contextual legacy handler default](../../../src/tools/executor.rs#L3442), [legacy `approve_plan` context](../../../src/tools/executor.rs#L3625), [closed-input runtime fixture](../../../src/chat.rs#L3054), [explicit policy denial](../../../tests/test_runtime_e2e.rs#L2095), [MCP deny-without-handler/schema fixtures](../../../src/integrations/mcp_server.rs#L3647) |
+| AC10d | [Exact-revision CI run](https://github.com/skills-yaml/nib/actions/runs/35800536448), [Windows](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702), [macOS](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726782294), [Linux](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697), and this per-criterion map |

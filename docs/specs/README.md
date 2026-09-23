@@ -100,8 +100,8 @@ work or narrower guarantees.
 - [T044: Strict Clippy Quality Gate](done/T044_strict_clippy_quality_gate.md)
 - [T045: Codex-Style Thought and Tool Rows](development/T045_codex_style_thought_and_tool_rows.md)
 - [T046: Cross-platform CI repairs](done/T046_cross_platform_ci_repairs.md)
-- [T047: User Interaction Harmonization](development/T047_user_interaction_harmonization.md)
-  ([implementation plan](development/T047_user_interaction_harmonization.plan.md))
+- [T047: User Interaction Harmonization](done/T047_user_interaction_harmonization.md)
+  ([implementation plan](done/T047_user_interaction_harmonization.plan.md))
 
 ### Feature specs
 

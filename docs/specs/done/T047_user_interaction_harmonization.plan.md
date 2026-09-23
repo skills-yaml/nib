@@ -1,6 +1,6 @@
 # Implementation Plan for T047 User Interaction Harmonization
 
-**Status:** Development
+**Status:** Done
 Created: 2026-09-19
 Decision revision: 2026-09-19 — integrates review questions Q1–Q20
 Parent: [T047 specification](T047_user_interaction_harmonization.md)
@@ -371,3 +371,28 @@ reorganization or context-budget work needs its own owning spec.
   was not available on this Linux host. Native clipboard qualification and a recorded
   exact revision also remain open. The parent and companion therefore stay in
   `development/`; their unchecked native/completion criteria are not waived.
+
+## Exact-Revision Qualification Checkpoint (2026-09-23)
+
+The final implementation revision `62d45bd468bc78af2f7f38efe170cdfdcd938498`
+passed local `task verify`; the separate exact-HEAD installer contract task passed
+42/42. [CI run 35800536448](https://github.com/skills-yaml/nib/actions/runs/35800536448)
+is testing the clean merge revision `5a31c4c739fc3f0190e6c74395e6e282cd9a5db4`.
+Linux validation passed, including `task coverage` at 85.80% (114,022/132,898).
+The [Linux](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697),
+[macOS](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726782294),
+and [Windows](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702)
+native evidence artifacts passed with exact binary/source identity, clean acceptance
+eligibility, F2 and plain-modal routing, three durable cancellations, restoration,
+and privacy scans. Windows and macOS delivered native clipboard copies; Linux
+reported the unconfirmed OSC52 fallback. The parent's
+[per-criterion evidence map](T047_user_interaction_harmonization.md#exact-revision-qualification-evidence-2026-09-23)
+links every AC to its own fixture or native capture.
+
+The Windows ordinary full-test step subsequently passed, making all three CI jobs
+green. Spec-compliance review checked each parent's AC against its linked fixture
+and native artifact. A separate quality/security review checked bounded waits,
+exact-session targeting, permissive observer file sharing, fail-closed authority,
+durable cancellation, restoration, and privacy scans; no blocker remained.
+Documentation integrity and whitespace checks pass after the lifecycle move.
+No paid/live provider qualification is implied by these offline Mock-backed gates.
