@@ -198,7 +198,7 @@ These are model instructions; tool permissions, exact plan binding, and reconcil
 are enforced by Rust independently of model compliance.
 
 Normal planning takes one model request and exposes only `submit_plan`, so a needed
-inspection or clarification becomes an approved plan step. The disabled-by-default
+inspection or clarification becomes an approved plan step. The default-enabled
 `agent.answer_only` route may precede planning for a new interactive execute request
 when the project and caller do not require planning and no plan or run is active. Its
 single bounded request exposes only the typed, non-executable `request_plan` control.

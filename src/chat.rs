@@ -108,6 +108,7 @@ impl PlainModalState {
 
 struct PlainQuestionPrompt {
     question: String,
+    proposed_answer: Option<String>,
     options: Vec<String>,
     reply: tokio::sync::oneshot::Sender<nib::agent::QuestionOutcome>,
 }
@@ -208,11 +209,13 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
             .ask_with_context(nib::agent::QuestionRequestContext {
                 invocation_id: nib::tools::ToolInvocationId::new(),
                 question,
+                proposed_answer: None,
                 options,
             })
             .await
         {
             nib::agent::QuestionOutcome::Answered(answer) => Ok(answer),
+            nib::agent::QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
             nib::agent::QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
             nib::agent::QuestionOutcome::Cancelled => Err("cancelled".to_string()),
             nib::agent::QuestionOutcome::InputClosed => Err("input closed".to_string()),
@@ -234,6 +237,7 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
             .tx
             .send(PlainQuestionPrompt {
                 question: context.question.to_string(),
+                proposed_answer: context.proposed_answer.map(str::to_string),
                 options: context.options.to_vec(),
                 reply,
             })
@@ -828,14 +832,21 @@ fn run_plain_with_input_and_modal_state(
                 Ok(InteractiveEffect::OpenQuestion {
                     invocation_id,
                     question,
+                    proposed_answer,
                     options,
                 }) => {
                     println!("Recovered question {invocation_id}: {question}");
-                    for (index, option) in options.iter().enumerate() {
-                        println!("  {}. {}", index + 1, option);
+                    if let Some(proposal) = proposed_answer.as_deref() {
+                        println!("Proposed answer: {proposal}");
+                        println!("1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise");
+                    }
+                    if proposed_answer.is_none() {
+                        for (index, option) in options.iter().enumerate() {
+                            println!("  {}. {}", index + 1, option);
+                        }
                     }
                     loop {
-                        print!("Answer: ");
+                        print!("Decision or answer: ");
                         let _ = io::stdout().flush();
                         let line = match input.read_line_blocking() {
                             Ok(line) => line,
@@ -844,16 +855,21 @@ fn run_plain_with_input_and_modal_state(
                                 break;
                             }
                         };
-                        match interpret_plain_question_line(&line, &options) {
+                        match interpret_plain_question_line(
+                            &line,
+                            &options,
+                            proposed_answer.as_deref(),
+                        ) {
                             PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(
                                 answer,
                             )) => {
-                                match nib::interactive::persist_recovered_question_answer(
+                                let saved = nib::interactive::persist_recovered_question_answer(
                                     &session_store,
                                     &sid,
                                     &invocation_id,
                                     &answer,
-                                ) {
+                                );
+                                match saved {
                                     Ok(plan_id) => {
                                         println!("Saved answer. Continue with /continue {plan_id}")
                                     }
@@ -861,7 +877,30 @@ fn run_plain_with_input_and_modal_state(
                                 }
                                 break;
                             }
+                            PlainQuestionLine::Outcome(
+                                nib::agent::QuestionOutcome::ApprovedProposal(answer),
+                            ) => {
+                                let saved = nib::interactive::persist_recovered_proposed_answer(
+                                    &session_store,
+                                    &sid,
+                                    &invocation_id,
+                                    &answer,
+                                );
+                                match saved {
+                                    Ok(plan_id) => println!(
+                                        "Saved approved answer. Continue with /continue {plan_id}"
+                                    ),
+                                    Err(error) => println!("{error}"),
+                                }
+                                break;
+                            }
                             PlainQuestionLine::Retry(message) => println!("{message}"),
+                            PlainQuestionLine::Outcome(
+                                nib::agent::QuestionOutcome::LeftUnanswered,
+                            ) => {
+                                println!("Question left unanswered. Dependent work is paused.");
+                                break;
+                            }
                             other => {
                                 println!("question was not answered: {other:?}");
                                 break;
@@ -1504,7 +1543,37 @@ enum PlainQuestionLine {
     Command(nib::interactive::InteractiveCommand),
 }
 
-fn interpret_plain_question_line(line: &str, options: &[String]) -> PlainQuestionLine {
+fn interpret_plain_question_line(
+    line: &str,
+    options: &[String],
+    proposed_answer: Option<&str>,
+) -> PlainQuestionLine {
+    if let Some(proposed_answer) = proposed_answer {
+        if line.trim_start().starts_with(":command") {
+            return match parse_plain_question_answer(line, options) {
+                InteractionReduction::ModalCommand(command) => PlainQuestionLine::Command(command),
+                InteractionReduction::Error { message, .. } => PlainQuestionLine::Retry(message),
+                _ => PlainQuestionLine::Retry("invalid prompt-local command".to_string()),
+            };
+        }
+        return match nib::interactive::parse_proposed_question_input(line) {
+            nib::interactive::ProposedQuestionInput::Approve => PlainQuestionLine::Outcome(
+                nib::agent::QuestionOutcome::ApprovedProposal(proposed_answer.to_string()),
+            ),
+            nib::interactive::ProposedQuestionInput::Reject => {
+                PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::LeftUnanswered)
+            }
+            nib::interactive::ProposedQuestionInput::InstructOtherwise => PlainQuestionLine::Retry(
+                "Type the alternative answer, then press Enter".to_string(),
+            ),
+            nib::interactive::ProposedQuestionInput::Answer(answer) => {
+                PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(answer))
+            }
+            nib::interactive::ProposedQuestionInput::Retry(message) => {
+                PlainQuestionLine::Retry(message)
+            }
+        };
+    }
     match parse_plain_question_answer(line, options) {
         InteractionReduction::QuestionAnswered(answer) => {
             PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(answer))
@@ -1686,10 +1755,18 @@ fn execute_prepared_agent_step(
                 Some(prompt) = question_rx.recv(), if pending_question.is_none() => {
                     if input_open {
                         println!("\nQuestion: {}", prompt.question);
-                        for (index, option) in prompt.options.iter().enumerate() {
-                            println!("  {}. {}", index + 1, option);
+                        if let Some(proposal) = prompt.proposed_answer.as_deref() {
+                            println!("Proposed answer: {proposal}");
+                            println!("1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise");
                         }
-                        if prompt.options.is_empty() {
+                        if prompt.proposed_answer.is_none() {
+                            for (index, option) in prompt.options.iter().enumerate() {
+                                println!("  {}. {}", index + 1, option);
+                            }
+                        }
+                        if prompt.proposed_answer.is_some() {
+                            print!("Decision or answer: ");
+                        } else if prompt.options.is_empty() {
                             print!("Answer: ");
                         } else {
                             print!("Answer (number or text): ");
@@ -1698,7 +1775,7 @@ fn execute_prepared_agent_step(
                         pending_question = Some(prompt);
                         if let Some(line) = buffered_modal_line.take() {
                             if let Some(prompt) = pending_question.as_ref() {
-                                match interpret_plain_question_line(&line, &prompt.options) {
+                                match interpret_plain_question_line(&line, &prompt.options, prompt.proposed_answer.as_deref()) {
                                     PlainQuestionLine::Outcome(outcome) => {
                                         let prompt = pending_question.take().expect("question");
                                         pending_modal_response = Some(PendingPlainModalResponse::Question {
@@ -1801,12 +1878,10 @@ fn execute_prepared_agent_step(
                         continue;
                     }
                     if pending_question.is_some() {
-                        let options = pending_question
-                            .as_ref()
-                            .expect("question")
-                            .options
-                            .clone();
-                        match interpret_plain_question_line(&line, &options) {
+                        let prompt = pending_question.as_ref().expect("question");
+                        let options = prompt.options.clone();
+                        let proposed_answer = prompt.proposed_answer.clone();
+                        match interpret_plain_question_line(&line, &options, proposed_answer.as_deref()) {
                             PlainQuestionLine::Outcome(outcome) => {
                                 let prompt = pending_question.take().expect("question");
                                 pending_modal_response = Some(PendingPlainModalResponse::Question {
@@ -1817,7 +1892,9 @@ fn execute_prepared_agent_step(
                             }
                             PlainQuestionLine::Retry(message) => {
                                 println!("{message}");
-                                if options.is_empty() {
+                                if proposed_answer.is_some() {
+                                    print!("Decision or answer: ");
+                                } else if options.is_empty() {
                                     print!("Answer: ");
                                 } else {
                                     print!("Answer (number or text): ");
@@ -1841,7 +1918,7 @@ fn execute_prepared_agent_step(
                                     ),
                                     Err(error) => println!("{error}"),
                                 }
-                                print!("Answer: ");
+                                print!("Decision or answer: ");
                                 let _ = io::stdout().flush();
                             }
                         }
@@ -1881,6 +1958,20 @@ fn execute_prepared_agent_step(
                             quit_requested = true;
                             cancellation.cancel();
                             println!("quit requested; reconciling the active run first");
+                        }
+                        InteractionReduction::Command(command) => {
+                            match execute_interactive_command_in_state(
+                                command,
+                                scope.project,
+                                scope.profile_id,
+                                scope.session_store,
+                                session_id,
+                                "running",
+                            ) {
+                                Ok(InteractiveEffect::Output(output)) => println!("{output}"),
+                                Ok(_) => println!("command completed"),
+                                Err(error) => println!("{error}"),
+                            }
                         }
                         InteractionReduction::Error { message, .. } => println!("{message}"),
                         InteractionReduction::NoOp(_) => {}
@@ -3241,6 +3332,7 @@ mod tests {
                 invocation_id,
                 plan_id: Some(plan_id),
                 question: "Which target?".to_string(),
+                proposed_answer: None,
                 options: vec!["alpha".to_string(), "beta".to_string()],
                 dependent_paths: Vec::new(),
                 status: nib::session::ClarificationStatus::Unresolved,

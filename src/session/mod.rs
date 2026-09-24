@@ -1385,6 +1385,8 @@ pub struct ClarificationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
     pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_answer: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     /// Worktree-relative scopes whose actions depend on this answer. An empty

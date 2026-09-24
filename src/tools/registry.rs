@@ -313,6 +313,8 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "proposed_answer": {"type": "string", "minLength": 1, "maxLength": 20000,
+                        "description": "A specific answer for the user to approve, reject, or replace. This never approves a tool action."},
                     "options": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1, "maxLength": 1000},

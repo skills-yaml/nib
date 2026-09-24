@@ -4053,7 +4053,7 @@ mod tests {
         };
         assert_eq!(
             classify_agent_run_outcome(Ok(refused)).unwrap_err().report,
-            "model_refusal"
+            "Model declined the request. No further work ran. Rephrase the request or select a different model.\nSession: scheduled-provider-refusal"
         );
 
         let completed = crate::agent::AgentRunSummary {
@@ -4149,9 +4149,12 @@ mod tests {
                 bound_reached,
                 trace: Vec::new(),
             };
+            let expected_report = unexpected
+                .user_failure_report()
+                .unwrap_or_else(|| outcome.to_string());
             let failed = classify_agent_run_outcome(Ok(unexpected)).unwrap_err();
             assert_eq!(failed.outcome, outcome);
-            assert_eq!(failed.report, outcome);
+            assert_eq!(failed.report, expected_report);
             assert_eq!(failed.failure, None);
         }
     }

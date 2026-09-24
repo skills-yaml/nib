@@ -547,12 +547,10 @@ async fn answer_only_transport_failure_reports_once_without_invoking_the_planner
 }
 
 #[tokio::test]
-async fn active_unrelated_plan_rejects_answer_only_without_model_or_plan_mutation() {
+async fn active_unrelated_plan_survives_an_information_answer() {
     let root = git_repository();
-    let mut config = mock_runtime_config();
-    config.agent.answer_only = true;
-    config.execution.plan_mode = false;
-    save_nib_config_full(root.path(), &mut config).expect("active plan config");
+    let (base_url, request_rx) = serve_responses_sequence(vec![answer_fixture_text_turn("Four.")]);
+    configure_answer_fixture(root.path(), &base_url, true, false);
     let store = SessionStore::for_project(root.path()).expect("active plan store");
     let mut session = store.create_session_with_id("answer-only-active-plan");
     let plan = Plan::new(
@@ -581,22 +579,27 @@ async fn active_unrelated_plan_rejects_answer_only_without_model_or_plan_mutatio
         },
     )
     .await
-    .expect("active plan rejection");
+    .expect("information answer");
     let persisted = store.load(&session.id).expect("active plan session");
 
-    assert_eq!(summary.outcome, "planning_required_active_plan");
-    assert!(summary.is_failure());
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.last_message.as_deref(), Some("Four."));
     assert_eq!(
         serde_json::to_value(persisted.plan.as_ref().unwrap()).unwrap(),
         expected_plan
     );
-    assert!(!persisted.events.iter().any(|event| matches!(
-        event.kind.as_str(),
-        "answer_route_started" | "plan_invalidated" | "plan_generated"
-    )));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_started"));
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| matches!(event.kind.as_str(), "plan_invalidated" | "plan_generated")));
     let resources = answer_resource_event(&persisted);
-    assert_eq!(resources["generation_requests"], 0);
+    assert_eq!(resources["generation_requests"], 1);
     assert_eq!(resources["tool_attempts"], 0);
+    assert_eq!(request_rx.try_iter().count(), 1);
 }
 
 #[tokio::test]

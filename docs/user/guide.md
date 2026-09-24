@@ -138,7 +138,7 @@ reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|ma
 [agent]
 max_turns = 90
 tool_use_enforcement = true
-answer_only = false
+answer_only = true
 
 [terminal]
 backend = "local"
@@ -356,17 +356,20 @@ Default manual mode prompts only when the request is unclear or a call is not
 auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
 
-Set `agent.answer_only = true` to allow a new interactive execute request to use one
-bounded response before planning when no plan or run is active and
-`execution.plan_mode = false`. This route has no executable tools. It can answer from
-the supplied context or select the non-executable `request_plan` control, which
-discards partial content and enters the normal approved-plan flow once. Unsupported
-responses also fall back once. Invalid control output and provider failures are
-reported without invoking the planner. An active plan or run keeps its existing state
-and the new request reports that planning is required.
-When the agent calls `ask_question`, the CLI prints the available options and accepts
-either an option number or free-form text on the same input stream. Closed or empty
-question input stops the run and reconciles the session without continuing execution.
+Interactive execute requests use a bounded tool-free answer before planning by
+default when `execution.plan_mode = false`. A clear information question can receive
+one answer with no plan, then nib waits for the next message. Requests needing
+inspection, clarification, or action select the non-executable `request_plan` control;
+partial answer text is discarded before normal planning begins. An incomplete plan
+stays intact when nib answers an unrelated information question; if that request
+needs new planning, nib explains the existing-plan conflict. An active run still
+owns its input. Set `agent.answer_only = false` to require the plan-first path.
+Invalid control output and provider failures do not invoke the planner.
+When the agent calls `ask_question`, the CLI clearly prints the question. If nib
+proposes one answer, choose Approve to accept that exact answer, Reject to leave the
+question unresolved, or Instruct otherwise to type a different answer. An open
+question accepts an option number or free-form text. Question answers never approve
+tools. Closed or empty input stops dependent work and reconciles the session.
 Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. Startup
 and final one-shot status lines are bounded and control-safe and do not echo the full
 goal.
@@ -433,6 +436,9 @@ the same options and launches the same product; `nib tui` remains a compatibilit
 alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
 Both presentation modes expose these commands:
+
+Plain-language `help` and `what can you do?` show supported capabilities immediately
+without starting a plan or asking the user to choose an option.
 
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox
@@ -592,9 +598,11 @@ The details view shows the bounded redacted command, patch, or validated argumen
 scroll with Up/Down and press Escape to return without deciding. Type
 `y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.
 Escape denies. While approval is open the footer reads `WAITING APPROVAL`. When nib
-asks a question, type a custom answer or move to the numbered suggestions. Bare
-numbers select one-based options; `text: 42` forces literal text. Escape leaves the
-question unanswered. Recover later with `/questions [id]` and `/continue <plan-id>`.
+asks an open question, type a custom answer or move to the numbered suggestions.
+Bare numbers select one-based options; `text: 42` forces literal text. For a proposed
+answer, the question and proposal remain visible above Approve, Reject, and Instruct
+otherwise. Reject and Escape leave it unresolved; approving the answer never grants
+tool permission. Recover later with `/questions [id]` and `/continue <plan-id>`.
 While a question or approval owns the TUI input, F2 opens a prompt-local command
 editor for read-only inspection or an exact live control; Escape returns to the
 unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mode,

@@ -934,6 +934,18 @@ fn safe_question_arguments(arguments: &Value, sensitive_values: &[String]) -> Va
                 false,
             )
         });
+    let proposed_answer = arguments
+        .get("proposed_answer")
+        .and_then(Value::as_str)
+        .filter(|answer| !answer.trim().is_empty())
+        .map(|answer| {
+            crate::interactive::bounded_public_text(
+                answer,
+                sensitive_values,
+                MAX_QUESTION_BYTES,
+                false,
+            )
+        });
     let options = arguments
         .get("options")
         .and_then(Value::as_array)
@@ -967,7 +979,12 @@ fn safe_question_arguments(arguments: &Value, sensitive_values: &[String]) -> Va
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({"question": question, "options": options, "dependent_paths": dependent_paths})
+    let mut safe =
+        json!({"question": question, "options": options, "dependent_paths": dependent_paths});
+    if let Some(proposed_answer) = proposed_answer {
+        safe["proposed_answer"] = json!(proposed_answer);
+    }
+    safe
 }
 
 fn safe_question_execution_arguments(
@@ -1013,15 +1030,26 @@ struct ReusedClarificationAnswer {
     answer_event_index: Option<usize>,
 }
 
+struct ClarificationPrompt<'a> {
+    question: &'a str,
+    proposed_answer: Option<&'a str>,
+    options: &'a [String],
+    dependent_paths: &'a [String],
+}
+
 fn persist_question_required(
     store: &SessionStore,
     session_id: &str,
     plan_id: Option<&str>,
     invocation_id: crate::tools::ToolInvocationId,
-    question: &str,
-    options: &[String],
-    dependent_paths: &[String],
+    prompt: ClarificationPrompt<'_>,
 ) -> Result<Option<ReusedClarificationAnswer>, String> {
+    let ClarificationPrompt {
+        question,
+        proposed_answer,
+        options,
+        dependent_paths,
+    } = prompt;
     store
         .update_session(session_id, |session| {
             let prior = session
@@ -1031,6 +1059,7 @@ fn persist_question_required(
                 .find_map(|clarification| {
                     (clarification.plan_id.as_deref() == plan_id
                         && clarification.question == question
+                        && clarification.proposed_answer.as_deref() == proposed_answer
                         && clarification.options == options
                         && clarification.status == ClarificationStatus::Answered)
                         .then(|| {
@@ -1049,6 +1078,7 @@ fn persist_question_required(
                 json!({
                     "invocation_id": invocation_id,
                     "question": question,
+                    "proposed_answer": proposed_answer,
                     "options": options,
                     "answer_reused": prior.is_some(),
                 }),
@@ -1057,6 +1087,7 @@ fn persist_question_required(
                 invocation_id,
                 plan_id: plan_id.map(str::to_string),
                 question: question.to_string(),
+                proposed_answer: proposed_answer.map(str::to_string),
                 options: options.to_vec(),
                 dependent_paths: dependent_paths.to_vec(),
                 status: if prior.is_some() {
@@ -1108,7 +1139,7 @@ fn persist_question_observation(
                 })?
                 .clone();
             match outcome {
-                QuestionOutcome::Answered(answer) => {
+                QuestionOutcome::Answered(answer) | QuestionOutcome::ApprovedProposal(answer) => {
                     let (answer_message_index, answer_event_index) = if reused_answer {
                         (target.answer_message_index, target.answer_event_index)
                     } else {
@@ -1120,6 +1151,7 @@ fn persist_question_observation(
                                 "invocation_id": invocation_id,
                                 "question_event_index": target.question_event_index,
                                 "answer": answer,
+                                "decision": outcome.reason(),
                             }),
                         );
                         session.human_intent.push(HumanIntentRecord {
@@ -1133,6 +1165,7 @@ fn persist_question_observation(
                     for clarification in session.clarifications.iter_mut().filter(|candidate| {
                         candidate.plan_id == target.plan_id
                             && candidate.question == target.question
+                            && candidate.proposed_answer == target.proposed_answer
                             && candidate.options == target.options
                             && candidate.status != ClarificationStatus::Answered
                     }) {
@@ -1349,6 +1382,7 @@ impl CancellationSignal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuestionOutcome {
     Answered(String),
+    ApprovedProposal(String),
     LeftUnanswered,
     Cancelled,
     InputClosed,
@@ -1358,14 +1392,14 @@ pub enum QuestionOutcome {
 impl QuestionOutcome {
     pub fn answered_text(&self) -> Option<&str> {
         match self {
-            Self::Answered(answer) => Some(answer.as_str()),
+            Self::Answered(answer) | Self::ApprovedProposal(answer) => Some(answer.as_str()),
             _ => None,
         }
     }
 
     fn clarification_status(&self) -> ClarificationStatus {
         match self {
-            Self::Answered(_) => ClarificationStatus::Answered,
+            Self::Answered(_) | Self::ApprovedProposal(_) => ClarificationStatus::Answered,
             Self::Cancelled => ClarificationStatus::Cancelled,
             Self::LeftUnanswered | Self::InputClosed | Self::InputUnavailable(_) => {
                 ClarificationStatus::Unresolved
@@ -1376,6 +1410,7 @@ impl QuestionOutcome {
     fn reason(&self) -> &'static str {
         match self {
             Self::Answered(_) => "answered",
+            Self::ApprovedProposal(_) => "approved_proposal",
             Self::LeftUnanswered => "left_unanswered",
             Self::Cancelled => "cancelled",
             Self::InputClosed => "input_closed",
@@ -1388,6 +1423,7 @@ impl QuestionOutcome {
 pub struct QuestionRequestContext<'a> {
     pub invocation_id: crate::tools::ToolInvocationId,
     pub question: &'a str,
+    pub proposed_answer: Option<&'a str>,
     pub options: &'a [String],
 }
 
@@ -1469,22 +1505,51 @@ impl AgentRunSummary {
     }
 
     pub fn user_failure_report(&self) -> Option<String> {
+        if self.outcome == "instruction_context_missing" {
+            let body = self
+                .last_message
+                .as_deref()
+                .filter(|message| message.contains("Project instructions could not be loaded"))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    instruction_context_user_message(
+                        "required project instructions are unavailable",
+                    )
+                });
+            return Some(format!("{body}\nSession: {}", self.session_id));
+        }
         self.failure.as_ref().map_or_else(
             || {
-                is_llm_failure_outcome(&self.outcome).then(|| {
-                    LlmError::new(
-                        LlmErrorClass::ProviderRejected,
-                        LlmErrorPhase::TerminalValidation,
-                        crate::llm::RetryDisposition::NotAttempted,
-                        crate::llm::LlmErrorMetadata::new("unknown", "legacy", None, None, &[]),
-                        "legacy run did not persist structured LLM failure evidence",
+                if is_llm_failure_outcome(&self.outcome) {
+                    Some(
+                        LlmError::new(
+                            LlmErrorClass::ProviderRejected,
+                            LlmErrorPhase::TerminalValidation,
+                            crate::llm::RetryDisposition::NotAttempted,
+                            crate::llm::LlmErrorMetadata::new("unknown", "legacy", None, None, &[]),
+                            "legacy run did not persist structured LLM failure evidence",
+                        )
+                        .user_report(Some(&self.session_id)),
                     )
-                    .user_report(Some(&self.session_id))
-                })
+                } else if is_agent_failure_outcome(&self.outcome) {
+                    let message = crate::interactive::terminal_outcome_message(&self.outcome);
+                    Some(format!(
+                        "{}. {}\nSession: {}",
+                        message.title, message.detail, self.session_id
+                    ))
+                } else {
+                    None
+                }
             },
             |failure| Some(failure.user_report(Some(&self.session_id))),
         )
     }
+}
+
+fn instruction_context_user_message(error: &str) -> String {
+    format!(
+        "Project instructions could not be loaded, so this run stopped before dependent work.\n{error}\nRestore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan."
+    )
 }
 
 pub async fn run_agent_loop(
@@ -2150,23 +2215,19 @@ async fn run_agent_loop_inner(
         .as_ref()
         .is_some_and(|plan| !plan.is_complete());
     let active_prior_run = has_unterminated_prior_run(&session_before_request, &run_id);
-    if answer_only_candidate && (active_plan || active_prior_run) {
+    if answer_only_candidate && active_prior_run {
         prepare_user_turn(&store, session_id, goal, profile.root_path())?;
         return finish_answer_only_planning_required(
             &store,
             session_id,
             &run_id,
             &cfg.stream_tx,
-            if active_plan {
-                "active_plan"
-            } else {
-                "active_run"
-            },
+            "active_run",
         )
         .await;
     }
     let answer_only_eligible =
-        answer_only_candidate && !nib_cfg.execution.plan_mode && !active_plan && !active_prior_run;
+        answer_only_candidate && !nib_cfg.execution.plan_mode && !active_prior_run;
 
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
@@ -2261,6 +2322,16 @@ async fn run_agent_loop_inner(
         {
             AnswerOnlyRoute::Completed(summary) | AnswerOnlyRoute::Failed(summary) => {
                 return Ok(summary)
+            }
+            AnswerOnlyRoute::Fallback if active_plan => {
+                return finish_answer_only_planning_required(
+                    &store,
+                    session_id,
+                    &run_id,
+                    &cfg.stream_tx,
+                    "active_plan",
+                )
+                .await;
             }
             AnswerOnlyRoute::Fallback => {}
         }
@@ -2437,6 +2508,7 @@ async fn run_agent_loop_inner(
     let mut pending_response_events: Vec<StreamEvent> = Vec::new();
     let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
     let mut reconciliation_reason: Option<String> = None;
+    let mut instruction_context_detail: Option<String> = None;
     let mut reconciliation_failure: Option<LlmError> = None;
     let mut pending_question: Option<ToolCallRequest> = None;
     let mut pending_observations: Vec<Value> = Vec::new();
@@ -2697,6 +2769,7 @@ async fn run_agent_loop_inner(
                             "planning_prompt_fit",
                             &error,
                         )?;
+                        instruction_context_detail = Some(instruction_context_user_message(&error));
                         reconciliation_reason = Some("instruction_context_missing".to_string());
                         state = transition_state(
                             &store,
@@ -2992,34 +3065,36 @@ async fn run_agent_loop_inner(
                 }
             }
             AgentState::BuildContext => {
-                let refreshed =
-                    match instruction_resolver.resolve_for_scopes(instruction_scopes.iter()) {
-                        Ok(refreshed) => refreshed,
-                        Err(error) => {
-                            let error =
-                                format!("required project instructions are unavailable: {error}");
-                            persist_instruction_context_block(
-                                &store,
-                                session_id,
-                                active_plan_id.as_deref(),
-                                &normalized_goal,
-                                "refresh",
-                                &error,
-                            )?;
-                            reconciliation_reason = Some("instruction_context_missing".to_string());
-                            state = transition_state(
-                                &store,
-                                session_id,
-                                state,
-                                AgentState::Reconciliation,
-                                &mut trace,
-                                &mut transition_count,
-                                &cfg.stream_tx,
-                            )
-                            .await?;
-                            continue;
-                        }
-                    };
+                let refreshed = match instruction_resolver
+                    .resolve_for_scopes(instruction_scopes.iter())
+                {
+                    Ok(refreshed) => refreshed,
+                    Err(error) => {
+                        let error =
+                            format!("required project instructions are unavailable: {error}");
+                        persist_instruction_context_block(
+                            &store,
+                            session_id,
+                            active_plan_id.as_deref(),
+                            &normalized_goal,
+                            "refresh",
+                            &error,
+                        )?;
+                        instruction_context_detail = Some(instruction_context_user_message(&error));
+                        reconciliation_reason = Some("instruction_context_missing".to_string());
+                        state = transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
                 if refreshed.identity != instruction_identity {
                     let previous_identity =
                         std::mem::replace(&mut instruction_identity, refreshed.identity.clone());
@@ -3236,6 +3311,8 @@ async fn run_agent_loop_inner(
                                     "runtime_prompt_fit",
                                     &error,
                                 )?;
+                                instruction_context_detail =
+                                    Some(instruction_context_user_message(&error));
                                 reconciliation_reason =
                                     Some("instruction_context_missing".to_string());
                                 state = transition_state(
@@ -3704,6 +3781,8 @@ async fn run_agent_loop_inner(
                                     "managed_worktree_resolution",
                                     &error,
                                 )?;
+                                instruction_context_detail =
+                                    Some(instruction_context_user_message(&error));
                                 tool_calls.clear();
                                 response_content = None;
                                 reconciliation_reason =
@@ -3750,6 +3829,7 @@ async fn run_agent_loop_inner(
                             "tool_scope",
                             &error,
                         )?;
+                        instruction_context_detail = Some(instruction_context_user_message(&error));
                         if provider_continuation.take().is_some() {
                             record_provider_continuation_lifecycle(
                                 &store,
@@ -4445,6 +4525,19 @@ async fn run_agent_loop_inner(
                     MAX_QUESTION_BYTES,
                     false,
                 );
+                let proposed_answer = request
+                    .arguments
+                    .get("proposed_answer")
+                    .and_then(Value::as_str)
+                    .filter(|answer| !answer.trim().is_empty())
+                    .map(|answer| {
+                        crate::interactive::bounded_public_text(
+                            answer,
+                            &public_output_sensitive_values,
+                            MAX_QUESTION_BYTES,
+                            false,
+                        )
+                    });
                 resources.observe_question(&question);
                 let options = request
                     .arguments
@@ -4471,9 +4564,12 @@ async fn run_agent_loop_inner(
                     session_id,
                     active_plan_id.as_deref(),
                     request.invocation_id,
-                    &question,
-                    &options,
-                    &dependent_paths,
+                    ClarificationPrompt {
+                        question: &question,
+                        proposed_answer: proposed_answer.as_deref(),
+                        options: &options,
+                        dependent_paths: &dependent_paths,
+                    },
                 )?;
                 if reused.is_none() {
                     emit(
@@ -4495,6 +4591,7 @@ async fn run_agent_loop_inner(
                                 .ask_with_context(QuestionRequestContext {
                                     invocation_id: request.invocation_id,
                                     question: &question,
+                                    proposed_answer: proposed_answer.as_deref(),
                                     options: &options,
                                 })
                                 .await
@@ -4520,6 +4617,23 @@ async fn run_agent_loop_inner(
                             QuestionOutcome::Answered(answer)
                         }
                     }
+                    QuestionOutcome::ApprovedProposal(answer) => {
+                        let answer = crate::interactive::bounded_public_text(
+                            &answer,
+                            &public_output_sensitive_values,
+                            MAX_QUESTION_BYTES,
+                            false,
+                        );
+                        if answer.trim().is_empty()
+                            || proposed_answer.as_deref() != Some(answer.as_str())
+                        {
+                            QuestionOutcome::InputUnavailable(
+                                "approved proposal did not match the displayed answer".to_string(),
+                            )
+                        } else {
+                            QuestionOutcome::ApprovedProposal(answer)
+                        }
+                    }
                     QuestionOutcome::InputUnavailable(error) => {
                         QuestionOutcome::InputUnavailable(crate::interactive::bounded_public_text(
                             &error,
@@ -4531,7 +4645,8 @@ async fn run_agent_loop_inner(
                     other => other,
                 };
                 let answer = match &outcome {
-                    QuestionOutcome::Answered(answer) => Ok(answer.clone()),
+                    QuestionOutcome::Answered(answer)
+                    | QuestionOutcome::ApprovedProposal(answer) => Ok(answer.clone()),
                     QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
                     QuestionOutcome::Cancelled => Err("cancelled".to_string()),
                     QuestionOutcome::InputClosed => Err("input closed".to_string()),
@@ -4840,26 +4955,36 @@ async fn run_agent_loop_inner(
                             )?;
                         }
                         if reconciliation_failure.is_none() {
-                            append_assistant_if_allowed(
-                                &store,
-                                session_id,
-                                &format!("Run reconciled with outcome: {other}"),
-                            )?;
+                            let message = if other == "instruction_context_missing" {
+                                instruction_context_detail.clone().unwrap_or_else(|| {
+                                    instruction_context_user_message(
+                                        "required project instructions are unavailable",
+                                    )
+                                })
+                            } else {
+                                format!("Run reconciled with outcome: {other}")
+                            };
+                            append_assistant_if_allowed(&store, session_id, &message)?;
                         }
                         other.to_string()
                     }
                 };
                 let failure_details = reconciliation_failure.clone();
+                let mut reconciliation_details = json!({
+                    "outcome": outcome,
+                    "continue": continue_plan,
+                    "failure": failure_details,
+                });
+                if outcome == "instruction_context_missing" {
+                    reconciliation_details["reason"] =
+                        json!(instruction_context_detail.clone().unwrap_or_else(|| {
+                            instruction_context_user_message(
+                                "required project instructions are unavailable",
+                            )
+                        }));
+                }
                 store
-                    .record_event(
-                        session_id,
-                        "reconciliation",
-                        json!({
-                            "outcome": outcome,
-                            "continue": continue_plan,
-                            "failure": failure_details,
-                        }),
-                    )
+                    .record_event(session_id, "reconciliation", reconciliation_details)
                     .map_err(|error| error.to_string())?;
                 emit(
                     &cfg.stream_tx,
@@ -4904,10 +5029,19 @@ async fn run_agent_loop_inner(
         session_id: session_id.to_string(),
         run_id: run_id.clone(),
         steps_taken: llm_turns.saturating_add(answer_route_requests),
-        last_message: final_session
-            .as_ref()
-            .and_then(|session| session.messages.last())
-            .map(|message| message.content.clone()),
+        last_message: if outcome == "instruction_context_missing" {
+            instruction_context_detail.or_else(|| {
+                final_session
+                    .as_ref()
+                    .and_then(|session| session.messages.last())
+                    .map(|message| message.content.clone())
+            })
+        } else {
+            final_session
+                .as_ref()
+                .and_then(|session| session.messages.last())
+                .map(|message| message.content.clone())
+        },
         tool_call_count,
         final_state: state,
         outcome,
@@ -5783,8 +5917,10 @@ async fn reconcile_preflight_instruction_failure(
     error: String,
     stream_tx: &Option<Sender<StreamEvent>>,
 ) -> Result<AgentRunSummary, String> {
+    let message = instruction_context_user_message(&error);
     persist_instruction_context_block(store, session_id, None, normalized_goal, stage, &error)?;
-    let (last_message, tool_call_count) = store
+    append_assistant_if_allowed(store, session_id, &message)?;
+    let tool_call_count = store
         .update_session(session_id, |session| {
             let previous_state = last_persisted_state(session);
             append_session_event(
@@ -5798,7 +5934,7 @@ async fn reconcile_preflight_instruction_failure(
                 json!({
                     "outcome": "instruction_context_missing",
                     "continue": false,
-                    "reason": error,
+                    "reason": message.clone(),
                 }),
             );
             append_session_event(
@@ -5809,13 +5945,7 @@ async fn reconcile_preflight_instruction_failure(
                     "to": AgentState::Done.as_str(),
                 }),
             );
-            Ok((
-                session
-                    .messages
-                    .last()
-                    .map(|message| message.content.clone()),
-                session.tool_calls.len(),
-            ))
+            Ok(session.tool_calls.len())
         })
         .map_err(|audit_error| {
             format!("failed to reconcile missing instruction context: {audit_error}")
@@ -5845,7 +5975,7 @@ async fn reconcile_preflight_instruction_failure(
         session_id: session_id.to_string(),
         run_id: String::new(),
         steps_taken: 0,
-        last_message,
+        last_message: Some(message),
         tool_call_count,
         final_state: AgentState::Done,
         outcome: "instruction_context_missing".to_string(),
@@ -6096,6 +6226,8 @@ fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "unresolved_clarification"
                 | "planning_required_active_plan"
                 | "planning_required_active_run"
+                | "plan_binding_changed"
+                | "plan_approval_denied"
         )
 }
 
@@ -7587,9 +7719,12 @@ mod tests {
             &session.id,
             Some("plan-a"),
             first,
-            "Which verification mode?",
-            &["fast".to_string(), "full".to_string()],
-            &["src".to_string()],
+            ClarificationPrompt {
+                question: "Which verification mode?",
+                proposed_answer: None,
+                options: &["fast".to_string(), "full".to_string()],
+                dependent_paths: &["src".to_string()],
+            },
         )
         .expect("persist question")
         .is_none());
@@ -7636,9 +7771,12 @@ mod tests {
             &session.id,
             Some("plan-a"),
             second,
-            "Which verification mode?",
-            &["fast".to_string(), "full".to_string()],
-            &["src".to_string()],
+            ClarificationPrompt {
+                question: "Which verification mode?",
+                proposed_answer: None,
+                options: &["fast".to_string(), "full".to_string()],
+                dependent_paths: &["src".to_string()],
+            },
         )
         .expect("reuse question")
         .expect("prior answer");
@@ -7651,9 +7789,12 @@ mod tests {
             &session.id,
             Some("plan-a"),
             third,
-            "Which target file?",
-            &[],
-            &[],
+            ClarificationPrompt {
+                question: "Which target file?",
+                proposed_answer: None,
+                options: &[],
+                dependent_paths: &[],
+            },
         )
         .expect("new question");
         persist_question_observation(
@@ -7686,9 +7827,12 @@ mod tests {
             &session.id,
             Some("plan-a"),
             fourth,
-            "Which target file?",
-            &[],
-            &[],
+            ClarificationPrompt {
+                question: "Which target file?",
+                proposed_answer: None,
+                options: &[],
+                dependent_paths: &[],
+            },
         )
         .expect("repeat unresolved question")
         .is_none());
@@ -7722,9 +7866,12 @@ mod tests {
             &session.id,
             Some("plan-a"),
             fifth,
-            "Which verification mode?",
-            &["fast".to_string(), "release".to_string()],
-            &["src".to_string()],
+            ClarificationPrompt {
+                question: "Which verification mode?",
+                proposed_answer: None,
+                options: &["fast".to_string(), "release".to_string()],
+                dependent_paths: &["src".to_string()],
+            },
         )
         .expect("changed option set")
         .is_none());
@@ -8222,6 +8369,25 @@ mod tests {
         let decoded: AgentRunSummary =
             serde_json::from_value(legacy).expect("legacy summary remains readable");
         assert!(decoded.run_id.is_empty());
+
+        let missing = AgentRunSummary {
+            session_id: "instruction-session".to_string(),
+            run_id: String::new(),
+            steps_taken: 0,
+            last_message: Some(
+                "Project instructions could not be loaded, so this run stopped before dependent work.\nAGENTS.md exceeds the instruction byte limit.\nRestore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan.".to_string(),
+            ),
+            tool_call_count: 0,
+            final_state: AgentState::Done,
+            outcome: "instruction_context_missing".to_string(),
+            failure: None,
+            bound_reached: false,
+            trace: Vec::new(),
+        };
+        let report = missing.user_failure_report().expect("instruction report");
+        assert!(report.contains("AGENTS.md exceeds"));
+        assert!(report.contains("Session: instruction-session"));
+        assert!(!report.contains("Agent run failed: instruction_context_missing"));
     }
 
     #[test]

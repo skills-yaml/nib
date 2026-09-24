@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **54 done, 3 development, and 3 backlog**.
+The current lifecycle is **55 done, 3 development, and 3 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -105,6 +105,7 @@ work or narrower guarantees.
   ([implementation plan](done/T047_user_interaction_harmonization.plan.md))
 - [T048: Active TUI Render Responsiveness](done/T048_active_tui_render_responsiveness.md)
 - [T049: Command Approval Card](development/T049_interaction_card.md)
+- [T050: Plan-Free Answers, Decision Prompts, and Run Outcomes](done/T050_plan_free_answers_decision_prompts_and_run_outcomes.md)
 
 ### Feature specs
 
