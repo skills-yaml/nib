@@ -1,6 +1,6 @@
 # T052: Windows TUI Session Cache Refresh
 
-**Status:** Development
+**Status:** Done
 
 **Related:** [T048](../done/T048_active_tui_render_responsiveness.md) and
 [T051](T051_windows_mcp_provider_failure_stack.md).
@@ -47,12 +47,12 @@ before the read starts, so every refresh attempt can be discarded.
 
 ## Acceptance Criteria
 
-- [ ] A single background refresh succeeds after a brief session-lock hold.
-- [ ] The existing cadence and session-switch test passes unchanged on native
+- [x] A single background refresh succeeds after a brief session-lock hold.
+- [x] The existing cadence and session-switch test passes unchanged on native
   Windows, including its five-second settle bound.
-- [ ] The TUI frame path stays nonblocking and refresh attempts remain limited to
+- [x] The TUI frame path stays nonblocking and refresh attempts remain limited to
   one per second.
-- [ ] `task check`, `task docs:check`, `task verify`, and native Windows `task test`
+- [x] `task check`, `task docs:check`, `task verify`, and native Windows `task test`
   pass; Linux and macOS CI remain green.
 
 ## Validation Gates
@@ -74,13 +74,15 @@ Merge with the Windows MCP stack fix after native CI passes. No migration is nee
 
 ## Open Questions
 
-None block implementation. Native Windows CI will validate whether 250 ms is
-sufficient under the project runner's filesystem load.
+None. Native Windows CI validated the 250 ms deadline under the project runner's
+filesystem load.
 
 ## Validation Record (2026-09-24)
 
 The pre-fix native Windows CI attempts both failed in the unchanged cache cadence
 test after five seconds; each passed the MCP provider-failure test. On the repair
 branch, `task test:tui-cache`, `task test:interactive`, `task docs:check`, and full
-`task verify` passed locally. `git diff --check` passed. Native CI remains the
-acceptance gate.
+`task verify` passed locally. `git diff --check` passed. The final PR run
+[36010434574](https://github.com/skills-yaml/nib/actions/runs/36010434574)
+passed Windows, macOS, and Linux validation. Its Windows log shows both the
+unchanged cadence/session-switch test and the new held-lock test passing.

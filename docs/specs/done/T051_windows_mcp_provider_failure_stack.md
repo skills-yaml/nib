@@ -1,6 +1,6 @@
 # T051: Windows MCP Provider-Failure Test Stack
 
-**Status:** Development
+**Status:** Done
 
 **Related:** [T026](../done/T026_actionable_redaction_safe_llm_failure_reporting.md),
 [T046](../done/T046_cross_platform_ci_repairs.md), and
@@ -53,9 +53,9 @@ failure and status boundary on Windows.
 
 - [x] The exact test passes on native Windows with its ordinary test-thread stack,
   with every existing typed failure and redaction assertion retained.
-- [ ] Windows `task test` passes; Linux and macOS gates remain green.
-- [ ] `task check`, `task docs:check`, and `task verify` pass on the final tree.
-- [ ] The fix does not alter production MCP responses or introduce a global stack
+- [x] Windows `task test` passes; Linux and macOS gates remain green.
+- [x] `task check`, `task docs:check`, and `task verify` pass on the final tree.
+- [x] The fix does not alter production MCP responses or introduce a global stack
   increase, ignored test, or relaxed security assertion.
 
 ## Validation Gates
@@ -98,3 +98,7 @@ None. The scoped production dispatch future was the stack-heavy boundary.
 - The exact MCP provider-failure test passed on both native Windows CI attempts
   for PR #30. The full Windows job then failed in the separate TUI cache test;
   [T052](T052_windows_tui_session_cache_refresh.md) owns that repair.
+- The final PR run
+  [36010434574](https://github.com/skills-yaml/nib/actions/runs/36010434574)
+  passed Windows, macOS, and Linux validation. Its Windows log shows the exact MCP
+  provider-failure test passing with the standard test-thread stack.
