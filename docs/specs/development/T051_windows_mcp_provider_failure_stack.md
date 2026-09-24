@@ -51,7 +51,7 @@ failure and status boundary on Windows.
 
 ## Acceptance Criteria
 
-- [ ] The exact test passes on native Windows with its ordinary test-thread stack,
+- [x] The exact test passes on native Windows with its ordinary test-thread stack,
   with every existing typed failure and redaction assertion retained.
 - [ ] Windows `task test` passes; Linux and macOS gates remain green.
 - [ ] `task check`, `task docs:check`, and `task verify` pass on the final tree.
@@ -95,3 +95,6 @@ None. The scoped production dispatch future was the stack-heavy boundary.
 - The first `task verify` passed the MCP test but an unrelated installer
   staged-asset-visibility fixture failed. `task test:installers` then passed all
   42 tests, including that fixture. The full `task verify` rerun passed.
+- The exact MCP provider-failure test passed on both native Windows CI attempts
+  for PR #30. The full Windows job then failed in the separate TUI cache test;
+  [T052](T052_windows_tui_session_cache_refresh.md) owns that repair.

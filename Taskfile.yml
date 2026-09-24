@@ -87,6 +87,11 @@ tasks:
         integrations::mcp_server::tests::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error
         -- --exact --test-threads=1 --nocapture
 
+  test:tui-cache:
+    desc: Verify TUI session display cache refresh and lock-wait behavior
+    cmds:
+      - cargo test --lib tui::tests::session_display_cache_ -- --test-threads=1
+
   verify:
     desc: Run the complete local static and test gates once
     cmds:

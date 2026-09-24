@@ -310,7 +310,7 @@ impl SessionDisplayCache {
                 let result = store
                     .load_result_with_deadline(
                         &session_id,
-                        Instant::now() + Duration::from_millis(10),
+                        Instant::now() + Duration::from_millis(250),
                     )
                     .map_err(|_| ());
                 let _ = sender.send(result);
@@ -7491,6 +7491,44 @@ mod tests {
             0,
         );
         assert_eq!(cache.session.as_ref().unwrap().id, "session-b");
+    }
+
+    #[test]
+    fn session_display_cache_waits_briefly_for_a_busy_session_lock() {
+        let directory = tempdir().expect("tempdir");
+        let store = SessionStore::at_dir(directory.path().join("sessions"));
+        store.create_session_with_id("session-a");
+
+        let (locked, ready) = mpsc::sync_channel(1);
+        let held_store = store.clone();
+        let holder = std::thread::spawn(move || {
+            held_store
+                .with_session_lock_for_testing("session-a", || {
+                    locked.send(()).expect("signal held lock");
+                    std::thread::sleep(Duration::from_millis(50));
+                    Ok(())
+                })
+                .expect("hold session lock");
+        });
+        ready
+            .recv_timeout(Duration::from_secs(5))
+            .expect("session lock acquired");
+
+        let now = Instant::now();
+        let mut cache = SessionDisplayCache::default();
+        cache.refresh(&store, "session-a", now);
+        holder.join().expect("release session lock");
+
+        let start = Instant::now();
+        while cache.pending.is_some() {
+            cache.refresh(&store, "session-a", now);
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            cache.session.as_ref().map(|session| session.id.as_str()),
+            Some("session-a")
+        );
     }
 
     fn draw_cached_test_transcript(
