@@ -180,6 +180,11 @@ reviewed T040 baseline are `src/agent/{loop.rs,instructions.rs,planner.rs}`,
 
 ### 5. Reduce planning overhead for simple answers
 
+T050 (2026-09-23) supersedes the opt-in default below for new interactive execute
+requests. The tool-free route now defaults on, while explicit
+`agent.answer_only = false`, plan mode, and one-shot `nib run` retain their
+existing plan-first behavior.
+
 - Design an opt-in answer-only route for requests satisfiable from available context.
   It must have no executable tools and make at most one generation request when the
   answer succeeds. It must not add a separate model classification call.

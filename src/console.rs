@@ -295,11 +295,13 @@ impl QuestionHandler for ConsoleQuestionHandler {
             .ask_with_context(QuestionRequestContext {
                 invocation_id: nib::tools::ToolInvocationId::new(),
                 question,
+                proposed_answer: None,
                 options,
             })
             .await
         {
             QuestionOutcome::Answered(answer) => Ok(answer),
+            QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
             QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
             QuestionOutcome::Cancelled => Err("cancelled".to_string()),
             QuestionOutcome::InputClosed => Err("input closed".to_string()),
@@ -309,11 +311,21 @@ impl QuestionHandler for ConsoleQuestionHandler {
 
     async fn ask_with_context(&self, context: QuestionRequestContext<'_>) -> QuestionOutcome {
         println!("\nQuestion: {}", context.question);
-        for (index, option) in context.options.iter().enumerate() {
-            println!("  {}. {}", index + 1, option);
+        if let Some(proposal) = context.proposed_answer {
+            println!("Proposed answer: {proposal}");
+            println!(
+                "1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise"
+            );
+        }
+        if context.proposed_answer.is_none() {
+            for (index, option) in context.options.iter().enumerate() {
+                println!("  {}. {}", index + 1, option);
+            }
         }
         loop {
-            if context.options.is_empty() {
+            if context.proposed_answer.is_some() {
+                print!("Decision or answer: ");
+            } else if context.options.is_empty() {
                 print!("Answer: ");
             } else {
                 print!("Answer (number or text): ");
@@ -327,6 +339,27 @@ impl QuestionHandler for ConsoleQuestionHandler {
                 Ok(line) => line,
                 Err(_) => return QuestionOutcome::InputClosed,
             };
+            if let Some(proposal) = context.proposed_answer {
+                match nib::interactive::parse_proposed_question_input(&line) {
+                    nib::interactive::ProposedQuestionInput::Approve => {
+                        return QuestionOutcome::ApprovedProposal(proposal.to_string());
+                    }
+                    nib::interactive::ProposedQuestionInput::Reject => {
+                        return QuestionOutcome::LeftUnanswered;
+                    }
+                    nib::interactive::ProposedQuestionInput::InstructOtherwise => {
+                        println!("Type the alternative answer, then press Enter");
+                        continue;
+                    }
+                    nib::interactive::ProposedQuestionInput::Answer(answer) => {
+                        return QuestionOutcome::Answered(answer);
+                    }
+                    nib::interactive::ProposedQuestionInput::Retry(message) => {
+                        eprintln!("{message}");
+                        continue;
+                    }
+                }
+            }
             let state = InteractionState {
                 question_pending: true,
                 ..InteractionState::default()

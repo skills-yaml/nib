@@ -860,6 +860,7 @@ pub enum InteractiveEffect {
     OpenQuestion {
         invocation_id: String,
         question: String,
+        proposed_answer: Option<String>,
         options: Vec<String>,
     },
 }
@@ -1370,12 +1371,89 @@ pub enum InteractionDecision {
     Reject,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposedQuestionInput {
+    Approve,
+    Reject,
+    InstructOtherwise,
+    Answer(String),
+    Retry(String),
+}
+
+pub fn parse_proposed_question_input(input: &str) -> ProposedQuestionInput {
+    let trimmed = input.trim();
+    if let Some(answer) = trimmed.strip_prefix("otherwise: ") {
+        return if answer.trim().is_empty() {
+            ProposedQuestionInput::Retry("alternative answer cannot be empty".to_string())
+        } else {
+            ProposedQuestionInput::Answer(answer.to_string())
+        };
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "approve" | "yes" => ProposedQuestionInput::Approve,
+        "2" | "reject" | "no" => ProposedQuestionInput::Reject,
+        "3" | "instruct otherwise" | "otherwise" => ProposedQuestionInput::InstructOtherwise,
+        "" => ProposedQuestionInput::Retry(
+            "choose Approve, Reject, or Instruct otherwise".to_string(),
+        ),
+        _ => match parse_prompt_prefix(input) {
+            Ok(Some(PromptPrefix::Text(answer))) => ProposedQuestionInput::Answer(answer),
+            Ok(Some(PromptPrefix::Command(_))) => ProposedQuestionInput::Retry(
+                "use the prompt-local command entry or answer with text: <answer>".to_string(),
+            ),
+            Err(message) => ProposedQuestionInput::Retry(message),
+            Ok(None) => ProposedQuestionInput::Answer(input.to_string()),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionTerminalOutcome {
     Completed,
     Cancelled,
     WaitingForInput,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalOutcomeMessage {
+    pub title: &'static str,
+    pub detail: &'static str,
+}
+
+pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
+    let (title, detail) = match outcome {
+        "completed" => ("Run completed", "The result is ready. You can send another request."),
+        "plan_ready" => ("Plan ready", "The plan was recorded; no plan actions were run."),
+        "step_completed" => ("Plan step completed", "The next plan step is starting."),
+        "context_compacted" => ("Context compacted", "Older context was summarized; raw session history remains saved."),
+        "context_unchanged" => ("Context unchanged", "No compression was needed or available. The session remains ready."),
+        "cancelled_by_user" => ("Run cancelled", "Active work stopped after reconciliation. Check /status before continuing."),
+        "waiting_for_user_input" | "unresolved_clarification" => ("Waiting for your answer", "Dependent work is paused. Use /questions to answer, then /continue <plan-id>."),
+        "model_refusal" => ("Model declined the request", "No further work ran. Rephrase the request or select a different model."),
+        "empty_model_response" => ("Model returned no answer", "No result was produced. Retry the request or inspect /status."),
+        "tool_execution_failed" => ("Tool failed", "The current work is incomplete. Inspect the tool result and give corrected instructions."),
+        "repeated_tool_failure" => ("Repeated tool failure", "The run stopped after unchanged failures. Inspect the last tool result before retrying."),
+        "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /plan and resolve its blocker."),
+        "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /plan and run or repair the exact check."),
+        "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /plan and /status before requesting more work."),
+        "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the same plan."),
+        "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning. Finish or resolve the current plan, or start a new session."),
+        "planning_required_active_run" => ("Run is still active", "Wait for reconciliation or cancel the active run before starting another request."),
+        "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /plan before continuing."),
+        "plan_approval_denied" => ("Plan approval declined", "No plan actions were run. Revise the request or start a new plan."),
+        _ if outcome.starts_with("planning_failed")
+            || outcome.starts_with("llm_stream_failed")
+            || outcome.starts_with("answer_only_failed")
+            || outcome.starts_with("configuration_failed")
+            || outcome.starts_with("invalid_tool_stream")
+            || outcome.starts_with("provider_continuation_failed") => (
+                "Model request failed",
+                "The session was saved. Follow the incident report above or run nib doctor.",
+            ),
+        _ => ("Run stopped", "Inspect /status and the saved session before trying again."),
+    };
+    TerminalOutcomeMessage { title, detail }
 }
 
 pub fn active_interaction_consumer(state: &InteractionState) -> InteractionConsumer {
@@ -1673,6 +1751,9 @@ fn reduce_composer_submission(state: &InteractionState, line: &str) -> Interacti
     if normalized.is_empty() {
         return InteractionReduction::NoOp(InteractionConsumer::Composer);
     }
+    if is_capability_question(normalized) {
+        return InteractionReduction::Command(InteractiveCommand::Help);
+    }
     if normalized.starts_with("queue:") {
         return parse_queue_line(normalized).map_or_else(
             || InteractionReduction::Error {
@@ -1738,6 +1819,16 @@ fn reduce_composer_submission(state: &InteractionState, line: &str) -> Interacti
         Some(command) => InteractionReduction::Command(command),
         None => InteractionReduction::IdleTurn(normalized.to_string()),
     }
+}
+
+fn is_capability_question(input: &str) -> bool {
+    matches!(
+        input
+            .trim_end_matches(['?', '.', '!'])
+            .to_ascii_lowercase()
+            .as_str(),
+        "help" | "what can you do" | "how can you help" | "what can nib do"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2378,8 +2469,21 @@ fn is_failure_outcome(outcome: &str) -> bool {
         || outcome.contains("failure")
         || outcome.contains("refusal")
         || outcome.contains("interrupted")
-        || outcome == "invalid_plan"
-        || outcome == "blocked_step_unresolved"
+        || matches!(
+            outcome,
+            "invalid_plan"
+                | "blocked_step_unresolved"
+                | "required_verification_unresolved"
+                | "turn_limit_reached"
+                | "transition_limit_reached"
+                | "model_refusal"
+                | "empty_model_response"
+                | "instruction_context_missing"
+                | "planning_required_active_plan"
+                | "planning_required_active_run"
+                | "plan_binding_changed"
+                | "plan_approval_denied"
+        )
 }
 
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
@@ -2504,10 +2608,24 @@ fn project_session_event(
             let outcome =
                 safe_event_atom(&event.details, "outcome").unwrap_or_else(|| "unknown".to_string());
             if outcome.contains("cancel") {
+                let message = terminal_outcome_message(&outcome);
                 (
                     ActivityKind::Cancellation,
-                    format!("run cancelled: {outcome}"),
-                    String::new(),
+                    message.title.to_string(),
+                    message.detail.to_string(),
+                )
+            } else if outcome == "instruction_context_missing" {
+                let reason = event
+                    .details
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(
+                        "Project instructions could not be loaded. Restore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan.",
+                    );
+                (
+                    ActivityKind::Failure,
+                    "project instructions unavailable".to_string(),
+                    bounded_public_text(reason, sensitive_values, MAX_ACTIVITY_BODY_BYTES, true),
                 )
             } else if event
                 .details
@@ -2515,16 +2633,20 @@ fn project_session_event(
                 .is_some_and(|value| !value.is_null())
                 || is_failure_outcome(&outcome)
             {
-                (
-                    ActivityKind::Failure,
-                    format!("run failed: {outcome}"),
-                    safe_failure_fields(&event.details),
-                )
+                let message = terminal_outcome_message(&outcome);
+                let fields = safe_failure_fields(&event.details);
+                let body = if fields.is_empty() {
+                    message.detail.to_string()
+                } else {
+                    format!("{}\n{fields}", message.detail)
+                };
+                (ActivityKind::Failure, message.title.to_string(), body)
             } else {
+                let message = terminal_outcome_message(&outcome);
                 (
                     ActivityKind::Reconcile,
-                    format!("run reconciled: {outcome}"),
-                    String::new(),
+                    message.title.to_string(),
+                    message.detail.to_string(),
                 )
             }
         }
@@ -3026,6 +3148,13 @@ pub fn apply_stream_event(
             }
         }
         StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {}
+        StreamEvent::Reconciled { outcome } if outcome == "instruction_context_missing" => {
+            activities.push(ActivityEntry::new(
+                ActivityKind::Failure,
+                "project instructions unavailable".to_string(),
+                "Restore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan.".to_string(),
+            ));
+        }
         StreamEvent::Reconciled { outcome } => {
             let reduction = reduce_interaction(
                 &InteractionState::default(),
@@ -3034,14 +3163,19 @@ pub fn apply_stream_event(
                     failure: false,
                 },
             );
-            let title = match reduction {
-                InteractionReduction::Reconciled { outcome, .. } => outcome,
+            let (outcome, terminal) = match reduction {
+                InteractionReduction::Reconciled { outcome, terminal } => (outcome, terminal),
                 _ => unreachable!("reconciliation input always has a terminal reduction"),
             };
+            let message = terminal_outcome_message(&outcome);
             activities.push(ActivityEntry::new(
-                ActivityKind::Reconcile,
-                title,
-                String::new(),
+                if terminal == InteractionTerminalOutcome::Failed {
+                    ActivityKind::Failure
+                } else {
+                    ActivityKind::Reconcile
+                },
+                message.title.to_string(),
+                message.detail.to_string(),
             ));
         }
         StreamEvent::Failure {
@@ -4613,25 +4747,7 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
         } => StreamDisplay::Status(format!(
             "[compression] {before_tokens} -> {after_tokens} tokens; summarized through message {summarized_through}"
         )),
-        StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {
-            StreamDisplay::Status(
-                "[verification] completion rejected; continuing the current step".to_string(),
-            )
-        }
-        StreamEvent::Reconciled { outcome } => {
-            let reduction = reduce_interaction(
-                &InteractionState::default(),
-                InteractionInput::ReconciledOutcome {
-                    outcome: &outcome,
-                    failure: false,
-                },
-            );
-            let outcome = match reduction {
-                InteractionReduction::Reconciled { outcome, .. } => outcome,
-                _ => unreachable!("reconciliation input always has a terminal reduction"),
-            };
-            StreamDisplay::Status(format!("[reconciled] {outcome}"))
-        }
+        StreamEvent::Reconciled { outcome } => display_reconciliation_status(&outcome),
         StreamEvent::Failure {
             failure,
             session_id,
@@ -4639,6 +4755,37 @@ fn display_stream_event_unchecked(event: StreamEvent) -> Option<StreamDisplay> {
         StreamEvent::End(reason) => StreamDisplay::Status(format!("[stream ended] {reason}")),
     };
     Some(display)
+}
+
+fn display_reconciliation_status(outcome: &str) -> StreamDisplay {
+    if outcome == "verification_recovery" {
+        return StreamDisplay::Status(
+            "[verification] completion rejected; continuing the current step".to_string(),
+        );
+    }
+    if outcome == "instruction_context_missing" {
+        return StreamDisplay::Status(
+            "[failed] Project instructions could not be loaded. Restore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan.".to_string(),
+        );
+    }
+    let reduction = reduce_interaction(
+        &InteractionState::default(),
+        InteractionInput::ReconciledOutcome {
+            outcome,
+            failure: false,
+        },
+    );
+    let (outcome, terminal) = match reduction {
+        InteractionReduction::Reconciled { outcome, terminal } => (outcome, terminal),
+        _ => unreachable!("reconciliation input always has a terminal reduction"),
+    };
+    let message = terminal_outcome_message(&outcome);
+    let label = if terminal == InteractionTerminalOutcome::Failed {
+        "failed"
+    } else {
+        "reconciled"
+    };
+    StreamDisplay::Status(format!("[{label}] {}. {}", message.title, message.detail))
 }
 
 fn inline_json(value: &serde_json::Value) -> String {
@@ -5091,6 +5238,7 @@ fn load_questions_effect(
     Ok(InteractiveEffect::OpenQuestion {
         invocation_id: record.invocation_id.to_string(),
         question: record.question.clone(),
+        proposed_answer: record.proposed_answer.clone(),
         options: record.options.clone(),
     })
 }
@@ -5166,8 +5314,31 @@ pub fn persist_recovered_question_answer(
     invocation_id: &str,
     answer: &str,
 ) -> Result<String, String> {
-    let answer = answer.trim();
-    if answer.is_empty() {
+    persist_recovered_question_response(store, session_id, invocation_id, answer, false)
+}
+
+pub fn persist_recovered_proposed_answer(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: &str,
+    answer: &str,
+) -> Result<String, String> {
+    persist_recovered_question_response(store, session_id, invocation_id, answer, true)
+}
+
+fn persist_recovered_question_response(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: &str,
+    answer: &str,
+    approved_proposal: bool,
+) -> Result<String, String> {
+    let answer = if approved_proposal {
+        answer
+    } else {
+        answer.trim()
+    };
+    if answer.trim().is_empty() {
         return Err("recovered question answer cannot be empty".to_string());
     }
     // UI-local idleness is not sufficient because another process may own this
@@ -5208,6 +5379,11 @@ pub fn persist_recovered_question_answer(
                     "question was already answered".to_string(),
                 ));
             }
+            if approved_proposal && record.proposed_answer.as_deref() != Some(answer) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "the proposed answer changed; reopen the question".to_string(),
+                ));
+            }
             let event_index = session.events.len();
             session.events.push(SessionEvent {
                 index: event_index,
@@ -5216,6 +5392,7 @@ pub fn persist_recovered_question_answer(
                     "invocation_id": invocation_id,
                     "answer": answer,
                     "recovered": true,
+                    "decision": if approved_proposal { "approved_proposal" } else { "answered" },
                 }),
                 timestamp: Some(Utc::now()),
             });
@@ -5230,7 +5407,14 @@ pub fn persist_recovered_question_answer(
             let record = &mut session.clarifications[index];
             record.status = crate::session::ClarificationStatus::Answered;
             record.answer = Some(answer.to_string());
-            record.outcome = Some("answered".to_string());
+            record.outcome = Some(
+                if approved_proposal {
+                    "approved_proposal"
+                } else {
+                    "answered"
+                }
+                .to_string(),
+            );
             record.reason = Some("recovered via /questions".to_string());
             record.answer_event_index = Some(event_index);
             Ok(active_plan)
@@ -5354,6 +5538,7 @@ mod tests {
                 invocation_id,
                 plan_id: Some(plan_id.clone()),
                 question: "Which target?".to_string(),
+                proposed_answer: None,
                 options: vec!["alpha".to_string(), "beta".to_string()],
                 dependent_paths: Vec::new(),
                 status: crate::session::ClarificationStatus::Unresolved,
@@ -5465,6 +5650,36 @@ mod tests {
         )
         .expect_err("duplicate answer must fail")
         .contains("already answered"));
+    }
+
+    #[test]
+    fn recovered_proposal_approval_requires_the_exact_saved_answer() {
+        let (_directory, store, session_id, invocation_id, _) = recoverable_question_fixture();
+        store
+            .update_session(&session_id, |session| {
+                session.clarifications[0].proposed_answer = Some("alpha".to_string());
+                Ok(())
+            })
+            .expect("save proposal");
+        assert!(persist_recovered_proposed_answer(
+            &store,
+            &session_id,
+            &invocation_id.to_string(),
+            "beta",
+        )
+        .is_err());
+        persist_recovered_proposed_answer(&store, &session_id, &invocation_id.to_string(), "alpha")
+            .expect("approve exact proposal");
+        let session = store.load(&session_id).expect("reloaded session");
+        assert_eq!(session.clarifications[0].answer.as_deref(), Some("alpha"));
+        assert_eq!(
+            session.clarifications[0].outcome.as_deref(),
+            Some("approved_proposal")
+        );
+        assert!(session.events.iter().any(|event| {
+            event.kind == "human_question_answer_received"
+                && event.details["decision"] == "approved_proposal"
+        }));
     }
 
     #[test]
@@ -5788,6 +6003,69 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    #[test]
+    fn capability_questions_show_help_without_starting_a_plan() {
+        for input in ["help", "Help?", "what can you do?", "how can you help"] {
+            for run in [InteractionRunState::Idle, InteractionRunState::Running] {
+                let state = InteractionState {
+                    run,
+                    ..InteractionState::default()
+                };
+                assert_eq!(
+                    reduce_interaction(&state, InteractionInput::SubmittedLine(input)),
+                    InteractionReduction::Command(InteractiveCommand::Help),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn proposed_question_decisions_preserve_approval_and_alternative_meanings() {
+        assert_eq!(
+            parse_proposed_question_input("1"),
+            ProposedQuestionInput::Approve
+        );
+        assert_eq!(
+            parse_proposed_question_input("reject"),
+            ProposedQuestionInput::Reject
+        );
+        assert_eq!(
+            parse_proposed_question_input("3"),
+            ProposedQuestionInput::InstructOtherwise
+        );
+        assert_eq!(
+            parse_proposed_question_input("text: approve"),
+            ProposedQuestionInput::Answer("approve".to_string())
+        );
+        assert_eq!(
+            parse_proposed_question_input("otherwise: beta"),
+            ProposedQuestionInput::Answer("beta".to_string())
+        );
+        assert!(matches!(
+            parse_proposed_question_input(""),
+            ProposedQuestionInput::Retry(_)
+        ));
+    }
+
+    #[test]
+    fn terminal_outcomes_explain_the_next_action() {
+        for outcome in [
+            "tool_execution_failed",
+            "repeated_tool_failure",
+            "required_verification_unresolved",
+            "turn_limit_reached",
+            "waiting_for_user_input",
+        ] {
+            let message = terminal_outcome_message(outcome);
+            assert!(!message.title.is_empty());
+            assert!(message.detail.contains(['.', '/', ' ']), "{outcome}");
+            assert!(
+                !message.detail.contains(outcome),
+                "internal token leaked: {outcome}"
+            );
         }
     }
 
@@ -8359,8 +8637,29 @@ mod tests {
             assert_eq!(activities[0].body, "First response.");
             assert_eq!(activities[1].body, "Second response.");
             assert!(activities[1].title.is_empty());
-            assert_eq!(activities[2].title, "completed");
+            assert_eq!(activities[2].title, "Run completed");
         }
+    }
+
+    #[test]
+    fn instruction_context_missing_reloads_with_the_recovery_reason() {
+        let activity = project_session_event(
+            &SessionEvent {
+                index: 0,
+                kind: "reconciliation".to_string(),
+                details: serde_json::json!({
+                    "outcome": "instruction_context_missing",
+                    "reason": "Project instructions could not be loaded, so this run stopped before dependent work.\nAGENTS.md exceeds the instruction byte limit.\nRestore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan."
+                }),
+                timestamp: None,
+            },
+            &[],
+        )
+        .expect("missing instructions stay visible");
+        assert_eq!(activity.kind, ActivityKind::Failure);
+        assert_eq!(activity.title, "project instructions unavailable");
+        assert!(activity.body.contains("AGENTS.md exceeds"));
+        assert!(activity.body.contains("llm.context_length"));
     }
 
     #[test]
@@ -8378,7 +8677,12 @@ mod tests {
                 )
                 .expect("failed run remains visible after reload");
                 assert_eq!(activity.kind, ActivityKind::Failure);
-                assert!(activity.title.contains(outcome));
+                if kind == "reconciliation" {
+                    assert_eq!(activity.title, terminal_outcome_message(outcome).title);
+                    assert!(!activity.body.is_empty());
+                } else {
+                    assert!(activity.title.contains(outcome));
+                }
             }
         }
     }
@@ -8429,8 +8733,8 @@ mod tests {
         )
         .expect("reconciliation activity");
         assert_eq!(reconciled.kind, ActivityKind::Cancellation);
-        assert_eq!(reconciled.title, "run cancelled: cancelled_by_user");
-        assert!(reconciled.body.is_empty());
+        assert_eq!(reconciled.title, "Run cancelled");
+        assert!(reconciled.body.contains("Check /status"));
         assert!(!reconciled.render_line().contains(run_id));
         assert!(!reconciled.render_line().contains("DO_NOT_RENDER"));
     }
@@ -8466,7 +8770,7 @@ mod tests {
                     reconciled("completed"),
                     terminal("a", "completed"),
                 ],
-                vec!["run reconciled: completed"],
+                vec!["Run completed"],
             ),
             (
                 vec![
@@ -8474,7 +8778,7 @@ mod tests {
                     reconciled("completed"),
                     terminal("a", "local_error"),
                 ],
-                vec!["run reconciled: completed", "run terminal: local_error"],
+                vec!["Run completed", "run terminal: local_error"],
             ),
             (
                 vec![
@@ -8484,7 +8788,7 @@ mod tests {
                     started("b"),
                     terminal("b", "completed"),
                 ],
-                vec!["run reconciled: completed", "run terminal: completed"],
+                vec!["Run completed", "run terminal: completed"],
             ),
             (
                 vec![
@@ -8492,11 +8796,11 @@ mod tests {
                     reconciled("completed"),
                     terminal("b", "completed"),
                 ],
-                vec!["run reconciled: completed", "run terminal: completed"],
+                vec!["Run completed", "run terminal: completed"],
             ),
             (
                 vec![reconciled("completed"), terminal("a", "completed")],
-                vec!["run reconciled: completed", "run terminal: completed"],
+                vec!["Run completed", "run terminal: completed"],
             ),
             (
                 vec![
@@ -8518,7 +8822,7 @@ mod tests {
                     ),
                     terminal("a", "completed"),
                 ],
-                vec!["run reconciled: completed", "run terminal: completed"],
+                vec!["Run completed", "run terminal: completed"],
             ),
         ] {
             let mut session = template.clone();
@@ -8702,10 +9006,10 @@ mod tests {
             .iter()
             .find(|entry| entry.kind == ActivityKind::Failure)
             .expect("failure evidence");
-        assert_eq!(
-            failure.body,
+        assert!(failure.body.contains("The session was saved"));
+        assert!(failure.body.contains(
             "class=transport · phase=stream · retry=retryable · incident_code=LLM-NETWORK"
-        );
+        ));
         assert!(projected
             .iter()
             .all(|entry| !entry.render_line().contains("do-not-render")));

@@ -876,6 +876,7 @@ impl TuiApprovalHandler {
 
 pub struct TuiQuestionRequest {
     pub question: String,
+    pub proposed_answer: Option<String>,
     pub options: Vec<String>,
     pub reply: oneshot::Sender<crate::agent::QuestionOutcome>,
 }
@@ -891,11 +892,13 @@ impl crate::agent::QuestionHandler for TuiQuestionHandler {
             .ask_with_context(crate::agent::QuestionRequestContext {
                 invocation_id: crate::tools::ToolInvocationId::new(),
                 question,
+                proposed_answer: None,
                 options,
             })
             .await
         {
             crate::agent::QuestionOutcome::Answered(answer) => Ok(answer),
+            crate::agent::QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
             crate::agent::QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
             crate::agent::QuestionOutcome::Cancelled => Err("cancelled".to_string()),
             crate::agent::QuestionOutcome::InputClosed => Err("input closed".to_string()),
@@ -912,6 +915,7 @@ impl crate::agent::QuestionHandler for TuiQuestionHandler {
             .tx
             .send(TuiQuestionRequest {
                 question: context.question.to_string(),
+                proposed_answer: context.proposed_answer.map(str::to_string),
                 options: context.options.to_vec(),
                 reply: reply_tx,
             })
@@ -941,6 +945,7 @@ struct PendingQuestion {
     recovery: Option<RecoveredQuestionTarget>,
     response: String,
     selected_option: Option<usize>,
+    selected_decision: usize,
     focus: QuestionFocus,
     error: Option<String>,
 }
@@ -1592,12 +1597,18 @@ fn model_action_for_key(model: &mut PendingModelSelection, code: KeyCode) -> Mod
 
 impl PendingQuestion {
     fn new(request: TuiQuestionRequest) -> Self {
+        let has_proposal = request.proposed_answer.is_some();
         Self {
             request,
             recovery: None,
             response: String::new(),
             selected_option: None,
-            focus: QuestionFocus::Editor,
+            selected_decision: 1,
+            focus: if has_proposal {
+                QuestionFocus::Actions
+            } else {
+                QuestionFocus::Editor
+            },
             error: None,
         }
     }
@@ -1613,6 +1624,7 @@ impl PendingQuestion {
 enum QuestionAction {
     Pending,
     Submit(String),
+    ApproveProposal(String),
     LeaveUnanswered,
     Error(String),
 }
@@ -1643,22 +1655,22 @@ fn submit_question_answer(question: &PendingQuestion, answer: &str) -> QuestionA
 fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> QuestionAction {
     match code {
         KeyCode::Tab => {
+            let has_suggestions =
+                question.request.proposed_answer.is_none() && !question.request.options.is_empty();
             question.focus = match question.focus {
-                QuestionFocus::Editor if !question.request.options.is_empty() => {
-                    QuestionFocus::Suggestions
-                }
+                QuestionFocus::Editor if has_suggestions => QuestionFocus::Suggestions,
                 QuestionFocus::Editor | QuestionFocus::Suggestions => QuestionFocus::Actions,
                 QuestionFocus::Actions => QuestionFocus::Editor,
             };
             QuestionAction::Pending
         }
         KeyCode::BackTab => {
+            let has_suggestions =
+                question.request.proposed_answer.is_none() && !question.request.options.is_empty();
             question.focus = match question.focus {
                 QuestionFocus::Editor => QuestionFocus::Actions,
                 QuestionFocus::Suggestions => QuestionFocus::Editor,
-                QuestionFocus::Actions if question.request.options.is_empty() => {
-                    QuestionFocus::Editor
-                }
+                QuestionFocus::Actions if !has_suggestions => QuestionFocus::Editor,
                 QuestionFocus::Actions => QuestionFocus::Suggestions,
             };
             QuestionAction::Pending
@@ -1683,6 +1695,27 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
             }
             QuestionAction::Pending
         }
+        KeyCode::Up
+            if question.focus == QuestionFocus::Actions
+                && question.request.proposed_answer.is_some() =>
+        {
+            question.selected_decision = question.selected_decision.saturating_sub(1);
+            QuestionAction::Pending
+        }
+        KeyCode::Down
+            if question.focus == QuestionFocus::Actions
+                && question.request.proposed_answer.is_some() =>
+        {
+            question.selected_decision = question.selected_decision.saturating_add(1).min(2);
+            QuestionAction::Pending
+        }
+        KeyCode::Char(digit @ '1'..='3')
+            if question.focus == QuestionFocus::Actions
+                && question.request.proposed_answer.is_some() =>
+        {
+            question.selected_decision = usize::from(digit as u8 - b'1');
+            QuestionAction::Pending
+        }
         KeyCode::Down if question.focus == QuestionFocus::Suggestions => {
             let last = question.request.options.len().saturating_sub(1);
             question.selected_option = Some(match question.selected_option {
@@ -1692,7 +1725,20 @@ fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Que
             QuestionAction::Pending
         }
         KeyCode::Enter => match question.focus {
-            QuestionFocus::Actions => QuestionAction::LeaveUnanswered,
+            QuestionFocus::Actions => {
+                if let Some(proposal) = question.request.proposed_answer.as_deref() {
+                    match question.selected_decision {
+                        0 => QuestionAction::ApproveProposal(proposal.to_string()),
+                        1 => QuestionAction::LeaveUnanswered,
+                        _ => {
+                            question.focus = QuestionFocus::Editor;
+                            QuestionAction::Pending
+                        }
+                    }
+                } else {
+                    QuestionAction::LeaveUnanswered
+                }
+            }
             QuestionFocus::Suggestions => {
                 if let Some(index) = question.selected_option {
                     if let Some(option) = question.request.options.get(index) {
@@ -1743,6 +1789,37 @@ fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) ->
     let action = question_action_for_key(pending, code);
     match action {
         QuestionAction::Pending => false,
+        QuestionAction::ApproveProposal(response) => {
+            if let Some(target) = question
+                .as_ref()
+                .and_then(|pending| pending.recovery.as_ref())
+            {
+                match crate::interactive::persist_recovered_proposed_answer(
+                    &target.store,
+                    &target.session_id,
+                    &target.invocation_id,
+                    &response,
+                ) {
+                    Ok(_) => {
+                        question.take();
+                        return true;
+                    }
+                    Err(message) => {
+                        if let Some(pending) = question.as_mut() {
+                            pending.error = Some(message);
+                        }
+                        return false;
+                    }
+                }
+            }
+            if let Some(pending) = question.take() {
+                let _ = pending
+                    .request
+                    .reply
+                    .send(crate::agent::QuestionOutcome::ApprovedProposal(response));
+            }
+            true
+        }
         QuestionAction::Submit(response) => {
             if let Some(target) = question
                 .as_ref()
@@ -2746,6 +2823,26 @@ fn render_approval_band(frame: &mut ratatui::Frame<'_>, area: Rect, req: &TuiApp
 }
 
 fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, question: &PendingQuestion) {
+    if question.request.proposed_answer.is_some() {
+        let choices = [
+            ("Approve proposed answer".to_string(), "1".to_string()),
+            ("Reject and leave unanswered".to_string(), "2".to_string()),
+            ("Instruct otherwise".to_string(), "3".to_string()),
+        ];
+        let selected = if question.focus == QuestionFocus::Actions {
+            question.selected_decision
+        } else {
+            choices.len()
+        };
+        render_numbered_choice_band(
+            frame,
+            area,
+            &choices,
+            selected,
+            "Up/Down select · Enter choose · Tab type another answer · Esc reject",
+        );
+        return;
+    }
     let mut choices: Vec<(String, String)> = question
         .request
         .options
@@ -3932,6 +4029,19 @@ fn waiting_composer_rows(
         }
         WaitingKind::Question => {
             let question = pending_question?;
+            if let Some(proposal) = question.request.proposed_answer.as_deref() {
+                let mut extra = vec![format!("Proposed answer: {proposal}")];
+                if question.focus == QuestionFocus::Editor {
+                    extra.push(format!("Your answer: {}", question.response));
+                }
+                if let Some(error) = question.error.as_deref() {
+                    extra.push(format!("Input error: {error}"));
+                }
+                return Some((
+                    overlay_visual_rows(&question.request.question, &extra, width),
+                    false,
+                ));
+            }
             if question.request.options.is_empty() {
                 let first = if question.response.is_empty() {
                     question.request.question.as_str()
@@ -6870,6 +6980,7 @@ fn draw_loop(
                                     Ok(InteractiveEffect::OpenQuestion {
                                         invocation_id,
                                         question,
+                                        proposed_answer,
                                         options,
                                     }) => {
                                         let (reply_tx, reply_rx) = oneshot::channel();
@@ -6877,6 +6988,7 @@ fn draw_loop(
                                         pending_question = Some(PendingQuestion::recovered(
                                             TuiQuestionRequest {
                                                 question,
+                                                proposed_answer,
                                                 options,
                                                 reply: reply_tx,
                                             },
@@ -7112,6 +7224,7 @@ mod tests {
                 invocation_id,
                 plan_id: Some(plan_id),
                 question: "Which target?".to_string(),
+                proposed_answer: None,
                 options: vec!["alpha".to_string(), "beta".to_string()],
                 dependent_paths: Vec::new(),
                 status: crate::session::ClarificationStatus::Unresolved,
@@ -8980,7 +9093,7 @@ mod tests {
             "[tool completed] read_file: ok - {\"content\":\"nib\"}",
             "[tool completed] run_terminal: failed - exit 1",
             "[compression] 1000 -> 250 tokens; summarized through message 4",
-            "[reconciled] completed",
+            "[reconciled] Run completed",
             "LLM request failed [LLM-AUTH]",
             "Provider: openai (responses), model: gpt-test",
             "Action: Refresh this provider's credential with `nib auth`, then retry.",
@@ -9378,6 +9491,7 @@ mod tests {
         let (question_tx, mut question_rx) = oneshot::channel();
         let mut question = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Still here?".to_string(),
+            proposed_answer: None,
             options: vec!["yes".to_string()],
             reply: question_tx,
         }));
@@ -9608,6 +9722,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Branch name?".to_string(),
+            proposed_answer: None,
             options: vec![],
             reply: reply_tx,
         }));
@@ -9628,10 +9743,46 @@ mod tests {
     }
 
     #[test]
+    fn proposed_question_requires_a_deliberate_decision() {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Use the release branch?".to_string(),
+            proposed_answer: Some("release".to_string()),
+            options: vec![],
+            reply: reply_tx,
+        }));
+        assert_eq!(pending.as_ref().unwrap().selected_decision, 1);
+        assert!(!handle_question_key(&mut pending, KeyCode::Char('1')));
+        assert!(matches!(
+            reply_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::ApprovedProposal("release".to_string())
+        );
+
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
+            question: "Use the release branch?".to_string(),
+            proposed_answer: Some("release".to_string()),
+            options: vec![],
+            reply: reply_tx,
+        }));
+        assert!(handle_question_key(&mut pending, KeyCode::Enter));
+        assert_eq!(
+            reply_rx.try_recv().unwrap(),
+            crate::agent::QuestionOutcome::LeftUnanswered
+        );
+    }
+
+    #[test]
     fn question_modal_paste_preserves_unicode_multiline_and_filters_controls() {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut question = PendingQuestion::new(TuiQuestionRequest {
             question: "Describe the result".to_string(),
+            proposed_answer: None,
             options: vec!["short".to_string()],
             reply: reply_tx,
         });
@@ -9655,6 +9806,7 @@ mod tests {
         let (reply_tx, _reply_rx) = oneshot::channel();
         let question = PendingQuestion::new(TuiQuestionRequest {
             question: "Which target?".to_string(),
+            proposed_answer: None,
             options: vec!["alpha".to_string()],
             reply: reply_tx,
         });
@@ -9688,6 +9840,7 @@ mod tests {
         let mut pending = Some(PendingQuestion::recovered(
             TuiQuestionRequest {
                 question: "Which target?".to_string(),
+                proposed_answer: None,
                 options: vec!["alpha".to_string(), "beta".to_string()],
                 reply: reply_tx,
             },
@@ -9714,6 +9867,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Search term?".to_string(),
+            proposed_answer: None,
             options: vec![],
             reply: reply_tx,
         }));
@@ -9740,6 +9894,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Mode?".to_string(),
+            proposed_answer: None,
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
@@ -9759,6 +9914,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Mode?".to_string(),
+            proposed_answer: None,
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
@@ -9773,6 +9929,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Mode?".to_string(),
+            proposed_answer: None,
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
@@ -9786,6 +9943,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Mode?".to_string(),
+            proposed_answer: None,
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         }));
@@ -9803,6 +9961,7 @@ mod tests {
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Continue?".to_string(),
+            proposed_answer: None,
             options: vec!["yes".to_string(), "no".to_string()],
             reply: reply_tx,
         }));
@@ -9920,10 +10079,7 @@ mod tests {
             plan.steps[plan.current_step_index].outcome.as_deref(),
             Some("cancelled_by_user")
         );
-        assert!(timeline
-            .live
-            .text
-            .contains("[reconciled] cancelled_by_user"));
+        assert!(timeline.live.text.contains("[reconciled] Run cancelled"));
         assert!(!timeline.live.text.contains("[stream ended]"));
         assert_eq!(
             timeline
@@ -9994,6 +10150,7 @@ mod tests {
             question_tx
                 .send(TuiQuestionRequest {
                     question: "This cancelled question must not reopen".to_string(),
+                    proposed_answer: None,
                     options: Vec::new(),
                     reply: question_reply_tx,
                 })
@@ -10009,6 +10166,7 @@ mod tests {
         let mut pending_approval = None;
         let mut pending_question = Some(PendingQuestion::new(TuiQuestionRequest {
             question: "Initial question".to_string(),
+            proposed_answer: None,
             options: Vec::new(),
             reply: initial_reply_tx,
         }));
@@ -10426,7 +10584,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("compact"));
-        assert!(rendered.contains("context_compacted"));
+        assert!(rendered.contains("Context compacted"));
         assert!(!rendered.contains("[user]"));
         assert!(!rendered.contains("explicit context compression"));
     }
@@ -10768,6 +10926,7 @@ mod tests {
         let (reply_tx, _reply_rx) = oneshot::channel();
         let question = PendingQuestion::new(TuiQuestionRequest {
             question: "Choose a mode".to_string(),
+            proposed_answer: None,
             options: vec!["plan".to_string(), "execute".to_string()],
             reply: reply_tx,
         });

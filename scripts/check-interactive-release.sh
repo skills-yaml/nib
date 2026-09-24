@@ -464,7 +464,7 @@ interrupt_question_input() {
 }
 
 interrupt_approval_input() {
-  wait_for_pty_output "$fixture/$current_case.txt" 'Approval required'
+  wait_for_pty_output "$fixture/$current_case.txt" 'Would you like to run the following command?'
   printf '\003'
 }
 

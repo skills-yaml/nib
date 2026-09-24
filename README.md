@@ -112,6 +112,11 @@ task build
    authentication first. `nib chat` remains an explicit spelling of the same launcher;
    `nib tui` remains a compatibility alias for `nib --tui`.
 
+   Plain-language `help` and `what can you do?` show nib's capabilities immediately.
+   Other clear information requests can receive a tool-free answer without a plan;
+   nib then waits for the next message. Requests needing inspection or action enter
+   the normal planning path.
+
    The TUI centers the active session's bounded persisted timeline and offers keyboard
    completion. Plain mode provides the same command and session capabilities through
    numbered prompts. `/session` previews history and requires confirmation before
