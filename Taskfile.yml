@@ -71,6 +71,27 @@ tasks:
     cmds:
       - 'cargo test --test llm_failure_cli -- --test-threads=1'
 
+  test:mcp-stack:
+    desc: Run the MCP provider-failure regression with a one MiB test-thread stack
+    cmds:
+      - cargo test --lib --no-run
+      - task: test:mcp-stack:small-stack
+
+  test:mcp-stack:small-stack:
+    internal: true
+    env:
+      RUST_MIN_STACK: '1048576'
+    cmds:
+      - >-
+        cargo test --lib
+        integrations::mcp_server::tests::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error
+        -- --exact --test-threads=1 --nocapture
+
+  test:tui-cache:
+    desc: Verify TUI session display cache refresh and lock-wait behavior
+    cmds:
+      - cargo test --lib tui::tests::session_display_cache_ -- --test-threads=1
+
   verify:
     desc: Run the complete local static and test gates once
     cmds:
