@@ -1794,11 +1794,16 @@ pub async fn handle_request(
     request: Value,
 ) -> Option<Value> {
     let cancellation_audit = Arc::new(CancellationAuditSlot::default());
-    let mut handled = SessionStore::with_lock_policy(
-        MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT,
-        handle_request_with_cancellation(project_root, config, request, None, &cancellation_audit),
-    )
-    .await;
+    // Keep the large dispatch future off the request thread's stack.
+    let dispatch = Box::pin(handle_request_with_cancellation(
+        project_root,
+        config,
+        request,
+        None,
+        &cancellation_audit,
+    ));
+    let mut handled =
+        SessionStore::with_lock_policy(MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT, dispatch).await;
     handled.complete_audit();
     handled.response
 }
