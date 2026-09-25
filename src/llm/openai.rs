@@ -258,7 +258,9 @@ impl OpenAiCompatClient {
         }
         if let Some(tools) = tools {
             body["tools"] = json!(encode_chat_tools(tools, &self.provider));
-            body["tool_choice"] = chat_tool_choice(&self.provider, &self.model, tool_choice);
+            if let Some(choice) = chat_tool_choice(&self.provider, &self.model, tool_choice) {
+                body["tool_choice"] = choice;
+            }
         }
         if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning_effort"] = json!(effort.as_str());
@@ -417,6 +419,14 @@ fn encode_chat_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value> {
             if !chat_includes_strict(provider) {
                 if let Some(function) = encoded.get_mut("function").and_then(Value::as_object_mut) {
                     function.remove("strict");
+                    if matches!(provider, "openrouter" | "meta") {
+                        if let Some(parameters) = function.get("parameters").cloned() {
+                            function.insert(
+                                "parameters".to_string(),
+                                crate::llm::types::gemini_compatible_schema(&parameters),
+                            );
+                        }
+                    }
                 }
             }
             encoded
@@ -428,11 +438,11 @@ fn chat_includes_strict(provider: &str) -> bool {
     matches!(provider, "openai" | "grok")
 }
 
-fn chat_tool_choice(provider: &str, model: &str, tool_choice: ToolChoice) -> Value {
+fn chat_tool_choice(provider: &str, model: &str, tool_choice: ToolChoice) -> Option<Value> {
     if provider == "meta" || (provider == "openrouter" && model.starts_with("anthropic/")) {
-        json!("auto")
+        None
     } else {
-        tool_choice.as_openai_value()
+        Some(tool_choice.as_openai_value())
     }
 }
 
@@ -1864,7 +1874,10 @@ mod tests {
         assert!(openrouter_claude["tools"][0]["function"]
             .get("strict")
             .is_none());
-        assert_eq!(openrouter_claude["tool_choice"], "auto");
+        assert!(openrouter_claude.get("tool_choice").is_none());
+        assert!(openrouter_claude["tools"][0]["function"]["parameters"]
+            .get("additionalProperties")
+            .is_none());
 
         let meta = OpenAiCompatClient::configured(
             "meta".to_string(),
@@ -1879,7 +1892,7 @@ mod tests {
         )
         .expect("valid Meta Chat request");
         assert!(meta["tools"][0]["function"].get("strict").is_none());
-        assert_eq!(meta["tool_choice"], "auto");
+        assert!(meta.get("tool_choice").is_none());
     }
 
     #[test]

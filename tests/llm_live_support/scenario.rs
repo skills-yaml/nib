@@ -1049,11 +1049,11 @@ async fn tool_continuation(
         .collect::<Vec<_>>();
     let content = if parallel {
         format!(
-            "Call both record_probe_a with nonce {first_nonce} and record_probe_b with nonce {second_nonce}. Do not answer directly. After the tools return, reply with only the receipt value from the tool output."
+            "You must invoke the record_probe_a and record_probe_b function tools. Pass nonce {first_nonce} to record_probe_a and nonce {second_nonce} to record_probe_b. After both tool results arrive, reply with only the receipt value."
         )
     } else {
         format!(
-            "Call record_probe with nonce {first_nonce}. Do not answer directly. After the tool returns, reply with only the receipt value from the tool output."
+            "You must invoke the record_probe function tool. Pass nonce {first_nonce} as the nonce argument. After the tool result arrives, reply with only the receipt value."
         )
     };
     let messages = [LlmMessage::user(content)];

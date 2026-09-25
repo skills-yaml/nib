@@ -4,7 +4,7 @@
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmRequest, LlmRequestScope, LlmResponse, LlmStreamEvent,
-    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest, ToolChoice,
+    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest,
     ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
@@ -132,7 +132,7 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
-            tool_choice,
+            tool_choice: _,
             scope,
             continuation,
         } = request;
@@ -177,9 +177,9 @@ impl AnthropicClient {
         if stream {
             body["stream"] = json!(true);
         }
-        if max_output_tokens.is_some() {
-            // Bounded turns cannot also run adaptive thinking: thinking tokens share
-            // max_tokens, and Opus 5-class models think by default.
+        if max_output_tokens.is_some() && tools.is_none() {
+            // Bounded text turns cannot also run adaptive thinking: thinking
+            // tokens share max_tokens, and Opus 5-class models think by default.
             body["thinking"] = json!({"type": "disabled"});
         }
         if let Some(tools) = tools {
@@ -187,11 +187,6 @@ impl AnthropicClient {
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
-            if tool_choice == ToolChoice::Required {
-                if let Some(tool) = tools.first() {
-                    body["tool_choice"] = json!({"type": "tool", "name": tool.name()});
-                }
-            }
         }
         Ok(body)
     }
@@ -1440,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_request_disables_capped_thinking_and_names_required_tool() {
+    fn anthropic_request_disables_thinking_only_on_capped_text_turns() {
         let client = test_client("https://api.anthropic.com/v1/messages".to_string());
         let messages = [LlmMessage::user("call")];
         let tools = [ToolDefinition::function("record_probe")];
@@ -1452,10 +1447,16 @@ mod tests {
                 false,
             )
             .expect("valid Anthropic request");
-        assert_eq!(body["thinking"]["type"], "disabled");
-        assert_eq!(body["tool_choice"]["type"], "tool");
-        assert_eq!(body["tool_choice"]["name"], "record_probe");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("tool_choice").is_none());
         assert_eq!(body["max_tokens"], 512);
+        let text_only = client
+            .request_body(
+                LlmRequest::new(&messages, None).with_max_output_tokens(512),
+                false,
+            )
+            .expect("valid Anthropic text request");
+        assert_eq!(text_only["thinking"]["type"], "disabled");
     }
 
     #[test]
@@ -1596,7 +1597,7 @@ mod tests {
             .contains("x-api-key: anthropic-test-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
         assert!(request.contains("\"max_tokens\":43"));
-        assert!(request.contains("\"thinking\":{\"type\":\"disabled\"}"));
+        assert!(!request.contains("\"thinking\""));
         assert!(request.contains("\"system\":\"follow project rules\""));
         assert!(request.contains("\"input_schema\""));
         assert!(!request.contains("\"stream\":true"));
