@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -45,12 +46,24 @@ fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
+fn accept_responses_request(listener: &TcpListener) -> (TcpStream, Vec<u8>) {
+    for _ in 0..16 {
+        let (mut stream, _) = listener.accept().expect("fixture connection");
+        let request = read_http_request(&mut stream);
+        if request.starts_with(b"POST /v1/responses HTTP/1.1") {
+            return (stream, request);
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+    panic!("fixture received too many requests unrelated to Responses");
+}
+
 fn serve_failed_responses_once(secret: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("fixture connection");
-        let _request = read_http_request(&mut stream);
+        let (mut stream, _request) = accept_responses_request(&listener);
 
         let body = format!(
             "data: {}\n\n",
@@ -106,8 +119,8 @@ fn serve_interactive_failure_then_success() -> (String, std::thread::JoinHandle<
     let address = listener.local_addr().expect("interactive fixture address");
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        let (mut stream, _) = listener.accept().expect("interactive fixture connection");
-        requests.push(read_http_request(&mut stream));
+        let (mut stream, request) = accept_responses_request(&listener);
+        requests.push(request);
         write_responses_event(
             &mut stream,
             json!({
@@ -129,8 +142,8 @@ fn serve_interactive_failure_then_success() -> (String, std::thread::JoinHandle<
             }),
         );
 
-        let (mut stream, _) = listener.accept().expect("recovery planner connection");
-        requests.push(read_http_request(&mut stream));
+        let (mut stream, request) = accept_responses_request(&listener);
+        requests.push(request);
         write_responses_event(
             &mut stream,
             json!({
@@ -149,8 +162,8 @@ fn serve_interactive_failure_then_success() -> (String, std::thread::JoinHandle<
             }),
         );
 
-        let (mut stream, _) = listener.accept().expect("recovery completion connection");
-        requests.push(read_http_request(&mut stream));
+        let (mut stream, request) = accept_responses_request(&listener);
+        requests.push(request);
         write_responses_events(
             &mut stream,
             [
@@ -230,7 +243,71 @@ fn recovery_outcomes(store: &SessionStore) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
+fn drain_child_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut reader = pipe;
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn drain_child_pipe_until_marker(
+    pipe: impl Read + Send + 'static,
+    marker: &'static [u8],
+    occurrence: usize,
+) -> (std::thread::JoinHandle<Vec<u8>>, mpsc::Receiver<()>) {
+    let (sender, receiver) = mpsc::channel();
+    let drain = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut reader = pipe;
+        let mut buffer = [0_u8; 4096];
+        let mut observed = false;
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            if !observed
+                && bytes
+                    .windows(marker.len())
+                    .filter(|window| *window == marker)
+                    .count()
+                    >= occurrence
+            {
+                let _ = sender.send(());
+                observed = true;
+            }
+        }
+        bytes
+    });
+    (drain, receiver)
+}
+
+fn wait_for_reconciliation_outcome(store: &SessionStore, outcome: &str, message: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let matched = store
+            .load_result(RECOVERY_SESSION_ID)
+            .expect("read plain recovery session")
+            .is_some_and(|session| {
+                session.events.iter().any(|event| {
+                    event.kind == "reconciliation" && event.details["outcome"] == outcome
+                })
+            });
+        if matched {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{message}; outcomes={:?}",
+            recovery_outcomes(store)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn spawn_plain_recovery_child(project: &Path, no_color: bool) -> std::process::Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
     command
         .args(["chat", "--plain", "--session", RECOVERY_SESSION_ID])
@@ -246,60 +323,48 @@ fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
     } else {
         command.env_remove("NO_COLOR");
     }
-    let mut child = command.spawn().expect("spawn plain recovery fixture");
+    command.spawn().expect("spawn plain recovery fixture")
+}
+
+fn run_plain_recovery(project: &Path, no_color: bool) -> Output {
+    let mut child = spawn_plain_recovery_child(project, no_color);
     let mut stdin = child.stdin.take().expect("plain recovery stdin");
+    let (stdout_drain, recovery_prompt) = drain_child_pipe_until_marker(
+        child.stdout.take().expect("plain recovery stdout"),
+        b"\nYou> ",
+        2,
+    );
+    let stderr_drain = drain_child_pipe(child.stderr.take().expect("plain recovery stderr"));
     stdin
         .write_all(b"first goal\n")
         .expect("plain recovery first goal");
     stdin.flush().expect("flush plain recovery first goal");
 
     let store = SessionStore::for_project(project).expect("plain recovery session store");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let failure_reconciled = store
-            .load_result(RECOVERY_SESSION_ID)
-            .expect("read plain recovery failure")
-            .is_some_and(|session| {
-                session.events.iter().any(|event| {
-                    event.kind == "reconciliation" && event.details["outcome"] == "planning_failed"
-                })
-            });
-        if failure_reconciled {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "plain recovery did not reconcile the first failure"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_reconciliation_outcome(
+        &store,
+        "planning_failed",
+        "plain recovery did not reconcile the first failure",
+    );
+    recovery_prompt
+        .recv_timeout(Duration::from_secs(30))
+        .expect("plain recovery did not return to the input prompt");
     stdin
         .write_all(b"second goal\n")
         .expect("plain recovery second goal");
     stdin.flush().expect("flush plain recovery second goal");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let recovery_completed = store
-            .load_result(RECOVERY_SESSION_ID)
-            .expect("read plain recovery session")
-            .is_some_and(|session| {
-                session.events.iter().any(|event| {
-                    event.kind == "reconciliation" && event.details["outcome"] == "completed"
-                })
-            });
-        if recovery_completed {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "plain recovery did not complete after the auto-approved plan; outcomes={:?}",
-            recovery_outcomes(&store),
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_reconciliation_outcome(
+        &store,
+        "completed",
+        "plain recovery did not complete after the auto-approved plan",
+    );
     drop(stdin);
-    let mut output = child.wait_with_output().expect("plain recovery output");
+    let status = child.wait().expect("plain recovery status");
+    let mut output = Output {
+        status,
+        stdout: stdout_drain.join().expect("plain recovery stdout drain"),
+        stderr: stderr_drain.join().expect("plain recovery stderr drain"),
+    };
 
     let mut status_command = Command::new(env!("CARGO_BIN_EXE_nib"));
     status_command
@@ -344,6 +409,28 @@ fn failure_report(stdout: &str) -> &str {
         .find("\n[stream ended]")
         .expect("plain failure report end");
     stdout[start..start + relative_end].trim_end()
+}
+
+#[test]
+fn responses_fixture_ignores_unrelated_localhost_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let receiver = std::thread::spawn(move || accept_responses_request(&listener).1);
+
+    let mut probe = TcpStream::connect(address).expect("probe connection");
+    probe
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("probe request");
+    let mut response = [0_u8; 128];
+    let count = probe.read(&mut response).expect("probe response");
+    assert!(response[..count].starts_with(b"HTTP/1.1 404 Not Found"));
+
+    let mut valid = TcpStream::connect(address).expect("Responses connection");
+    valid
+        .write_all(b"POST /v1/responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+        .expect("Responses request");
+    let request = receiver.join().expect("fixture receiver");
+    assert!(request.ends_with(b"{}"));
 }
 
 fn post_failure_status_semantics(stdout: &str) -> Vec<String> {

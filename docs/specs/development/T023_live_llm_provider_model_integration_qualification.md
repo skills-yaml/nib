@@ -892,12 +892,22 @@ Anthropic documents that forced tool choice is unavailable with adaptive
 thinking, and that `output_config.effort` can steer tool use on supported
 models ([tool-use guidance](https://platform.claude.com/docs/en/claude_api_primer),
 [effort compatibility](https://platform.claude.com/docs/en/build-with-claude/effort)).
-The next candidate omits forced choice and sends low effort only for an
+The `e2500bc` candidate omits forced choice and sends low effort only for an
 explicit `ToolChoice::Required` qualification request. Ordinary `Auto` tool
-requests keep their prior system and effort fields. This candidate has no live
-pass yet; an exact-revision protected canary must validate it. Unsupported
-effort on older account-visible models remains a full-matrix risk and must
-not be misclassified as model tool incompatibility.
+requests keep their prior system and effort fields. Its protected
+[run 36182823666](https://github.com/skills-yaml/nib/actions/runs/36182823666)
+passed text completion and streaming. The tool scenario made two successful
+requests, then failed a `response_mismatch` check on its continuation response.
+The sanitized report does not distinguish the final response's finish class,
+tool state, or receipt text, so the next candidate emits only fixed, content-free
+error classes for those checks. The complete local gate also exposed a
+one-connection localhost fixture that could consume an unrelated probe; its
+test now verifies that unrelated requests receive 404 while the expected
+Responses request remains available. The plain CLI recovery fixture likewise
+filters unrelated requests and waits for the next prompt before sending its
+second goal. Unsupported effort on older account-visible
+models remains a full-matrix risk and must not be misclassified as model tool
+incompatibility.
 
 ## Affected Areas
 
