@@ -905,9 +905,16 @@ one-connection localhost fixture that could consume an unrelated probe; its
 test now verifies that unrelated requests receive 404 while the expected
 Responses request remains available. The plain CLI recovery fixture likewise
 filters unrelated requests and waits for the next prompt before sending its
-second goal. Unsupported effort on older account-visible
-models remains a full-matrix risk and must not be misclassified as model tool
-incompatibility.
+second goal. The protected [run 36190856434](https://github.com/skills-yaml/nib/actions/runs/36190856434)
+at `1449b4b` passed text completion and streaming. Its first tool request
+completed, but the continuation response returned Anthropic's refusal terminal
+status (`response_refused` in the sanitized report). The fixed benign probe
+therefore fails this selected model on the current account and revision. Per
+the refusal policy above, the harness does not retry a different prompt or
+count the first tool call as a pass. A reviewed selected-model decision and a
+fresh exact-revision live pass are still required. Unsupported effort on older
+account-visible models remains a full-matrix risk and must not be misclassified
+as model tool incompatibility.
 
 ## Affected Areas
 
