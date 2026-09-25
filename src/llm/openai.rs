@@ -1389,7 +1389,11 @@ pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<LlmStreamEvent>, St
     };
     let mut events = Vec::new();
     let delta = choice.get("delta").unwrap_or(&Value::Null);
-    if let Some(content) = chat_text_content(delta.get("content")) {
+    if let Some(content) = chat_text_content(delta.get("content")).or_else(|| {
+        choice
+            .get("message")
+            .and_then(|message| chat_text_content(message.get("content")))
+    }) {
         events.push(LlmStreamEvent::Delta(LlmDelta::Content(content)));
     }
     if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -1935,6 +1939,18 @@ mod tests {
         .expect("array stream content");
         assert!(matches!(
             &events[0],
+            LlmStreamEvent::Delta(LlmDelta::Content(value)) if value == "NIB_ok"
+        ));
+
+        let message_events = parse_openai_stream_chunk(&json!({
+            "choices": [{
+                "message": {"content": "NIB_ok"},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("message-shaped stream chunk");
+        assert!(matches!(
+            &message_events[0],
             LlmStreamEvent::Delta(LlmDelta::Content(value)) if value == "NIB_ok"
         ));
     }
