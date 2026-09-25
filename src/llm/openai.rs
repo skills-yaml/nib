@@ -4,7 +4,7 @@ use crate::config::ReasoningEffort;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmMessage, LlmRequest, LlmRequestScope, LlmResponse,
     LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation,
-    ToolCallAccumulator, ToolCallRequest, ToolDefinition, ToolResult,
+    ToolCallAccumulator, ToolCallRequest, ToolChoice, ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -257,11 +257,8 @@ impl OpenAiCompatClient {
             }
         }
         if let Some(tools) = tools {
-            body["tools"] = json!(tools
-                .iter()
-                .map(ToolDefinition::to_openai_tool)
-                .collect::<Vec<_>>());
-            body["tool_choice"] = tool_choice.as_openai_value();
+            body["tools"] = json!(encode_chat_tools(tools, &self.provider));
+            body["tool_choice"] = chat_tool_choice(&self.provider, tool_choice);
         }
         if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning_effort"] = json!(effort.as_str());
@@ -412,6 +409,38 @@ fn uses_max_completion_tokens(provider: &str) -> bool {
     matches!(provider, "openai" | "grok")
 }
 
+fn encode_chat_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut encoded = tool.to_openai_tool();
+            if provider != "openai" {
+                if let Some(function) = encoded.get_mut("function").and_then(Value::as_object_mut) {
+                    function.remove("strict");
+                }
+            }
+            encoded
+        })
+        .collect()
+}
+
+fn chat_tool_choice(provider: &str, tool_choice: ToolChoice) -> Value {
+    if provider == "meta" {
+        json!("auto")
+    } else {
+        tool_choice.as_openai_value()
+    }
+}
+
+fn is_chat_refusal_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Bool(true) => true,
+        _ => true,
+    }
+}
+
 fn structured_chat_error_detail(body: &str) -> String {
     let Some(_error) = serde_json::from_str::<Value>(body)
         .ok()
@@ -520,12 +549,7 @@ fn chat_protocol_failure(data: &Value) -> Option<ChatProtocolFailure> {
                 .into_iter()
                 .flatten()
                 .filter_map(|part| part.get("refusal"))
-                .any(|refusal| {
-                    !refusal.is_null()
-                        && refusal
-                            .as_str()
-                            .is_none_or(|refusal| !refusal.trim().is_empty())
-                })
+                .any(is_chat_refusal_value)
         })
     }) {
         return Some(ChatProtocolFailure::new(ChatProtocolFailureKind::Refused));
@@ -1786,6 +1810,51 @@ mod tests {
             )
             .expect("valid Chat request");
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["tools"][0]["function"]["strict"], false);
+    }
+
+    #[test]
+    fn compatible_chat_tools_omit_strict_and_meta_keeps_auto_choice() {
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe").with_strict(true)];
+        for provider in ["grok", "openrouter", "meta"] {
+            let client = OpenAiCompatClient::configured(
+                provider.to_string(),
+                "fixture-model".to_string(),
+                vec!["test-key".to_string()],
+                "https://example.test/v1",
+                None,
+            );
+            let body = client
+                .request_body(
+                    LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                    false,
+                )
+                .expect("valid Chat request");
+            assert!(
+                body["tools"][0]["function"].get("strict").is_none(),
+                "{provider} must omit function.strict"
+            );
+            let expected_choice = if provider == "meta" {
+                "auto"
+            } else {
+                "required"
+            };
+            assert_eq!(body["tool_choice"], expected_choice, "{provider}");
+        }
+    }
+
+    #[test]
+    fn boolean_false_refusal_is_not_a_provider_refusal() {
+        let response = parse_openai_response(&json!({
+            "choices": [{
+                "message": {"content": "ok", "refusal": false},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("false refusal is an absent refusal");
+        assert_eq!(response.content.as_deref(), Some("ok"));
+        assert_eq!(response.finish_reason, LlmFinishReason::Complete);
     }
 
     #[test]

@@ -132,7 +132,7 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
-            tool_choice,
+            tool_choice: _,
             scope,
             continuation,
         } = request;
@@ -187,9 +187,8 @@ impl AnthropicClient {
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
-            if let Some(choice) = tool_choice.as_anthropic_value() {
-                body["tool_choice"] = choice;
-            }
+            // Claude 5 rejects forced tool_choice (`any` / named tool). The
+            // qualification prompt plus thinking-off is the supported path.
         }
         Ok(body)
     }
@@ -1438,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_request_encodes_required_tool_choice_and_disables_capped_thinking() {
+    fn anthropic_request_disables_capped_thinking_without_forced_tool_choice() {
         let client = test_client("https://api.anthropic.com/v1/messages".to_string());
         let messages = [LlmMessage::user("call")];
         let tools = [ToolDefinition::function("record_probe")];
@@ -1451,7 +1450,7 @@ mod tests {
             )
             .expect("valid Anthropic request");
         assert_eq!(body["thinking"]["type"], "disabled");
-        assert_eq!(body["tool_choice"]["type"], "any");
+        assert!(body.get("tool_choice").is_none());
         assert_eq!(body["max_tokens"], 512);
     }
 

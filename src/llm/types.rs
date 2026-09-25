@@ -375,13 +375,6 @@ impl ToolChoice {
         }
     }
 
-    pub fn as_anthropic_value(self) -> Option<Value> {
-        match self {
-            Self::Auto => None,
-            Self::Required => Some(json!({"type": "any"})),
-        }
-    }
-
     pub fn as_gemini_mode(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,

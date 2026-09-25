@@ -112,6 +112,21 @@ fn into_responses_input(
     Ok(input)
 }
 
+fn encode_responses_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut encoded = tool.to_responses_tool();
+            if provider != "openai" {
+                if let Some(object) = encoded.as_object_mut() {
+                    object.remove("strict");
+                }
+            }
+            encoded
+        })
+        .collect()
+}
+
 pub struct OpenAiResponsesClient {
     client: Client,
     provider: String,
@@ -246,13 +261,12 @@ impl OpenAiResponsesClient {
         }
         let has_tools = tools.is_some_and(|tools| !tools.is_empty());
         if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
-            body["tools"] = Value::Array(
-                tools
-                    .iter()
-                    .map(ToolDefinition::to_responses_tool)
-                    .collect(),
-            );
-            body["tool_choice"] = tool_choice.as_openai_value();
+            body["tools"] = Value::Array(encode_responses_tools(tools, &self.provider));
+            body["tool_choice"] = if self.provider == "meta" {
+                json!("auto")
+            } else {
+                tool_choice.as_openai_value()
+            };
         }
         if has_tools || has_continuation {
             body["include"] = json!(["reasoning.encrypted_content"]);
@@ -2135,5 +2149,36 @@ mod tests {
             )
             .expect("valid Responses request");
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn compatible_responses_tools_omit_strict_and_meta_keeps_auto_choice() {
+        let messages = [crate::llm::types::LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe").with_strict(true)];
+        for provider in ["grok", "openrouter", "meta"] {
+            let client = OpenAiResponsesClient::new(
+                provider,
+                "fixture-model".to_string(),
+                vec!["test-key".to_string()],
+                "https://example.test/v1/responses",
+            );
+            let (body, _, _) = client
+                .request_body(
+                    LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                    false,
+                )
+                .expect("valid Responses request");
+            assert!(
+                body["tools"][0].get("strict").is_none(),
+                "{provider} must omit responses strict"
+            );
+            let expected_choice = if provider == "meta" {
+                "auto"
+            } else {
+                "required"
+            };
+            assert_eq!(body["tool_choice"], expected_choice, "{provider}");
+        }
     }
 }
