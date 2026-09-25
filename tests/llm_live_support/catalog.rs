@@ -544,8 +544,8 @@ fn parse_openrouter_page(value: &Value) -> Result<Vec<CatalogModel>, String> {
     required_array(value, "data")?
         .iter()
         .map(|model| {
-            let id = required_string(model, "canonical_slug")
-                .or_else(|_| required_string(model, "id"))?;
+            let id = required_string(model, "id")?;
+            let canonical_slug = optional_string(model, "canonical_slug")?;
             let architecture = model.get("architecture").and_then(Value::as_object);
             let input = architecture
                 .and_then(|value| value.get("input_modalities"))
@@ -566,10 +566,14 @@ fn parse_openrouter_page(value: &Value) -> Result<Vec<CatalogModel>, String> {
                         && output.iter().any(|value| value == "text"),
                 )
             };
+            let aliases = canonical_slug
+                .filter(|slug| slug != &id)
+                .into_iter()
+                .collect();
             Ok(CatalogModel {
                 id,
                 generation_target: None,
-                aliases: Vec::new(),
+                aliases,
                 supports_text_generation: supports_text,
                 supports_tools: Some(parameters.iter().any(|value| value == "tools")),
                 supports_parallel_tools: Some(
@@ -989,7 +993,8 @@ mod tests {
             "pricing": {"prompt": "0.000001", "completion": "0.000002", "request": "0"}
         }]}))
         .unwrap();
-        assert_eq!(models[0].id, "owner/model");
+        assert_eq!(models[0].id, "alias/value");
+        assert_eq!(models[0].aliases, ["owner/model"]);
         assert_eq!(models[0].supports_tools, Some(true));
         assert_eq!(models[0].supports_parallel_tools, Some(true));
         assert_eq!(
