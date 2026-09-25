@@ -5,7 +5,7 @@
 **Current stage:** The protected six-provider catalog passed on 2026-09-25.
 Canary reports are retained but still fail provider tool-continuation scenarios;
 selected and full qualification remain open. The latest Anthropic canary passes
-text and streaming but rejects its tool request.
+text and streaming and makes a tool call, but refuses the final continuation.
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
