@@ -784,17 +784,13 @@ fn optional_number(value: &Value, field: &str) -> Result<Option<f64>, String> {
 fn parse_decimal(value: Option<&Value>) -> Result<Option<f64>, String> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => value
+        Some(Value::String(value)) => Ok(value
             .parse::<f64>()
             .ok()
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(Some)
-            .ok_or_else(|| "catalog pricing contains an invalid decimal".to_string()),
-        Some(Value::Number(value)) => value
+            .filter(|value| value.is_finite() && *value >= 0.0)),
+        Some(Value::Number(value)) => Ok(value
             .as_f64()
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(Some)
-            .ok_or_else(|| "catalog pricing contains an invalid number".to_string()),
+            .filter(|value| value.is_finite() && *value >= 0.0)),
         _ => Err("catalog pricing must be a decimal string or number".to_string()),
     }
 }
@@ -1012,6 +1008,20 @@ mod tests {
             models[0].pricing.as_ref().unwrap().completion_per_token_usd,
             Some(0.000002)
         );
+    }
+
+    #[test]
+    fn openrouter_sentinel_negative_prices_are_unpriced() {
+        let models = parse_openrouter_page(&json!({"data": [{
+            "id": "openrouter/auto",
+            "canonical_slug": "openrouter/auto",
+            "pricing": {"prompt": "-1", "completion": "-1", "request": "0"}
+        }]}))
+        .expect("OpenRouter auto-router -1 prices are unpriced, not a catalog failure");
+        let pricing = models[0].pricing.as_ref().expect("pricing object");
+        assert_eq!(pricing.prompt_per_token_usd, None);
+        assert_eq!(pricing.completion_per_token_usd, None);
+        assert_eq!(pricing.request_usd, Some(0.0));
     }
 
     #[test]
