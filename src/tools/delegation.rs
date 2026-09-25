@@ -18213,7 +18213,7 @@ mod tests {
 
     #[test]
     fn legacy_running_record_and_orphan_cancellation_fail_closed() {
-        #[cfg(windows)]
+        // Filesystem reconciliation can exceed the test-only 250 ms deadline on CI.
         let _timeout = SubagentCancellationTimeoutGuard::set(Duration::from_secs(10));
         let root = tempfile::tempdir().expect("root");
         let legacy = record_fixture(root.path(), "sub-legacy-owner", "running");
@@ -18242,7 +18242,7 @@ mod tests {
                 error,
             } => {
                 assert!(!manager_stopped);
-                assert_eq!(observed_status.as_deref(), Some("running"));
+                assert_eq!(observed_status.as_deref(), Some("running"), "{error}");
                 assert!(error.contains("untracked"), "{error}");
                 let persisted = get_subagent_record_internal(root.path(), &orphan.id)
                     .expect("orphan remains recoverable");
