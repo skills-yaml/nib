@@ -151,6 +151,8 @@ pub(super) struct ProviderReport {
     pub blocker_classification: Option<Classification>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_error_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_error: Option<String>,
     pub evidence_complete: bool,
     pub budget_truncated: bool,
     pub accounting: Vec<CatalogEntryReport>,
@@ -520,6 +522,7 @@ pub(super) fn catalog_provider_report(
         actual_cost_usd: Some(0.0),
         blocker_classification: None,
         safe_error_class: None,
+        safe_error: None,
         evidence_complete: true,
         budget_truncated: false,
         accounting,
@@ -533,6 +536,7 @@ pub(super) fn blocked_provider_report(
     provider: &str,
     classification: Classification,
     safe_error_class: &'static str,
+    detail: Option<&str>,
 ) -> ProviderReport {
     ProviderReport {
         provider: provider.to_string(),
@@ -556,6 +560,7 @@ pub(super) fn blocked_provider_report(
         actual_cost_usd: Some(0.0),
         blocker_classification: Some(classification),
         safe_error_class: Some(safe_error_class.to_string()),
+        safe_error: detail.map(|value| value.chars().take(240).collect()),
         evidence_complete: true,
         budget_truncated: classification == Classification::BlockedBudget,
         accounting: Vec::new(),
@@ -732,6 +737,7 @@ pub(super) fn generation_provider_report(
         actual_cost_usd: aggregate.actual_cost_usd,
         blocker_classification: None,
         safe_error_class: None,
+        safe_error: None,
         evidence_complete: aggregate.valid,
         budget_truncated,
         accounting,
@@ -1841,6 +1847,9 @@ fn markdown_summary(report: &QualificationReport) -> String {
         if let Some(class) = &provider.safe_error_class {
             output.push_str(&format!("- Safe error class: `{class}`\n"));
         }
+        if let Some(error) = &provider.safe_error {
+            output.push_str(&format!("- Safe error: `{error}`\n"));
+        }
         if let Some(classification) = provider.blocker_classification {
             output.push_str(&format!("- Blocker classification: `{classification:?}`\n"));
         }
@@ -2794,6 +2803,7 @@ mod tests {
             actual_cost_usd: Some(0.0),
             blocker_classification: None,
             safe_error_class: None,
+            safe_error: None,
             evidence_complete: true,
             budget_truncated: false,
             accounting: vec![CatalogEntryReport {

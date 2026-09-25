@@ -425,6 +425,7 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
                         provider,
                         classification,
                         safe_class,
+                        Some(error.as_str()),
                     )));
                     continue;
                 }
@@ -436,6 +437,7 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
                 provider,
                 Classification::BlockedBudget,
                 "blocked_run_deadline",
+                Some("blocked_budget: live run deadline exhausted"),
             )));
             continue;
         }
@@ -448,6 +450,7 @@ pub async fn run_from_environment() -> Result<PublishedReport, String> {
                     provider,
                     classification,
                     safe_class,
+                    Some(error.as_str()),
                 )));
             }
         }
@@ -686,7 +689,9 @@ fn publish_uniform_blocker(
     let providers = settings
         .providers
         .iter()
-        .map(|provider| report::blocked_provider_report(provider, classification, safe_error_class))
+        .map(|provider| {
+            report::blocked_provider_report(provider, classification, safe_error_class, None)
+        })
         .collect();
     let qualification = report::QualificationReport::new(
         run_id,

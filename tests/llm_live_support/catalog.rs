@@ -668,19 +668,25 @@ fn parse_gemini_page(value: &Value) -> Result<GeminiPage, String> {
         .iter()
         .map(|model| {
             let resource_name = required_string(model, "name")?;
-            resource_name
+            let from_name = resource_name
                 .strip_prefix("models/")
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
                     "Gemini model name must use the models/ resource prefix".to_string()
-                })?;
-            let generation_target = required_string(model, "baseModelId")?;
-            if generation_target.starts_with("models/") {
-                return Err(
-                    "Gemini baseModelId must be a generation target without the models/ prefix"
-                        .to_string(),
-                );
-            }
+                })?
+                .to_string();
+            // Live ListModels often omits baseModelId. The resource-name suffix is the
+            // generateContent ID; never infer from displayName.
+            let generation_target = match optional_string(model, "baseModelId")? {
+                Some(id) if id.starts_with("models/") => {
+                    return Err(
+                        "Gemini baseModelId must be a generation target without the models/ prefix"
+                            .to_string(),
+                    );
+                }
+                Some(id) => id,
+                None => from_name,
+            };
             let actions = model
                 .get("supportedGenerationMethods")
                 .or_else(|| model.get("supported_actions"))
@@ -939,11 +945,11 @@ mod tests {
         assert_eq!(page.models[0].owner, None);
         assert_eq!(page.models[1].supports_text_generation, Some(false));
         assert!(parse_gemini_page(&json!({"models": [{"name": "gemini-chat"}]})).is_err());
-        assert!(parse_gemini_page(&json!({
-            "models": [{"name": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"]}]
+        let inferred = parse_gemini_page(&json!({
+            "models": [{"name": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"], "displayName": "Gemini Chat"}]
         }))
-        .unwrap_err()
-        .contains("baseModelId"));
+        .expect("resource-name suffix is the generation target when baseModelId is omitted");
+        assert_eq!(inferred.models[0].generation_target(), "gemini-chat");
         assert!(
             parse_gemini_page(&json!({
                 "models": [{"name": "models/gemini-chat", "baseModelId": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"]}]
