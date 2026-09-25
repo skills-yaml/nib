@@ -139,8 +139,7 @@ impl AnthropicClient {
         let system = request_messages
             .iter()
             .find(|message| message.role == crate::llm::LlmMessageRole::System)
-            .map(|message| message.content.as_str())
-            .unwrap_or("You are nib, an AI agent.");
+            .map(|message| message.content.as_str());
         let mut messages = request_messages
             .iter()
             .filter(|message| message.role != crate::llm::types::LlmMessageRole::System)
@@ -165,9 +164,17 @@ impl AnthropicClient {
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_output_tokens.unwrap_or(4096),
-            "system": system,
             "messages": messages,
         });
+        let qualification_tool_turn =
+            tool_choice == ToolChoice::Required && tools.is_some_and(|tools| !tools.is_empty());
+        match system {
+            Some(system) => body["system"] = json!(system),
+            None if !qualification_tool_turn => {
+                body["system"] = json!("You are nib, an AI agent.");
+            }
+            None => {}
+        }
         if let Some(temperature) = options.temperature() {
             body["temperature"] = json!(temperature);
         }
@@ -187,12 +194,11 @@ impl AnthropicClient {
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
-            // Forced any/named tool_choice 400s when combined with thinking.type
-            // disabled. Tool turns keep adaptive thinking and name the tool.
-            if tool_choice == ToolChoice::Required {
-                if let Some(tool) = tools.first() {
-                    body["tool_choice"] = json!({"type": "tool", "name": tool.name()});
-                }
+            // Adaptive thinking disallows a forced tool choice. Keep the
+            // qualification request's effort hint scoped to explicit Required
+            // turns; ordinary Auto tool requests retain their prior body.
+            if qualification_tool_turn {
+                body["output_config"] = json!({"effort": "low"});
             }
         }
         Ok(body)
@@ -1453,13 +1459,23 @@ mod tests {
             )
             .expect("valid Anthropic request");
         assert!(body.get("thinking").is_none());
-        assert_eq!(body["tool_choice"]["type"], "tool");
-        assert_eq!(body["tool_choice"]["name"], "record_probe");
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("system").is_none());
+        assert_eq!(body["output_config"]["effort"], "low");
         assert_eq!(body["max_tokens"], 512);
         assert!(body["tools"][0]["input_schema"]
             .get("additionalProperties")
             .is_none());
         assert!(body["tools"][0].get("strict").is_none());
+        let ordinary_tool = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_max_output_tokens(512),
+                false,
+            )
+            .expect("valid ordinary Anthropic tool request");
+        assert_eq!(ordinary_tool["system"], "You are nib, an AI agent.");
+        assert!(ordinary_tool.get("output_config").is_none());
+        assert!(ordinary_tool.get("tool_choice").is_none());
         let text_only = client
             .request_body(
                 LlmRequest::new(&messages, None).with_max_output_tokens(512),

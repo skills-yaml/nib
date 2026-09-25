@@ -357,9 +357,10 @@ pub enum ReasoningOption {
 
 /// Provider-neutral tool-selection policy for a single request.
 ///
-/// Adapters serialize this through the native tool-choice field. `Auto` is the
-/// production default; `Required` is used by live qualification to force an
-/// advertised function-tool path without changing planner semantics.
+/// `Auto` is the production default. `Required` is used by live qualification
+/// to request a function-tool path without changing planner semantics. An
+/// adapter may not be able to force that choice; qualification still requires
+/// an observed tool call before it can pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolChoice {
     #[default]

@@ -2,9 +2,10 @@
 
 **Status:** Development
 
-**Current stage:** Offline implementation and native portability are complete. Closure
-is blocked on owner-provided live-provider authority and evidence, as detailed in the
-2026-09-17 external authority audit below.
+**Current stage:** The protected six-provider catalog passed on 2026-09-25.
+Canary reports are retained but still fail provider tool-continuation scenarios;
+selected and full qualification remain open. The latest Anthropic canary passes
+text and streaming but rejects its tool request.
 
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
@@ -876,6 +877,27 @@ Closure now requires these external actions in order:
 Provider secrets must be installed through GitHub environment secret management or an
 equivalent local secret channel; they must not be pasted into this spec, chat, command
 arguments, repository files, or ordinary workflow variables.
+
+### Live qualification follow-up (2026-09-25)
+
+The six-provider catalog passed in [run 36116388282](https://github.com/skills-yaml/nib/actions/runs/36116388282).
+The OpenRouter allowlist now records reviewed exact IDs and cost ceilings. The
+same-revision six-provider canary in [run 36119828512](https://github.com/skills-yaml/nib/actions/runs/36119828512)
+published sanitized reports but failed. Later bounded, protected canaries have
+isolated Anthropic: at `8206220`, [run 36129038781](https://github.com/skills-yaml/nib/actions/runs/36129038781)
+passed `complete_text` and `streamed_text`, while
+`single_tool_continuation` failed with `provider_rejected` before a tool result.
+
+Anthropic documents that forced tool choice is unavailable with adaptive
+thinking, and that `output_config.effort` can steer tool use on supported
+models ([tool-use guidance](https://platform.claude.com/docs/en/claude_api_primer),
+[effort compatibility](https://platform.claude.com/docs/en/build-with-claude/effort)).
+The next candidate omits forced choice and sends low effort only for an
+explicit `ToolChoice::Required` qualification request. Ordinary `Auto` tool
+requests keep their prior system and effort fields. This candidate has no live
+pass yet; an exact-revision protected canary must validate it. Unsupported
+effort on older account-visible models remains a full-matrix risk and must
+not be misclassified as model tool incompatibility.
 
 ## Affected Areas
 
