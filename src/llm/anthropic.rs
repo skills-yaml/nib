@@ -853,10 +853,6 @@ fn anthropic_stream_rejection(
     )
 }
 
-fn is_skipped_anthropic_block(block_type: &str) -> bool {
-    matches!(block_type, "thinking" | "redacted_thinking")
-}
-
 fn is_anthropic_error_envelope(event_type: &str, data: &Value) -> bool {
     event_type == "error" || data.get("type").and_then(Value::as_str) == Some("error")
 }
@@ -926,12 +922,7 @@ impl AnthropicStreamParser {
                         }));
                     }
                     Some("text") => {}
-                    Some(block_type) if is_skipped_anthropic_block(block_type) => {}
-                    Some(_) => {
-                        return Err(
-                            "Anthropic stream contained an unsupported content block".to_string()
-                        )
-                    }
+                    Some(_) => {}
                     None => return Err("Anthropic content block is missing its type".to_string()),
                 }
             }
@@ -1198,7 +1189,6 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
                     .ok_or("Anthropic text block is missing text")?;
                 text.push_str(value);
             }
-            Some(block_type) if is_skipped_anthropic_block(block_type) => {}
             Some("tool_use") => {
                 let name = block
                     .get("name")
@@ -1224,9 +1214,7 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
                     arguments,
                 ));
             }
-            Some(_) => {
-                return Err("Anthropic response contains an unsupported content block".to_string())
-            }
+            Some(_) => {}
             None => return Err("Anthropic content block is missing its type".to_string()),
         }
     }
@@ -1438,7 +1426,17 @@ mod tests {
     fn anthropic_request_disables_thinking_only_on_capped_text_turns() {
         let client = test_client("https://api.anthropic.com/v1/messages".to_string());
         let messages = [LlmMessage::user("call")];
-        let tools = [ToolDefinition::function("record_probe")];
+        let tools = [ToolDefinition::new(
+            "record_probe",
+            "Record one nonce",
+            json!({
+                "type": "object",
+                "properties": {"nonce": {"type": "string"}},
+                "required": ["nonce"],
+                "additionalProperties": false
+            }),
+        )
+        .expect("qualification tool")];
         let body = client
             .request_body(
                 LlmRequest::new(&messages, Some(&tools))
@@ -1450,6 +1448,9 @@ mod tests {
         assert!(body.get("thinking").is_none());
         assert!(body.get("tool_choice").is_none());
         assert_eq!(body["max_tokens"], 512);
+        assert!(body["tools"][0]["input_schema"]
+            .get("additionalProperties")
+            .is_none());
         let text_only = client
             .request_body(
                 LlmRequest::new(&messages, None).with_max_output_tokens(512),

@@ -305,7 +305,7 @@ impl ToolDefinition {
         json!({
             "name": self.name,
             "description": self.description,
-            "input_schema": self.parameters,
+            "input_schema": gemini_compatible_schema(&self.parameters),
         })
     }
 
