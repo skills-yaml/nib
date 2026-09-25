@@ -1436,7 +1436,8 @@ mod tests {
                 "additionalProperties": false
             }),
         )
-        .expect("qualification tool")];
+        .expect("qualification tool")
+        .with_strict(true)];
         let body = client
             .request_body(
                 LlmRequest::new(&messages, Some(&tools))
@@ -1451,6 +1452,7 @@ mod tests {
         assert!(body["tools"][0]["input_schema"]
             .get("additionalProperties")
             .is_none());
+        assert_eq!(body["tools"][0]["strict"], true);
         let text_only = client
             .request_body(
                 LlmRequest::new(&messages, None).with_max_output_tokens(512),
