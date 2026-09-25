@@ -8,11 +8,11 @@ use super::{
     CatalogSnapshot, Classification, LlmTerminalStatus, ModelProfile, ScenarioId, TransportId,
 };
 use futures::{stream, StreamExt as _};
-use nib::config::{LlmApiMode, LlmConfig, NibConfig, ProviderEntry};
+use nib::config::{LlmApiMode, LlmConfig, NibConfig, ProviderEntry, ReasoningEffort};
 use nib::llm::{
     create_client, LlmError, LlmErrorClass, LlmErrorPhase, LlmFinishReason, LlmMessage, LlmRequest,
-    LlmRequestScope, LlmResponse, LlmStream, LlmUsage, RetryAttemptMetadata, ToolDefinition,
-    ToolResult,
+    LlmRequestScope, LlmResponse, LlmStream, LlmUsage, RetryAttemptMetadata, ToolChoice,
+    ToolDefinition, ToolResult,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -917,7 +917,9 @@ fn client_for_profile(
             .then(|| settings.meta_base_url.clone())
             .flatten(),
         api,
-        reasoning_effort: None,
+        reasoning_effort: (provider == "openai"
+            && matches!(profile.transport, TransportId::ChatCompletions))
+        .then_some(ReasoningEffort::None),
     };
     let llm = LlmConfig {
         active_provider: Some(provider.to_string()),
@@ -1047,10 +1049,12 @@ async fn tool_continuation(
         .collect::<Vec<_>>();
     let content = if parallel {
         format!(
-            "Call both record_probe_a with nonce {first_nonce} and record_probe_b with nonce {second_nonce}. Do not answer directly."
+            "Call both record_probe_a with nonce {first_nonce} and record_probe_b with nonce {second_nonce}. Do not answer directly. After the tools return, reply with only the receipt value from the tool output."
         )
     } else {
-        format!("Call record_probe with nonce {first_nonce}. Do not answer directly.")
+        format!(
+            "Call record_probe with nonce {first_nonce}. Do not answer directly. After the tool returns, reply with only the receipt value from the tool output."
+        )
     };
     let messages = [LlmMessage::user(content)];
     let scope = scope(run_id, if parallel { "parallel" } else { "tool" })?;
@@ -1060,7 +1064,7 @@ async fn tool_continuation(
             Some(&tools),
             scope.clone(),
             settings,
-        ))
+        ).with_tool_choice(ToolChoice::Required))
         .await?;
     if response.terminal_status != LlmTerminalStatus::Completed {
         return Err(ScenarioFailure::harness(

@@ -313,7 +313,7 @@ impl ToolDefinition {
         json!({
             "name": self.name,
             "description": self.description,
-            "parameters": self.parameters,
+            "parameters": gemini_compatible_schema(&self.parameters),
         })
     }
 
@@ -328,11 +328,66 @@ impl ToolDefinition {
     }
 }
 
+/// Gemini's OpenAPI-subset `parameters` proto rejects JSON Schema keywords such as
+/// `additionalProperties` and `$schema`. Strip those so a strict nib tool schema
+/// still encodes as a valid function declaration.
+pub(crate) fn gemini_compatible_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut cleaned = serde_json::Map::new();
+            for (key, child) in map {
+                if key == "additionalProperties" || key == "strict" || key.starts_with('$') {
+                    continue;
+                }
+                cleaned.insert(key.clone(), gemini_compatible_schema(child));
+            }
+            Value::Object(cleaned)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(gemini_compatible_schema).collect()),
+        other => other.clone(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningOption {
     ProviderDefault,
     Disabled,
     Effort(ReasoningEffort),
+}
+
+/// Provider-neutral tool-selection policy for a single request.
+///
+/// Adapters serialize this through the native tool-choice field. `Auto` is the
+/// production default; `Required` is used by live qualification to force an
+/// advertised function-tool path without changing planner semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+}
+
+impl ToolChoice {
+    pub fn as_openai_value(self) -> Value {
+        match self {
+            Self::Auto => json!("auto"),
+            Self::Required => json!("required"),
+        }
+    }
+
+    pub fn as_anthropic_value(self) -> Option<Value> {
+        match self {
+            Self::Auto => None,
+            Self::Required => Some(json!({"type": "any"})),
+        }
+    }
+
+    pub fn as_gemini_mode(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Required => Some("ANY"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -401,6 +456,7 @@ pub struct LlmRequest<'a> {
     pub tools: Option<&'a [ToolDefinition]>,
     pub options: GenerationOptions,
     pub max_output_tokens: Option<u32>,
+    pub tool_choice: ToolChoice,
     pub scope: Option<LlmRequestScope>,
     pub continuation: Option<ProviderContinuation>,
 }
@@ -412,6 +468,7 @@ impl<'a> LlmRequest<'a> {
             tools,
             options: GenerationOptions::provider_default(),
             max_output_tokens: None,
+            tool_choice: ToolChoice::Auto,
             scope: None,
             continuation: None,
         }
@@ -444,6 +501,11 @@ impl<'a> LlmRequest<'a> {
         self
     }
 
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = tool_choice;
+        self
+    }
+
     pub fn with_scope(mut self, scope: LlmRequestScope) -> Self {
         self.scope = Some(scope);
         self
@@ -462,6 +524,7 @@ impl fmt::Debug for LlmRequest<'_> {
             .field("tool_count", &self.tools.map_or(0, <[ToolDefinition]>::len))
             .field("temperature", &self.options.temperature())
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("tool_choice", &self.tool_choice)
             .field("reasoning", &self.options.reasoning())
             .field("scope", &self.scope)
             .field("continuation", &self.continuation)

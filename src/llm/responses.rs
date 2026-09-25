@@ -207,6 +207,7 @@ impl OpenAiResponsesClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -251,7 +252,7 @@ impl OpenAiResponsesClient {
                     .map(ToolDefinition::to_responses_tool)
                     .collect(),
             );
-            body["tool_choice"] = json!("auto");
+            body["tool_choice"] = tool_choice.as_openai_value();
         }
         if has_tools || has_continuation {
             body["include"] = json!(["reasoning.encrypted_content"]);
@@ -1280,6 +1281,7 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm::test_support::serve_once;
+    use crate::llm::types::ToolChoice;
     use std::time::Duration;
 
     fn completed_with_call() -> Value {
@@ -2114,5 +2116,24 @@ mod tests {
             .to_responses_tool();
         assert_eq!(loose["strict"], false);
         assert_eq!(strict["strict"], true);
+    }
+
+    #[test]
+    fn responses_request_encodes_required_tool_choice() {
+        let client = OpenAiResponsesClient::new(
+            "openai",
+            "gpt-5.6-sol".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.openai.com/v1/responses",
+        );
+        let messages = [crate::llm::types::LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe")];
+        let (body, _, _) = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Responses request");
+        assert_eq!(body["tool_choice"], "required");
     }
 }

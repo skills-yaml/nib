@@ -214,6 +214,7 @@ impl OpenAiCompatClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -240,7 +241,7 @@ impl OpenAiCompatClient {
             if max_output_tokens == 0 {
                 return Err("max_output_tokens must be greater than zero".to_string());
             }
-            let field = if self.provider == "openai" {
+            let field = if uses_max_completion_tokens(&self.provider) {
                 "max_completion_tokens"
             } else {
                 "max_tokens"
@@ -260,7 +261,7 @@ impl OpenAiCompatClient {
                 .iter()
                 .map(ToolDefinition::to_openai_tool)
                 .collect::<Vec<_>>());
-            body["tool_choice"] = json!("auto");
+            body["tool_choice"] = tool_choice.as_openai_value();
         }
         if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning_effort"] = json!(effort.as_str());
@@ -405,6 +406,10 @@ impl OpenAiCompatClient {
         };
         self.protocol_error("protocol failure", detail)
     }
+}
+
+fn uses_max_completion_tokens(provider: &str) -> bool {
+    matches!(provider, "openai" | "grok")
 }
 
 fn structured_chat_error_detail(body: &str) -> String {
@@ -1401,15 +1406,36 @@ fn parse_openai_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
     let usage = usage
         .as_object()
         .ok_or_else(|| "OpenAI usage must be an object".to_string())?;
-    LlmUsage::new(
-        required_chat_usage_count(usage, "prompt_tokens")?,
-        required_chat_usage_count(usage, "completion_tokens")?,
-        required_chat_usage_count(usage, "total_tokens")?,
-        optional_chat_usage_detail(usage, "prompt_tokens_details", "cached_tokens")?,
-        optional_chat_usage_detail(usage, "completion_tokens_details", "reasoning_tokens")?,
-    )
-    .map(Some)
-    .map_err(|error| format!("OpenAI usage is invalid: {error}"))
+    let input = required_chat_usage_count(usage, "prompt_tokens")
+        .or_else(|_| required_chat_usage_count(usage, "input_tokens"))?;
+    let visible_output = required_chat_usage_count(usage, "completion_tokens")
+        .or_else(|_| required_chat_usage_count(usage, "output_tokens"))?;
+    let total = required_chat_usage_count(usage, "total_tokens")?;
+    let cached = match optional_chat_usage_detail(usage, "prompt_tokens_details", "cached_tokens")?
+    {
+        Some(cached) => Some(cached),
+        None => optional_chat_usage_detail(usage, "input_tokens_details", "cached_tokens")?,
+    };
+    let reasoning =
+        match optional_chat_usage_detail(usage, "completion_tokens_details", "reasoning_tokens")? {
+            Some(reasoning) => Some(reasoning),
+            None => optional_chat_usage_detail(usage, "output_tokens_details", "reasoning_tokens")?,
+        };
+    let output = match input.checked_add(visible_output) {
+        Some(sum) if sum == total => visible_output,
+        Some(sum) => match reasoning {
+            Some(reasoning) if sum.checked_add(reasoning) == Some(total) => visible_output
+                .checked_add(reasoning)
+                .ok_or_else(|| "OpenAI usage overflowed".to_string())?,
+            _ => {
+                return Err("OpenAI usage total does not match input plus output".to_string());
+            }
+        },
+        None => return Err("OpenAI usage overflowed".to_string()),
+    };
+    LlmUsage::new(input, output, total, cached, reasoning)
+        .map(Some)
+        .map_err(|error| format!("OpenAI usage is invalid: {error}"))
 }
 
 pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
@@ -1480,6 +1506,7 @@ mod tests {
     use crate::llm::test_support::{
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
+    use crate::llm::types::ToolChoice;
     use std::time::Duration;
 
     #[test]
@@ -1634,6 +1661,12 @@ mod tests {
                 "https://openrouter.ai/api/v1",
                 "https://openrouter.ai/api/v1/chat/completions",
             ),
+            (
+                "grok",
+                "grok-4.5",
+                "https://api.x.ai/v1",
+                "https://api.x.ai/v1/chat/completions",
+            ),
         ] {
             let client = OpenAiCompatClient::configured(
                 provider.to_string(),
@@ -1655,7 +1688,7 @@ mod tests {
             assert!(body.get("input").is_none());
             assert!(body.get("store").is_none());
             assert!(body.get("include").is_none());
-            if provider == "openai" {
+            if uses_max_completion_tokens(provider) {
                 assert_eq!(body["max_completion_tokens"], 37);
                 assert!(body.get("max_tokens").is_none());
             } else {
@@ -1733,6 +1766,44 @@ mod tests {
             .contains("authorization: bearer test-key"));
         assert!(request.contains("\"model\":\"test-model\""));
         assert!(request.contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn chat_request_encodes_required_tool_choice() {
+        let client = OpenAiCompatClient::configured(
+            "openai".to_string(),
+            "gpt-5.6-sol".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.openai.com/v1",
+            None,
+        );
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe")];
+        let body = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Chat request");
+        assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn complete_usage_counts_separate_reasoning_tokens_toward_output() {
+        let response = parse_openai_response(&json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 37,
+                "completion_tokens": 530,
+                "total_tokens": 800,
+                "completion_tokens_details": {"reasoning_tokens": 233}
+            }
+        }))
+        .expect("xAI-style usage with separate reasoning tokens");
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(37, 763, 800, None, Some(233)).unwrap())
+        );
     }
 
     #[test]

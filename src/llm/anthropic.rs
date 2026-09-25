@@ -132,6 +132,7 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -176,11 +177,19 @@ impl AnthropicClient {
         if stream {
             body["stream"] = json!(true);
         }
+        if max_output_tokens.is_some() {
+            // Bounded turns cannot also run adaptive thinking: thinking tokens share
+            // max_tokens, and Opus 5-class models think by default.
+            body["thinking"] = json!({"type": "disabled"});
+        }
         if let Some(tools) = tools {
             body["tools"] = json!(tools
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
+            if let Some(choice) = tool_choice.as_anthropic_value() {
+                body["tool_choice"] = choice;
+            }
         }
         Ok(body)
     }
@@ -847,6 +856,10 @@ fn anthropic_stream_rejection(
     )
 }
 
+fn is_skipped_anthropic_block(block_type: &str) -> bool {
+    matches!(block_type, "thinking" | "redacted_thinking")
+}
+
 fn is_anthropic_error_envelope(event_type: &str, data: &Value) -> bool {
     event_type == "error" || data.get("type").and_then(Value::as_str) == Some("error")
 }
@@ -916,6 +929,7 @@ impl AnthropicStreamParser {
                         }));
                     }
                     Some("text") => {}
+                    Some(block_type) if is_skipped_anthropic_block(block_type) => {}
                     Some(_) => {
                         return Err(
                             "Anthropic stream contained an unsupported content block".to_string()
@@ -1187,6 +1201,7 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
                     .ok_or("Anthropic text block is missing text")?;
                 text.push_str(value);
             }
+            Some(block_type) if is_skipped_anthropic_block(block_type) => {}
             Some("tool_use") => {
                 let name = block
                     .get("name")
@@ -1249,7 +1264,7 @@ mod tests {
     use crate::llm::test_support::{
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
-    use crate::llm::types::{LlmRequestScope, ProviderContinuation};
+    use crate::llm::types::{LlmRequestScope, ProviderContinuation, ToolChoice};
     use std::time::Duration;
 
     fn test_client(base_url: String) -> AnthropicClient {
@@ -1423,6 +1438,24 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_request_encodes_required_tool_choice_and_disables_capped_thinking() {
+        let client = test_client("https://api.anthropic.com/v1/messages".to_string());
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe")];
+        let body = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools))
+                    .with_max_output_tokens(512)
+                    .with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Anthropic request");
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["tool_choice"]["type"], "any");
+        assert_eq!(body["max_tokens"], 512);
+    }
+
+    #[test]
     fn complete_and_stream_reject_malformed_tools_before_io() {
         let error = ToolDefinition::from_openai_value(&json!({
             "type": "function",
@@ -1459,6 +1492,25 @@ mod tests {
         assert!(parse_anthropic_response(&inconsistent)
             .expect_err("inconsistent tool terminal")
             .contains("inconsistent"));
+
+        let thinking = parse_anthropic_response(&json!({
+            "content": [
+                {"type": "thinking", "thinking": "private-chain"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "visible"}
+            ],
+            "stop_reason": "end_turn"
+        }))
+        .expect("thinking blocks are not part of the authorized text");
+        assert_eq!(thinking.content.as_deref(), Some("visible"));
+        assert_eq!(thinking.finish_reason, LlmFinishReason::Complete);
+
+        let stream_thinking = parse_anthropic_stream_event(
+            "content_block_start",
+            &json!({"index": 0, "content_block": {"type": "thinking"}}),
+        )
+        .expect("streamed thinking is skipped");
+        assert!(stream_thinking.is_empty());
 
         let unknown = json!({"content": [], "stop_reason": "remote_future_value"});
         let error = parse_anthropic_response(&unknown).expect_err("unknown terminal reason");
@@ -1541,6 +1593,7 @@ mod tests {
             .contains("x-api-key: anthropic-test-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
         assert!(request.contains("\"max_tokens\":43"));
+        assert!(request.contains("\"thinking\":{\"type\":\"disabled\"}"));
         assert!(request.contains("\"system\":\"follow project rules\""));
         assert!(request.contains("\"input_schema\""));
         assert!(!request.contains("\"stream\":true"));
