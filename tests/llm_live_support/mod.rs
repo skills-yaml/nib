@@ -617,12 +617,62 @@ fn classify_local_blocker(error: &str) -> (Classification, &'static str) {
             Classification::BlockedConfiguration,
             "blocked_configuration",
         ),
+        (
+            "catalog_rejected",
+            Classification::Unknown,
+            "catalog_rejected",
+        ),
+        (
+            "provider_unavailable",
+            Classification::Unknown,
+            "provider_unavailable",
+        ),
+        (
+            "request failed before a valid response",
+            Classification::Unknown,
+            "catalog_transport_failure",
+        ),
+        (
+            "catalog field",
+            Classification::Unknown,
+            "catalog_parse_failure",
+        ),
+        (
+            "catalog returned invalid JSON",
+            Classification::Unknown,
+            "catalog_parse_failure",
+        ),
     ] {
         if error.contains(token) {
             return (classification, safe_class);
         }
     }
     (Classification::Unknown, "catalog_or_plan_failure")
+}
+
+#[cfg(test)]
+mod classify_local_blocker_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_catalog_http_and_parse_tokens() {
+        assert_eq!(
+            classify_local_blocker("google catalog blocked_auth with HTTP 400"),
+            (Classification::BlockedAuth, "blocked_auth")
+        );
+        assert_eq!(
+            classify_local_blocker("openrouter catalog catalog_rejected with HTTP 400"),
+            (Classification::Unknown, "catalog_rejected")
+        );
+        assert_eq!(
+            classify_local_blocker("google catalog request failed before a valid response"),
+            (Classification::Unknown, "catalog_transport_failure")
+        );
+        assert_eq!(
+            classify_local_blocker("catalog field 'baseModelId' must be a non-empty string"),
+            (Classification::Unknown, "catalog_parse_failure")
+        );
+    }
 }
 
 fn publish_uniform_blocker(

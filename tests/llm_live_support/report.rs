@@ -1838,6 +1838,13 @@ fn markdown_summary(report: &QualificationReport) -> String {
             provider.complete,
             provider.passed
         ));
+        if let Some(class) = &provider.safe_error_class {
+            output.push_str(&format!("- Safe error class: `{class}`\n"));
+        }
+        if let Some(classification) = provider.blocker_classification {
+            output.push_str(&format!("- Blocker classification: `{classification:?}`\n"));
+        }
+        output.push('\n');
         if provider.catalog_drift {
             output.push_str("- Catalog drift: `true`\n\n");
         }

@@ -344,6 +344,8 @@ async fn fetch_gemini_from_endpoint(
     CatalogSnapshot::new("google", pages, models)
 }
 
+const MAX_CATALOG_ERROR_BYTES: usize = 8 * 1024;
+
 async fn send_catalog_request(provider: &str, request: RequestBuilder) -> Result<Value, String> {
     let response = request
         .send()
@@ -351,21 +353,54 @@ async fn send_catalog_request(provider: &str, request: RequestBuilder) -> Result
         .map_err(|_| format!("{provider} catalog request failed before a valid response"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(safe_catalog_status(provider, status));
+        let body = read_bounded_error_bytes(response).await;
+        return Err(safe_catalog_status(provider, status, &body));
     }
     read_bounded_catalog_json(response, provider).await
 }
 
-fn safe_catalog_status(provider: &str, status: StatusCode) -> String {
-    let class = match status.as_u16() {
+fn safe_catalog_status(provider: &str, status: StatusCode, body: &[u8]) -> String {
+    let class = catalog_http_error_class(status, body);
+    format!("{provider} catalog {class} with HTTP {}", status.as_u16())
+}
+
+fn catalog_http_error_class(status: StatusCode, body: &[u8]) -> &'static str {
+    match status.as_u16() {
         401 | 403 => "blocked_auth",
         402 => "blocked_billing",
         429 => "blocked_rate_limit",
         451 => "blocked_region",
+        400 if catalog_body_indicates_invalid_key(body) => "blocked_auth",
         500..=599 => "provider_unavailable",
         _ => "catalog_rejected",
-    };
-    format!("{provider} catalog {class} with HTTP {}", status.as_u16())
+    }
+}
+
+fn catalog_body_indicates_invalid_key(body: &[u8]) -> bool {
+    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    lower.contains("api_key_invalid")
+        || lower.contains("invalid_api_key")
+        || lower.contains("api key not valid")
+        || lower.contains("invalid api key")
+}
+
+async fn read_bounded_error_bytes(response: Response) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let take = MAX_CATALOG_ERROR_BYTES.saturating_sub(bytes.len());
+        if take == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..take.min(chunk.len())]);
+        if bytes.len() >= MAX_CATALOG_ERROR_BYTES {
+            break;
+        }
+    }
+    bytes
 }
 
 async fn read_bounded_catalog_json(response: Response, provider: &str) -> Result<Value, String> {
@@ -1066,12 +1101,35 @@ mod tests {
     #[test]
     fn safe_status_never_contains_remote_body_text() {
         assert_eq!(
-            safe_catalog_status("openai", StatusCode::UNAUTHORIZED),
+            safe_catalog_status("openai", StatusCode::UNAUTHORIZED, b"remote-catalog-secret"),
             "openai catalog blocked_auth with HTTP 401"
         );
         assert_eq!(
-            safe_catalog_status("google", StatusCode::TOO_MANY_REQUESTS),
+            safe_catalog_status("google", StatusCode::TOO_MANY_REQUESTS, b"retry-later"),
             "google catalog blocked_rate_limit with HTTP 429"
+        );
+        assert_eq!(
+            safe_catalog_status(
+                "google",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}"#
+            ),
+            "google catalog blocked_auth with HTTP 400"
+        );
+        let leaked = safe_catalog_status(
+            "google",
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"message":"API key not valid. Please pass a valid API key."}}"#,
+        );
+        assert_eq!(leaked, "google catalog blocked_auth with HTTP 400");
+        assert!(!leaked.contains("API key not valid"));
+        assert_eq!(
+            safe_catalog_status(
+                "openrouter",
+                StatusCode::BAD_REQUEST,
+                b"malformed catalog query"
+            ),
+            "openrouter catalog catalog_rejected with HTTP 400"
         );
     }
 
@@ -1340,6 +1398,33 @@ mod tests {
         server.join().expect("HTTP error fixture server");
         assert_eq!(error, "openai catalog blocked_auth with HTTP 401");
         assert!(!error.contains(remote_sentinel));
+
+        let invalid_key_body = r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#;
+        let (endpoint, _, server) = serve(vec![FixtureResponse::status(
+            "400 Bad Request",
+            invalid_key_body,
+        )]);
+        let error =
+            send_catalog_request("google", test_client(Duration::from_secs(2)).get(endpoint))
+                .await
+                .expect_err("google invalid key");
+        server.join().expect("google 400 fixture server");
+        assert_eq!(error, "google catalog blocked_auth with HTTP 400");
+        assert!(!error.contains("API_KEY_INVALID"));
+        assert!(!error.contains("API key not valid"));
+
+        let (endpoint, _, server) = serve(vec![FixtureResponse::status(
+            "400 Bad Request",
+            r#"{"error":"malformed catalog query"}"#,
+        )]);
+        let error = send_catalog_request(
+            "openrouter",
+            test_client(Duration::from_secs(2)).get(endpoint),
+        )
+        .await
+        .expect_err("openrouter catalog 400");
+        server.join().expect("openrouter 400 fixture server");
+        assert_eq!(error, "openrouter catalog catalog_rejected with HTTP 400");
 
         let (endpoint, _, server) = serve(vec![FixtureResponse::status("200 OK", "{broken")]);
         let error =
