@@ -916,6 +916,39 @@ fresh exact-revision live pass are still required. Unsupported effort on older
 account-visible models remains a full-matrix risk and must not be misclassified
 as model tool incompatibility.
 
+### Proposed Anthropic selected-model replacement (owner review pending)
+
+Replace only the Anthropic selected-suite entry `claude-opus-5` with
+`claude-sonnet-5` after owner review. Anthropic identifies `claude-sonnet-5` as
+a pinned Claude API model ID, lists tool use and adaptive thinking for Sonnet 5,
+and documents `thinking: {type: "disabled"}` for text requests. The existing
+Anthropic adapter's low-effort tool request and bounded text request therefore
+have documented parameter support on this candidate. Published standard rates
+are $2 per million input tokens and $10 per million output tokens, versus
+$5 and $25 for Opus 5. These are list prices, not an observed qualification cost.
+See [Sonnet 5 specifications](https://platform.claude.com/docs/en/models/sonnet-5/overview),
+[Sonnet 5 thinking behavior](https://platform.claude.com/docs/en/models/sonnet-5/whats-new-sonnet-5),
+[Opus 5 specifications](https://platform.claude.com/docs/en/models/opus-5/overview), and
+[model ID stability](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions).
+
+This is a candidate, not qualification evidence. Sonnet 5 can also refuse some
+requests, and account visibility has not been established from the sanitized
+catalog report. The proposed owner is `nib-maintainers`, with review dated
+2026-09-25 and expiry on 2027-03-25 if approved now. Keep the protected
+Anthropic environment's current $50 run cost ceiling and 200-request,
+600-attempt, 4,096-output-token-per-request limits; do not raise them for this
+candidate. The previous canary reported unknown actual cost because catalog
+pricing was incomplete, so the owner must also confirm the provider-side hard
+spend cap required by the existing unpriced allowance before another paid run.
+The selected-suite fixture currently has one review date and expiry for all
+providers; changing those fields requires a review of the whole suite or a
+per-provider metadata extension. The owner must approve the exact ID, rationale,
+limits, review scope, and expiry before the fixture changes. Then capture account
+catalog visibility, review the resulting dry-run budget, and run protected canary,
+selected, and full exact-revision qualification. Keep the failed Opus 5 result
+in the evidence record. See [Anthropic refusal behavior](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback)
+and the [Sonnet 5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5/migration-guide).
+
 ## Affected Areas
 
 - `tests/llm_live.rs` and live-only support modules/fixtures
