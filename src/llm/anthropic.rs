@@ -4,7 +4,7 @@
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmRequest, LlmRequestScope, LlmResponse, LlmStreamEvent,
-    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest,
+    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest, ToolChoice,
     ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
@@ -132,7 +132,7 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
-            tool_choice: _,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -187,6 +187,13 @@ impl AnthropicClient {
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
+            // Forced any/named tool_choice 400s when combined with thinking.type
+            // disabled. Tool turns keep adaptive thinking and name the tool.
+            if tool_choice == ToolChoice::Required {
+                if let Some(tool) = tools.first() {
+                    body["tool_choice"] = json!({"type": "tool", "name": tool.name()});
+                }
+            }
         }
         Ok(body)
     }
@@ -1446,7 +1453,8 @@ mod tests {
             )
             .expect("valid Anthropic request");
         assert!(body.get("thinking").is_none());
-        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "record_probe");
         assert_eq!(body["max_tokens"], 512);
         assert!(body["tools"][0]["input_schema"]
             .get("additionalProperties")
