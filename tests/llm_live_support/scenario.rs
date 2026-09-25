@@ -1056,12 +1056,7 @@ async fn tool_continuation(
             "You must invoke the record_probe function tool. Pass nonce {first_nonce} as the nonce argument. After the tool result arrives, reply with only the receipt value."
         )
     };
-    let messages = [
-        LlmMessage::system(
-            "You are a function-calling test client. When tools are provided, call them instead of answering in text.",
-        ),
-        LlmMessage::user(content),
-    ];
+    let messages = [LlmMessage::user(content)];
     let scope = scope(run_id, if parallel { "parallel" } else { "tool" })?;
     let response = context
         .complete(client, live_request(
