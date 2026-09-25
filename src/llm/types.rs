@@ -328,9 +328,8 @@ impl ToolDefinition {
     }
 }
 
-/// Gemini's OpenAPI-subset `parameters` proto rejects JSON Schema keywords such as
-/// `additionalProperties` and `$schema`. Strip those so a strict nib tool schema
-/// still encodes as a valid function declaration.
+/// Strip JSON Schema keywords unsupported by native tool declarations while
+/// preserving user-defined property names and values in schema metadata.
 pub(crate) fn gemini_compatible_schema(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -339,7 +338,24 @@ pub(crate) fn gemini_compatible_schema(value: &Value) -> Value {
                 if key == "additionalProperties" || key == "strict" || key.starts_with('$') {
                     continue;
                 }
-                cleaned.insert(key.clone(), gemini_compatible_schema(child));
+                let child = if key == "properties" {
+                    match child {
+                        Value::Object(properties) => Value::Object(
+                            properties
+                                .iter()
+                                .map(|(name, schema)| {
+                                    (name.clone(), gemini_compatible_schema(schema))
+                                })
+                                .collect(),
+                        ),
+                        _ => child.clone(),
+                    }
+                } else if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
+                    child.clone()
+                } else {
+                    gemini_compatible_schema(child)
+                };
+                cleaned.insert(key.clone(), child);
             }
             Value::Object(cleaned)
         }
@@ -1187,6 +1203,25 @@ impl ToolCallAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compatible_tool_schema_preserves_property_names_and_default_values() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "additionalProperties": {"type": "string"},
+                "strict": {"type": "object", "default": {"strict": true}}
+            }
+        });
+        let cleaned = gemini_compatible_schema(&schema);
+        assert!(cleaned.get("additionalProperties").is_none());
+        assert_eq!(
+            cleaned["properties"]["additionalProperties"]["type"],
+            "string"
+        );
+        assert_eq!(cleaned["properties"]["strict"]["default"]["strict"], true);
+    }
 
     #[test]
     fn request_scope_debug_never_exposes_private_session_or_run_identity() {
