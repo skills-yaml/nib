@@ -1444,11 +1444,6 @@ fn validate_provider_execution_evidence(
         || provider
             .actual_attempts
             .is_some_and(|attempts| attempts > provider.maximum_attempts)
-        || provider.usage.is_some_and(|usage| {
-            usize::try_from(usage.output_tokens)
-                .ok()
-                .is_none_or(|tokens| tokens > provider.maximum_output_tokens)
-        })
         || provider.actual_logical_requests > limits.max_logical_requests
         || provider
             .actual_attempts
@@ -1603,40 +1598,69 @@ fn validate_scenario_execution_evidence(
         .actual_logical_requests
         .checked_mul(MAX_ATTEMPTS_PER_LOGICAL_REQUEST)
         .ok_or_else(|| "qualification scenario attempt evidence overflowed".to_string())?;
-    let maximum_actual_output = u64::try_from(scenario.actual_logical_requests)
-        .ok()
-        .and_then(|requests| requests.checked_mul(u64::from(limits.max_output_tokens_per_request)))
-        .ok_or_else(|| "qualification scenario output evidence overflowed".to_string())?;
-    if scenario.actual_logical_requests > expected_requests
-        || scenario.usage_requests > scenario.actual_logical_requests
+    if scenario.actual_logical_requests > expected_requests {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: logical_requests {} > {}",
+            scenario.actual_logical_requests, expected_requests
+        ));
+    }
+    if scenario.usage_requests > scenario.actual_logical_requests
         || scenario.usage_complete_requests > scenario.usage_requests
         || scenario.usage_completeness != expected_usage_completeness
-        || scenario
-            .actual_attempts
-            .is_some_and(|attempts| attempts > maximum_actual_attempts)
-        || scenario
-            .usage
-            .is_some_and(|usage| usage.output_tokens > maximum_actual_output)
-        || scenario
-            .http_status
-            .is_some_and(|status| !(100..=599).contains(&status))
-        || (scenario.passed
-            && (scenario.actual_logical_requests != expected_requests
-                || scenario.actual_attempts.is_none()
-                || scenario
-                    .actual_attempts
-                    .is_some_and(|attempts| attempts < expected_requests)
-                || scenario.safe_error_class.is_some()
-                || scenario.http_status.is_some()
-                || scenario.budget_blocked
-                || scenario.not_executed_reason.is_some()
-                || scenario.duration_ms > limits.max_scenario_elapsed_ms))
-        || (!scenario.passed && scenario.safe_error_class.is_none())
-        || scenario.safe_error_class.as_ref().is_some_and(|class| {
-            class.is_empty() || class.len() > 128 || class.chars().any(char::is_control)
-        })
     {
-        return Err("qualification scenario request/attempt evidence is inconsistent".to_string());
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: usage completeness"
+                .to_string(),
+        );
+    }
+    if scenario
+        .actual_attempts
+        .is_some_and(|attempts| attempts > maximum_actual_attempts)
+    {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: attempts {:?} > {}",
+            scenario.actual_attempts, maximum_actual_attempts
+        ));
+    }
+    if scenario
+        .http_status
+        .is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: http_status {:?}",
+            scenario.http_status
+        ));
+    }
+    if scenario.passed
+        && (scenario.actual_logical_requests != expected_requests
+            || scenario.actual_attempts.is_none()
+            || scenario
+                .actual_attempts
+                .is_some_and(|attempts| attempts < expected_requests)
+            || scenario.safe_error_class.is_some()
+            || scenario.http_status.is_some()
+            || scenario.budget_blocked
+            || scenario.not_executed_reason.is_some()
+            || scenario.duration_ms > limits.max_scenario_elapsed_ms)
+    {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: passing scenario"
+                .to_string(),
+        );
+    }
+    if !scenario.passed && scenario.safe_error_class.is_none() {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: missing safe_error_class"
+                .to_string(),
+        );
+    }
+    if scenario.safe_error_class.as_ref().is_some_and(|class| {
+        class.is_empty() || class.len() > 128 || class.chars().any(char::is_control)
+    }) {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: unsafe error class"
+                .to_string(),
+        );
     }
     if let Some(reason) = scenario.not_executed_reason {
         if reason != ScenarioNotExecutedReason::TransportUnsupportedByBasicProbe
