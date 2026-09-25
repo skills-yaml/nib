@@ -31,6 +31,8 @@ fn selected_live_ci_contract_is_protected_and_reported() {
     assert!(workflow.contains(".scenario == \"single_tool_continuation\""));
     assert!(workflow.contains(".scenario == \"parallel_tool_continuation\""));
     assert!(workflow.contains(".not_applicable_scenarios[]"));
+    assert!(workflow.contains("NIB_LIVE_META_BASE_URL: ${{ vars.NIB_LIVE_META_BASE_URL }}"));
+    assert!(!workflow.contains("secrets.NIB_LIVE_META_BASE_URL"));
     assert!(workflow.contains("      - name: Upload sanitized live reports\n        if: always()"));
     assert!(workflow.contains("          if-no-files-found: ignore\n"));
     assert!(!workflow.contains("\n  pull_request:"));

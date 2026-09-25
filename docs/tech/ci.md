@@ -59,7 +59,7 @@ each provider. Each job has a bounded timeout and uses a protected GitHub enviro
 named `llm-live-<provider>`. Configure only that provider's credential in each protected
 environment under the common secret name `LLM_API_KEY`; the job maps it to the exact
 provider variable only for the test process. The `llm-live-meta` environment also requires
-`NIB_LIVE_META_BASE_URL` as an environment secret until Meta has a verified default
+`NIB_LIVE_META_BASE_URL` as an environment variable until Meta has a verified default
 catalog root. Environment protection rules should restrict approvals and secret access
 to trusted default-branch scheduled runs and authorized manual operators.
 
