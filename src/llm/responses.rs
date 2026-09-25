@@ -117,7 +117,7 @@ fn encode_responses_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value
         .iter()
         .map(|tool| {
             let mut encoded = tool.to_responses_tool();
-            if provider != "openai" {
+            if !matches!(provider, "openai" | "grok") {
                 if let Some(object) = encoded.as_object_mut() {
                     object.remove("strict");
                 }
@@ -262,7 +262,9 @@ impl OpenAiResponsesClient {
         let has_tools = tools.is_some_and(|tools| !tools.is_empty());
         if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
             body["tools"] = Value::Array(encode_responses_tools(tools, &self.provider));
-            body["tool_choice"] = if self.provider == "meta" {
+            body["tool_choice"] = if self.provider == "meta"
+                || (self.provider == "openrouter" && self.model.starts_with("anthropic/"))
+            {
                 json!("auto")
             } else {
                 tool_choice.as_openai_value()
@@ -2156,29 +2158,49 @@ mod tests {
     fn compatible_responses_tools_omit_strict_and_meta_keeps_auto_choice() {
         let messages = [crate::llm::types::LlmMessage::user("call")];
         let tools = [ToolDefinition::function("record_probe").with_strict(true)];
-        for provider in ["grok", "openrouter", "meta"] {
-            let client = OpenAiResponsesClient::new(
-                provider,
-                "fixture-model".to_string(),
-                vec!["test-key".to_string()],
-                "https://example.test/v1/responses",
-            );
-            let (body, _, _) = client
-                .request_body(
-                    LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
-                    false,
-                )
-                .expect("valid Responses request");
-            assert!(
-                body["tools"][0].get("strict").is_none(),
-                "{provider} must omit responses strict"
-            );
-            let expected_choice = if provider == "meta" {
-                "auto"
-            } else {
-                "required"
-            };
-            assert_eq!(body["tool_choice"], expected_choice, "{provider}");
-        }
+        let grok = OpenAiResponsesClient::new(
+            "grok",
+            "grok-4.5".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.x.ai/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Grok Responses request")
+        .0;
+        assert_eq!(grok["tools"][0]["strict"], true);
+        assert_eq!(grok["tool_choice"], "required");
+
+        let openrouter_claude = OpenAiResponsesClient::new(
+            "openrouter",
+            "anthropic/claude-opus-5".to_string(),
+            vec!["test-key".to_string()],
+            "https://openrouter.ai/api/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid OpenRouter Responses request")
+        .0;
+        assert!(openrouter_claude["tools"][0].get("strict").is_none());
+        assert_eq!(openrouter_claude["tool_choice"], "auto");
+
+        let meta = OpenAiResponsesClient::new(
+            "meta",
+            "muse-spark-1.1".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.meta.ai/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Meta Responses request")
+        .0;
+        assert!(meta["tools"][0].get("strict").is_none());
+        assert_eq!(meta["tool_choice"], "auto");
     }
 }

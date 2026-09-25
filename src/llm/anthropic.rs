@@ -4,7 +4,7 @@
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmRequest, LlmRequestScope, LlmResponse, LlmStreamEvent,
-    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest,
+    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest, ToolChoice,
     ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
@@ -132,7 +132,7 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
-            tool_choice: _,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -187,8 +187,11 @@ impl AnthropicClient {
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
-            // Claude 5 rejects forced tool_choice (`any` / named tool). The
-            // qualification prompt plus thinking-off is the supported path.
+            if tool_choice == ToolChoice::Required {
+                if let Some(tool) = tools.first() {
+                    body["tool_choice"] = json!({"type": "tool", "name": tool.name()});
+                }
+            }
         }
         Ok(body)
     }
@@ -1437,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_request_disables_capped_thinking_without_forced_tool_choice() {
+    fn anthropic_request_disables_capped_thinking_and_names_required_tool() {
         let client = test_client("https://api.anthropic.com/v1/messages".to_string());
         let messages = [LlmMessage::user("call")];
         let tools = [ToolDefinition::function("record_probe")];
@@ -1450,7 +1453,8 @@ mod tests {
             )
             .expect("valid Anthropic request");
         assert_eq!(body["thinking"]["type"], "disabled");
-        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "record_probe");
         assert_eq!(body["max_tokens"], 512);
     }
 
