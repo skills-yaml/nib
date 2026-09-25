@@ -795,8 +795,11 @@ fn pause_after_spawn_preparation_intent(subagent_id: &str) -> Result<(), String>
         return Ok(());
     };
     let ready = PathBuf::from(ready);
-    std::fs::write(&ready, subagent_id.as_bytes())
+    let staged_ready = ready.with_extension("pending");
+    std::fs::write(&staged_ready, subagent_id.as_bytes())
         .map_err(|error| format!("failed to publish planned intent readiness: {error}"))?;
+    std::fs::rename(&staged_ready, &ready)
+        .map_err(|error| format!("failed to commit planned intent readiness: {error}"))?;
     let resume = std::env::var_os("NIB_TEST_SUBAGENT_INTENT_PLANNED_RESUME")
         .map(PathBuf::from)
         .ok_or_else(|| "missing planned intent resume path".to_string())?;
