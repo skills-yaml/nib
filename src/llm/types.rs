@@ -302,15 +302,11 @@ impl ToolDefinition {
     }
 
     pub fn to_anthropic_tool(&self) -> Value {
-        let mut encoded = json!({
+        json!({
             "name": self.name,
             "description": self.description,
             "input_schema": gemini_compatible_schema(&self.parameters),
-        });
-        if self.strict {
-            encoded["strict"] = json!(true);
-        }
-        encoded
+        })
     }
 
     pub fn to_gemini_declaration(&self) -> Value {
