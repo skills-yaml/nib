@@ -1312,7 +1312,25 @@ expires_at = "2027-02-06"
 
     #[test]
     fn selected_openrouter_models_cannot_bypass_allowlist_approval() {
-        let allowlist = OpenRouterAllowlist::load_default().unwrap();
+        let allowlist = OpenRouterAllowlist::parse(
+            r#"
+version = 1
+[[model]]
+id = "openai/gpt-5.6-sol"
+approved = false
+transports = ["chat_completions"]
+required_scenarios = ["complete_text", "streamed_text", "single_tool_continuation"]
+required_parameters = ["tools"]
+required_input_modalities = ["text"]
+required_output_modalities = ["text"]
+rationale = "Deterministic unapproved fixture"
+owner = "nib-maintainers"
+reviewed_at = "2026-08-06"
+expires_at = "2027-02-06"
+"#,
+            NaiveDate::from_ymd_opt(2026, 8, 17).unwrap(),
+        )
+        .unwrap();
         let matrix = SelectedMatrix::parse(
             SELECTED_MODELS,
             NaiveDate::from_ymd_opt(2026, 8, 17).unwrap(),
