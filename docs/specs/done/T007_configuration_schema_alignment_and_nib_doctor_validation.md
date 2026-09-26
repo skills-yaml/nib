@@ -176,7 +176,7 @@ isolated release-binary smoke.
 - `.nib/config.toml.lock` is bound to the persistent project-root anchor provided by
   `with_file_lock_in`; the pre-lock and protected `.nib` capabilities must have the
   same identity before a configuration operation starts.
-- `src/daemons/workload.rs` verifies that a durable terminal worker rejects a transient
+- `src/daemons/workload/mod.rs` verifies that a durable terminal worker rejects a transient
   forged configuration with fewer redaction credentials before execution or result
   publication, then persists only redacted output under the canonical configuration.
 
@@ -231,7 +231,7 @@ runtime configuration and persistence diagnostics.
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/config/mod.rs`, `src/doctor.rs`, `src/tui/mod.rs`,
+`src/daemons/state/mod.rs`, `src/config/mod.rs`, `src/doctor.rs`, `src/tui/mod.rs`,
 configuration integrity tests, and detached-worker configuration consumers.
 
 ### Validation Gates

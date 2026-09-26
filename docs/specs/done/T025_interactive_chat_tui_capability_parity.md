@@ -58,7 +58,7 @@ capabilities even though they use the same agent loop.
 
 ## Affected Areas
 
-- `src/chat.rs`
+- `src/chat/mod.rs`
 - `src/main.rs`
 - `src/lib.rs`
 - `src/tui/mod.rs`
@@ -103,7 +103,7 @@ capabilities even though they use the same agent loop.
 
 ## Implementation Reconciliation (2026-08-15)
 
-- `src/interactive.rs` now owns the presentation-neutral command grammar, session
+- `src/interactive/mod.rs` now owns the presentation-neutral command grammar, session
   resolution, model/provider operations, skill and MCP effects, help text, and stream
   event formatting used by both interactive surfaces.
 - Chat preserves its multi-turn console workflow while rendering model, tool, and

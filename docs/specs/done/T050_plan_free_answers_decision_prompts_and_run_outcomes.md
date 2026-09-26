@@ -5,7 +5,7 @@
 **Related:** [T041](../done/T041_task_aware_context_and_verified_completion.md),
 [T047](../done/T047_user_interaction_harmonization.md),
 [T026](../done/T026_actionable_redaction_safe_llm_failure_reporting.md), and
-[T049](../development/T049_interaction_card.md).
+[T049](T049_interaction_card.md).
 
 ## Summary
 
@@ -95,11 +95,11 @@ TUI, and from `nib run`. Preserve stable machine outcome tokens and exit codes.
 
 ## Affected Areas
 
-- `src/config/mod.rs`, `src/agent/instructions.rs`, `src/agent/loop.rs`: answer route,
+- `src/config/mod.rs`, `src/agent/instructions.rs`, `src/agent/loop/mod.rs`: answer route,
   question request, persisted decision, and terminal summary.
 - `src/tools/registry.rs`, `src/session/mod.rs`, `src/llm/types.rs`: bounded proposal
   schema and backwards-compatible durable representation.
-- `src/interactive.rs`, `src/chat.rs`, `src/console.rs`, `src/tui/mod.rs`, `src/run.rs`:
+- `src/interactive/mod.rs`, `src/chat/mod.rs`, `src/console.rs`, `src/tui/mod.rs`, `src/run.rs`:
   common input and output semantics with native controls.
 - `scripts/check-interactive-release.sh`: native approval prompt smoke expectation.
 - `docs/user/guide.md`, `README.md`, relevant completed spec supersession notes,
@@ -171,3 +171,11 @@ requests on 2026-09-23.
 - `task smoke:interactive`: passed; a stale approval prompt expectation in the
   native script was corrected and `task smoke:interactive:binary` then passed
   without a timeout diagnostic.
+
+## Supersession (2026-09-24)
+
+T050 mapped structured `Reconciled` outcomes to a heading and next action.
+[T053](T053_visible_stop_reasons.md) extends that mapper to
+worker `End`/`Err` paths, including `local_error`, so a stopped run cannot
+present the machine token as the only user-visible explanation. Machine
+tokens and T026 redaction are unchanged.

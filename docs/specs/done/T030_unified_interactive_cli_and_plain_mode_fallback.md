@@ -225,10 +225,10 @@ record.
 
 - `src/main.rs` — no-subcommand dispatch, unified typed arguments, compatibility alias,
   and help text.
-- `src/chat.rs` — unified interactive launcher and plain presentation adapter, or a
+- `src/chat/mod.rs` — unified interactive launcher and plain presentation adapter, or a
   focused replacement module if naming would otherwise preserve the product split.
 - `src/tui/mod.rs` — TUI preflight/launch boundary and restoration-safe errors.
-- `src/interactive.rs` — presentation-neutral mode-independent command, session, and
+- `src/interactive/mod.rs` — presentation-neutral mode-independent command, session, and
   stream behavior; it must not absorb renderer-specific terminal code.
 - `src/console.rs` — terminal/stream capability helpers only if no existing boundary is
   suitable.
@@ -259,7 +259,7 @@ formats, durable tasks, updater, and release transaction are not behaviorally mo
 
 ## Implementation Reconciliation (2026-08-19)
 
-The implementation now has one typed launcher in `src/chat.rs`. Root `nib` and
+The implementation now has one typed launcher in `src/chat/mod.rs`. Root `nib` and
 `nib chat` pass the same `ChatArgs` contract to it, while `nib tui` translates its
 legacy arguments once and forces the same launcher's TUI mode. Mode resolution is a
 pure decision over the explicit flags and detected stream/terminal metadata and runs
@@ -267,7 +267,7 @@ before configuration, authentication, session resolution, terminal ownership, or
 worker creation. A forced unsupported TUI returns actionable `--plain` guidance;
 automatic redirected execution selects plain mode without polluting stdout.
 
-The plain renderer retains the shared `src/interactive.rs` command/effect registry and
+The plain renderer retains the shared `src/interactive/mod.rs` command/effect registry and
 now accepts an exactly-once initial `--run` goal. The TUI performs a read-only preflight
 before session mutation, initializes terminal ownership before resolving a session,
 and uses one restoration guard that attempts both raw-mode and alternate-screen cleanup

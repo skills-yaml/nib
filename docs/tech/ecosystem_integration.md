@@ -84,7 +84,7 @@ MCP (Model Context Protocol) is the standard way tools and context are provided 
 **Implementation**:
 - `src/integrations/mcp.rs` manages configured stdio child servers and namespaces
   discovered tools as `server::tool`.
-- `src/integrations/mcp_server.rs` serves JSON-RPC/MCP over stdio.
+- `src/integrations/mcp_server/mod.rs` serves JSON-RPC/MCP over stdio.
 - `.nib/config.toml` owns command, arguments, environment, working directory, and
   request timeout configuration.
 - Advertised tool invocations pass through `ToolExecutor`. Starting an outbound MCP

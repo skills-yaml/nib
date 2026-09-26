@@ -22,17 +22,17 @@ this spec and its companion into `development/` and passing their gates.
 The interaction review found semantic differences that presentation alone cannot
 justify. Source anchors below were checked against revision `0f2c0c2`:
 
-- [Shared question parsing](../../../src/interactive.rs),
-  [plain chat](../../../src/chat.rs), and [console prompts](../../../src/console.rs)
+- [Shared question parsing](../../../src/interactive/mod.rs),
+  [plain chat](../../../src/chat/mod.rs), and [console prompts](../../../src/console.rs)
   disagree on numeric free text and local retries. The shared parser treats a numeric
   answer as an option index even when there are no options; plain chat can consume a
   pending question before validation succeeds.
 - [TUI question handling](../../../src/tui/mod.rs) accepts option selection but not
   custom text when options exist. Modal editing/paste differs from the composer.
-- [Approval context](../../../src/tools/executor.rs) and the console/TUI presentations
+- [Approval context](../../../src/tools/executor/mod.rs) and the console/TUI presentations
   do not consistently expose enough detail to inspect a command, edit, or proposed
   memory value. Console affirmative parsing and TUI initial approval focus differ.
-- [Command policy](../../../src/interactive.rs) rejects inspection and `/stop` while
+- [Command policy](../../../src/interactive/mod.rs) rejects inspection and `/stop` while
   a worker is active, precisely when monitoring and intervention are useful.
 - [One-shot output](../../../src/run.rs) does not attach a plan event consumer and
   reduces the final response to a short flattened summary.
@@ -68,7 +68,7 @@ products in this task.
   policy, worktree isolation, tool validation, or reconciliation.
 - A web UI, new terminal framework, arbitrary module cleanup, new model/provider
   behavior, remote MCP transport, or external channel authentication/listeners.
-- Complete context-budget accounting; [T042](../backlog/T042_context_budgeting_and_live_visibility.md)
+- Complete context-budget accounting; [T042](../done/T042_context_budgeting_and_live_visibility.md)
   owns that data contract. Until available, `/context` must label existing estimates
   honestly rather than claim complete request usage.
 - Optional-question/fallback semantics: current `ask_question` requests remain
@@ -396,11 +396,11 @@ no crash-time automatic queue replay.
 
 ## Affected Areas and Dependencies
 
-- `src/interactive.rs`, `src/chat.rs`, `src/console.rs`, `src/tui/`: shared reducers,
+- `src/interactive/mod.rs`, `src/chat/mod.rs`, `src/console.rs`, `src/tui/`: shared reducers,
   command availability, prompt ownership, editing, rendering, clipboard feedback.
-- `src/agent/loop.rs`, `src/session/`: typed question outcomes, durable recovery,
+- `src/agent/loop/mod.rs`, `src/session/`: typed question outcomes, durable recovery,
   exact identity/provenance, dependency blocking and lease-safe reconciliation.
-- `src/tools/executor.rs`, tool implementations/metadata as required: approval detail
+- `src/tools/executor/mod.rs`, tool implementations/metadata as required: approval detail
   projection from validated arguments; preserve schema and policy enforcement.
 - `src/run.rs` and CLI exit plumbing in `src/main.rs`: plan/final output,
   actionable waiting-for-input recovery, and reconciled interrupt exit behavior.
@@ -412,7 +412,7 @@ no crash-time automatic queue replay.
 [FT-019](../done/ft_019_codex_inspired_chat_and_tui_interactions.md) remains the umbrella.
 This proposal explicitly revises selected T038/T039 defaults for Ctrl+C, role labels,
 approval focus, and custom question answers. Coordinate with
-[T045](../development/T045_codex_style_thought_and_tool_rows.md) and
+[T045](T045_codex_style_thought_and_tool_rows.md) and
 [T046](../done/T046_cross_platform_ci_repairs.md); preserve scan-list presentation,
 native terminal restoration, and platform-path fixes. T042 owns richer context
 snapshots; T047 owns command availability and modal-safe access to whichever truthful
@@ -668,25 +668,25 @@ the three artifact links above hold sanitized native captures and summaries.
 
 | Criterion | Linked fixture or qualification evidence |
 | --- | --- |
-| AC1 | [Shared prefix/retry grammar](../../../src/interactive.rs#L5795), [plain modal retry](../../../src/chat.rs#L3105), [TUI typed response](../../../src/tui/mod.rs#L8880) |
+| AC1 | [Shared prefix/retry grammar](../../../src/interactive/mod.rs#L5795), [plain modal retry](../../../src/chat/mod.rs#L3105), [TUI typed response](../../../src/tui/mod.rs#L8880) |
 | AC2 | [TUI typed response](../../../src/tui/mod.rs#L8880), [Unicode/multiline paste](../../../src/tui/mod.rs#L8904), [question card](../../../src/tui/mod.rs#L10038) |
-| AC3 | [Shared modal outcome reducer](../../../src/interactive.rs#L5895), [closed plain input](../../../src/chat.rs#L3054), [legacy handler fallback](../../../src/tools/executor.rs#L3442) |
-| AC4a | [Durable exact recovered answer and run lease](../../../src/interactive.rs#L5372), [TUI persistence before close](../../../src/tui/mod.rs#L8957) |
-| AC4b | [Exact-plan recovery with answer-only on/off](../../../src/agent/loop.rs#L10816), [redacted display remains non-authoritative](../../../src/interactive.rs#L5372) |
-| AC4c | [Continuation eligibility and required checks](../../../src/agent/loop.rs#L8816), [malformed target fails closed](../../../src/agent/loop.rs#L10920) |
-| AC4d | [Premature-completion corrective runtime fixture](../../../tests/test_runtime_e2e.rs#L895), [required-check admission](../../../src/agent/loop.rs#L8816) |
-| AC5 | [Bounded redacted approval context](../../../src/tools/executor.rs#L3361), [narrow approval card](../../../src/tui/mod.rs#L10081) |
-| AC6 | [Live queue/steer reducer](../../../src/interactive.rs#L6570), [plain exact-run router](../../../src/chat.rs#L2381), [native modal capture](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC3 | [Shared modal outcome reducer](../../../src/interactive/mod.rs#L5895), [closed plain input](../../../src/chat/mod.rs#L3054), [legacy handler fallback](../../../src/tools/executor/mod.rs#L3442) |
+| AC4a | [Durable exact recovered answer and run lease](../../../src/interactive/mod.rs#L5372), [TUI persistence before close](../../../src/tui/mod.rs#L8957) |
+| AC4b | [Exact-plan recovery with answer-only on/off](../../../src/agent/loop/mod.rs#L10816), [redacted display remains non-authoritative](../../../src/interactive/mod.rs#L5372) |
+| AC4c | [Continuation eligibility and required checks](../../../src/agent/loop/mod.rs#L8816), [malformed target fails closed](../../../src/agent/loop/mod.rs#L10920) |
+| AC4d | [Premature-completion corrective runtime fixture](../../../tests/test_runtime_e2e.rs#L895), [required-check admission](../../../src/agent/loop/mod.rs#L8816) |
+| AC5 | [Bounded redacted approval context](../../../src/tools/executor/mod.rs#L3361), [narrow approval card](../../../src/tui/mod.rs#L10081) |
+| AC6 | [Live queue/steer reducer](../../../src/interactive/mod.rs#L6570), [plain exact-run router](../../../src/chat/mod.rs#L2381), [native modal capture](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
 | AC7a | [TUI question cancellation](../../../src/tui/mod.rs#L9075), [approval-blocked shutdown](../../../src/tui/mod.rs#L9122), [native question/approval/tool cancellation captures](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
 | AC7b | [Uninterrupted two-press Ctrl+Q fixture](../../../src/tui/mod.rs#L7079) |
-| AC7c | [Case/separator/empty/nested grammar](../../../src/interactive.rs#L5795), [idle F2/draft ownership](../../../src/tui/mod.rs#L8927), [native F2 and plain captures](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
-| AC7d | [Durable FIFO queue/start failure](../../../src/interactive.rs#L6930), [exact-run steering admission](../../../src/agent/loop.rs#L8228), [plain cancellation retention](../../../src/chat.rs#L2588) |
+| AC7c | [Case/separator/empty/nested grammar](../../../src/interactive/mod.rs#L5795), [idle F2/draft ownership](../../../src/tui/mod.rs#L8927), [native F2 and plain captures](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
+| AC7d | [Durable FIFO queue/start failure](../../../src/interactive/mod.rs#L6930), [exact-run steering admission](../../../src/agent/loop/mod.rs#L8228), [plain cancellation retention](../../../src/chat/mod.rs#L2588) |
 | AC7e | [Unix exit-130 SIGINT fixture](../../../tests/interactive_cli.rs#L518), [Windows native three-stage captures and restoration](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702) |
 | AC8 | [Ordered one-shot plan/no execution](../../../tests/interactive_cli.rs#L296), [long structured final output](../../../tests/interactive_cli.rs#L267) |
-| AC9a | [Narrow/Unicode transcript fixture](../../../src/interactive.rs#L6109), [no-color approval signaling](../../../src/tui/mod.rs#L6673), [narrow question/approval cards](../../../src/tui/mod.rs#L10038) |
+| AC9a | [Narrow/Unicode transcript fixture](../../../src/interactive/mod.rs#L6109), [no-color approval signaling](../../../src/tui/mod.rs#L6673), [narrow question/approval cards](../../../src/tui/mod.rs#L10038) |
 | AC9b | [Backend success/OSC52/failure outcomes](../../../src/tui/mod.rs#L10408), [drag-release route](../../../src/tui/mod.rs#L10329), [redirected pipe omits escapes](../../../tests/interactive_cli.rs#L335), [Windows native clipboard](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702), [Linux OSC52 labeling](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697) |
-| AC9c | [Owned-worktree `/review` fixture](../../../src/interactive.rs#L6824), [user-facing review wording](../../../README.md) |
+| AC9c | [Owned-worktree `/review` fixture](../../../src/interactive/mod.rs#L6824), [user-facing review wording](../../../README.md) |
 | AC10a | [Documentation integrity fixtures](../../../tests/docs_integrity.rs), [supersession ownership](#review-question-decisions), [release smoke contract](../../../tests/installers.rs#L324) |
-| AC10b | [TUI workspace consent](../../../src/tui/mod.rs#L7001), [plain session switch/deny](../../../src/chat.rs#L2771) |
-| AC10c | [Contextual legacy handler default](../../../src/tools/executor.rs#L3442), [legacy `approve_plan` context](../../../src/tools/executor.rs#L3625), [closed-input runtime fixture](../../../src/chat.rs#L3054), [explicit policy denial](../../../tests/test_runtime_e2e.rs#L2095), [MCP deny-without-handler/schema fixtures](../../../src/integrations/mcp_server.rs#L3647) |
+| AC10b | [TUI workspace consent](../../../src/tui/mod.rs#L7001), [plain session switch/deny](../../../src/chat/mod.rs#L2771) |
+| AC10c | [Contextual legacy handler default](../../../src/tools/executor/mod.rs#L3442), [legacy `approve_plan` context](../../../src/tools/executor/mod.rs#L3625), [closed-input runtime fixture](../../../src/chat/mod.rs#L3054), [explicit policy denial](../../../tests/test_runtime_e2e.rs#L2095), [MCP deny-without-handler/schema fixtures](../../../src/integrations/mcp_server/mod.rs#L3647) |
 | AC10d | [Exact-revision CI run](https://github.com/skills-yaml/nib/actions/runs/35800536448), [Windows](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726815702), [macOS](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726782294), [Linux](https://github.com/skills-yaml/nib/actions/runs/35800536448/artifacts/10726522697), and this per-criterion map |

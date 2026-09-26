@@ -118,51 +118,51 @@ tasks:
     cmds:
       - >-
         cargo test --lib
-        tools::delegation::tests::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
+        tools::delegation::tests::test_part_2::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
+        tools::delegation::tests::test_part_3::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        daemons::state::tests::optional_read_write_
+        daemons::state::tests::test_part_0::optional_read_write_
         -- --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
+        tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains
+        tools::delegation::tests::test_part_3::persistent_anchor_prevents_replaced_repository_lock_domains
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
+        tools::delegation::tests::test_overflow::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
+        tools::delegation::tests::test_part_2::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::bounded_reconciliation_record_does_not_publish_after_precommit_expiry
+        tools::delegation::tests::test_part_2::bounded_reconciliation_record_does_not_publish_after_precommit_expiry
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::contradictory_terminal_record_and_manager_states_fail_closed
+        tools::delegation::tests::test_part_2::contradictory_terminal_record_and_manager_states_fail_closed
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::dead_anchor_only_record_without_process_scope_requires_recovery
+        tools::delegation::tests::test_part_2::dead_anchor_only_record_without_process_scope_requires_recovery
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
+        tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root
+        integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root
         -- --exact --test-threads=1
       - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
       - cargo test --test delegation -- --test-threads=1

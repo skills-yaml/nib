@@ -205,7 +205,7 @@ in `NO_COLOR`, and `Ctrl+C` never copies.
 
 ## Affected Areas
 
-- `src/interactive.rs` — tool argument hints, title composition, display_text,
+- `src/interactive/mod.rs` — tool argument hints, title composition, display_text,
   compact `TuiChrome`.
 - `src/tui/mod.rs` — tool row styling, under-composer approval/question/workspace
   lists, header/footer chrome, keys, below-composer completion layout, waiting
@@ -214,7 +214,7 @@ in `NO_COLOR`, and `Ctrl+C` never copies.
 - `src/context/budget.rs` — Codex-style communication instructions in the runtime
   system prompt.
 - `src/config/mod.rs` — `workspace.allowed` grant.
-- `src/chat.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
+- `src/chat/mod.rs` / `src/updater.rs` — pass the startup update notice into the TUI;
   plain-mode TTY workspace consent.
 - `docs/user/guide.md` — approval, tool-block, completion placement, waiting-meter,
   startup welcome, and Ctrl+C quit copy.

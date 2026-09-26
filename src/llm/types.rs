@@ -689,6 +689,17 @@ impl ProviderContinuation {
         Ok(())
     }
 
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    pub(crate) fn unresolved_count(&self) -> usize {
+        self.pending_invocations
+            .iter()
+            .filter(|id| !self.tool_results.contains_key(id))
+            .count()
+    }
+
     pub(crate) fn consume<T: Any + Send>(
         self,
         provider: &str,

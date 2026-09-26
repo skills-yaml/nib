@@ -596,11 +596,16 @@ fn plain_chat_recovers_after_one_structured_failure_with_identical_safe_output()
             assert!(report.contains(expected), "missing {expected}: {report}");
         }
         assert!(
-            stdout.contains("[stream ended] planning_failed"),
+            stdout.contains("[stream ended] Model request failed"),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains("[stream ended] planning_failed"),
             "{stdout}"
         );
         assert!(stdout.contains("Recovered assistant success."), "{stdout}");
-        assert!(stdout.contains("[stream ended] completed"), "{stdout}");
+        assert!(stdout.contains("[stream ended] Run completed"), "{stdout}");
+        assert!(!stdout.contains("[stream ended] completed\n"), "{stdout}");
         assert!(stdout.contains("Goodbye. Session saved to"), "{stdout}");
         let status = post_failure_status_semantics(&stdout);
 

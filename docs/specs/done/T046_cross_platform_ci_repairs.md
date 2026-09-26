@@ -23,7 +23,7 @@ and credential-free native qualification.
 Restore Windows mouse capture before disabling raw mode so mouse cleanup cannot
 reapply the raw input mode it saved during TUI initialization.
 
-Affected areas: `src/context/`, `src/tools/delegation.rs`, `src/agent/loop.rs` test
+Affected areas: `src/context/`, `src/tools/delegation/mod.rs`, `src/agent/loop/mod.rs` test
 fixtures, `src/tui/`, interactive
 smoke scripts, focused regression tests, and Task entries only where needed.
 No persistence schema changes, release publication changes, or new frameworks.

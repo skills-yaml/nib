@@ -23,7 +23,7 @@ compliance review followed by a quality/security review. Fix findings before adv
 
 ## Affected Areas
 
-Shared interaction and presentation modules (`src/interactive.rs`, `src/chat.rs`,
+Shared interaction and presentation modules (`src/interactive/mod.rs`, `src/chat/mod.rs`,
 `src/console.rs`, `src/tui/`); runtime/session clarification handling; tool approval
 projection; `src/run.rs` and CLI exit plumbing in `src/main.rs`; deterministic tests,
 native smoke scripts, and affected
@@ -85,8 +85,8 @@ failure is misreported as fixed. Dependencies with T042/T045/T046 are recorded.
   plain modal-frame delimiter ownership across validation retries; add delayed
   surplus-input tests instead of relying on draining only currently buffered lines.
 
-Files: `src/interactive.rs`, `src/console.rs`, `src/chat.rs`, `src/tui/`,
-`src/agent/loop.rs`, relevant handler tests.
+Files: `src/interactive/mod.rs`, `src/console.rs`, `src/chat/mod.rs`, `src/tui/`,
+`src/agent/loop/mod.rs`, relevant handler tests.
 Acceptance: AC1 and the typed-outcome portion of AC3.
 
 ### A2. Editable questions and durable recovery
@@ -163,7 +163,7 @@ Acceptance: AC2, AC3, AC4a–d; no unintended plan-step completion.
   Add the parent's dated supersession notes to affected T039/FT-019 sections and
   coordinate T046 prompt/smoke expectations without changing historical evidence.
 
-Files: `src/tools/executor.rs`, relevant tool implementations, A1 presentation files,
+Files: `src/tools/executor/mod.rs`, relevant tool implementations, A1 presentation files,
 permission tests, README/guide/permissions documentation where affected.
 Acceptance: AC5, AC10b–c plus the relevant AC10a supersession notes.
 
@@ -231,7 +231,7 @@ Acceptance: AC7a–b, AC7d–e; no stale modal, duplicate terminal event, lost q
 - Preserve machine outcome tokens, exit statuses, redaction, and existing redirection
   behavior; add fixtures longer than 512 characters and malformed/failed model turns.
 
-Files for B: `src/interactive.rs`, `src/chat.rs`, `src/console.rs`, `src/tui/`,
+Files for B: `src/interactive/mod.rs`, `src/chat/mod.rs`, `src/console.rs`, `src/tui/`,
 `src/run.rs`, command/CLI/runtime tests, native smoke scripts and guide.
 Acceptance: AC8 and remaining control/output aspects of AC10.
 

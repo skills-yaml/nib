@@ -41,7 +41,7 @@ The following tool capabilities will be introduced into `nib`:
 ## Design & Implementation Details
 
 - **Tool Registry Expansion:** Update `src/tools/registry.rs` to register the new tool schemas.
-- **Agent Loop Modifications (`src/agent/loop.rs`):**
+- **Agent Loop Modifications (`src/agent/loop/mod.rs`):**
   - For `ask_question`, the agent must transition to a `WaitingForUserInput` state, rendering the question payload in the TUI, and wait for human response via `stdin` or Ratatui event loops.
   - For `schedule` and `manage_task`, introduce an asynchronous task manager in `src/daemons/` that can inject synthetic messages back into the agent's context when a timer fires or a task completes.
 - **Web Execution:** `search_web` and `read_url_content` will utilize `reqwest` for HTTP execution, returning safe, sanitized markdown.
@@ -60,7 +60,7 @@ Scope: replace web/question/schedule/task/subagent stubs with complete gated too
 deliver task/timer events to the loop, and expose the full schemas over MCP.
 
 Affected areas: `src/tools/`, `src/daemons/`, `src/agent/`, `src/tui/`,
-`src/integrations/mcp_server.rs`, and tool/E2E tests.
+`src/integrations/mcp_server/mod.rs`, and tool/E2E tests.
 
 Acceptance criteria: every expanded tool is implemented behind the normal scope,
 classification, approval, audit, and reconciliation path; asynchronous results are
@@ -90,13 +90,13 @@ reconciliation path as the five core tools.
 ### Affected Areas
 
 `src/tools/`, `src/daemons/`, `src/agent/`, `src/tui/`,
-`src/integrations/mcp_server.rs`, and expansion/delegation/durable tests.
+`src/integrations/mcp_server/mod.rs`, and expansion/delegation/durable tests.
 
 ### Implementation Evidence
 
 - `src/tools/core.rs` implements web, task, memory, schedule, question, and delegation dispatch.
-- `src/daemons/workload.rs` owns durable workers; `src/tools/delegation.rs` owns
-  child records/worktrees; `src/agent/loop.rs` owns question and observation reconciliation.
+- `src/daemons/workload/mod.rs` owns durable workers; `src/tools/delegation/mod.rs` owns
+  child records/worktrees; `src/agent/loop/mod.rs` owns question and observation reconciliation.
 
 ### Validation Evidence
 
@@ -143,8 +143,8 @@ task that cannot be managed.
 
 ### Affected Areas
 
-`src/tools/core.rs`, `src/tools/executor.rs`, `src/agent/loop.rs`,
-`src/daemons/task.rs`, `src/daemons/workload.rs`, and executor tests.
+`src/tools/core.rs`, `src/tools/executor/mod.rs`, `src/agent/loop/mod.rs`,
+`src/daemons/task.rs`, `src/daemons/workload/mod.rs`, and executor tests.
 
 ### Validation Gates
 
@@ -168,7 +168,7 @@ for interactive chat so `ask_question` resumes outside the TUI.
 
 ### Affected Areas
 
-`src/run.rs`, `src/chat.rs`, console question handling, and CLI tests.
+`src/run.rs`, `src/chat/mod.rs`, console question handling, and CLI tests.
 
 ### Implementation Plan
 

@@ -317,6 +317,22 @@ separate product capability owned by backlog spec FT-020. Windows and macOS may 
 independently only through that future spec and must not weaken the current rejection
 contract.
 
+## 2026-09-25 - FT-020 ships fail-closed non-Linux production
+
+- Type: decision
+- Source: FT-020 selected design and C01-C07
+- Confidence: high
+- Review: 2026-09-25 spec-compliance then quality review
+- Supersedes: 2026-09-02 backlog ownership of FT-020 as unimplemented future work
+
+Content:
+
+FT-020 is Done as the protected-owner implementation plus a fail-closed Windows
+and macOS `production()` contract. Mechanism tests and Job/process-group
+`current()` backends do not enable production. A later independent native
+qualification record is required before `production()` may return a Windows or
+macOS backend.
+
 ## 2026-09-02 - Qualify every native CI release binary exactly
 
 - Type: decision

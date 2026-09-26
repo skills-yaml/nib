@@ -452,7 +452,10 @@ The live suite consumes only process environment or CI environment-scoped secret
 - `XAI_API_KEY`
 - `META_API_KEY`
 - `OPENROUTER_API_KEY`
-- `NIB_LIVE_META_BASE_URL` while Meta has no verified repository default
+
+`NIB_LIVE_META_BASE_URL` is a reviewed HTTPS catalog root, not a credential. Protected
+CI reads it from the `llm-live-meta` environment variable until Meta has a verified
+repository default.
 
 Keys must belong to dedicated low-privilege test projects/accounts with provider-side
 spend and rate limits. They must not be user or production keys. The harness never
@@ -864,7 +867,8 @@ Closure now requires these external actions in order:
 1. Create or designate six dedicated low-privilege provider accounts with hard spend
    and rate limits, and choose a supported-region Meta catalog root.
 2. Configure `LLM_API_KEY` in each matching `llm-live-*` environment, configure the
-   Meta root and all nine provider-scoped paid ceilings, and use the installed required
+   Meta root as the `llm-live-meta` environment variable `NIB_LIVE_META_BASE_URL`,
+   configure all nine provider-scoped paid ceilings, and use the installed required
    reviewer gate for live deployments.
 3. Run catalog mode from the intended exact revision. Review the retained catalogs,
    model capabilities, pricing, regions, privacy scan, and planned denominators.
@@ -877,6 +881,101 @@ Closure now requires these external actions in order:
 Provider secrets must be installed through GitHub environment secret management or an
 equivalent local secret channel; they must not be pasted into this spec, chat, command
 arguments, repository files, or ordinary workflow variables.
+
+### Historical authority snapshots (2026-09-25)
+
+The following audits record what was known at each point that day. The live qualification follow-up below supersedes their then-current status.
+
+### External Authority Audit (2026-09-25)
+
+Live catalog/canary/selected/full was re-attempted on Linux host
+`ej-assistant-001` against HEAD `c7797c689f68de5c5c3940aeb3708b45107bebb5`.
+Classification: **unverifiable**. T023 remains in `development/`. No acceptance
+checkbox is promoted.
+
+- Process environment: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`,
+  `XAI_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `NIB_LIVE_TESTS`,
+  `NIB_LIVE_ACK_COSTS`, and `NIB_LIVE_META_BASE_URL` are all unset. No local
+  `.env` exists at the documented harness inputs. The harness was not pointed at
+  user or production keys.
+- GitHub `skills-yaml/nib`: repository secrets and variables are empty. Each of
+  the six `llm-live-*` environments still has zero secrets and zero variables.
+- `tests/fixtures/llm_live/openrouter_models.toml` still has every entry
+  `approved = false`.
+- Scheduled workflow `llm-live.yml` run
+  [35078889158](https://github.com/skills-yaml/nib/actions/runs/35078889158)
+  remains a credential-preflight failure. Run
+  [35842462022](https://github.com/skills-yaml/nib/actions/runs/35842462022)
+  is still waiting on environment protection and has produced no reports.
+- Real Task verdicts, not a dry-run substitute:
+  - `task test:llm-live:catalog` without `NIB_LIVE_TESTS` exits 201 at the
+    network-acknowledgement precondition.
+  - `NIB_LIVE_TESTS=1 NIB_LIVE_PROVIDER=all task test:llm-live:catalog` runs the
+    ignored production-path entrypoint and fails safely:
+    `provider 'openai' is blocked_auth because OPENAI_API_KEY is missing`.
+  - `task test:llm-live:{canary,selected,full}` without `NIB_LIVE_ACK_COSTS`
+    exit 201 at the paid-cost precondition.
+  - Paid canary with both acknowledgements but no ceilings/keys fails safely:
+    `blocked_configuration: paid live generation requires an explicit
+    NIB_LIVE_MAX_REQUESTS ceiling`.
+  - `task test:llm-live:offline` passed 66 credential-free tests with the paid
+    entrypoint ignored. That is not live qualification.
+
+No sanitized catalog/canary/selected/full report was published. The external
+closure sequence recorded on 2026-09-17 is unchanged.
+
+A later same-day provision attempt confirmed the six `llm-live-*` GitHub
+environment secret and variable inventories are still empty, repository
+Actions secrets are empty, and organization secret listing is forbidden
+(`admin:org` missing). A personal `~/.nib/config.toml` OpenAI `api_key`
+exists; it was not exported, not copied into GitHub, and not used, because
+T023 requires dedicated low-privilege test credentials in process or
+environment-scoped secrets and forbids loading user config. OpenRouter
+entries remain `approved = false` pending an authenticated catalog review.
+
+### External Authority Audit (2026-09-25 catalog retry)
+
+GitHub Actions catalog on `88a80d47c3fa6c079a84f426fea57892fb3a5017`
+([run 36113356974](https://github.com/skills-yaml/nib/actions/runs/36113356974)):
+
+- `LLM_API_KEY` was present on all six `llm-live-*` environments.
+- `NIB_LIVE_META_BASE_URL` is the `llm-live-meta` environment variable
+  `https://api.meta.ai/v1` (workflow reads `vars`, not secrets).
+- Passed catalogs: OpenAI 138 models, Anthropic 12, Grok 8, Meta 8.
+- Failed catalogs: Google and OpenRouter, 0 pages, `blocker_classification=unknown`,
+  `safe_error_class=catalog_or_plan_failure` (not `blocked_auth`).
+- Aggregate failed. OpenRouter allowlist is still `approved = false`.
+- Canary/selected/full were not run. T023 remains in `development/`.
+
+### External Authority Audit (2026-09-25 catalog pass)
+
+After parser fixes, catalog aggregate succeeded on
+`5b95533379bee0986848ce4456105117f2342da6`
+([run 36116388282](https://github.com/skills-yaml/nib/actions/runs/36116388282)):
+
+- OpenAI 138, Anthropic 12, Gemini 61, Grok 8, Meta 8, OpenRouter 625 models.
+- Gemini live ListModels omits `baseModelId`; generation target is the `models/` suffix.
+- OpenRouter `-1` prices are unpriced; catalog identity is unique `id` (not shared `canonical_slug`).
+- Allowlist exact ids were present with text+tools and were approved for paid modes.
+
+### External Authority Audit (2026-09-25 canary)
+
+Catalog on `bdaecaa3ecfaf8cac10e6e86d719be386cdef145` passed
+([run 36118865398](https://github.com/skills-yaml/nib/actions/runs/36118865398)).
+
+Canary on the same revision
+([run 36119828512](https://github.com/skills-yaml/nib/actions/runs/36119828512))
+now publishes reports. It does not pass:
+
+- OpenAI/Anthropic/Gemini/Meta/Grok/OpenRouter complete+stream often succeed.
+- `single_tool_continuation` fails as `response_mismatch`, `unsupported_request`,
+  or `provider_rejected` on every advertised transport except OpenRouter
+  `x-ai/grok-4.5`.
+- Unpriced catalogs require `NIB_LIVE_ALLOW_UNPRICED=1` plus a spend cap.
+- Report publication no longer dies on aggregate inconsistency after the
+  `blocked_budget` truncation accounting fix.
+
+T023 remains in `development/` until canary, selected, and full pass.
 
 ### Live qualification follow-up (2026-09-25)
 
@@ -948,6 +1047,7 @@ catalog visibility, review the resulting dry-run budget, and run protected canar
 selected, and full exact-revision qualification. Keep the failed Opus 5 result
 in the evidence record. See [Anthropic refusal behavior](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback)
 and the [Sonnet 5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5/migration-guide).
+
 
 ## Affected Areas
 

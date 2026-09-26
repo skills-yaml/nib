@@ -4041,11 +4041,17 @@ async fn compression_is_measured_audited_and_keeps_the_raw_transcript() {
     assert_eq!(event.details["raw_message_count"], raw_messages.len());
 
     let prompts = compressor.prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("context compression engine"));
+    assert!(
+        !prompts.is_empty(),
+        "chunked compression must issue at least one bounded summarizer request"
+    );
+    assert!(
+        prompts.iter().all(|prompt| prompt[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("context compression engine")),
+        "every compression request must use the compression engine instruction"
+    );
     assert!(prompts[0][1]["content"]
         .as_str()
         .unwrap()

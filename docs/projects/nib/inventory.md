@@ -32,17 +32,19 @@ Metadata:
 
 - T023 is in `development/`. Its credential-free harness is locally green, but live
   catalog/canary/selected/full evidence requires owner-approved credentials, budgets,
-  OpenRouter exact IDs, and protected-workflow authority.
-- FT-020 is in `backlog/` for a future protected cleanup-authority design that could
-  enable production delegation on Windows or macOS. Current v1 production delegation
-  remains Linux+bwrap only.
+  OpenRouter exact IDs, and protected-workflow authority. A 2026-09-25 re-audit
+  classified that live matrix as unverifiable without those secrets.
+- FT-020 is in `done/`. Protected Windows Job owner/DACL and macOS reaper preflight
+  shipped; `production()` stays fail-closed on Windows and macOS. Current v1
+  production delegation remains Linux+bwrap only until a later native qualification
+  enables those platforms.
 - `docs/specs/feature/` and `docs/specs/task/` are retained only as empty legacy
   directories; active lifecycle state uses the canonical state directories.
 - MCP v1 is stdio-only; HTTP/SSE and OAuth require a separate future spec.
 - Live paid-provider qualification is the only active implementation-spec gate and
   remains explicitly authorization-bound. Completed Windows/macOS mechanism evidence
-  does not enable production delegation there; those platforms require FT-020 or another
-  approved protected-authority design.
+  does not enable production delegation there; FT-020 keeps those platforms
+  fail-closed until a later native qualification record.
 
 ## Legacy Spec Paths (Aligned)
 
@@ -98,8 +100,8 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 44 specs are in `done/`, T023 is the sole `development/` spec, and FT-020
-  is the sole `backlog/` spec. `docs/specs/README.md` is the authoritative per-spec
+- Lifecycle: 63 specs are in `done/`, T023 is the sole `development/` spec, and
+  `backlog/` is empty. `docs/specs/README.md` is the authoritative per-spec
   index.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate

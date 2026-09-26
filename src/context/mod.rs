@@ -11,6 +11,7 @@ pub mod budget;
 pub mod compression;
 pub mod project_docs;
 pub mod skills;
+pub mod snapshot;
 
 pub use agents::{find_agents_md, format_context_for_prompt, load_agents_md};
 

@@ -521,7 +521,7 @@ plain_semantics_input() {
   printf '%s\n' 'inspect @README.md'
   wait_for_pty_output "$output" 'Approve? [y/N]: '
   printf '%s\n' 'n' ''
-  wait_for_pty_output "$output" '[stream ended] tool_execution_failed'
+  wait_for_pty_output "$output" '[stream ended] Tool failed.'
   printf '/sta\n'
   wait_for_pty_output "$output" 'Command completions:'
   printf '%s\n' \
@@ -579,7 +579,7 @@ plain_failure_recovery_input() {
   printf '%s\n' 'list workspace after provider recovery'
   wait_for_pty_output "$output" 'Approve? [y/N]: '
   printf 'y\n\n'
-  wait_for_pty_output "$output" '[stream ended] completed'
+  wait_for_pty_output "$output" '[stream ended] Run completed.'
   printf '/status\n/quit\n'
   wait_for_pty_output "$output" 'Goodbye.'
 }

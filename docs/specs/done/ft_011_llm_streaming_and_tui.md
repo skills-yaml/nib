@@ -35,7 +35,7 @@ appear stuck. The reconciliation below records the shipped streaming path.
 - `src/llm/openai.rs` (OpenAiCompatClient implementation)
 - `src/llm/anthropic.rs` (AnthropicClient implementation)
 - `src/llm/gemini.rs` (GeminiClient implementation)
-- `src/agent/loop.rs` (AgentLoop logic)
+- `src/agent/loop/mod.rs` (AgentLoop logic)
 - `src/tui/mod.rs`.
 
 ## Validation Gates

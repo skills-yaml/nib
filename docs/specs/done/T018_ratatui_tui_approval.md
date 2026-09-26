@@ -20,7 +20,7 @@ When the agent executes a destructive tool (e.g., `run_terminal`), `ToolExecutor
 
 ## Affected Areas
 
-- `src/tools/executor.rs`: Make approval IO pluggable.
+- `src/tools/executor/mod.rs`: Make approval IO pluggable.
 - `src/tui/mod.rs`: Add channel communication and modal rendering.
 
 ## Validation Gates
@@ -56,7 +56,7 @@ render bounded live lifecycle/detail views, and cancel/join cleanly on exit.
 
 ### Affected Areas
 
-`src/tools/executor.rs`, `src/tui/mod.rs`, `src/agent/loop.rs`, stream event types,
+`src/tools/executor/mod.rs`, `src/tui/mod.rs`, `src/agent/loop/mod.rs`, stream event types,
 and TUI tests.
 
 ### Implementation Evidence

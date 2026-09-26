@@ -63,12 +63,12 @@ User / Workload Owner
 ┌───────────────────────────────────────────────┐
 │              Context + Planner              │
 │  (AGENTS.md/skills + LLM reasoning)           │
-│  src/context/ + src/agent/loop.rs             │
+│  src/context/ + src/agent/loop/mod.rs             │
 └──────────────┬────────────────────────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│         Tool Executor (the Gatekeeper)        │  (src/tools/executor.rs)
+│         Tool Executor (the Gatekeeper)        │  (src/tools/executor/mod.rs)
 │  • Tool Registry (metadata + PermissionLevel) │
 │  • Scoping + Worktree isolation               │
 │  • Classification (read-only / safe /         │
@@ -94,7 +94,7 @@ User / Workload Owner
                ▼
 ┌───────────────────────────────────────────────┐
 │              Reconciliation                   │  (Update plan outcome, emit lifecycle state,
-│  (src/agent/loop.rs)                          │   preserve artifacts and audit rationale)
+│  (src/agent/loop/mod.rs)                          │   preserve artifacts and audit rationale)
 └──────────────┬────────────────────────────────┘
                │
                ▼
@@ -118,14 +118,14 @@ User / Workload Owner
 - `src/integrations/gateway.rs` — Normalized console and external-messaging ingress/egress contract.
 - `src/integrations/mcp.rs` — Outbound MCP stdio client lifecycle and tool dispatch.
 - `src/integrations/mcp_framing.rs` — Shared bounded, newline-delimited JSON framing for MCP client/server stdio.
-- `src/integrations/mcp_server.rs` — Inbound MCP server exposing the gated nib runtime.
+- `src/integrations/mcp_server/mod.rs` — Inbound MCP server exposing the gated nib runtime.
 - `src/integrations/worktree.rs` — Session worktree manager built on sandbox ownership receipts.
 - `src/llm/{mod.rs,types.rs,registry.rs,factory.rs,openai.rs,responses.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral structured requests and private completed-turn streams, retry/response bounds, a central structural adapter-capability registry, explicit Chat Completions and Responses transports, provider construction and diagnostics, concrete APIs, and deterministic test doubles. Registry capabilities describe implemented transports, not live model compatibility.
 - `src/profile/{mod.rs,migration.rs}` — Workspace profile resolution, isolated state roots, environment loading, and legacy state migration.
 - `src/sandbox/mod.rs` — Command-shell resolution, capability checks, direct execution, and optional Linux `bwrap` isolation.
-- `src/sandbox/process.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
+- `src/sandbox/process/mod.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
 - `src/sandbox/windows_job.rs` — Windows Job Object containment backend.
-- `src/sandbox/worktree.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
+- `src/sandbox/worktree/mod.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
 - `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, additive exact-run steering and lifecycle events, tool audit, profile-scoped persistence, and bounded profile memory.
 - `src/tools/{mod.rs,classifier.rs,models.rs,registry.rs,executor.rs,core.rs,delegation.rs}` — Tool contracts and metadata, classification, the central approval/policy/sandbox gate, built-in tools, and linked-subagent lifecycle.
 - `src/tui/mod.rs` — Current-session-first Ratatui renderer, terminal preflight and
@@ -135,7 +135,7 @@ User / Workload Owner
 
 - `src/main.rs` — Clap command model, no-subcommand interactive dispatch, compatibility
   aliases, runtime setup, and hidden worker/relay entry points.
-- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, the unified
+- `src/auth.rs`, `src/chat/mod.rs`, and `src/run.rs` — Provider authentication, the unified
   interactive launcher with its plain renderer, and unchanged one-shot execution.
 - `src/console.rs` — Shared blocking/async console input used by the plain renderer's single-owner active-run broker and other CLI flows.
 - `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.

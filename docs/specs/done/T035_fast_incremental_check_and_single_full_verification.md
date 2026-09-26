@@ -113,7 +113,7 @@ feedback in 25.53 seconds on the same host. The broader installer run passed its
 pre-existing tests; its newly added contract test initially exposed and then received
 a fix for YAML section parsing, after which the dedicated regression passed.
 
-The initially reported shared-tree Clippy finding in `src/tools/delegation.rs` was
+The initially reported shared-tree Clippy finding in `src/tools/delegation/mod.rs` was
 reconciled as part of the owning runtime repair. On 2026-09-02,
 `task test:task-contract`, `task test:installers` (40/40), `task docs:check` (5/5),
 `task check`, and `git diff --check` passed. The canonical `task verify` completed the

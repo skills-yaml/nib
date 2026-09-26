@@ -70,11 +70,11 @@ cancellation must be restricted atomically to work owned by the active session.
 ## Affected Areas
 
 - `src/context/compression.rs`
-- `src/agent/loop.rs`
-- `src/interactive.rs`
-- `src/chat.rs`
+- `src/agent/loop/mod.rs`
+- `src/interactive/mod.rs`
+- `src/chat/mod.rs`
 - `src/tui/mod.rs`
-- `src/daemons/workload.rs`
+- `src/daemons/workload/mod.rs`
 - Context, durable-task, interactive, and CLI integration tests
 - `docs/user/guide.md`, `docs/tech/architecture.md`, and parent development specs
 

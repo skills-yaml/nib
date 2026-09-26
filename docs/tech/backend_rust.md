@@ -28,7 +28,7 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### Project Structure (Rust specific)
 
 - `src/main.rs`: Entry point. Sets up logging and invokes the `clap` CLI router.
-- `src/chat.rs`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
+- `src/chat/`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
 - `src/auth.rs`, `src/run.rs`, and other command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
 - `src/llm/`: The `LlmProvider` contract and provider implementations (OpenAI, Anthropic,

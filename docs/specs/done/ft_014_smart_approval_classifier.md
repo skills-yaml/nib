@@ -19,7 +19,7 @@ argument-aware deterministic classifier.
 ## Scope
 - Create `src/tools/classifier.rs` with deterministic logic to assess tool calls from
   their arguments. LLM-based classification requires a separate trust design.
-- Modify `src/agent/loop.rs` or `src/tools/executor.rs` to intercept tool execution and call the classifier.
+- Modify `src/agent/loop/mod.rs` or `src/tools/executor/mod.rs` to intercept tool execution and call the classifier.
 - If classified as `Safe`, bypass the user approval even if `auto_approve` is off for that tool category, or alternatively handle varying levels of risk (e.g. read-only commands vs destructive commands).
 - Implement basic command safety classification (e.g., `git status`, `cargo test`, `ls` are safe).
 
@@ -32,8 +32,8 @@ argument-aware deterministic classifier.
 
 ## Affected Areas
 - `src/tools/classifier.rs` (new)
-- `src/tools/executor.rs` (execution path changes)
-- `src/agent/loop.rs` (if approval logic is handled there)
+- `src/tools/executor/mod.rs` (execution path changes)
+- `src/agent/loop/mod.rs` (if approval logic is handled there)
 
 ## Validation Gates
 - `task check`
@@ -44,7 +44,7 @@ argument-aware deterministic classifier.
 Scope: classify the registered `run_terminal` tool, parse shell composition safely,
 apply AGENTS/skill policy rules, and test executor approval decisions end to end.
 
-Affected areas: `src/tools/classifier.rs`, `src/tools/executor.rs`, context policy
+Affected areas: `src/tools/classifier.rs`, `src/tools/executor/mod.rs`, context policy
 loading, and classifier/executor tests.
 
 Validation gates: safe/destructive/network/composition/policy tests, `task check`,
@@ -68,7 +68,7 @@ composition from auto-approval, and combine classifier results with AGENTS/skill
 
 ### Affected Areas
 
-`src/tools/classifier.rs`, `src/tools/executor.rs`, `src/agent/loop.rs`,
+`src/tools/classifier.rs`, `src/tools/executor/mod.rs`, `src/agent/loop/mod.rs`,
 `src/context/skills.rs`, and classifier/executor tests.
 
 ### Implementation Evidence

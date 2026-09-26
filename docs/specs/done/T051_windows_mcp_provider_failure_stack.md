@@ -44,7 +44,7 @@ failure and status boundary on Windows.
 
 ## Affected Areas
 
-- `src/integrations/mcp_server.rs`: failing test and, only if demonstrated,
+- `src/integrations/mcp_server/mod.rs`: failing test and, only if demonstrated,
   its MCP request boundary.
 - `Taskfile.yml` if a repeatable focused stack probe is needed.
 - `docs/specs/README.md` and this spec for state and validation evidence.

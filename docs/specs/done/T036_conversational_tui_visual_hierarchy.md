@@ -115,7 +115,7 @@ available in session persistence and explicit commands.
 
 ## Affected Areas
 
-- `src/interactive.rs` — display labels, compact TUI chrome, and quiet default
+- `src/interactive/mod.rs` — display labels, compact TUI chrome, and quiet default
   activity projection while preserving explicit detailed formatters.
 - `src/tui/mod.rs` — styled transcript, empty state, composer, contextual footer,
   compact completion menu, and cursor/layout calculations.

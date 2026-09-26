@@ -109,14 +109,14 @@ exposure. Historical Python/Pydantic paths and a global Task row are superseded.
 ### Affected Areas
 
 `src/tools/`, `src/sandbox/`, `src/session/`, `src/context/`, `src/agent/`,
-`src/integrations/mcp_server.rs`, and executor/runtime integration tests.
+`src/integrations/mcp_server/mod.rs`, and executor/runtime integration tests.
 
 ### Implementation Evidence
 
-- `src/tools/registry.rs`, `src/tools/core.rs`, and `src/tools/executor.rs` own schemas,
+- `src/tools/registry.rs`, `src/tools/core.rs`, and `src/tools/executor/mod.rs` own schemas,
   implementations, approval/policy, dispatch, and `ToolCallRecord` audit.
-- `src/agent/loop.rs` supplies bounded context and reconciles observations into the
-  persisted session plan; `src/sandbox/worktree.rs` owns session worktrees.
+- `src/agent/loop/mod.rs` supplies bounded context and reconciles observations into the
+  persisted session plan; `src/sandbox/worktree/mod.rs` owns session worktrees.
 
 ### Validation Evidence
 
@@ -158,7 +158,7 @@ dispatch either records a profile-session audit or fails before the tool runs.
 
 ### Affected Areas
 
-`src/tools/executor.rs`, `src/doctor.rs`, session persistence, and executor tests.
+`src/tools/executor/mod.rs`, `src/doctor.rs`, session persistence, and executor tests.
 
 ### Implementation Plan
 
