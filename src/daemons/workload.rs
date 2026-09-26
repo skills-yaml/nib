@@ -4237,58 +4237,69 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Responses fixture listener");
         let address = listener.local_addr().expect("Responses fixture address");
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("Responses fixture connection");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("Responses fixture timeout");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).expect("Responses fixture read");
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let content_length = String::from_utf8_lossy(&request[..header_end])
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .unwrap_or(0);
-                if request.len() >= header_end + 4 + content_length {
-                    break;
-                }
-            }
-            let body = format!(
-                "data: {}\n\n",
-                json!({
-                    "type": "response.completed",
-                    "response": {
-                        "id": "scheduled-response-failed",
-                        "status": "failed",
-                        "error": {
-                            "code": "scheduled_fixture_failure",
-                            "message": format!("provider rejected {secret}")
-                        },
-                        "output": []
+            for _ in 0..16 {
+                let (mut stream, _) = listener.accept().expect("Responses fixture connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("Responses fixture timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).expect("Responses fixture read");
+                    if read == 0 {
+                        break;
                     }
-                })
-            );
-            let response = format!(
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let content_length = String::from_utf8_lossy(&request[..header_end])
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                if !request.starts_with(b"POST /v1/responses HTTP/1.1\r\n") {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                let body = format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "scheduled-response-failed",
+                            "status": "failed",
+                            "error": {
+                                "code": "scheduled_fixture_failure",
+                                "message": format!("provider rejected {secret}")
+                            },
+                            "output": []
+                        }
+                    })
+                );
+                let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
-            stream
-                .write_all(response.as_bytes())
-                .expect("Responses fixture response");
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("Responses fixture response");
+                return;
+            }
+            panic!("Responses fixture did not receive its expected request");
         });
         format!("http://{address}/v1")
     }
@@ -4422,6 +4433,10 @@ mod tests {
         const SECRET: &str = "scheduled-provider-secret";
         let (directory, store, session_store) = scheduled_agent_fixture();
         let base_url = serve_failed_responses_once(SECRET);
+        let unrelated = reqwest::get(format!("{base_url}/unrelated"))
+            .await
+            .expect("unrelated fixture request");
+        assert_eq!(unrelated.status(), reqwest::StatusCode::NOT_FOUND);
         let mut config =
             crate::config::load_nib_config_full(directory.path()).expect("runtime config");
         config.llm.active_provider = Some("openai".to_string());

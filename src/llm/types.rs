@@ -305,7 +305,7 @@ impl ToolDefinition {
         json!({
             "name": self.name,
             "description": self.description,
-            "input_schema": self.parameters,
+            "input_schema": gemini_compatible_schema(&self.parameters),
         })
     }
 
@@ -313,7 +313,7 @@ impl ToolDefinition {
         json!({
             "name": self.name,
             "description": self.description,
-            "parameters": self.parameters,
+            "parameters": gemini_compatible_schema(&self.parameters),
         })
     }
 
@@ -328,11 +328,76 @@ impl ToolDefinition {
     }
 }
 
+/// Strip JSON Schema keywords unsupported by native tool declarations while
+/// preserving user-defined property names and values in schema metadata.
+pub(crate) fn gemini_compatible_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut cleaned = serde_json::Map::new();
+            for (key, child) in map {
+                if key == "additionalProperties" || key == "strict" || key.starts_with('$') {
+                    continue;
+                }
+                let child = if key == "properties" {
+                    match child {
+                        Value::Object(properties) => Value::Object(
+                            properties
+                                .iter()
+                                .map(|(name, schema)| {
+                                    (name.clone(), gemini_compatible_schema(schema))
+                                })
+                                .collect(),
+                        ),
+                        _ => child.clone(),
+                    }
+                } else if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
+                    child.clone()
+                } else {
+                    gemini_compatible_schema(child)
+                };
+                cleaned.insert(key.clone(), child);
+            }
+            Value::Object(cleaned)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(gemini_compatible_schema).collect()),
+        other => other.clone(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningOption {
     ProviderDefault,
     Disabled,
     Effort(ReasoningEffort),
+}
+
+/// Provider-neutral tool-selection policy for a single request.
+///
+/// `Auto` is the production default. `Required` is used by live qualification
+/// to request a function-tool path without changing planner semantics. An
+/// adapter may not be able to force that choice; qualification still requires
+/// an observed tool call before it can pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+}
+
+impl ToolChoice {
+    pub fn as_openai_value(self) -> Value {
+        match self {
+            Self::Auto => json!("auto"),
+            Self::Required => json!("required"),
+        }
+    }
+
+    pub fn as_gemini_mode(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Required => Some("ANY"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -401,6 +466,7 @@ pub struct LlmRequest<'a> {
     pub tools: Option<&'a [ToolDefinition]>,
     pub options: GenerationOptions,
     pub max_output_tokens: Option<u32>,
+    pub tool_choice: ToolChoice,
     pub scope: Option<LlmRequestScope>,
     pub continuation: Option<ProviderContinuation>,
 }
@@ -412,6 +478,7 @@ impl<'a> LlmRequest<'a> {
             tools,
             options: GenerationOptions::provider_default(),
             max_output_tokens: None,
+            tool_choice: ToolChoice::Auto,
             scope: None,
             continuation: None,
         }
@@ -444,6 +511,11 @@ impl<'a> LlmRequest<'a> {
         self
     }
 
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = tool_choice;
+        self
+    }
+
     pub fn with_scope(mut self, scope: LlmRequestScope) -> Self {
         self.scope = Some(scope);
         self
@@ -462,6 +534,7 @@ impl fmt::Debug for LlmRequest<'_> {
             .field("tool_count", &self.tools.map_or(0, <[ToolDefinition]>::len))
             .field("temperature", &self.options.temperature())
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("tool_choice", &self.tool_choice)
             .field("reasoning", &self.options.reasoning())
             .field("scope", &self.scope)
             .field("continuation", &self.continuation)
@@ -1130,6 +1203,25 @@ impl ToolCallAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compatible_tool_schema_preserves_property_names_and_default_values() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "additionalProperties": {"type": "string"},
+                "strict": {"type": "object", "default": {"strict": true}}
+            }
+        });
+        let cleaned = gemini_compatible_schema(&schema);
+        assert!(cleaned.get("additionalProperties").is_none());
+        assert_eq!(
+            cleaned["properties"]["additionalProperties"]["type"],
+            "string"
+        );
+        assert_eq!(cleaned["properties"]["strict"]["default"]["strict"], true);
+    }
 
     #[test]
     fn request_scope_debug_never_exposes_private_session_or_run_identity() {

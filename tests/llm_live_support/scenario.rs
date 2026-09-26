@@ -8,11 +8,11 @@ use super::{
     CatalogSnapshot, Classification, LlmTerminalStatus, ModelProfile, ScenarioId, TransportId,
 };
 use futures::{stream, StreamExt as _};
-use nib::config::{LlmApiMode, LlmConfig, NibConfig, ProviderEntry};
+use nib::config::{LlmApiMode, LlmConfig, NibConfig, ProviderEntry, ReasoningEffort};
 use nib::llm::{
     create_client, LlmError, LlmErrorClass, LlmErrorPhase, LlmFinishReason, LlmMessage, LlmRequest,
-    LlmRequestScope, LlmResponse, LlmStream, LlmUsage, RetryAttemptMetadata, ToolDefinition,
-    ToolResult,
+    LlmRequestScope, LlmResponse, LlmStream, LlmUsage, RetryAttemptMetadata, ToolChoice,
+    ToolDefinition, ToolResult,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -31,6 +31,11 @@ enum HarnessFailureCode {
     Configuration,
     Scope,
     ResponseMismatch,
+    ResponseRefused,
+    ResponseFinishMismatch,
+    ResponseUnexpectedToolState,
+    ResponseMissingNonce,
+    ResponseEmptyText,
     ToolCorrelation,
 }
 
@@ -43,6 +48,11 @@ impl HarnessFailureCode {
             Self::Configuration => "blocked_configuration",
             Self::Scope => "harness_scope",
             Self::ResponseMismatch => "response_mismatch",
+            Self::ResponseRefused => "response_refused",
+            Self::ResponseFinishMismatch => "response_finish_mismatch",
+            Self::ResponseUnexpectedToolState => "response_unexpected_tool_state",
+            Self::ResponseMissingNonce => "response_missing_nonce",
+            Self::ResponseEmptyText => "response_empty_text",
             Self::ToolCorrelation => "tool_correlation",
         }
     }
@@ -51,9 +61,15 @@ impl HarnessFailureCode {
         match self {
             Self::Budget | Self::ScenarioTimeout => Classification::BlockedBudget,
             Self::Configuration => Classification::BlockedConfiguration,
-            Self::Evidence | Self::Scope | Self::ResponseMismatch | Self::ToolCorrelation => {
-                Classification::FailedAdapter
-            }
+            Self::Evidence
+            | Self::Scope
+            | Self::ResponseMismatch
+            | Self::ResponseRefused
+            | Self::ResponseFinishMismatch
+            | Self::ResponseUnexpectedToolState
+            | Self::ResponseMissingNonce
+            | Self::ResponseEmptyText
+            | Self::ToolCorrelation => Classification::FailedAdapter,
         }
     }
 }
@@ -917,7 +933,9 @@ fn client_for_profile(
             .then(|| settings.meta_base_url.clone())
             .flatten(),
         api,
-        reasoning_effort: None,
+        reasoning_effort: (provider == "openai"
+            && matches!(profile.transport, TransportId::ChatCompletions))
+        .then_some(ReasoningEffort::None),
     };
     let llm = LlmConfig {
         active_provider: Some(provider.to_string()),
@@ -1047,10 +1065,12 @@ async fn tool_continuation(
         .collect::<Vec<_>>();
     let content = if parallel {
         format!(
-            "Call both record_probe_a with nonce {first_nonce} and record_probe_b with nonce {second_nonce}. Do not answer directly."
+            "You must invoke the record_probe_a and record_probe_b function tools. Pass nonce {first_nonce} to record_probe_a and nonce {second_nonce} to record_probe_b. After both tool results arrive, reply with only the receipt value."
         )
     } else {
-        format!("Call record_probe with nonce {first_nonce}. Do not answer directly.")
+        format!(
+            "You must invoke the record_probe function tool. Pass nonce {first_nonce} as the nonce argument. After the tool result arrives, reply with only the receipt value."
+        )
     };
     let messages = [LlmMessage::user(content)];
     let scope = scope(run_id, if parallel { "parallel" } else { "tool" })?;
@@ -1060,7 +1080,7 @@ async fn tool_continuation(
             Some(&tools),
             scope.clone(),
             settings,
-        ))
+        ).with_tool_choice(ToolChoice::Required))
         .await?;
     if response.terminal_status != LlmTerminalStatus::Completed {
         return Err(ScenarioFailure::harness(
@@ -1169,13 +1189,13 @@ fn validate_text_response(
 ) -> Result<(), ScenarioFailure> {
     if response.terminal_status != LlmTerminalStatus::Completed {
         return Err(ScenarioFailure::harness(
-            HarnessFailureCode::ResponseMismatch,
+            HarnessFailureCode::ResponseRefused,
             "qualification response was refused",
         ));
     }
     if response.finish_reason != LlmFinishReason::Complete {
         return Err(ScenarioFailure::harness(
-            HarnessFailureCode::ResponseMismatch,
+            HarnessFailureCode::ResponseFinishMismatch,
             "text qualification did not finish with the complete classification",
         ));
     }
@@ -1186,7 +1206,7 @@ fn validate_text_response(
         || response.continuation.is_some()
     {
         return Err(ScenarioFailure::harness(
-            HarnessFailureCode::ResponseMismatch,
+            HarnessFailureCode::ResponseUnexpectedToolState,
             "text qualification unexpectedly returned tool state",
         ));
     }
@@ -1195,13 +1215,13 @@ fn validate_text_response(
         .filter(|content| content.len() <= 64 * 1024 && content.contains(nonce))
         .ok_or_else(|| {
             ScenarioFailure::harness(
-                HarnessFailureCode::ResponseMismatch,
+                HarnessFailureCode::ResponseMissingNonce,
                 "qualification response did not contain its nonce",
             )
         })?;
     if content.trim().is_empty() {
         return Err(ScenarioFailure::harness(
-            HarnessFailureCode::ResponseMismatch,
+            HarnessFailureCode::ResponseEmptyText,
             "qualification response is missing text or a finish classification",
         ));
     }
@@ -1565,7 +1585,13 @@ mod tests {
 
         assert_eq!(
             classify_failure(&failure, Some(ScenarioId::CompleteText)),
-            (Classification::FailedAdapter, "response_mismatch")
+            (Classification::FailedAdapter, "response_finish_mismatch")
+        );
+
+        let failure = validate_text_response(LlmResponse::text("other text"), nonce).unwrap_err();
+        assert_eq!(
+            classify_failure(&failure, Some(ScenarioId::SingleToolContinuation)),
+            (Classification::FailedAdapter, "response_missing_nonce")
         );
     }
 

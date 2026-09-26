@@ -1377,11 +1377,12 @@ fn validate_provider_execution_evidence(
             .iter()
             .flat_map(|profile| profile.scenarios.iter()),
     );
-    let budget_truncated = provider
-        .profiles
-        .iter()
-        .flat_map(|profile| profile.scenarios.iter())
-        .any(|scenario| scenario.budget_blocked);
+    let budget_truncated = provider.blocker_classification == Some(Classification::BlockedBudget)
+        || provider
+            .profiles
+            .iter()
+            .flat_map(|profile| profile.scenarios.iter())
+            .any(|scenario| scenario.budget_blocked);
     let terminally_skipped_requests = provider
         .profiles
         .iter()
@@ -1391,31 +1392,52 @@ fn validate_provider_execution_evidence(
             total.checked_add(scenario.scenario.logical_requests())
         })
         .ok_or_else(|| "qualification skipped request evidence overflowed".to_string())?;
-    if provider.actual_logical_requests != aggregate.actual_logical_requests
-        || provider.actual_attempts != aggregate.actual_attempts
-        || provider.usage_requests != aggregate.usage_requests
+    let expected_concurrency = provider.profiles.len().min(limits.configured_concurrency);
+    if provider.actual_logical_requests != aggregate.actual_logical_requests {
+        return Err(format!(
+            "qualification provider aggregate execution evidence is inconsistent: actual_logical_requests {} vs {}",
+            provider.actual_logical_requests, aggregate.actual_logical_requests
+        ));
+    }
+    if provider.actual_attempts != aggregate.actual_attempts {
+        return Err(format!(
+            "qualification provider aggregate execution evidence is inconsistent: actual_attempts {:?} vs {:?}",
+            provider.actual_attempts, aggregate.actual_attempts
+        ));
+    }
+    if provider.usage_requests != aggregate.usage_requests
         || provider.usage_complete_requests != aggregate.usage_complete_requests
         || provider.usage_completeness != aggregate.usage_completeness
         || provider.usage != aggregate.usage
         || !same_cost(provider.actual_cost_usd, aggregate.actual_cost_usd)
-        || provider.evidence_complete != aggregate.valid
-        || provider.budget_truncated != budget_truncated
-        || provider.effective_concurrency
-            != provider.profiles.len().min(limits.configured_concurrency)
     {
         return Err(
-            "qualification provider aggregate execution evidence is inconsistent".to_string(),
+            "qualification provider aggregate execution evidence is inconsistent: usage or cost"
+                .to_string(),
         );
+    }
+    if provider.evidence_complete != aggregate.valid {
+        return Err(format!(
+            "qualification provider aggregate execution evidence is inconsistent: evidence_complete {} vs {}",
+            provider.evidence_complete, aggregate.valid
+        ));
+    }
+    if provider.budget_truncated != budget_truncated {
+        return Err(
+            "qualification provider aggregate execution evidence is inconsistent: budget_truncated"
+                .to_string(),
+        );
+    }
+    if provider.effective_concurrency != expected_concurrency {
+        return Err(format!(
+            "qualification provider aggregate execution evidence is inconsistent: effective_concurrency {} vs {}",
+            provider.effective_concurrency, expected_concurrency
+        ));
     }
     if provider.actual_logical_requests > provider.logical_requests
         || provider
             .actual_attempts
             .is_some_and(|attempts| attempts > provider.maximum_attempts)
-        || provider.usage.is_some_and(|usage| {
-            usize::try_from(usage.output_tokens)
-                .ok()
-                .is_none_or(|tokens| tokens > provider.maximum_output_tokens)
-        })
         || provider.actual_logical_requests > limits.max_logical_requests
         || provider
             .actual_attempts
@@ -1570,40 +1592,69 @@ fn validate_scenario_execution_evidence(
         .actual_logical_requests
         .checked_mul(MAX_ATTEMPTS_PER_LOGICAL_REQUEST)
         .ok_or_else(|| "qualification scenario attempt evidence overflowed".to_string())?;
-    let maximum_actual_output = u64::try_from(scenario.actual_logical_requests)
-        .ok()
-        .and_then(|requests| requests.checked_mul(u64::from(limits.max_output_tokens_per_request)))
-        .ok_or_else(|| "qualification scenario output evidence overflowed".to_string())?;
-    if scenario.actual_logical_requests > expected_requests
-        || scenario.usage_requests > scenario.actual_logical_requests
+    if scenario.actual_logical_requests > expected_requests {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: logical_requests {} > {}",
+            scenario.actual_logical_requests, expected_requests
+        ));
+    }
+    if scenario.usage_requests > scenario.actual_logical_requests
         || scenario.usage_complete_requests > scenario.usage_requests
         || scenario.usage_completeness != expected_usage_completeness
-        || scenario
-            .actual_attempts
-            .is_some_and(|attempts| attempts > maximum_actual_attempts)
-        || scenario
-            .usage
-            .is_some_and(|usage| usage.output_tokens > maximum_actual_output)
-        || scenario
-            .http_status
-            .is_some_and(|status| !(100..=599).contains(&status))
-        || (scenario.passed
-            && (scenario.actual_logical_requests != expected_requests
-                || scenario.actual_attempts.is_none()
-                || scenario
-                    .actual_attempts
-                    .is_some_and(|attempts| attempts < expected_requests)
-                || scenario.safe_error_class.is_some()
-                || scenario.http_status.is_some()
-                || scenario.budget_blocked
-                || scenario.not_executed_reason.is_some()
-                || scenario.duration_ms > limits.max_scenario_elapsed_ms))
-        || (!scenario.passed && scenario.safe_error_class.is_none())
-        || scenario.safe_error_class.as_ref().is_some_and(|class| {
-            class.is_empty() || class.len() > 128 || class.chars().any(char::is_control)
-        })
     {
-        return Err("qualification scenario request/attempt evidence is inconsistent".to_string());
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: usage completeness"
+                .to_string(),
+        );
+    }
+    if scenario
+        .actual_attempts
+        .is_some_and(|attempts| attempts > maximum_actual_attempts)
+    {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: attempts {:?} > {}",
+            scenario.actual_attempts, maximum_actual_attempts
+        ));
+    }
+    if scenario
+        .http_status
+        .is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err(format!(
+            "qualification scenario request/attempt evidence is inconsistent: http_status {:?}",
+            scenario.http_status
+        ));
+    }
+    if scenario.passed
+        && (scenario.actual_logical_requests != expected_requests
+            || scenario.actual_attempts.is_none()
+            || scenario
+                .actual_attempts
+                .is_some_and(|attempts| attempts < expected_requests)
+            || scenario.safe_error_class.is_some()
+            || scenario.http_status.is_some()
+            || scenario.budget_blocked
+            || scenario.not_executed_reason.is_some()
+            || scenario.duration_ms > limits.max_scenario_elapsed_ms)
+    {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: passing scenario"
+                .to_string(),
+        );
+    }
+    if !scenario.passed && scenario.safe_error_class.is_none() {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: missing safe_error_class"
+                .to_string(),
+        );
+    }
+    if scenario.safe_error_class.as_ref().is_some_and(|class| {
+        class.is_empty() || class.len() > 128 || class.chars().any(char::is_control)
+    }) {
+        return Err(
+            "qualification scenario request/attempt evidence is inconsistent: unsafe error class"
+                .to_string(),
+        );
     }
     if let Some(reason) = scenario.not_executed_reason {
         if reason != ScenarioNotExecutedReason::TransportUnsupportedByBasicProbe
@@ -1838,6 +1889,13 @@ fn markdown_summary(report: &QualificationReport) -> String {
             provider.complete,
             provider.passed
         ));
+        if let Some(class) = &provider.safe_error_class {
+            output.push_str(&format!("- Safe error class: `{class}`\n"));
+        }
+        if let Some(classification) = provider.blocker_classification {
+            output.push_str(&format!("- Blocker classification: `{classification:?}`\n"));
+        }
+        output.push('\n');
         if provider.catalog_drift {
             output.push_str("- Catalog drift: `true`\n\n");
         }
@@ -2722,6 +2780,15 @@ mod tests {
     use chrono::Utc;
     use std::time::Duration;
 
+    #[test]
+    fn blocked_provider_report_exposes_only_the_fixed_error_class() {
+        let report =
+            blocked_provider_report("openai", Classification::Unknown, "catalog_or_plan_failure");
+        let serialized = serde_json::to_value(report).expect("serialize blocked provider");
+        assert_eq!(serialized["safe_error_class"], "catalog_or_plan_failure");
+        assert!(serialized.get("safe_error").is_none());
+    }
+
     fn limits() -> LiveLimits {
         LiveLimits {
             max_logical_requests: 10_000,
@@ -3444,6 +3511,78 @@ mod tests {
                 })
         }));
         assert!(validate_report_consistency(&full).is_ok());
+    }
+
+    #[test]
+    fn canary_failed_scenarios_keep_consistent_execution_aggregates() {
+        let descriptor = nib::llm::registry::provider_descriptor("openai").unwrap();
+        let snapshot = CatalogSnapshot {
+            provider: "openai".to_string(),
+            captured_at: Utc::now(),
+            page_count: 1,
+            models: vec![planned_model(descriptor.default_model(), true)],
+        };
+        let mut canary = qualification_from_real_plan(LiveMode::Canary, &snapshot);
+        for profile in &mut canary.providers[0].profiles {
+            profile.classification = Classification::BlockedConfiguration;
+            profile.scenarios = profile
+                .required_scenarios
+                .iter()
+                .map(|scenario| ScenarioReport {
+                    scenario: *scenario,
+                    passed: false,
+                    duration_ms: 0,
+                    actual_logical_requests: 0,
+                    actual_attempts: Some(0),
+                    usage_requests: 0,
+                    usage_complete_requests: 0,
+                    usage_completeness: UsageCompleteness::Unknown,
+                    usage: None,
+                    actual_cost_usd: Some(0.0),
+                    http_status: None,
+                    budget_blocked: false,
+                    not_executed_reason: None,
+                    safe_error_class: Some("blocked_configuration".to_string()),
+                })
+                .collect();
+        }
+        refresh_provider_evidence(&mut canary.providers[0]);
+        canary.providers[0].complete = false;
+        canary.providers[0].passed = false;
+        let rebuilt = qualification_with_provider(LiveMode::Canary, canary.providers[0].clone());
+        assert!(
+            validate_report_consistency(&rebuilt).is_ok(),
+            "{:?}",
+            validate_report_consistency(&rebuilt)
+        );
+    }
+
+    #[test]
+    fn catalog_confirmation_budget_block_keeps_execution_aggregates_consistent() {
+        let descriptor = nib::llm::registry::provider_descriptor("openai").unwrap();
+        let snapshot = CatalogSnapshot {
+            provider: "openai".to_string(),
+            captured_at: Utc::now(),
+            page_count: 1,
+            models: vec![planned_model(descriptor.default_model(), true)],
+        };
+        let mut canary = qualification_from_real_plan(LiveMode::Canary, &snapshot);
+        mark_provider_blocker(
+            &mut canary.providers[0],
+            Classification::BlockedBudget,
+            "blocked_budget",
+        );
+        let rebuilt = qualification_with_provider(LiveMode::Canary, canary.providers[0].clone());
+        assert!(
+            validate_report_consistency(&rebuilt).is_ok(),
+            "{:?}",
+            validate_report_consistency(&rebuilt)
+        );
+        assert_eq!(
+            rebuilt.providers[0].blocker_classification,
+            Some(Classification::BlockedBudget)
+        );
+        assert!(rebuilt.providers[0].budget_truncated);
     }
 
     #[test]

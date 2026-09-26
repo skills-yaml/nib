@@ -4,7 +4,7 @@ use crate::config::ReasoningEffort;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmMessage, LlmRequest, LlmRequestScope, LlmResponse,
     LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation,
-    ToolCallAccumulator, ToolCallRequest, ToolDefinition, ToolResult,
+    ToolCallAccumulator, ToolCallRequest, ToolChoice, ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
 use async_trait::async_trait;
@@ -214,6 +214,7 @@ impl OpenAiCompatClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -240,7 +241,7 @@ impl OpenAiCompatClient {
             if max_output_tokens == 0 {
                 return Err("max_output_tokens must be greater than zero".to_string());
             }
-            let field = if self.provider == "openai" {
+            let field = if uses_max_completion_tokens(&self.provider) {
                 "max_completion_tokens"
             } else {
                 "max_tokens"
@@ -256,11 +257,10 @@ impl OpenAiCompatClient {
             }
         }
         if let Some(tools) = tools {
-            body["tools"] = json!(tools
-                .iter()
-                .map(ToolDefinition::to_openai_tool)
-                .collect::<Vec<_>>());
-            body["tool_choice"] = json!("auto");
+            body["tools"] = json!(encode_chat_tools(tools, &self.provider));
+            if let Some(choice) = chat_tool_choice(&self.provider, &self.model, tool_choice) {
+                body["tool_choice"] = choice;
+            }
         }
         if let Some(effort) = options.resolved_reasoning(self.reasoning_effort) {
             body["reasoning_effort"] = json!(effort.as_str());
@@ -407,6 +407,72 @@ impl OpenAiCompatClient {
     }
 }
 
+fn uses_max_completion_tokens(provider: &str) -> bool {
+    matches!(provider, "openai" | "grok")
+}
+
+fn encode_chat_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut encoded = tool.to_openai_tool();
+            if !chat_includes_strict(provider) {
+                if let Some(function) = encoded.get_mut("function").and_then(Value::as_object_mut) {
+                    function.remove("strict");
+                    if matches!(provider, "openrouter" | "meta") {
+                        if let Some(parameters) = function.get("parameters").cloned() {
+                            function.insert(
+                                "parameters".to_string(),
+                                crate::llm::types::gemini_compatible_schema(&parameters),
+                            );
+                        }
+                    }
+                }
+            }
+            encoded
+        })
+        .collect()
+}
+
+fn chat_includes_strict(provider: &str) -> bool {
+    matches!(provider, "openai" | "grok")
+}
+
+fn chat_tool_choice(provider: &str, model: &str, tool_choice: ToolChoice) -> Option<Value> {
+    if provider == "meta" || (provider == "openrouter" && model.starts_with("anthropic/")) {
+        None
+    } else {
+        Some(tool_choice.as_openai_value())
+    }
+}
+
+fn is_chat_refusal_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Bool(true) => true,
+        _ => true,
+    }
+}
+
+fn chat_text_content(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Array(parts)) => {
+            let mut text = String::new();
+            for part in parts {
+                if let Some(fragment) = part.as_str() {
+                    text.push_str(fragment);
+                } else if let Some(fragment) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(fragment);
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
 fn structured_chat_error_detail(body: &str) -> String {
     let Some(_error) = serde_json::from_str::<Value>(body)
         .ok()
@@ -515,12 +581,7 @@ fn chat_protocol_failure(data: &Value) -> Option<ChatProtocolFailure> {
                 .into_iter()
                 .flatten()
                 .filter_map(|part| part.get("refusal"))
-                .any(|refusal| {
-                    !refusal.is_null()
-                        && refusal
-                            .as_str()
-                            .is_none_or(|refusal| !refusal.trim().is_empty())
-                })
+                .any(is_chat_refusal_value)
         })
     }) {
         return Some(ChatProtocolFailure::new(ChatProtocolFailureKind::Refused));
@@ -1328,10 +1389,12 @@ pub fn parse_openai_stream_chunk(data: &Value) -> Result<Vec<LlmStreamEvent>, St
     };
     let mut events = Vec::new();
     let delta = choice.get("delta").unwrap_or(&Value::Null);
-    if let Some(content) = delta.get("content").and_then(Value::as_str) {
-        events.push(LlmStreamEvent::Delta(LlmDelta::Content(
-            content.to_string(),
-        )));
+    if let Some(content) = chat_text_content(delta.get("content")).or_else(|| {
+        choice
+            .get("message")
+            .and_then(|message| chat_text_content(message.get("content")))
+    }) {
+        events.push(LlmStreamEvent::Delta(LlmDelta::Content(content)));
     }
     if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
         crate::llm::ensure_response_item_count(tool_calls.len(), "OpenAI streamed tool calls")?;
@@ -1401,15 +1464,36 @@ fn parse_openai_usage(data: &Value) -> Result<Option<LlmUsage>, String> {
     let usage = usage
         .as_object()
         .ok_or_else(|| "OpenAI usage must be an object".to_string())?;
-    LlmUsage::new(
-        required_chat_usage_count(usage, "prompt_tokens")?,
-        required_chat_usage_count(usage, "completion_tokens")?,
-        required_chat_usage_count(usage, "total_tokens")?,
-        optional_chat_usage_detail(usage, "prompt_tokens_details", "cached_tokens")?,
-        optional_chat_usage_detail(usage, "completion_tokens_details", "reasoning_tokens")?,
-    )
-    .map(Some)
-    .map_err(|error| format!("OpenAI usage is invalid: {error}"))
+    let input = required_chat_usage_count(usage, "prompt_tokens")
+        .or_else(|_| required_chat_usage_count(usage, "input_tokens"))?;
+    let visible_output = required_chat_usage_count(usage, "completion_tokens")
+        .or_else(|_| required_chat_usage_count(usage, "output_tokens"))?;
+    let total = required_chat_usage_count(usage, "total_tokens")?;
+    let cached = match optional_chat_usage_detail(usage, "prompt_tokens_details", "cached_tokens")?
+    {
+        Some(cached) => Some(cached),
+        None => optional_chat_usage_detail(usage, "input_tokens_details", "cached_tokens")?,
+    };
+    let reasoning =
+        match optional_chat_usage_detail(usage, "completion_tokens_details", "reasoning_tokens")? {
+            Some(reasoning) => Some(reasoning),
+            None => optional_chat_usage_detail(usage, "output_tokens_details", "reasoning_tokens")?,
+        };
+    let output = match input.checked_add(visible_output) {
+        Some(sum) if sum == total => visible_output,
+        Some(sum) => match reasoning {
+            Some(reasoning) if sum.checked_add(reasoning) == Some(total) => visible_output
+                .checked_add(reasoning)
+                .ok_or_else(|| "OpenAI usage overflowed".to_string())?,
+            _ => {
+                return Err("OpenAI usage total does not match input plus output".to_string());
+            }
+        },
+        None => return Err("OpenAI usage overflowed".to_string()),
+    };
+    LlmUsage::new(input, output, total, cached, reasoning)
+        .map(Some)
+        .map_err(|error| format!("OpenAI usage is invalid: {error}"))
 }
 
 pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
@@ -1418,10 +1502,7 @@ pub fn parse_openai_response(data: &Value) -> Result<LlmResponse, String> {
     }
     let choice = &data["choices"][0];
     let message = &choice["message"];
-    let content = message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string());
+    let content = chat_text_content(message.get("content"));
 
     let mut tool_calls = Vec::new();
     if let Some(tcs) = message.get("tool_calls").and_then(|v| v.as_array()) {
@@ -1480,6 +1561,7 @@ mod tests {
     use crate::llm::test_support::{
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
+    use crate::llm::types::ToolChoice;
     use std::time::Duration;
 
     #[test]
@@ -1634,6 +1716,12 @@ mod tests {
                 "https://openrouter.ai/api/v1",
                 "https://openrouter.ai/api/v1/chat/completions",
             ),
+            (
+                "grok",
+                "grok-4.5",
+                "https://api.x.ai/v1",
+                "https://api.x.ai/v1/chat/completions",
+            ),
         ] {
             let client = OpenAiCompatClient::configured(
                 provider.to_string(),
@@ -1655,7 +1743,7 @@ mod tests {
             assert!(body.get("input").is_none());
             assert!(body.get("store").is_none());
             assert!(body.get("include").is_none());
-            if provider == "openai" {
+            if uses_max_completion_tokens(provider) {
                 assert_eq!(body["max_completion_tokens"], 37);
                 assert!(body.get("max_tokens").is_none());
             } else {
@@ -1733,6 +1821,156 @@ mod tests {
             .contains("authorization: bearer test-key"));
         assert!(request.contains("\"model\":\"test-model\""));
         assert!(request.contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn chat_request_encodes_required_tool_choice() {
+        let client = OpenAiCompatClient::configured(
+            "openai".to_string(),
+            "gpt-5.6-sol".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.openai.com/v1",
+            None,
+        );
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe")];
+        let body = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Chat request");
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["tools"][0]["function"]["strict"], false);
+    }
+
+    #[test]
+    fn compatible_chat_tools_omit_strict_and_meta_keeps_auto_choice() {
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe").with_strict(true)];
+        let grok = OpenAiCompatClient::configured(
+            "grok".to_string(),
+            "grok-4.5".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.x.ai/v1",
+            None,
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Grok Chat request");
+        assert_eq!(grok["tools"][0]["function"]["strict"], true);
+        assert_eq!(grok["tool_choice"], "required");
+
+        let openrouter_claude = OpenAiCompatClient::configured(
+            "openrouter".to_string(),
+            "anthropic/claude-opus-5".to_string(),
+            vec!["test-key".to_string()],
+            "https://openrouter.ai/api/v1",
+            None,
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid OpenRouter Chat request");
+        assert!(openrouter_claude["tools"][0]["function"]
+            .get("strict")
+            .is_none());
+        assert!(openrouter_claude.get("tool_choice").is_none());
+        assert!(openrouter_claude["tools"][0]["function"]["parameters"]
+            .get("additionalProperties")
+            .is_none());
+
+        let meta = OpenAiCompatClient::configured(
+            "meta".to_string(),
+            "muse-spark-1.1".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.meta.ai/v1",
+            None,
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Meta Chat request");
+        assert!(meta["tools"][0]["function"].get("strict").is_none());
+        assert!(meta.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn boolean_false_refusal_is_not_a_provider_refusal() {
+        let response = parse_openai_response(&json!({
+            "choices": [{
+                "message": {"content": "ok", "refusal": false},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("false refusal is an absent refusal");
+        assert_eq!(response.content.as_deref(), Some("ok"));
+        assert_eq!(response.finish_reason, LlmFinishReason::Complete);
+    }
+
+    #[test]
+    fn chat_parsers_read_array_content_parts() {
+        let complete = parse_openai_response(&json!({
+            "choices": [{
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "NIB_"},
+                        {"type": "text", "text": "ok"}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("array content");
+        assert_eq!(complete.content.as_deref(), Some("NIB_ok"));
+
+        let events = parse_openai_stream_chunk(&json!({
+            "choices": [{
+                "delta": {
+                    "content": [{"type": "text", "text": "NIB_ok"}]
+                },
+                "finish_reason": null
+            }]
+        }))
+        .expect("array stream content");
+        assert!(matches!(
+            &events[0],
+            LlmStreamEvent::Delta(LlmDelta::Content(value)) if value == "NIB_ok"
+        ));
+
+        let message_events = parse_openai_stream_chunk(&json!({
+            "choices": [{
+                "message": {"content": "NIB_ok"},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("message-shaped stream chunk");
+        assert!(matches!(
+            &message_events[0],
+            LlmStreamEvent::Delta(LlmDelta::Content(value)) if value == "NIB_ok"
+        ));
+    }
+
+    #[test]
+    fn complete_usage_counts_separate_reasoning_tokens_toward_output() {
+        let response = parse_openai_response(&json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 37,
+                "completion_tokens": 530,
+                "total_tokens": 800,
+                "completion_tokens_details": {"reasoning_tokens": 233}
+            }
+        }))
+        .expect("xAI-style usage with separate reasoning tokens");
+        assert_eq!(
+            response.usage,
+            Some(LlmUsage::new(37, 763, 800, None, Some(233)).unwrap())
+        );
     }
 
     #[test]

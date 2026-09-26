@@ -4,7 +4,7 @@
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
     LlmDelta, LlmFinishReason, LlmRequest, LlmRequestScope, LlmResponse, LlmStreamEvent,
-    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest,
+    LlmTerminalStatus, LlmUsage, ProviderCallId, ProviderContinuation, ToolCallRequest, ToolChoice,
     ToolDefinition, ToolResult,
 };
 use crate::tools::ToolInvocationId;
@@ -132,14 +132,14 @@ impl AnthropicClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
         let system = request_messages
             .iter()
             .find(|message| message.role == crate::llm::LlmMessageRole::System)
-            .map(|message| message.content.as_str())
-            .unwrap_or("You are nib, an AI agent.");
+            .map(|message| message.content.as_str());
         let mut messages = request_messages
             .iter()
             .filter(|message| message.role != crate::llm::types::LlmMessageRole::System)
@@ -164,9 +164,17 @@ impl AnthropicClient {
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_output_tokens.unwrap_or(4096),
-            "system": system,
             "messages": messages,
         });
+        let qualification_tool_turn =
+            tool_choice == ToolChoice::Required && tools.is_some_and(|tools| !tools.is_empty());
+        match system {
+            Some(system) => body["system"] = json!(system),
+            None if !qualification_tool_turn => {
+                body["system"] = json!("You are nib, an AI agent.");
+            }
+            None => {}
+        }
         if let Some(temperature) = options.temperature() {
             body["temperature"] = json!(temperature);
         }
@@ -176,11 +184,22 @@ impl AnthropicClient {
         if stream {
             body["stream"] = json!(true);
         }
+        if max_output_tokens.is_some() && tools.is_none() {
+            // Bounded text turns cannot also run adaptive thinking: thinking
+            // tokens share max_tokens, and Opus 5-class models think by default.
+            body["thinking"] = json!({"type": "disabled"});
+        }
         if let Some(tools) = tools {
             body["tools"] = json!(tools
                 .iter()
                 .map(ToolDefinition::to_anthropic_tool)
                 .collect::<Vec<_>>());
+            // Adaptive thinking disallows a forced tool choice. Keep the
+            // qualification request's effort hint scoped to explicit Required
+            // turns; ordinary Auto tool requests retain their prior body.
+            if qualification_tool_turn {
+                body["output_config"] = json!({"effort": "low"});
+            }
         }
         Ok(body)
     }
@@ -916,11 +935,7 @@ impl AnthropicStreamParser {
                         }));
                     }
                     Some("text") => {}
-                    Some(_) => {
-                        return Err(
-                            "Anthropic stream contained an unsupported content block".to_string()
-                        )
-                    }
+                    Some(_) => {}
                     None => return Err("Anthropic content block is missing its type".to_string()),
                 }
             }
@@ -1212,9 +1227,7 @@ pub fn parse_anthropic_response(data: &Value) -> Result<LlmResponse, String> {
                     arguments,
                 ));
             }
-            Some(_) => {
-                return Err("Anthropic response contains an unsupported content block".to_string())
-            }
+            Some(_) => {}
             None => return Err("Anthropic content block is missing its type".to_string()),
         }
     }
@@ -1249,7 +1262,7 @@ mod tests {
     use crate::llm::test_support::{
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
-    use crate::llm::types::{LlmRequestScope, ProviderContinuation};
+    use crate::llm::types::{LlmRequestScope, ProviderContinuation, ToolChoice};
     use std::time::Duration;
 
     fn test_client(base_url: String) -> AnthropicClient {
@@ -1423,6 +1436,56 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_request_disables_thinking_only_on_capped_text_turns() {
+        let client = test_client("https://api.anthropic.com/v1/messages".to_string());
+        let messages = [LlmMessage::user("call")];
+        let tools = [ToolDefinition::new(
+            "record_probe",
+            "Record one nonce",
+            json!({
+                "type": "object",
+                "properties": {"nonce": {"type": "string"}},
+                "required": ["nonce"],
+                "additionalProperties": false
+            }),
+        )
+        .expect("qualification tool")];
+        let body = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools))
+                    .with_max_output_tokens(512)
+                    .with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Anthropic request");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("system").is_none());
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body["tools"][0]["input_schema"]
+            .get("additionalProperties")
+            .is_none());
+        assert!(body["tools"][0].get("strict").is_none());
+        let ordinary_tool = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_max_output_tokens(512),
+                false,
+            )
+            .expect("valid ordinary Anthropic tool request");
+        assert_eq!(ordinary_tool["system"], "You are nib, an AI agent.");
+        assert!(ordinary_tool.get("output_config").is_none());
+        assert!(ordinary_tool.get("tool_choice").is_none());
+        let text_only = client
+            .request_body(
+                LlmRequest::new(&messages, None).with_max_output_tokens(512),
+                false,
+            )
+            .expect("valid Anthropic text request");
+        assert_eq!(text_only["thinking"]["type"], "disabled");
+    }
+
+    #[test]
     fn complete_and_stream_reject_malformed_tools_before_io() {
         let error = ToolDefinition::from_openai_value(&json!({
             "type": "function",
@@ -1459,6 +1522,25 @@ mod tests {
         assert!(parse_anthropic_response(&inconsistent)
             .expect_err("inconsistent tool terminal")
             .contains("inconsistent"));
+
+        let thinking = parse_anthropic_response(&json!({
+            "content": [
+                {"type": "thinking", "thinking": "private-chain"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "visible"}
+            ],
+            "stop_reason": "end_turn"
+        }))
+        .expect("thinking blocks are not part of the authorized text");
+        assert_eq!(thinking.content.as_deref(), Some("visible"));
+        assert_eq!(thinking.finish_reason, LlmFinishReason::Complete);
+
+        let stream_thinking = parse_anthropic_stream_event(
+            "content_block_start",
+            &json!({"index": 0, "content_block": {"type": "thinking"}}),
+        )
+        .expect("streamed thinking is skipped");
+        assert!(stream_thinking.is_empty());
 
         let unknown = json!({"content": [], "stop_reason": "remote_future_value"});
         let error = parse_anthropic_response(&unknown).expect_err("unknown terminal reason");
@@ -1541,6 +1623,7 @@ mod tests {
             .contains("x-api-key: anthropic-test-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
         assert!(request.contains("\"max_tokens\":43"));
+        assert!(!request.contains("\"thinking\""));
         assert!(request.contains("\"system\":\"follow project rules\""));
         assert!(request.contains("\"input_schema\""));
         assert!(!request.contains("\"stream\":true"));

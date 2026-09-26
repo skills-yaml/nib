@@ -31,6 +31,8 @@ fn selected_live_ci_contract_is_protected_and_reported() {
     assert!(workflow.contains(".scenario == \"single_tool_continuation\""));
     assert!(workflow.contains(".scenario == \"parallel_tool_continuation\""));
     assert!(workflow.contains(".not_applicable_scenarios[]"));
+    assert!(workflow.contains("NIB_LIVE_META_BASE_URL: ${{ vars.NIB_LIVE_META_BASE_URL }}"));
+    assert!(!workflow.contains("secrets.NIB_LIVE_META_BASE_URL"));
     assert!(workflow.contains("      - name: Upload sanitized live reports\n        if: always()"));
     assert!(workflow.contains("          if-no-files-found: ignore\n"));
     assert!(!workflow.contains("\n  pull_request:"));
@@ -51,5 +53,45 @@ async fn live_llm_qualification() {
         "live LLM qualification summary: {}",
         published.markdown.display()
     );
-    assert!(published.passed, "live LLM qualification did not pass");
+    assert!(
+        published.passed,
+        "live LLM qualification did not pass; {}",
+        live_provider_failure_summary(&published.json)
+    );
+}
+
+fn live_provider_failure_summary(path: &std::path::Path) -> String {
+    let Ok(value) = std::fs::read_to_string(path) else {
+        return format!("unable to read {}", path.display());
+    };
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(&value) else {
+        return format!("unable to parse {}", path.display());
+    };
+    report
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .map(|providers| {
+            providers
+                .iter()
+                .map(|provider| {
+                    format!(
+                        "{}:passed={}/class={}",
+                        provider
+                            .get("provider")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown"),
+                        provider
+                            .get("passed")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        provider
+                            .get("safe_error_class")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_else(|| "no provider results".to_string())
 }

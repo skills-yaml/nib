@@ -165,6 +165,7 @@ impl GeminiClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -204,6 +205,11 @@ impl GeminiClient {
                 .map(ToolDefinition::to_gemini_declaration)
                 .collect::<Vec<_>>();
             body["tools"] = json!([{"functionDeclarations": declarations}]);
+            if let Some(mode) = tool_choice.as_gemini_mode() {
+                body["toolConfig"] = json!({
+                    "functionCallingConfig": {"mode": mode}
+                });
+            }
         }
         Ok(body)
     }
@@ -906,7 +912,7 @@ pub fn gemini_function_declarations(tools: &[Value]) -> Result<Vec<Value>, Strin
             Ok(json!({
                 "name": name,
                 "description": description,
-                "parameters": parameters,
+                "parameters": crate::llm::types::gemini_compatible_schema(parameters),
             }))
         })
         .collect()
@@ -1181,7 +1187,7 @@ mod tests {
     use crate::llm::test_support::{
         serve_once, serve_once_with_declared_length, serve_open_stream,
     };
-    use crate::llm::types::{LlmRequestScope, ProviderContinuation};
+    use crate::llm::types::{LlmRequestScope, ProviderContinuation, ToolChoice};
     use std::time::Duration;
 
     fn test_client(base_url: String) -> GeminiClient {
@@ -1365,6 +1371,37 @@ mod tests {
         .expect("valid declarations");
         assert_eq!(declarations[0]["name"], "read_file");
         assert_eq!(declarations[0]["parameters"]["required"][0], "path");
+    }
+
+    #[test]
+    fn gemini_tool_schema_omits_json_schema_keywords_the_api_rejects() {
+        let client = GeminiClient::new(
+            "gemini-test".to_string(),
+            vec!["gemini-test-key".to_string()],
+        );
+        let tool = ToolDefinition::new(
+            "record_probe",
+            "Record one nonce",
+            json!({
+                "type": "object",
+                "properties": {"nonce": {"type": "string"}},
+                "required": ["nonce"],
+                "additionalProperties": false
+            }),
+        )
+        .expect("qualification tool")
+        .with_strict(true);
+        let messages = [LlmMessage::user("call")];
+        let body = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&[tool])).with_tool_choice(ToolChoice::Required),
+            )
+            .expect("valid Gemini request");
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        assert!(parameters.get("additionalProperties").is_none());
+        assert_eq!(parameters["required"][0], "nonce");
+        assert_eq!(parameters["properties"]["nonce"]["type"], "string");
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
     }
 
     #[test]

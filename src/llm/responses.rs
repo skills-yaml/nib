@@ -112,6 +112,21 @@ fn into_responses_input(
     Ok(input)
 }
 
+fn encode_responses_tools(tools: &[ToolDefinition], provider: &str) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut encoded = tool.to_responses_tool();
+            if !matches!(provider, "openai" | "grok") {
+                if let Some(object) = encoded.as_object_mut() {
+                    object.remove("strict");
+                }
+            }
+            encoded
+        })
+        .collect()
+}
+
 pub struct OpenAiResponsesClient {
     client: Client,
     provider: String,
@@ -207,6 +222,7 @@ impl OpenAiResponsesClient {
             tools,
             options,
             max_output_tokens,
+            tool_choice,
             scope,
             continuation,
         } = request;
@@ -245,13 +261,12 @@ impl OpenAiResponsesClient {
         }
         let has_tools = tools.is_some_and(|tools| !tools.is_empty());
         if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
-            body["tools"] = Value::Array(
-                tools
-                    .iter()
-                    .map(ToolDefinition::to_responses_tool)
-                    .collect(),
-            );
-            body["tool_choice"] = json!("auto");
+            body["tools"] = Value::Array(encode_responses_tools(tools, &self.provider));
+            if !(self.provider == "meta"
+                || (self.provider == "openrouter" && self.model.starts_with("anthropic/")))
+            {
+                body["tool_choice"] = tool_choice.as_openai_value();
+            }
         }
         if has_tools || has_continuation {
             body["include"] = json!(["reasoning.encrypted_content"]);
@@ -752,7 +767,7 @@ fn parse_terminal_response(
         )
     })?;
     let status = object.get("status").and_then(Value::as_str);
-    if status != Some("completed") {
+    if !matches!(status, Some("completed") | Some("complete")) {
         let detail = match status {
             Some("incomplete") => incomplete_detail(data),
             Some("failed") => structured_error_detail(data),
@@ -811,50 +826,61 @@ fn parse_terminal_response(
         match item_type {
             "message" => {
                 ensure_completed_item(item, provider, model, "message", secrets)?;
-                let parts = item
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| {
-                        contextual_error(
+                match item.get("content") {
+                    Some(Value::String(text)) => content.push_str(text),
+                    Some(Value::Array(parts)) => {
+                        crate::llm::ensure_response_item_count(
+                            parts.len(),
+                            "Responses content parts",
+                        )
+                        .map_err(|error| {
+                            contextual_error(provider, model, "protocol failure", &error, secrets)
+                        })?;
+                        for part in parts {
+                            match part.get("type").and_then(Value::as_str) {
+                                Some("output_text") | Some("text") => {
+                                    let text = part
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .ok_or_else(|| {
+                                            contextual_error(
+                                                provider,
+                                                model,
+                                                "protocol failure",
+                                                "output_text part was missing text",
+                                                secrets,
+                                            )
+                                        })?;
+                                    content.push_str(text);
+                                }
+                                Some("refusal") => {
+                                    refused = true;
+                                }
+                                Some(_) => {}
+                                None => {
+                                    if let Some(text) = part.as_str() {
+                                        content.push_str(text);
+                                    } else {
+                                        return Err(contextual_error(
+                                            provider,
+                                            model,
+                                            "protocol failure",
+                                            "response content part was missing its type",
+                                            secrets,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(contextual_error(
                             provider,
                             model,
                             "protocol failure",
                             "response message was missing its content array",
                             secrets,
-                        )
-                    })?;
-                crate::llm::ensure_response_item_count(parts.len(), "Responses content parts")
-                    .map_err(|error| {
-                        contextual_error(provider, model, "protocol failure", &error, secrets)
-                    })?;
-                for part in parts {
-                    match part.get("type").and_then(Value::as_str) {
-                        Some("output_text") => {
-                            let text =
-                                part.get("text").and_then(Value::as_str).ok_or_else(|| {
-                                    contextual_error(
-                                        provider,
-                                        model,
-                                        "protocol failure",
-                                        "output_text part was missing text",
-                                        secrets,
-                                    )
-                                })?;
-                            content.push_str(text);
-                        }
-                        Some("refusal") => {
-                            refused = true;
-                        }
-                        Some(_) => {}
-                        None => {
-                            return Err(contextual_error(
-                                provider,
-                                model,
-                                "protocol failure",
-                                "response content part was missing its type",
-                                secrets,
-                            ));
-                        }
+                        ));
                     }
                 }
             }
@@ -1025,7 +1051,9 @@ fn ensure_completed_item(
 ) -> Result<(), String> {
     match item.get("status") {
         None | Some(Value::Null) => Ok(()),
-        Some(Value::String(status)) if status == "completed" => Ok(()),
+        Some(Value::String(status)) if matches!(status.as_str(), "completed" | "complete") => {
+            Ok(())
+        }
         _ => Err(contextual_error(
             provider,
             model,
@@ -1280,6 +1308,7 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm::test_support::serve_once;
+    use crate::llm::types::ToolChoice;
     use std::time::Duration;
 
     fn completed_with_call() -> Value {
@@ -1668,6 +1697,28 @@ mod tests {
                 .expect_err("terminal must fail");
             assert!(error.contains("Responses API"));
         }
+    }
+
+    #[test]
+    fn complete_status_and_text_content_parts_are_accepted() {
+        let response = parse_terminal_response(
+            &json!({
+                "status": "complete",
+                "output": [{
+                    "type": "message",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": "NIB_ok"}]
+                }]
+            }),
+            "meta",
+            "muse-spark-1.1",
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("complete/text are valid terminal shapes");
+        assert_eq!(response.content.as_deref(), Some("NIB_ok"));
+        assert_eq!(response.finish_reason, LlmFinishReason::Complete);
     }
 
     #[test]
@@ -2114,5 +2165,75 @@ mod tests {
             .to_responses_tool();
         assert_eq!(loose["strict"], false);
         assert_eq!(strict["strict"], true);
+    }
+
+    #[test]
+    fn responses_request_encodes_required_tool_choice() {
+        let client = OpenAiResponsesClient::new(
+            "openai",
+            "gpt-5.6-sol".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.openai.com/v1/responses",
+        );
+        let messages = [crate::llm::types::LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe")];
+        let (body, _, _) = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+                false,
+            )
+            .expect("valid Responses request");
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn compatible_responses_tools_omit_strict_and_meta_keeps_auto_choice() {
+        let messages = [crate::llm::types::LlmMessage::user("call")];
+        let tools = [ToolDefinition::function("record_probe").with_strict(true)];
+        let grok = OpenAiResponsesClient::new(
+            "grok",
+            "grok-4.5".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.x.ai/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Grok Responses request")
+        .0;
+        assert_eq!(grok["tools"][0]["strict"], true);
+        assert_eq!(grok["tool_choice"], "required");
+
+        let openrouter_claude = OpenAiResponsesClient::new(
+            "openrouter",
+            "anthropic/claude-opus-5".to_string(),
+            vec!["test-key".to_string()],
+            "https://openrouter.ai/api/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid OpenRouter Responses request")
+        .0;
+        assert!(openrouter_claude["tools"][0].get("strict").is_none());
+        assert!(openrouter_claude.get("tool_choice").is_none());
+
+        let meta = OpenAiResponsesClient::new(
+            "meta",
+            "muse-spark-1.1".to_string(),
+            vec!["test-key".to_string()],
+            "https://api.meta.ai/v1/responses",
+        )
+        .request_body(
+            LlmRequest::new(&messages, Some(&tools)).with_tool_choice(ToolChoice::Required),
+            false,
+        )
+        .expect("valid Meta Responses request")
+        .0;
+        assert!(meta["tools"][0].get("strict").is_none());
+        assert!(meta.get("tool_choice").is_none());
     }
 }

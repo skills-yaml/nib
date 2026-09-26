@@ -31,7 +31,7 @@ pub use types::{
     GenerationOptions, LlmDelta, LlmFinishReason, LlmMessage, LlmMessageRole, LlmRequest,
     LlmRequestScope, LlmResponse, LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId,
     ProviderContinuation, ReasoningOption, StreamEvent, ToolCallAccumulator, ToolCallRequest,
-    ToolDefinition, ToolResult, ToolResultClass,
+    ToolChoice, ToolDefinition, ToolResult, ToolResultClass,
 };
 
 pub(crate) const MAX_LLM_COMPLETE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
