@@ -142,6 +142,14 @@ tasks:
         -- --exact --test-threads=1
       - >-
         cargo test --lib
+        tools::delegation::tests::test_part_3::sweep_pair_and_both_half_deletions_stop_at_expired_quarantines
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::missing_legacy_directory_retries_anchor_quarantine_without_creating_state
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
         tools::delegation::tests::test_part_2::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
         -- --exact --test-threads=1
       - >-
