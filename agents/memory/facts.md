@@ -313,3 +313,26 @@ containment. Hosted Linux runtime line coverage was 85.87 percent
 T023 remains open because ordinary credential-free evidence cannot substitute for
 owner-approved paid live qualification. FT-015/FT-017 completion retains the
 Linux+bwrap-only production boundary; FT-020 owns future protected non-Linux authority.
+
+## 2026-09-25 - FT-020 done fail-closed; T023 live unverifiable
+
+- Type: fact
+- Source: development/backlog implementation goal; live Task verdicts and GitHub env inventory
+- Confidence: high
+- Review: 2026-09-25 two-stage review for FT-020; T023 remains owner-gated
+- Supersedes: 2026-09-02 canonical lifecycle 44 done / T023 development / FT-020 backlog
+
+Content:
+
+The catalog lifecycle is 63 specs in `done/`, T023 alone in `development/`, and
+zero backlog specs. FT-020 shipped the Windows protected Job owner (non-inheritable
+handle, DACL deny WRITE_DAC|WRITE_OWNER to Everyone) and macOS LaunchDaemon
+preflight. `ProcessScopeBackend::production()` stays fail-closed on Windows and
+macOS; Linux remains bwrap PID-namespace. Enabling those platforms is a later
+independent native qualification, not this spec's Done bar.
+
+T023 live catalog/canary/selected/full is unverifiable: process provider keys,
+`NIB_LIVE_TESTS`/`NIB_LIVE_ACK_COSTS`, GitHub `llm-live-*` secrets/variables, and
+OpenRouter `approved = true` entries are all absent. Real Task catalog with
+`NIB_LIVE_TESTS=1` failed `blocked_auth` on missing `OPENAI_API_KEY`. Offline
+harness 66/66 non-ignored tests passed and is not a Done substitute.

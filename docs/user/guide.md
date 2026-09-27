@@ -442,11 +442,19 @@ without starting a plan or asking the user to choose an option.
 
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox
-  posture, plan, and queued follow-up count.
-- `/context` shows the compact approximate usage indicator. `/context details` adds a
-  bounded breakdown of message and summary coverage, retained human intent,
-  unresolved clarifications, selected skills, and the latest run's generation, tool,
-  compression, repeated-question, and approximate input-token counters.
+  posture, plan, and queued follow-up count. When a run stops, the transcript
+  shows a heading, a reason, and a next action (usually inspect `/status`) instead
+  of an internal token such as `local_error`.
+  If managed Git worktree preparation fails, nib stops before running the proposed
+  tools, records that stage in the session, and advises checking Git worktree health
+  and running `nib doctor` before retrying.
+- `/context` shows the compact occupancy indicator (`ctx ~18k/64k`). `/context details`
+  adds a bounded breakdown of the last prepared/sent request snapshot, response
+  reserve and headroom, contributions, occupancy versus cumulative provider usage,
+  message and summary coverage, retained human intent, unresolved clarifications,
+  selected skills, and the latest run's generation, tool, compression, and
+  repeated-question counters. Inspection is local and read-only, including while a
+  run is active or an approval/question owns the prompt (TUI: F2 then `/context`).
 - `/model` or `/model <name>` lists or selects a model.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox
@@ -754,9 +762,10 @@ Timeout, cancellation, manager drop, fatal transport, and direct-server-exit cle
 are bounded, terminate descendants that remain in the managed process group, and reap
 the direct child. During a supervised subagent run, MCP children also remain inside the
 bwrap PID namespace rooted at the validated namespace PID 1 on Linux. Native Job Object
-and process-group mechanism tests exist for Windows and macOS, but production subagent
-delegation fails closed on those
-platforms until managed workers cannot forge the durable cleanup authority. Linux
+and process-group mechanism tests exist for Windows and macOS. Windows Job Objects used
+for those tests carry a non-inheritable protected-owner handle whose DACL denies
+WRITE_DAC and WRITE_OWNER to Everyone. Production subagent delegation still fails
+closed on Windows and macOS until that owner is natively qualified. Linux
 locally proves cleanup of a descendant that calls `setsid`.
 
 HTTP/SSE MCP transports and OAuth are not implemented in this release. Both outbound
@@ -786,13 +795,18 @@ bypass `ToolExecutor` policy.
 nib --version
 nib version
 nib context . --task "inspect the parser"
+nib context --session <session-id>
+nib context --session <session-id> --json
 nib task list
 nib task get <task-id>
 nib task cancel <task-id>
 nib task reconcile
 ```
 
-`nib context` prints assembled AGENTS and skill context. `demo-tool` is a developer
+`nib context` prints assembled AGENTS and skill context (a project preview, not a
+live request). `nib context --session <id>` inspects that session's latest prepared
+or sent request snapshot; `--json` emits a bounded document with
+`kind=live_request` or `kind=project_preview`. `demo-tool` is a developer
 diagnostic rather than a normal agent workflow. Background terminal calls and
 scheduled wakes create profile-scoped durable task records. The task commands emit
 JSON for inspecting them, requesting cancellation, and failing workers whose leases

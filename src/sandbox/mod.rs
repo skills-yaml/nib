@@ -1,6 +1,7 @@
 //! Hybrid sandbox: executable bwrap isolation with a documented direct fallback.
 
 pub mod process;
+pub(crate) mod protected_owner;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod windows_job;
@@ -1199,8 +1200,12 @@ pub fn doctor_report() -> String {
         Ok(process::ProcessScopeBackend::LinuxPidNamespace) => {
             "available (Linux bwrap PID namespace)".to_string()
         }
-        Ok(process::ProcessScopeBackend::WindowsJobObject) => unreachable!(),
-        Ok(process::ProcessScopeBackend::MacosProcessGroup) => unreachable!(),
+        Ok(process::ProcessScopeBackend::WindowsJobObject) => {
+            "available (Windows Job Object with protected cleanup owner)".to_string()
+        }
+        Ok(process::ProcessScopeBackend::MacosProcessGroup) => {
+            "available (macOS process group with protected cleanup reaper)".to_string()
+        }
         Err(error) => format!("unavailable ({error})"),
     };
     format!(

@@ -93,7 +93,7 @@ arbitrary live-model compliance.
 `src/agent/` runtime and shared instructions; `src/context/` prompts, attachments,
 budgeting, and compression; focused tests; `Taskfile.yml`; `docs/tech/task.md`;
 `docs/tech/architecture.md`; `docs/user/guide.md`; spec inventory.
-`src/interactive.rs` classifies the new blocked outcome consistently on history reload.
+`src/interactive/mod.rs` classifies the new blocked outcome consistently on history reload.
 `build.rs` and its metadata-discovery tests cover efficient worktree builds.
 Session schema, external integrations, UI input semantics, and permissions stay compatible.
 

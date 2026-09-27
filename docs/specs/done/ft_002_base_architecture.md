@@ -160,7 +160,7 @@ complete for the current library, binary, sandbox, and integration modules.
 
 ### Affected Areas
 
-`src/tools/executor.rs`, `src/doctor.rs`, `docs/tech/architecture.md`,
+`src/tools/executor/mod.rs`, `src/doctor.rs`, `docs/tech/architecture.md`,
 `docs/tech/project_structure.md`, and documentation tests.
 
 ### Implementation Plan

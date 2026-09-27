@@ -29,7 +29,7 @@ A single agent loop struggles with massive codebase refactors. It loses context 
 - Unit or integration tests demonstrate subagent spawning and completion.
 
 ## Affected Areas
-- `src/tools/delegation.rs` (new module)
+- `src/tools/delegation/mod.rs` (new module)
 - `src/tools/registry.rs` (registering new tools)
 - `src/tools/core.rs` (dispatching delegation tools)
 - `src/tools/mod.rs` (exporting delegation)
@@ -43,7 +43,7 @@ A single agent loop struggles with massive codebase refactors. It loses context 
 Scope: link parent/child sessions and worktrees, expose status/results, require
 verification before merge, avoid nested worktree routing, and test reconciliation.
 
-Affected areas: `src/tools/delegation.rs`, `src/daemons/task.rs`, worktree/session
+Affected areas: `src/tools/delegation/mod.rs`, `src/daemons/task.rs`, worktree/session
 models, registry/executor routing, and delegation tests.
 
 Validation gates: spawn/status/message/verified-merge tests, `task check`, and `task test`.
@@ -70,19 +70,19 @@ and results, support message/cancel, and require separately approved verificatio
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, `src/tools/executor.rs`, `src/daemons/task.rs`,
-`src/sandbox/worktree.rs`, session state, and delegation tests.
+`src/tools/delegation/mod.rs`, `src/tools/executor/mod.rs`, `src/daemons/task.rs`,
+`src/sandbox/worktree/mod.rs`, session state, and delegation tests.
 
 ### Implementation Evidence
 
 `SubagentRecord`, `SubagentRunGuard`, and `VerificationEvidence` in
-`src/tools/delegation.rs` provide durable reconciliation and verified merge input.
+`src/tools/delegation/mod.rs` provide durable reconciliation and verified merge input.
 
 ### Validation Evidence
 
 Eleven scenarios in `tests/delegation.rs` cover spawn, completion/bounds, policy,
 cancellation, interruption, symlinks/bounds, verification, backend failure, merge, and
-the child allow-policy ceiling. The `src/tools/delegation.rs` cleanup-failure unit test
+the child allow-policy ceiling. The `src/tools/delegation/mod.rs` cleanup-failure unit test
 proves that `merged` is impossible until worktree cleanup succeeds.
 
 ### Historical Validation Gates
@@ -138,7 +138,7 @@ Git integration, cleanup, and durable status cannot silently disagree.
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, `src/sandbox/worktree.rs`, delegation records, and
+`src/tools/delegation/mod.rs`, `src/sandbox/worktree/mod.rs`, delegation records, and
 `tests/delegation.rs`.
 
 ### Validation Gates
@@ -171,7 +171,7 @@ existing merge/recovery ownership proofs.
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, delegation lock tests, lifecycle documentation, and final
+`src/tools/delegation/mod.rs`, delegation lock tests, lifecycle documentation, and final
 validation evidence.
 
 ### Validation Evidence
@@ -222,7 +222,7 @@ natural completion or leaving an untracked child.
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, task ownership/status inspection, session audit, delegation
+`src/tools/delegation/mod.rs`, task ownership/status inspection, session audit, delegation
 record migration, and process-level delegation tests.
 
 ### Validation Gates
@@ -333,8 +333,8 @@ user-configured helpers while creating, verifying, merging, or compensating work
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, `src/daemons/state.rs`, `src/fs_security.rs`,
-`src/sandbox/mod.rs`, `src/sandbox/worktree.rs`, `src/integrations/worktree.rs`,
+`src/tools/delegation/mod.rs`, `src/daemons/state/mod.rs`, `src/fs_security.rs`,
+`src/sandbox/mod.rs`, `src/sandbox/worktree/mod.rs`, `src/integrations/worktree.rs`,
 managed-process platform support, delegation/MCP/worktree tests, and FT-015 lifecycle
 evidence.
 
@@ -604,7 +604,7 @@ before the residual-artifact assertions and included in their failure diagnostic
 
 ### Affected Areas
 
-`src/sandbox/worktree.rs`, `src/tools/delegation.rs`, `src/tools/executor.rs`,
+`src/sandbox/worktree/mod.rs`, `src/tools/delegation/mod.rs`, `src/tools/executor/mod.rs`,
 `tests/delegation.rs`, focused worktree and repository-lock tests, this FT-015 evidence,
 and the hosted CI matrix.
 
@@ -743,7 +743,7 @@ unchanged.
 
 ### Affected Areas
 
-`src/tools/delegation.rs`, `src/integrations/mcp_server.rs`, `tests/installers.rs`,
+`src/tools/delegation/mod.rs`, `src/integrations/mcp_server/mod.rs`, `tests/installers.rs`,
 `Taskfile.yml`, this spec, and exact-revision hosted native validation.
 
 ### Validation Evidence

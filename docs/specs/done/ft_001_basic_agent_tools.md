@@ -279,8 +279,8 @@ session audit, worktree sandbox, context policy, and stdio MCP exposure describe
 
 ### Implementation Evidence
 
-`src/tools/registry.rs`, `src/tools/core.rs`, and `src/tools/executor.rs` replace the
-historical Python/Pydantic proposal. `src/agent/loop.rs` links observations to the
+`src/tools/registry.rs`, `src/tools/core.rs`, and `src/tools/executor/mod.rs` replace the
+historical Python/Pydantic proposal. `src/agent/loop/mod.rs` links observations to the
 profile session and persisted `PlanStep` rather than a global Task row.
 `src/context/project_docs.rs` discovers bounded conventional standards and library
 documentation, and `src/context/budget.rs` accounts for that group in the aggregate

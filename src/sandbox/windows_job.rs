@@ -18,11 +18,11 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-    JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, IsProcessInJob, JobObjectBasicAccountingInformation,
+    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     OpenProcess, OpenThread, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
@@ -57,13 +57,9 @@ pub struct WindowsJob {
 
 impl WindowsJob {
     fn create() -> io::Result<Self> {
-        // A null SECURITY_ATTRIBUTES pointer creates a non-inheritable handle, and
-        // a null name gives each managed child an independent Job Object.
-        let raw_handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-        if raw_handle.is_null() {
-            return Err(last_os_error("cannot create Windows Job Object"));
-        }
-        let handle = owned_handle(raw_handle);
+        let protected = crate::sandbox::protected_owner::create_protected_job_object()?;
+        let handle = protected.handle;
+        let raw_handle = raw_handle(&handle);
 
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;

@@ -1,5 +1,6 @@
 use crate::context::budget::{
-    build_bounded_planning_input, ensure_required_instructions_present, PlanningPromptRequest,
+    build_bounded_planning_input, ensure_required_instructions_present, BoundedLlmInput,
+    PlanningPromptRequest,
 };
 use crate::context::RuntimeContextSections;
 use crate::llm::types::{LlmRequest, LlmRequestScope, StreamEvent, ToolCallRequest};
@@ -75,7 +76,7 @@ pub(crate) fn validate_planning_instruction_context(
     context: &RuntimeContextSections,
     session: Option<&crate::session::Session>,
     context_length: usize,
-) -> Result<(), String> {
+) -> Result<BoundedLlmInput, String> {
     let tools = planning_tools();
     let bounded = build_bounded_planning_input(PlanningPromptRequest {
         context,
@@ -86,7 +87,8 @@ pub(crate) fn validate_planning_instruction_context(
             .expect("planning tool schema is always an array"),
         context_length,
     })?;
-    ensure_required_instructions_present(&bounded, &context.agents)
+    ensure_required_instructions_present(&bounded, &context.agents)?;
+    Ok(bounded)
 }
 
 // Planning APIs preserve the canonical typed LLM failure (including retry/phase metadata) for
@@ -183,7 +185,10 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
     };
     let typed_messages = crate::llm::LlmMessage::from_openai_values(&bounded.messages)?;
     let typed_tools = crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref())?;
-    let request = LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(scope);
+    let request = crate::context::snapshot::apply_response_reserve(
+        LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(scope),
+        context_length,
+    );
     let completed = finish_private_planning_stream(llm.stream(request).await?).await?;
     let plan = plan_from_tool_calls(goal, completed.tool_calls.unwrap_or_default())
         .map_err(crate::llm::LlmError::from)?;

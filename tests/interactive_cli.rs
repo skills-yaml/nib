@@ -181,7 +181,14 @@ fn plain_compact_and_background_commands_use_session_scoped_runtime_effects() {
         stdout.contains("Session-owned running background work"),
         "{stdout}"
     );
-    assert!(stdout.contains("context_unchanged"), "{stdout}");
+    assert!(
+        stdout.contains("Context unchanged. No compression was needed or available."),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("[stream ended] context_unchanged"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("waits on T003"), "{stdout}");
     assert!(!stdout.contains("waits on FT-017"), "{stdout}");
 

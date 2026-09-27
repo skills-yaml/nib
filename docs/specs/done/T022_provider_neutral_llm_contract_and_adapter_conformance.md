@@ -674,7 +674,7 @@ reconciliation is safer and auditable.
 - `src/llm/openai.rs`, `src/llm/responses.rs`, `src/llm/anthropic.rs`,
   `src/llm/gemini.rs`, `src/llm/mock.rs`, and provider-specific wrappers/codecs
 - `src/config/mod.rs`, `src/auth.rs`, `src/config_cmd.rs`, and `src/doctor.rs`
-- `src/agent/planner.rs`, `src/agent/loop.rs`, and run reconciliation
+- `src/agent/planner.rs`, `src/agent/loop/mod.rs`, and run reconciliation
 - `src/context/`, delegated/durable execution, CLI/chat/run, TUI, gateway, and MCP
   observer paths
 - session/audit tests that prove private provider state is not persisted

@@ -247,7 +247,7 @@ fn report_run_summary(
     if summary.is_failure() {
         return Err(summary
             .user_failure_report()
-            .unwrap_or_else(|| format!("Agent run failed: {}\nSession: {sid}", summary.outcome)));
+            .unwrap_or_else(|| nib::interactive::user_visible_stop_report(&summary.outcome, sid)));
     }
     println!("Agent run completed for session {sid}");
     if args.mode == "plan" {

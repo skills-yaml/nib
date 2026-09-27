@@ -191,13 +191,13 @@ TUI input behavior can drift because they are represented separately.
 
 ## Affected Areas
 
-- `src/interactive.rs` — shared command metadata, parser/help consistency, and the
+- `src/interactive/mod.rs` — shared command metadata, parser/help consistency, and the
   presentation-neutral session-selection effect.
 - `src/tui/mod.rs` — current-session projection, layout/focus state, session switcher,
   resume confirmation, completion popup, and modal precedence.
 - `src/session/` — read-only bounded metadata/projection helpers only if existing APIs
   cannot safely provide them; no persistence schema change is expected.
-- `src/chat.rs` — bounded line-mode completion, session selection/confirmation, and
+- `src/chat/mod.rs` — bounded line-mode completion, session selection/confirmation, and
   repeated-turn routing after a confirmed switch.
 - `docs/user/guide.md` and `README.md` — user-facing TUI behavior where applicable.
 - Interactive parser, Ratatui `TestBackend`, direct-key-dispatch, session persistence,
@@ -247,7 +247,7 @@ TUI input behavior can drift because they are represented separately.
 
 ## Implementation Reconciliation (2026-08-19)
 
-- `src/interactive.rs` now owns one typed, ordered command registry for aliases,
+- `src/interactive/mod.rs` now owns one typed, ordered command registry for aliases,
   parsing, help, usage, summaries, and bounded command/fixed-subcommand completion.
 - The TUI now renders a session-ID-bound active timeline with separate bounded
   persisted and live projections. `/clear` and confirmed resume replace that complete

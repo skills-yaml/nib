@@ -91,9 +91,9 @@ T036 quieted chrome but the default view is still a string dump:
 
 ## Affected Areas
 
-- `src/interactive.rs` — activity fold flag, mutating tool projection, tool summaries, session labels, optional chrome-key helper.
-- `src/llm/types.rs`, `src/agent/loop.rs`, `src/tools/core.rs`, and
-  `src/tools/executor.rs` — exact invocation identity on projected tool lifecycle
+- `src/interactive/mod.rs` — activity fold flag, mutating tool projection, tool summaries, session labels, optional chrome-key helper.
+- `src/llm/types.rs`, `src/agent/loop/mod.rs`, `src/tools/core.rs`, and
+  `src/tools/executor/mod.rs` — exact invocation identity on projected tool lifecycle
   and terminal-output events.
 - `src/tui/mod.rs` — block render, focus, keys, composer chrome, chrome cache, completion Enter, copy.
 - `docs/user/guide.md` — layout and key contract.

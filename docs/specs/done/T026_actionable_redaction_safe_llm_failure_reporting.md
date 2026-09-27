@@ -45,7 +45,7 @@ and exposes presentation tags that the Rust console does not interpret.
 | `LlmClient` and `LlmStream` | Completion and stream failures use `Result<_, String>`. | Type, retry state, and safe structured context are irreversibly flattened. |
 | Agent loop | The string becomes an `llm_stream_failed: ...` outcome and is persisted during reconciliation. | Machine state and display prose are coupled; callers must parse or repeat an internal string. |
 | Chat/run wrappers | The failure outcome is wrapped again as `agent run failed for session ...`. | The user sees nested implementation wording rather than one actionable incident report. |
-| Chat presentation | `src/chat.rs` prints `[dim]`, `[red]`, `[yellow]`, `[green]`, and `[bold]` tokens directly, mixed with raw ANSI escapes. | Styling tokens appear literally and redirected output is inconsistent. |
+| Chat presentation | `src/chat/mod.rs` prints `[dim]`, `[red]`, `[yellow]`, `[green]`, and `[bold]` tokens directly, mixed with raw ANSI escapes. | Styling tokens appear literally and redirected output is inconsistent. |
 | Conversation persistence | Reconciliation failures can be represented as assistant messages, and chat has a fallback that appends `[error] ...` as assistant content. | A local operational failure can masquerade as model-authored conversation content on a later turn. |
 
 The reported line is therefore evidence of a real provider rejection plus a local
@@ -215,8 +215,8 @@ Session: <id>
 - `src/llm/mod.rs`, `src/llm/types.rs`, `src/llm/openai.rs`,
   `src/llm/responses.rs`, `src/llm/anthropic.rs`, and `src/llm/gemini.rs`
 - provider wrappers/codecs and Mock introduced or reorganized by T022
-- `src/agent/loop.rs`, `src/agent/planner.rs`, and context compression callers
-- `src/chat.rs`, `src/run.rs`, `src/tui/`, and a shared presentation module
+- `src/agent/loop/mod.rs`, `src/agent/planner.rs`, and context compression callers
+- `src/chat/mod.rs`, `src/run.rs`, `src/tui/`, and a shared presentation module
 - `src/integrations/gateway.rs` and MCP observer paths
 - delegated and durable run result adapters
 - `src/session/` serialization and context construction

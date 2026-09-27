@@ -12,12 +12,12 @@ orchestrated by other MCP systems. The reconciliation below records the shipped 
 server boundary.
 
 ## Goals
-- Implement an MCP server endpoint in `src/integrations/mcp_server.rs`.
+- Implement an MCP server endpoint in `src/integrations/mcp_server/mod.rs`.
 - Expose tools like `nib_run(goal)` and `nib_get_status(session_id)`.
 - Allow external systems to leverage `nib`'s gated execution model, hybrid sandboxing, and session persistence natively.
 
 ## Scope
-- Create `src/integrations/mcp_server.rs` module.
+- Create `src/integrations/mcp_server/mod.rs` module.
 - Implement an MCP server that responds over stdio.
 - Add tool `nib_run` to start a background `nib` task.
 - Add tool `nib_get_status` to query the status of an agent run using its session_id.
@@ -32,7 +32,7 @@ server boundary.
 - Tests verify the JSON-RPC interface for the server.
 
 ## Affected Areas
-- `src/integrations/mcp_server.rs` (new)
+- `src/integrations/mcp_server/mod.rs` (new)
 - `src/integrations/mod.rs`
 - `src/main.rs` (new CLI command)
 
@@ -45,7 +45,7 @@ server boundary.
 Scope: route inbound calls through gated/audited execution, return status for the
 requested session, expose core tools safely, and test JSON-RPC behavior.
 
-Affected areas: `src/integrations/mcp_server.rs`, `src/tools/`, task/session status,
+Affected areas: `src/integrations/mcp_server/mod.rs`, `src/tools/`, task/session status,
 CLI startup, and MCP server integration tests.
 
 Validation gates: initialize/list/call/error/status/no-bypass tests, `task check`,
@@ -70,13 +70,13 @@ core tools, and route calls through profile-aware runtime/executor ownership.
 
 ### Affected Areas
 
-`src/integrations/mcp_server.rs`, `src/integrations/mcp_framing.rs`, `src/main.rs`,
+`src/integrations/mcp_server/mod.rs`, `src/integrations/mcp_framing.rs`, `src/main.rs`,
 `src/tools/`, profile sessions, and MCP server tests.
 
 ### Implementation Evidence
 
 `run_mcp_server`, `handle_request`, `advertised_tools`, and `call_tool` in
-`src/integrations/mcp_server.rs` implement the stdio protocol and gated dispatch.
+`src/integrations/mcp_server/mod.rs` implement the stdio protocol and gated dispatch.
 
 ### Validation Evidence
 
@@ -127,7 +127,7 @@ execution promptly while retaining normal audit/reconciliation behavior.
 
 ### Affected Areas
 
-`src/integrations/mcp_server.rs`, `src/sandbox/mod.rs`, MCP framing/server lifecycle
+`src/integrations/mcp_server/mod.rs`, `src/sandbox/mod.rs`, MCP framing/server lifecycle
 helpers, executor/tool cancellation plumbing and target-specific dependency metadata
 if required, and MCP server/process tests.
 
@@ -189,9 +189,9 @@ containment on Windows as asynchronous execution.
 
 ### Affected Areas
 
-`src/integrations/mcp_server.rs`, `src/integrations/worktree.rs`,
-`src/sandbox/worktree.rs`, `src/sandbox/mod.rs`, `src/sandbox/windows_job.rs`,
-`src/tools/delegation.rs`, task state inspection, and focused MCP/worktree tests.
+`src/integrations/mcp_server/mod.rs`, `src/integrations/worktree.rs`,
+`src/sandbox/worktree/mod.rs`, `src/sandbox/mod.rs`, `src/sandbox/windows_job.rs`,
+`src/tools/delegation/mod.rs`, task state inspection, and focused MCP/worktree tests.
 
 ### Validation Gates
 
@@ -399,7 +399,7 @@ execution policy, timeouts, shell selection, or containment semantics.
 
 ### Affected Areas
 
-`src/tools/executor.rs`, `src/tools/core.rs`, `src/sandbox/mod.rs`,
+`src/tools/executor/mod.rs`, `src/tools/core.rs`, `src/sandbox/mod.rs`,
 `src/sandbox/windows_job.rs`, `tests/mcp_integration.rs`, and FT-016 validation evidence.
 
 ### Validation Gates
@@ -506,7 +506,7 @@ cancellation behavior, sandbox policy, Windows Job containment, and the public t
 
 ### Affected Areas
 
-`src/sandbox/mod.rs`, `src/tools/executor.rs`, `src/tools/core.rs`,
+`src/sandbox/mod.rs`, `src/tools/executor/mod.rs`, `src/tools/core.rs`,
 `src/sandbox/windows_job.rs`, `tests/mcp_integration.rs`, and FT-016 validation evidence.
 
 ### Validation Gates

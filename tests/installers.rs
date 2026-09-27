@@ -223,20 +223,20 @@ fn task_contract_enforces_strict_clippy_on_every_local_target_and_feature() {
 fn delegation_task_pins_hosted_stabilization_fixtures() {
     const TESTS: [(&str, &str); 4] = [
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
+            "src/tools/delegation/test_part_0.rs",
+            "tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
         ),
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains",
+            "src/tools/delegation/test_part_3.rs",
+            "tools::delegation::tests::test_part_3::persistent_anchor_prevents_replaced_repository_lock_domains",
         ),
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
+            "src/tools/delegation/test_part_0.rs",
+            "tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
         ),
         (
-            "src/integrations/mcp_server.rs",
-            "integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root",
+            "src/integrations/mcp_server/test_part_1.rs",
+            "integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root",
         ),
     ];
     let taskfile = read_repository_text("Taskfile.yml");
@@ -272,7 +272,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let windows_pty = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
     let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
     let taskfile = read_repository_text("Taskfile.yml");
-    let agent_loop = read_repository_text("src/agent/loop.rs");
+    let agent_loop = read_repository_text("src/agent/loop/part_c.rs");
     let workflow = read_repository_text(".github/workflows/ci.yml");
 
     for contract in [

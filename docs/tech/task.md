@@ -56,7 +56,12 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task test:llm-live:full` — run paid qualification against every eligible direct-
   provider model and the approved OpenRouter allowlist
 - `task docs:check` — validate internal links, unique spec IDs, and done-spec acceptance state
-- `task coverage` — enforce the configured runtime line-coverage threshold
+- `task coverage` — enforce the configured runtime line-coverage threshold.
+  Coverage artifacts are reproduced by this task and stay under `target/`
+  (`target/runtime-coverage.json` and `target/coverage/*.profraw`). The script
+  sets `LLVM_PROFILE_FILE` under `target/coverage/` and moves any child-process
+  `*.profraw` that land in the repo root back into that directory. Never store
+  `*.profraw` in the repo root or commit them.
 - `task build` — build the locked optimized release binary (optionally for `TARGET`)
 - `task qualify:llm-release` — build the optimized binary with the checkout's exact
   HEAD identity, exercise the credential-free T021 release path against localhost

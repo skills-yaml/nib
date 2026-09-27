@@ -156,10 +156,10 @@ members before the final reap.
 
 ## Affected Areas
 
-`src/main.rs`, `src/tools/delegation.rs`, `src/agent/loop.rs`,
-`src/tools/executor.rs`, `src/tools/core.rs`, `src/sandbox/mod.rs`,
-`src/sandbox/worktree.rs`, `src/sandbox/windows_job.rs`,
-`src/integrations/mcp.rs`, `src/skill_cmd.rs`, `src/sandbox/process.rs`, workload/session
+`src/main.rs`, `src/tools/delegation/mod.rs`, `src/agent/loop/mod.rs`,
+`src/tools/executor/mod.rs`, `src/tools/core.rs`, `src/sandbox/mod.rs`,
+`src/sandbox/worktree/mod.rs`, `src/sandbox/windows_job.rs`,
+`src/integrations/mcp.rs`, `src/skill_cmd.rs`, `src/sandbox/process/mod.rs`, workload/session
 audit records, and cross-process tests.
 
 ## Alternatives Considered
@@ -402,7 +402,7 @@ it without non-portable multi-digit descriptor redirections.
 
 ### Affected Areas
 
-`src/sandbox/mod.rs`, `src/sandbox/process.rs`, exact managed-process capability tests,
+`src/sandbox/mod.rs`, `src/sandbox/process/mod.rs`, exact managed-process capability tests,
 delegation integration tests, and the Linux Validate job.
 
 ### Validation Gates
@@ -447,7 +447,7 @@ validation or exact crash recovery.
 
 ### Affected Areas
 
-`src/sandbox/process.rs`, `tests/delegation.rs`, managed-process capability and
+`src/sandbox/process/mod.rs`, `tests/delegation.rs`, managed-process capability and
 transaction recovery tests, and the hosted native CI matrix.
 
 ### Validation Gates
@@ -493,7 +493,7 @@ coverage.
 
 ### Affected Areas
 
-`src/sandbox/process.rs`, managed-process capability regressions,
+`src/sandbox/process/mod.rs`, managed-process capability regressions,
 `tests/mcp_integration.rs`, `tests/test_runtime_e2e.rs`, `.github/workflows/ci.yml`, and
 the hosted Linux/macOS jobs.
 
@@ -540,7 +540,7 @@ namespace proof unchanged, and do not enable production subagent delegation on W
 
 ### Affected Areas
 
-`src/sandbox/process.rs`, `src/sandbox/windows_job.rs`,
+`src/sandbox/process/mod.rs`, `src/sandbox/windows_job.rs`,
 `tests/managed_process_supervisor_windows.rs`, FT-017 cleanup proof evidence, and the
 hosted Windows job.
 
@@ -630,7 +630,7 @@ existing cleanup proof, lease lock, scope lock, deadline, and fail-closed bounda
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/sandbox/process.rs`, the managed-process and delegation
+`src/daemons/state/mod.rs`, `src/sandbox/process/mod.rs`, the managed-process and delegation
 tests, `Taskfile.yml`, and this spec.
 
 ### Validation Evidence

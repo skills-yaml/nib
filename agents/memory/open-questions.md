@@ -60,7 +60,23 @@ Content:
 
 GitHub-hosted Ubuntu 24.04, macOS 15, and Windows runners executed the native runtime,
 filesystem, process, release-binary, and terminal gates in run `33683995100`; that
-location question is resolved. The protected cleanup-authority design question remains
-open under backlog FT-020. Production delegation therefore remains Linux+bwrap only;
-Windows and macOS continue to reject it until a future approved protected authority is
-implemented and verified.
+location question is resolved. The protected cleanup-authority *design* is selected
+in done spec FT-020 (Windows protected Job DACL + non-inheritable owner handle;
+macOS LaunchDaemon reaper preflight). Production delegation remains Linux+bwrap
+only. Windows and macOS `production()` stay fail-closed until a later native
+qualification record enables them.
+
+## 2026-09-25 - T023 live credentials still owner-gated
+
+- Type: open-question
+- Source: T023 2026-09-25 external authority audit
+- Confidence: high
+- Review: 2026-09-25 live Task and GitHub environment inventory
+
+Content:
+
+Dedicated low-privilege keys for OpenAI, Anthropic, Gemini, xAI, Meta, and
+OpenRouter, plus `NIB_LIVE_TESTS`/`NIB_LIVE_ACK_COSTS`, Meta catalog root,
+OpenRouter exact-ID approval, and `llm-live-*` GitHub environment secrets, are
+still missing. T023 cannot move to done until one exact revision has a complete
+privacy-reviewed catalog/canary/selected/full pass.

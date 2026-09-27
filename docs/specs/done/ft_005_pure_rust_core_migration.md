@@ -22,7 +22,7 @@ live under profile state, normally `.nib/profiles/<id>/sessions/`; legacy
 
 At the 2026-07-02 audit, nib presented as a Rust CLI but **all agent work ran in Python**:
 
-- `nib chat` and `nib run` spawn `uv run python -c …` with inline snippets (`src/chat.rs`, `src/run.rs`).
+- `nib chat` and `nib run` spawn `uv run python -c …` with inline snippets (`src/chat/mod.rs`, `src/run.rs`).
 - ~27 Python modules own ToolExecutor, agent loop, LiteLLM, context/skills, and tool implementations.
 - Rust duplicated session/config logic; models drifted between languages.
 - CI quality gates (`task check`) cover Rust only — Python tests are stale and failing.

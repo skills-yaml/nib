@@ -27,13 +27,13 @@ nib/
 │   ├── main.rs                  # Rust CLI entry + unified interactive dispatch (clap)
 │   ├── lib.rs                   # Public runtime module surface
 │   ├── auth.rs                  # Provider authentication command
-│   ├── chat.rs                  # Unified interactive launcher + plain renderer
+│   ├── chat/                    # Unified interactive launcher + plain renderer
 │   ├── config_cmd.rs            # Config show/edit/validate command
 │   ├── console.rs               # Shared approval/question console input
 │   ├── context_cmd.rs           # Context inspection command
 │   ├── doctor.rs                # Runtime health checks
 │   ├── fs_security.rs           # Shared filesystem identity/link checks
-│   ├── interactive.rs           # Shared plain/TUI commands and interaction effects
+│   ├── interactive/             # Shared plain/TUI commands and interaction effects
 │   ├── mcp_cmd.rs               # MCP configuration command
 │   ├── mcp_test_fixture.rs      # Debug-only MCP subprocess fixture
 │   ├── run.rs                   # One-shot agent command
@@ -58,19 +58,22 @@ nib/
 ## Key Directories & Ownership
 
 - `src/agent/`, `src/context/`, and `src/llm/` — Planning, prompt construction, model transport, streaming, and run reconciliation.
-- `src/tools/` — Tool contracts, registration, classification, approval/policy gates, implementations, and delegation.
-- `src/sandbox/` — Direct/`bwrap` execution, managed process scopes, Windows Job Object support, and owned subagent worktrees.
+- `src/tools/` — Tool contracts, registration, classification, approval/policy gates, implementations, and delegation. Bounded HTTP fetch and HTML sanitization live in `src/tools/core_http.rs`. Executor, delegation, and related tests are split behind `src/tools/{executor,delegation}/` facades.
+- `src/sandbox/` — Direct/`bwrap` execution, managed process scopes, Windows Job Object support, and owned subagent worktrees. Process scopes and worktrees live in `src/sandbox/{process,worktree}/`.
 - `src/fs_security.rs` — Shared filesystem identity and no-link primitives. Security-sensitive persistence and execution code should reuse this module.
 - `src/config/`, `src/profile/`, `src/session/`, and `src/daemons/` — Configuration plus profile-scoped session, memory, and durable workload state.
 - `src/integrations/` — Normalized gateways, bounded MCP framing, outbound/inbound MCP, and session worktree integration.
-- `src/interactive.rs` — Presentation-neutral plain/TUI command grammar, session
+- `src/interactive/` — Presentation-neutral plain/TUI command grammar, session
   selection, model selection, management effects, and stream-event display mapping.
-- `src/main.rs` and `src/chat.rs` — Unified interactive entry and deterministic
+- `src/main.rs` and `src/chat/` — Unified interactive entry and deterministic
   `auto`/`plain`/`tui` presentation selection. No-subcommand `nib` and `nib chat` share
   this launcher; `nib tui` is a compatibility alias.
 - `src/console.rs` and `src/tui/` — Native plain and full-screen presentation layers.
-  They should stay relatively thin and reuse `src/interactive.rs` for shared
+  They should stay relatively thin and reuse `src/interactive/` for shared
   capabilities.
+- `src/agent/loop/`, `src/daemons/{state,workload}/`, `src/session/`, and
+  `src/integrations/mcp_server/` — Oversized modules split behind thin re-export
+  facades (T043); public paths stay stable.
 - `docs/specs/` — Product truth. Never implement major behavior without a corresponding spec or task plan.
 - `docs/tech/` — Engineering conventions. Keep them up to date as the project evolves.
 

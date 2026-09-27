@@ -278,7 +278,7 @@ curator_enabled = false
             # lifecycle event is emitted only after the modal answer has been
             # consumed and the one-shot run has reconciled, so it is the stable
             # synchronization point before returning to the interactive prompt.
-            [pscustomobject]@{ Text = "/quit`r`n"; WaitForOutput = "[stream ended] completed"; DelayMilliseconds = 200 }
+            [pscustomobject]@{ Text = "/quit`r`n"; WaitForOutput = "[stream ended] Run completed."; DelayMilliseconds = 200 }
         ) `
         -TimeoutMilliseconds 60000
     if ($plainQuestionResult.ExitCode -ne 0 -or

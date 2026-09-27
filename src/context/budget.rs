@@ -78,6 +78,19 @@ pub fn ensure_required_instructions_present(
     }
 }
 
+fn input_cap(context_length: usize) -> Result<usize, String> {
+    if context_length == 0 {
+        return Err("llm.context_length must be greater than zero".to_string());
+    }
+    let allowance = crate::context::snapshot::input_allowance_for(context_length);
+    if allowance == 0 {
+        return Err(format!(
+            "llm.context_length {context_length} leaves no input allowance after response reserve"
+        ));
+    }
+    Ok(allowance)
+}
+
 pub fn bound_single_turn_input(
     system_prompt: &str,
     user_content: &str,
@@ -135,9 +148,7 @@ pub fn bound_single_turn_input(
 pub fn build_bounded_planning_input(
     request: PlanningPromptRequest<'_>,
 ) -> Result<BoundedLlmInput, String> {
-    if request.context_length == 0 {
-        return Err("llm.context_length must be greater than zero".to_string());
-    }
+    let cap = input_cap(request.context_length)?;
 
     let prepared_tools = prepare_tools(request.tools);
     if !request.tools.is_empty() && prepared_tools.is_empty() {
@@ -150,18 +161,16 @@ pub fn build_bounded_planning_input(
     } else {
         approximate_tokens(&serde_json::to_string(&[prepared_tools[0].compact.clone()]).unwrap())
     };
-    let mut context_budget = (request.context_length * 50 / 100)
-        .max(MIN_RUNTIME_CONTEXT_TOKENS)
-        .min(request.context_length);
+    let mut context_budget = (cap * 50 / 100).max(MIN_RUNTIME_CONTEXT_TOKENS).min(cap);
     let mut session_budget = request
         .session
-        .map(|_| (request.context_length * 15 / 100).max(MIN_HISTORY_TOKENS))
+        .map(|_| (cap * 15 / 100).max(MIN_HISTORY_TOKENS))
         .unwrap_or(0);
-    let mut goal_budget = (request.context_length * 20 / 100).max(8);
+    let mut goal_budget = (cap * 20 / 100).max(8);
     let mut tool_budget = if prepared_tools.is_empty() {
         0
     } else {
-        (request.context_length * 15 / 100).max(minimum_tool_budget)
+        (cap * 15 / 100).max(minimum_tool_budget)
     };
 
     loop {
@@ -184,7 +193,7 @@ pub fn build_bounded_planning_input(
         ];
         let tools = (!selected_tools.is_empty()).then_some(selected_tools);
         let actual = approximate_llm_input_tokens(&messages, tools.as_deref());
-        if actual <= request.context_length {
+        if actual <= cap {
             let included_tool_count = tools.as_ref().map_or(0, Vec::len);
             return Ok(BoundedLlmInput {
                 messages,
@@ -198,8 +207,7 @@ pub fn build_bounded_planning_input(
             });
         }
 
-        let mut overflow =
-            (actual - request.context_length).max((request.context_length / 100).max(8));
+        let mut overflow = (actual - cap).max((cap / 100).max(8));
         overflow = shrink_budget(&mut session_budget, 0, overflow);
         overflow = shrink_budget(&mut tool_budget, minimum_tool_budget, overflow);
         overflow = shrink_budget(&mut context_budget, MIN_RUNTIME_CONTEXT_TOKENS, overflow);
@@ -216,9 +224,7 @@ pub fn build_bounded_planning_input(
 pub fn build_bounded_runtime_input(
     request: RuntimePromptRequest<'_>,
 ) -> Result<BoundedLlmInput, String> {
-    if request.context_length == 0 {
-        return Err("llm.context_length must be greater than zero".to_string());
-    }
+    let cap = input_cap(request.context_length)?;
 
     let prepared_tools = request.tools.map(prepare_tools).unwrap_or_default();
     if request.tools.is_some_and(|tools| !tools.is_empty()) && prepared_tools.is_empty() {
@@ -229,15 +235,15 @@ pub fn build_bounded_runtime_input(
     } else {
         approximate_tokens(&serde_json::to_string(&[prepared_tools[0].compact.clone()]).unwrap())
     };
-    let mut context_budget = (request.context_length * 45 / 100)
-        .max(MIN_RUNTIME_CONTEXT_TOKENS)
-        .min(request.context_length);
+    let mut context_budget = (cap * 45 / 100).max(MIN_RUNTIME_CONTEXT_TOKENS).min(cap);
     let mut tool_budget = if prepared_tools.is_empty() {
         0
     } else {
-        (request.context_length * 30 / 100).max(minimum_tool_budget)
+        (cap * 30 / 100).max(minimum_tool_budget)
     };
-    let mut history_budget = crate::context::runtime_history_budget(request.context_length);
+    let mut history_budget = crate::context::runtime_history_budget(cap);
+    let mut expanded_unused = false;
+    let mut fitted: Option<BoundedLlmInput> = None;
 
     loop {
         let bounded_history = bounded_session_context(request.session, history_budget);
@@ -265,20 +271,31 @@ pub fn build_bounded_runtime_input(
         messages.extend(bounded_history.messages);
         let tools = request.tools.map(|_| selected_tools);
         let actual = approximate_llm_input_tokens(&messages, tools.as_deref());
-        if actual <= request.context_length {
+        if actual <= cap {
             let included_tool_count = tools.as_ref().map_or(0, Vec::len);
-            return Ok(BoundedLlmInput {
+            let candidate = BoundedLlmInput {
                 messages,
                 tools,
                 approximate_tokens: actual,
                 raw_message_count: bounded_history.raw_message_count,
                 raw_tool_count: request.tools.map_or(0, <[Value]>::len),
                 included_tool_count,
-            });
+            };
+            let leftover = cap.saturating_sub(actual);
+            if leftover >= MIN_HISTORY_TOKENS && !expanded_unused {
+                history_budget = history_budget.saturating_add(leftover);
+                expanded_unused = true;
+                fitted = Some(candidate);
+                continue;
+            }
+            return Ok(candidate);
         }
 
-        let mut overflow =
-            (actual - request.context_length).max((request.context_length / 100).max(8));
+        if let Some(candidate) = fitted {
+            return Ok(candidate);
+        }
+
+        let mut overflow = (actual - cap).max((cap / 100).max(8));
         overflow = shrink_budget(&mut history_budget, MIN_HISTORY_TOKENS, overflow);
         overflow = shrink_budget(&mut tool_budget, minimum_tool_budget, overflow);
         overflow = shrink_budget(&mut context_budget, MIN_RUNTIME_CONTEXT_TOKENS, overflow);
@@ -289,6 +306,15 @@ pub fn build_bounded_runtime_input(
             ));
         }
     }
+}
+
+fn unique_sections(sections: &[RuntimeContextSection]) -> Vec<RuntimeContextSection> {
+    let mut seen = std::collections::BTreeSet::new();
+    sections
+        .iter()
+        .filter(|section| seen.insert((section.label.clone(), section.content.clone())))
+        .cloned()
+        .collect()
 }
 
 fn shrink_budget(budget: &mut usize, minimum: usize, overflow: usize) -> usize {
@@ -405,6 +431,11 @@ fn render_runtime_context(
         label: "Compressed context summary".to_string(),
         content: content.to_string(),
     });
+    let project_docs = unique_sections(&context.project_docs);
+    let attachments = unique_sections(&context.attachments);
+    let skills = unique_sections(&context.skills);
+    let memory = unique_sections(&context.memory);
+    let workload = unique_sections(&context.workload);
     let mut groups = vec![
         (
             "Project Agent Guidelines",
@@ -419,18 +450,18 @@ fn render_runtime_context(
             MIN_CONTEXT_SECTION_CHARS,
         ),
     ];
-    if !context.project_docs.is_empty() {
+    if !project_docs.is_empty() {
         groups.push((
             "Project Standards and Library Documentation",
-            context.project_docs.as_slice(),
+            project_docs.as_slice(),
             15,
             MIN_PROJECT_DOC_SECTION_CHARS,
         ));
     }
-    if !context.attachments.is_empty() {
+    if !attachments.is_empty() {
         groups.push((
             "Attached Project Paths",
-            context.attachments.as_slice(),
+            attachments.as_slice(),
             15,
             MIN_PROJECT_DOC_SECTION_CHARS,
         ));
@@ -443,26 +474,26 @@ fn render_runtime_context(
             MIN_CONTEXT_SECTION_CHARS,
         ));
     }
-    if !context.skills.is_empty() {
+    if !skills.is_empty() {
         groups.push((
             "Active Skills",
-            context.skills.as_slice(),
+            skills.as_slice(),
             20,
             MIN_CONTEXT_SECTION_CHARS,
         ));
     }
-    if !context.memory.is_empty() {
+    if !memory.is_empty() {
         groups.push((
             "Profile Memory",
-            context.memory.as_slice(),
+            memory.as_slice(),
             5,
             MIN_CONTEXT_SECTION_CHARS,
         ));
     }
-    if !context.workload.is_empty() {
+    if !workload.is_empty() {
         groups.push((
             "Workload Snapshot",
-            context.workload.as_slice(),
+            workload.as_slice(),
             5,
             MIN_CONTEXT_SECTION_CHARS,
         ));
@@ -572,34 +603,21 @@ fn truncate_to_chars(content: &str, max_chars: usize) -> String {
 
 #[derive(Clone)]
 struct PreparedTool {
-    name: String,
-    full: Value,
-    compact: Value,
+    pub(crate) name: String,
+    pub(crate) full: Value,
+    pub(crate) compact: Value,
 }
 
 fn prepare_tools(tools: &[Value]) -> Vec<PreparedTool> {
-    let mut prepared = tools
+    let prepared = tools
         .iter()
         .filter_map(prepare_tool)
         .collect::<Vec<PreparedTool>>();
-    prepared.sort_by(|left, right| {
-        let left_mcp = left.name.contains("::");
-        let right_mcp = right.name.contains("::");
-        left_mcp
-            .cmp(&right_mcp)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    let core_count = prepared
-        .iter()
-        .take_while(|tool| !tool.name.contains("::"))
-        .count();
-    let mut ordered = Vec::with_capacity(prepared.len());
-    for index in head_tail_indices(core_count) {
-        ordered.push(prepared[index].clone());
-    }
-    for index in head_tail_indices(prepared.len() - core_count) {
-        ordered.push(prepared[core_count + index].clone());
-    }
+    let (core, mcp): (Vec<_>, Vec<_>) = prepared
+        .into_iter()
+        .partition(|tool| !tool.name.contains("::"));
+    let mut ordered = core;
+    ordered.extend(mcp);
     ordered
 }
 
@@ -616,18 +634,25 @@ fn prepare_tool(tool: &Value) -> Option<PreparedTool> {
             .unwrap_or_default(),
         MAX_TOOL_DESCRIPTION_TOKENS,
     );
-    let parameters = function
+    let parameters = match function
         .get("parameters")
         .or_else(|| function.get("inputSchema"))
-        .map(|schema| strip_schema_annotations(schema, 0))
-        .filter(|schema| approximate_tokens(&schema.to_string()) <= MAX_TOOL_SCHEMA_TOKENS)
-        .unwrap_or_else(permissive_parameters);
+    {
+        Some(schema) => {
+            let stripped = strip_schema_annotations(schema, 0);
+            if approximate_tokens(&stripped.to_string()) > MAX_TOOL_SCHEMA_TOKENS {
+                return None;
+            }
+            stripped
+        }
+        None => json!({"type": "object"}),
+    };
     let full = json!({
         "type": "function",
         "function": {
             "name": name,
             "description": description,
-            "parameters": parameters,
+            "parameters": parameters.clone(),
         }
     });
     let compact = json!({
@@ -641,7 +666,7 @@ fn prepare_tool(tool: &Value) -> Option<PreparedTool> {
                     .unwrap_or_default(),
                 MAX_COMPACT_TOOL_DESCRIPTION_TOKENS,
             ),
-            "parameters": permissive_parameters(),
+            "parameters": parameters,
         }
     });
     Some(PreparedTool {
@@ -652,6 +677,10 @@ fn prepare_tool(tool: &Value) -> Option<PreparedTool> {
 }
 
 fn strip_schema_annotations(value: &Value, depth: usize) -> Value {
+    strip_schema_annotations_at(value, depth, false)
+}
+
+fn strip_schema_annotations_at(value: &Value, depth: usize, preserve_map_keys: bool) -> Value {
     if depth >= 16 {
         return Value::Bool(true);
     }
@@ -659,27 +688,32 @@ fn strip_schema_annotations(value: &Value, depth: usize) -> Value {
         Value::Object(map) => Value::Object(
             map.iter()
                 .filter(|(key, _)| {
-                    !matches!(
+                    preserve_map_keys
+                        || !matches!(
+                            key.as_str(),
+                            "description" | "title" | "$comment" | "examples" | "default"
+                        )
+                })
+                .map(|(key, child)| {
+                    let nested_preserve = matches!(
                         key.as_str(),
-                        "description" | "title" | "$comment" | "examples" | "default"
+                        "properties" | "patternProperties" | "$defs" | "definitions"
+                    );
+                    (
+                        key.clone(),
+                        strip_schema_annotations_at(child, depth + 1, nested_preserve),
                     )
                 })
-                .map(|(key, value)| (key.clone(), strip_schema_annotations(value, depth + 1)))
                 .collect(),
         ),
         Value::Array(values) => Value::Array(
             values
                 .iter()
-                .take(64)
-                .map(|value| strip_schema_annotations(value, depth + 1))
+                .map(|child| strip_schema_annotations_at(child, depth + 1, false))
                 .collect(),
         ),
         _ => value.clone(),
     }
-}
-
-fn permissive_parameters() -> Value {
-    json!({"type": "object", "additionalProperties": true})
 }
 
 fn select_tools(prepared: &[PreparedTool], max_tokens: usize) -> Vec<Value> {
@@ -696,6 +730,9 @@ fn select_tools(prepared: &[PreparedTool], max_tokens: usize) -> Vec<Value> {
         if approximate_tokens(&serde_json::to_string(&compact).unwrap()) <= max_tokens {
             selected = compact;
             continue;
+        }
+        if selected.is_empty() {
+            return Vec::new();
         }
         break;
     }
@@ -1044,5 +1081,176 @@ mod tests {
         let error = ensure_required_instructions_present(&input, &context.agents)
             .expect_err("runtime must not claim a truncated required policy was followed");
         assert!(error.contains("complete required project instructions"));
+    }
+
+    #[test]
+    fn compact_tool_schema_keeps_properties_named_like_annotations() {
+        let tools = [json!({
+            "type": "function",
+            "function": {
+                "name": "annotate",
+                "description": "stores a note",
+                "parameters": {
+                    "type": "object",
+                    "description": "annotation-only field",
+                    "properties": {
+                        "description": { "type": "string", "enum": ["short", "long"] },
+                        "title": { "type": "string" }
+                    },
+                    "required": ["description", "title"]
+                }
+            }
+        })];
+        let prepared = prepare_tools(&tools);
+        let parameters = &prepared[0].full["function"]["parameters"];
+        assert!(parameters.get("description").is_none());
+        assert_eq!(
+            parameters["properties"]["description"]["enum"],
+            json!(["short", "long"])
+        );
+        assert_eq!(parameters["required"], json!(["description", "title"]));
+        assert_eq!(
+            prepared[0].compact["function"]["parameters"]["properties"]["description"]["enum"],
+            json!(["short", "long"])
+        );
+    }
+
+    #[test]
+    fn runtime_payload_stays_within_input_allowance() {
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &hostile_context(),
+            session: &hostile_session(),
+            current_step: Some("keep the public API"),
+            tools: Some(&hostile_tools()),
+            mode: "execute",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: true,
+            context_length: 10_000,
+        })
+        .expect("bounded");
+        let allowance = crate::context::snapshot::input_allowance_for(10_000);
+        assert!(bounded.approximate_tokens <= allowance);
+        assert_eq!(allowance, 8_500);
+        crate::context::snapshot::admit_estimated_input(
+            &crate::context::snapshot::request_budget(10_000, "configured"),
+            bounded.approximate_tokens,
+        )
+        .expect("admitted");
+    }
+
+    #[test]
+    fn required_core_tool_in_alphabetical_middle_stays_usable() {
+        let tools = [
+            json!({"type":"function","function":{"name":"aaa","description":"a","parameters":{"type":"object","properties":{}}}}),
+            json!({"type":"function","function":{"name":"required_middle","description":"must remain","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}),
+            json!({"type":"function","function":{"name":"zzz","description":"z","parameters":{"type":"object","properties":{}}}}),
+        ];
+        let prepared = prepare_tools(&tools);
+        let names: Vec<_> = prepared.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, ["aaa", "required_middle", "zzz"]);
+        let selected = select_tools(&prepared, 4_096);
+        let selected_names: Vec<_> = selected
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(selected_names.contains(&"required_middle"));
+        assert_eq!(
+            selected[1]["function"]["parameters"]["required"],
+            json!(["path"])
+        );
+    }
+
+    #[test]
+    fn oversized_schema_is_omitted_instead_of_becoming_permissive() {
+        let huge_enum: Vec<String> = (0..400).map(|index| format!("value-{index:03}")).collect();
+        let tools = [json!({
+            "type": "function",
+            "function": {
+                "name": "huge_enum",
+                "description": "too large to represent",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "choice": { "type": "string", "enum": huge_enum }
+                    },
+                    "required": ["choice"]
+                }
+            }
+        })];
+        assert!(prepare_tools(&tools).is_empty());
+    }
+
+    #[test]
+    fn duplicate_optional_docs_are_not_sent_twice() {
+        let mut context = hostile_context();
+        context.project_docs = vec![
+            RuntimeContextSection {
+                label: "docs/repeat.md".into(),
+                content: "SHARED_STANDARD_BODY".into(),
+            },
+            RuntimeContextSection {
+                label: "docs/repeat.md".into(),
+                content: "SHARED_STANDARD_BODY".into(),
+            },
+            RuntimeContextSection {
+                label: "docs/other.md".into(),
+                content: "OTHER_SCOPE_BODY".into(),
+            },
+        ];
+        context.skills.clear();
+        context.memory.clear();
+        context.workload.clear();
+        let unique = render_runtime_context(&context, None, None, 4_000);
+        assert_eq!(unique.matches("SHARED_STANDARD_BODY").count(), 1);
+        assert!(unique.contains("OTHER_SCOPE_BODY"));
+        let redundant = {
+            let mut duplicated = context.clone();
+            duplicated.project_docs.push(RuntimeContextSection {
+                label: "docs/repeat.md".into(),
+                content: "SHARED_STANDARD_BODY".into(),
+            });
+            render_runtime_context(&duplicated, None, None, 4_000)
+        };
+        assert!(unique.len() <= redundant.len());
+        assert_eq!(
+            unique.matches("SHARED_STANDARD_BODY").count(),
+            redundant.matches("SHARED_STANDARD_BODY").count()
+        );
+    }
+
+    #[test]
+    fn unused_optional_capacity_is_given_to_history() {
+        let mut context = hostile_context();
+        context.project_docs.clear();
+        context.skills.clear();
+        context.memory.clear();
+        context.workload.clear();
+        context.attachments.clear();
+        let session: Session = serde_json::from_value(json!({
+            "id": "reuse-capacity",
+            "messages": [
+                {"index": 0, "role": "user", "content": format!("KEEP_LATEST {}", "log line ".repeat(200))}
+            ]
+        }))
+        .expect("session");
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: Some("inspect logs"),
+            tools: None,
+            mode: "execute",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: false,
+            context_length: 8_000,
+        })
+        .expect("bounded");
+        let text = bounded
+            .messages
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("KEEP_LATEST"));
+        assert!(bounded.approximate_tokens <= crate::context::snapshot::input_allowance_for(8_000));
     }
 }

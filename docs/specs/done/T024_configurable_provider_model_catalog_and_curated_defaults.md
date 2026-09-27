@@ -206,7 +206,7 @@ costly suggestions. The selected model is the only automatic addition.
 - `src/llm/default_models.toml`
 - `src/llm/registry.rs`
 - `src/config/mod.rs`
-- `src/auth.rs` and `src/chat.rs`
+- `src/auth.rs` and `src/chat/mod.rs`
 - provider registry, config round-trip, validation, auth, and chat tests
 - `docs/user/guide.md`, `docs/tech/backend_rust.md`, and `docs/specs/README.md`
 - T023 relationship/evidence if live catalog work consumes the new defaults

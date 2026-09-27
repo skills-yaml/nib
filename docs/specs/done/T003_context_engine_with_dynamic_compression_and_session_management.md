@@ -203,7 +203,7 @@ workload transition claim delivery that was published to an unowned path.
 
 ### Affected Areas
 
-`src/session/mod.rs`, `src/daemons/state.rs`, session delivery/reconciliation callers,
+`src/session/mod.rs`, `src/daemons/state/mod.rs`, session delivery/reconciliation callers,
 curator skill-usage locking, and session/durable-task integration tests.
 
 ### Validation Gates
@@ -303,7 +303,7 @@ from a malicious peer already running as the same UID is outside the product bou
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/session/mod.rs`, session callers in `src/doctor.rs` and
+`src/daemons/state/mod.rs`, `src/session/mod.rs`, session callers in `src/doctor.rs` and
 `src/tui/mod.rs`, `src/daemons/curator.rs`, and session persistence tests.
 
 ### Validation Gates

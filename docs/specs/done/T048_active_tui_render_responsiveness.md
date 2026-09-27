@@ -3,7 +3,7 @@
 **Status:** Done
 
 **Related:** [T038 block transcript](../done/T038_tui_block_transcript_and_key_contract.md),
-[T042 context budgeting and visibility](../backlog/T042_context_budgeting_and_live_visibility.md),
+[T042 context budgeting and visibility](../done/T042_context_budgeting_and_live_visibility.md),
 [T047 interaction harmonization](../done/T047_user_interaction_harmonization.md)
 
 ## Summary and Problem

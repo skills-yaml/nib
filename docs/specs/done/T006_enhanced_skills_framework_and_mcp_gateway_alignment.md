@@ -134,13 +134,13 @@ external adapters; nib owns only the normalized gateway dispatch contract.
 ### Affected Areas
 
 `src/context/skills.rs`, `src/skill_cmd.rs`, `src/integrations/mcp.rs`,
-`src/integrations/mcp_server.rs`, `src/integrations/gateway.rs`, `src/tools/`,
+`src/integrations/mcp_server/mod.rs`, `src/integrations/gateway.rs`, `src/tools/`,
 `src/session/`, `src/daemons/curator.rs`, and tests.
 
 ### Implementation Evidence
 
 - `src/context/skills.rs` parses manifests/references/assets and derives policy/hooks.
-- `src/integrations/mcp.rs` and `src/integrations/mcp_server.rs` implement stdio client/server boundaries.
+- `src/integrations/mcp.rs` and `src/integrations/mcp_server/mod.rs` implement stdio client/server boundaries.
 - `src/integrations/gateway.rs` implements normalized, tool-schema-closed dispatch.
 - `src/session/mod.rs` keeps skill-use records authoritative and serializes usage writes
   with session deletion and curator reads, rejecting names that cannot map to a bounded
@@ -154,7 +154,7 @@ external adapters; nib owns only the normalized gateway dispatch contract.
 - `src/context/skills.rs`: structured parse, policy, symlink, count, and byte-bound tests.
 - `tests/test_runtime_e2e.rs`: selected-skill denial and permission-gated MCP delegation.
 - `src/integrations/mcp.rs`: timeout, cancellation, environment, schema, and child-lifecycle tests.
-- `src/integrations/mcp_server.rs`: initialize/list/call/status/error/no-audit-bypass tests.
+- `src/integrations/mcp_server/mod.rs`: initialize/list/call/status/error/no-audit-bypass tests.
 - `src/daemons/curator.rs`:
   `cross_session_skill_usage_survives_restart_and_drives_retention`,
   `concurrent_skill_usage_updates_are_not_lost_from_the_aggregate`,

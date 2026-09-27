@@ -95,7 +95,7 @@ durable work, and reconciliation.
 
 ### Implementation Evidence
 
-- `src/agent/loop.rs` emits transition traces and audited lifecycle events.
+- `src/agent/loop/mod.rs` emits transition traces and audited lifecycle events.
 - `scripts/check-runtime-coverage.sh` defines the runtime coverage gate.
 
 ### Validation Evidence

@@ -111,7 +111,7 @@ process. Ambiguous leftover queue remains persisted and is shown by `/status`.
 
 ## Affected Areas
 
-`src/interactive.rs` (or `src/interactive/`), `src/tui/`, `src/chat.rs`,
+`src/interactive/mod.rs` (or `src/interactive/`), `src/tui/`, `src/chat/mod.rs`,
 `src/session/mod.rs`, `src/console.rs` as needed, `docs/user/guide.md`,
 `docs/specs/`, `tests/interactive_cli.rs`, TUI unit tests.
 
@@ -131,8 +131,8 @@ process. Ambiguous leftover queue remains persisted and is shown by `/status`.
 
 ## Implementation Reconciliation (2026-08-21)
 
-T031's acceptance criteria are implemented in `src/interactive.rs`, `src/tui/mod.rs`,
-`src/chat.rs`, and `src/session/mod.rs`. Queue persist-before-ack, ledger rendering,
+T031's acceptance criteria are implemented in `src/interactive/mod.rs`, `src/tui/mod.rs`,
+`src/chat/mod.rs`, and `src/session/mod.rs`. Queue persist-before-ack, ledger rendering,
 approval/question docks, overlay-local switcher errors, exact-ID snapshot refresh,
 composer caret, wrap-based height, and bounded draft history are covered by library
 and `--plain` child-process tests. `/compact`, `/ps`, `/stop`, and steer remain
