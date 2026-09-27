@@ -123,6 +123,16 @@ Windows CI also exposed a cleanup-expiry test whose 150 ms deadline could pass
 before the test reached its quarantine checkpoint. The test now waits for that
 checkpoint with a platform-appropriate deadline, then expires the deadline
 while cleanup is paused.
+The first merged development release passed PR CI, but post-merge Linux CI
+exposed the same 150 ms race in the owner sweep quarantine test. The legacy
+anchor quarantine fixture had the same pattern. Delegation expiry fixtures
+now share longer native-runner checkpoint deadlines and wait
+for the observed boundary before deliberately expiring the operation. The
+focused delegation task includes the failing sweep regression.
+The focused gate also found a repository merge-lock fixture timing out while
+acquiring its initial test lock under local load. Its successful setup and
+recovery acquisitions now have a 10-second bound; the child probes still
+exercise the intended short failure path.
 
 ## Affected Areas and Implementation Plan
 

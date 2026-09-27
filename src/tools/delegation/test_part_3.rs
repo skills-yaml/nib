@@ -515,7 +515,7 @@ fn expired_absolute_delegation_lock_rejects_free_lock_before_operation() {
 fn records_initialization_deadline_guards_nib_creation_and_retries_safely() {
     let root = tempfile::tempdir().expect("root");
     let nib = root.path().join(".nib");
-    let deadline = Instant::now() + Duration::from_millis(300);
+    let deadline = Instant::now() + expiry_checkpoint_timeout();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
     let worker_root = root.path().to_path_buf();
@@ -533,7 +533,7 @@ fn records_initialization_deadline_guards_nib_creation_and_retries_safely() {
         .expect_err("expired nib creation must fail closed")
     });
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("records initialization reached nib creation");
     let paused = subagent_namespace_snapshot(root.path());
     while Instant::now() < deadline {
@@ -632,7 +632,7 @@ fn delegation_lock_setup_deadline_guards_every_namespace_mutation_and_retries() 
             Boundary::VisibleLock => lock_path.clone(),
             Boundary::AnchorLink => anchor_path.clone(),
         };
-        let deadline = Instant::now() + Duration::from_millis(300);
+        let deadline = Instant::now() + expiry_checkpoint_timeout();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
         let worker_nib = nib.clone();
@@ -660,7 +660,7 @@ fn delegation_lock_setup_deadline_guards_every_namespace_mutation_and_retries() 
             .expect_err("expired setup boundary must fail closed")
         });
         ready_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(expiry_checkpoint_wait())
             .expect("delegation setup reached mutation boundary");
         let paused = subagent_namespace_snapshot(root.path());
         while Instant::now() < deadline {
@@ -856,12 +856,13 @@ fn precommit_record_cleanup_stops_at_its_quarantine_after_expiry() {
     let worker_quarantine = quarantine.clone();
     let worker_record = record.clone();
     let worker_expected = expected.try_clone().expect("clone expected record");
+    let operation_timeout = expiry_checkpoint_timeout();
     let worker = std::thread::spawn(move || {
         cleanup_precommit_record_with_timeout_and_hooks(
             &project_root,
             &worker_record,
             Some(&worker_expected),
-            Duration::from_millis(150),
+            operation_timeout,
             || Ok(()),
             || {
                 if worker_quarantine.exists() && !worker_path.exists() {
@@ -876,10 +877,10 @@ fn precommit_record_cleanup_stops_at_its_quarantine_after_expiry() {
     });
 
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("precommit cleanup reached its final deletion boundary");
     let quarantined = std::fs::read(&quarantine).expect("precommit quarantine bytes");
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(operation_timeout + Duration::from_millis(200));
     resume_tx
         .send(())
         .expect("resume expired precommit cleanup");
@@ -920,17 +921,9 @@ fn precommit_record_cleanup_stops_at_its_quarantine_after_expiry() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn initial_and_revision_publications_stop_before_namespace_mutation_after_expiry() {
-    let operation_timeout = if cfg!(windows) {
-        Duration::from_secs(2)
-    } else {
-        Duration::from_millis(150)
-    };
+    let operation_timeout = expiry_checkpoint_timeout();
     let expiry_delay = operation_timeout + Duration::from_millis(50);
-    let boundary_wait = if cfg!(windows) {
-        Duration::from_secs(5)
-    } else {
-        Duration::from_secs(2)
-    };
+    let boundary_wait = expiry_checkpoint_wait();
     let root = tempfile::tempdir().expect("root");
     let initial = record_fixture(root.path(), "sub-initial-publication-expiry", "running");
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -1116,7 +1109,7 @@ fn legacy_lock_migration_retries_a_retained_deletion_quarantine() {
     let quarantine = visible_directory
         .deterministic_artifact_path(&visible, ".nib-legacy-lock-delete-", ".quarantine")
         .expect("legacy quarantine");
-    let deadline = Instant::now() + Duration::from_millis(150);
+    let deadline = Instant::now() + expiry_checkpoint_timeout();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
     let worker_visible = visible.clone();
@@ -1139,9 +1132,11 @@ fn legacy_lock_migration_retries_a_retained_deletion_quarantine() {
         )
     });
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("legacy cleanup reached its quarantine boundary");
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(
+        deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(200),
+    );
     resume_tx.send(()).expect("resume expired legacy cleanup");
     let error = worker
         .join()
@@ -1242,7 +1237,7 @@ fn repository_merge_lock_replacement_child_process() {
 #[tokio::test]
 async fn persistent_anchor_prevents_replaced_repository_lock_domains() {
     let root = tempfile::tempdir().expect("root");
-    let held = RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(1))
+    let held = RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(10))
         .await
         .expect("held persistent repository merge lock");
 
@@ -1299,7 +1294,7 @@ async fn persistent_anchor_prevents_replaced_repository_lock_domains() {
     // The timeout covers records-directory and lock-anchor validation as well as
     // acquisition. Leave enough room for those bounded filesystem checks on a
     // loaded CI host after the child-process probes exit.
-    RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(1))
+    RepositoryMergeLock::acquire_with_timeout(root.path(), Duration::from_secs(10))
         .await
         .expect("restored persistent lock identity remains usable");
 }

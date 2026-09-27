@@ -1645,7 +1645,7 @@ fn missing_legacy_directory_retries_anchor_quarantine_without_creating_state() {
         .expect("anchor quarantine");
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
-    let deadline = Instant::now() + Duration::from_millis(150);
+    let deadline = Instant::now() + expiry_checkpoint_timeout();
     let worker_anchor = anchor.clone();
     let worker_quarantine = quarantine.clone();
     let worker = std::thread::spawn(move || {
@@ -1666,9 +1666,11 @@ fn missing_legacy_directory_retries_anchor_quarantine_without_creating_state() {
         )
     });
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("anchor cleanup reached its quarantine boundary");
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(
+        deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(200),
+    );
     resume_tx.send(()).expect("resume expired anchor cleanup");
     let error = worker
         .join()

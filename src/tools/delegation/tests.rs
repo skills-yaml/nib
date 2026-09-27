@@ -1,5 +1,24 @@
 use super::*;
 
+// Expiry tests first pause at an observed mutation boundary. Give setup enough
+// time to reach that boundary on loaded native runners, then deliberately let
+// the deadline expire while the worker is paused.
+pub(crate) fn expiry_checkpoint_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(1)
+    }
+}
+
+pub(crate) fn expiry_checkpoint_wait() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(12)
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
 pub(crate) struct SpawnPreparationTimeoutGuard {
     pub(crate) previous: Option<Duration>,
     pub(crate) _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
@@ -646,12 +665,13 @@ pub(crate) fn sweep_owner_quarantine_expiry_fixture(half: Option<bool>) {
     let project_root = root.path().to_path_buf();
     let worker_source = source.clone();
     let worker_quarantine = quarantine.clone();
+    let operation_timeout = expiry_checkpoint_timeout();
     let worker = std::thread::spawn(move || {
         let mut paused = false;
         sweep_owner_lease_artifacts_with_timeout_and_guard(
             &project_root,
             &std::collections::HashSet::new(),
-            Duration::from_millis(150),
+            operation_timeout,
             || {
                 if !paused && worker_quarantine.exists() && !worker_source.exists() {
                     paused = true;
@@ -664,10 +684,10 @@ pub(crate) fn sweep_owner_quarantine_expiry_fixture(half: Option<bool>) {
     });
 
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("sweep reached its final deletion boundary");
     let quarantined = source_bytes;
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(operation_timeout + Duration::from_millis(200));
     resume_tx.send(()).expect("resume expired owner sweep");
     let error = worker
         .join()
@@ -751,8 +771,9 @@ pub(crate) fn owner_cleanup_quarantine_expiry_fixture(half: Option<bool>) {
     let cleanup_quarantine = quarantine.clone();
     let cleanup_source = source.clone();
     let worker_lease_id = lease_id.clone();
+    let operation_timeout = expiry_checkpoint_timeout();
     let worker = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_millis(150);
+        let deadline = Instant::now() + operation_timeout;
         let mut paused = false;
         remove_persisted_owner_lease_until_with_guard(
             &project_root,
@@ -771,14 +792,14 @@ pub(crate) fn owner_cleanup_quarantine_expiry_fixture(half: Option<bool>) {
     });
 
     ready_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(expiry_checkpoint_wait())
         .expect("owner cleanup reached its final quarantine");
     assert!(!source.exists(), "owner source was quarantined");
     assert!(quarantine.is_file(), "recoverable quarantine is retained");
     if half.is_none() {
         assert!(anchor.is_file(), "the paired anchor remains authoritative");
     }
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(operation_timeout + Duration::from_millis(200));
     let quarantined = source_bytes;
     resume_tx.send(()).expect("resume expired owner cleanup");
 
