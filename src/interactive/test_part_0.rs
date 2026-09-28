@@ -445,19 +445,39 @@ fn shared_interaction_reducer_yields_one_effect_without_fallthrough() {
 }
 
 #[test]
-fn capability_questions_show_help_without_starting_a_plan() {
-    for input in ["help", "Help?", "what can you do?", "how can you help"] {
-        for run in [InteractionRunState::Idle, InteractionRunState::Running] {
-            let state = InteractionState {
-                run,
-                ..InteractionState::default()
-            };
-            assert_eq!(
-                reduce_interaction(&state, InteractionInput::SubmittedLine(input)),
-                InteractionReduction::Command(InteractiveCommand::Help),
-            );
-        }
+fn plain_help_and_helpful_tasks_follow_the_normal_message_route() {
+    for input in [
+        "help",
+        "Help?",
+        "what can you do?",
+        "how can you help",
+        "help me refactor this file",
+    ] {
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState::default(),
+                InteractionInput::SubmittedLine(input)
+            ),
+            InteractionReduction::IdleTurn(input.to_string()),
+        );
+        assert_eq!(
+            reduce_interaction(
+                &InteractionState {
+                    run: InteractionRunState::Running,
+                    ..InteractionState::default()
+                },
+                InteractionInput::SubmittedLine(input)
+            ),
+            InteractionReduction::QueueNext(input.to_string()),
+        );
     }
+    assert_eq!(
+        reduce_interaction(
+            &InteractionState::default(),
+            InteractionInput::SubmittedLine("/help")
+        ),
+        InteractionReduction::Command(InteractiveCommand::Help),
+    );
 }
 
 #[test]

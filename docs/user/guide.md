@@ -437,8 +437,12 @@ alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
 Both presentation modes expose these commands:
 
-Plain-language `help` and `what can you do?` show supported capabilities immediately
-without starting a plan or asking the user to choose an option.
+Plain-language `help` and `what can you do?` are normal messages. When the model can
+answer from supplied context, nib gives a conversational overview of the current
+repository, relevant validation tasks, and a few supported commands without
+starting a plan. `/help` prints the complete command reference immediately without
+a model connection. While a run is active, plain-language help follows the normal
+next-turn queue rule; `/help` remains available for immediate command discovery.
 
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox

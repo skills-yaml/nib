@@ -381,3 +381,20 @@ runtime identity prompts, architecture guidance, and product documentation use t
 term without qualifying nib as a coding agent or workload agent. Coding, planning,
 execution, and workload reconciliation remain concrete capabilities, not the product
 category.
+
+## 2026-09-28 - Make plain-language help a conversational request
+
+- Type: decision
+- Source: user + T055
+- Confidence: high
+- Review: `task verify` and documentation integrity
+- Supersedes: T050's local command-registry response for plain-language help
+
+Content:
+
+Text such as `help` and `what can you do?` follows the ordinary interactive agent
+route. The answer-only prompt receives bounded README, Taskfile, and supported
+command metadata so it can give a repository-aware answer without creating a plan
+when context is sufficient. `/help` remains the immediate, provider-free command
+reference. Text entered during an active run follows the normal next-turn queue
+rule.

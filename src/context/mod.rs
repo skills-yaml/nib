@@ -9,6 +9,7 @@ use crate::session::{ClarificationStatus, HumanIntentKind, MessageOrigin, Sessio
 pub mod agents;
 pub mod budget;
 pub mod compression;
+mod help;
 pub mod project_docs;
 pub mod skills;
 pub mod snapshot;

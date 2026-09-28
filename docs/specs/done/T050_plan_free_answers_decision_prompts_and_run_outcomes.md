@@ -179,3 +179,10 @@ T050 mapped structured `Reconciled` outcomes to a heading and next action.
 worker `End`/`Err` paths, including `local_error`, so a stopped run cannot
 present the machine token as the only user-visible explanation. Machine
 tokens and T026 redaction are unchanged.
+
+## Supersession (T055)
+
+[T055](T055_conversational_repository_aware_help.md) replaces the
+local command-registry response for plain-language capability requests with a
+repository-aware answer-only response. `/help` retains the deterministic registry
+reference.

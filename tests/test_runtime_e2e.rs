@@ -393,6 +393,43 @@ async fn answer_only_success_uses_one_generation_and_no_executable_resources() {
 }
 
 #[tokio::test]
+async fn conversational_help_uses_the_answer_route_and_current_project_context() {
+    let root = git_repository();
+    std::fs::write(
+        root.path().join("README.md"),
+        "# Example\n\nA repository for answer-route help.\n",
+    )
+    .expect("README");
+    std::fs::write(
+        root.path().join("Taskfile.yml"),
+        "tasks:\n  check:\n    desc: Run the example check\n",
+    )
+    .expect("Taskfile");
+    let answer = "I can help with this repository. Use task check for its checks.";
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![answer_fixture_text_turn(answer)],
+        true,
+        false,
+        "conversational-help",
+        "help",
+    )
+    .await;
+
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.last_message.as_deref(), Some(answer));
+    assert_eq!(summary.tool_call_count, 0);
+    assert!(persisted.plan.is_none());
+    assert!(persisted.tool_calls.is_empty());
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    let request = requests[0].to_string();
+    assert!(request.contains("A repository for answer-route help"));
+    assert!(request.contains("task check: Run the example check"));
+    assert!(request.contains("/plan [prompt]"));
+}
+
+#[tokio::test]
 async fn answer_only_request_plan_falls_back_once_to_the_normal_planner() {
     let root = git_repository();
     let (summary, persisted, requests) = run_answer_fixture(

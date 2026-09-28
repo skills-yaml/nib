@@ -20,6 +20,7 @@ const MAX_TOOL_SCHEMA_TOKENS: usize = 1_024;
 const MIN_CONTEXT_GROUP_CHARS: usize = 80;
 const MIN_CONTEXT_SECTION_CHARS: usize = 24;
 const MIN_PROJECT_DOC_SECTION_CHARS: usize = 96;
+const MAX_HELP_CONTEXT_TOKENS: usize = 420;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundedLlmInput {
@@ -242,6 +243,12 @@ pub fn build_bounded_runtime_input(
         (cap * 30 / 100).max(minimum_tool_budget)
     };
     let mut history_budget = crate::context::runtime_history_budget(cap);
+    let help_context = if request.mode == "answer_only" {
+        super::help::conversational_help_context(request.project_root)
+    } else {
+        String::new()
+    };
+    let mut help_budget = (cap * 16 / 100).min(MAX_HELP_CONTEXT_TOKENS);
     let mut expanded_unused = false;
     let mut fitted: Option<BoundedLlmInput> = None;
 
@@ -262,6 +269,7 @@ pub fn build_bounded_runtime_input(
         );
         let system_prompt = build_runtime_system_prompt(
             &optional_context,
+            &truncate_to_tokens(&help_context, help_budget),
             request.mode,
             request.project_root,
             request.tool_use_enforcement,
@@ -296,6 +304,7 @@ pub fn build_bounded_runtime_input(
         }
 
         let mut overflow = (actual - cap).max((cap / 100).max(8));
+        overflow = shrink_budget(&mut help_budget, 0, overflow);
         overflow = shrink_budget(&mut history_budget, MIN_HISTORY_TOKENS, overflow);
         overflow = shrink_budget(&mut tool_budget, minimum_tool_budget, overflow);
         overflow = shrink_budget(&mut context_budget, MIN_RUNTIME_CONTEXT_TOKENS, overflow);
@@ -326,6 +335,7 @@ fn shrink_budget(budget: &mut usize, minimum: usize, overflow: usize) -> usize {
 
 fn build_runtime_system_prompt(
     context: &str,
+    help_context: &str,
     mode: &str,
     project_root: &Path,
     tool_use_enforcement: bool,
@@ -338,8 +348,13 @@ fn build_runtime_system_prompt(
         } else {
             format!("\n\n{context}")
         };
+        let help_context = if help_context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{help_context}")
+        };
         return format!(
-            "{}\n\n{}\nProject root: {root}{context}",
+            "{}\n\n{}\nProject root: {root}{context}{help_context}",
             crate::agent::instructions::SHARED,
             crate::agent::instructions::ANSWER_ONLY,
         );
@@ -942,6 +957,60 @@ mod tests {
         assert!(system.contains("non-executable routing control"));
         assert!(system.contains("no inspection, clarification, external lookup"));
         assert!(!system.contains("current persisted, approved plan step"));
+    }
+
+    #[test]
+    fn answer_only_help_reference_is_source_backed_and_bounded() {
+        let root = tempfile::tempdir().expect("project");
+        std::fs::write(
+            root.path().join("README.md"),
+            "# Example\n\nA source-backed project overview.\n",
+        )
+        .expect("README");
+        std::fs::write(
+            root.path().join("Taskfile.yml"),
+            "tasks:\n  check:\n    desc: Run project checks\n  verify:\n    desc: Run full verification\n",
+        )
+        .expect("Taskfile");
+        let session: Session = serde_json::from_value(json!({
+            "id": "help-budget",
+            "messages": [{"index": 0, "role": "user", "content": "help"}]
+        }))
+        .expect("session");
+        let context = RuntimeContextSections {
+            agents: String::new(),
+            task: "help".to_string(),
+            project_docs: Vec::new(),
+            skills: Vec::new(),
+            memory: Vec::new(),
+            workload: Vec::new(),
+            attachments: Vec::new(),
+        };
+        let control = json!({
+            "type": "function",
+            "function": {
+                "name": "request_plan",
+                "description": "Request normal planning",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        });
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: None,
+            tools: Some(std::slice::from_ref(&control)),
+            mode: "answer_only",
+            project_root: root.path(),
+            tool_use_enforcement: false,
+            context_length: 4_000,
+        })
+        .expect("bounded help input");
+        let system = bounded.messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("A source-backed project overview"));
+        assert!(system.contains("task check: Run project checks"));
+        assert!(system.contains("task verify: Run full verification"));
+        assert!(system.contains("/plan [prompt]"));
+        assert!(bounded.approximate_tokens <= input_cap(4_000).unwrap());
     }
 
     #[test]

@@ -1766,9 +1766,6 @@ pub(crate) fn reduce_composer_submission(
     if normalized.is_empty() {
         return InteractionReduction::NoOp(InteractionConsumer::Composer);
     }
-    if is_capability_question(normalized) {
-        return InteractionReduction::Command(InteractiveCommand::Help);
-    }
     if normalized.starts_with("queue:") {
         return parse_queue_line(normalized).map_or_else(
             || InteractionReduction::Error {
@@ -1834,14 +1831,4 @@ pub(crate) fn reduce_composer_submission(
         Some(command) => InteractionReduction::Command(command),
         None => InteractionReduction::IdleTurn(normalized.to_string()),
     }
-}
-
-pub(crate) fn is_capability_question(input: &str) -> bool {
-    matches!(
-        input
-            .trim_end_matches(['?', '.', '!'])
-            .to_ascii_lowercase()
-            .as_str(),
-        "help" | "what can you do" | "how can you help" | "what can nib do"
-    )
 }
