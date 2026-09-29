@@ -1,6 +1,6 @@
 # T057: Contextual Answers and Plan Progress
 
-**Status:** Development
+**Status:** Done
 
 **Related:** [T050](../done/T050_plan_free_answers_decision_prompts_and_run_outcomes.md),
 [T039](../done/T039_visible_tool_blocks_and_explicit_approval.md), and
@@ -110,4 +110,8 @@ On 2026-09-29, `task verify` passed the complete static, serial test, and
 doctest gate: 1,244 library tests plus CLI and integration suites. Focused
 `task test:interactive`, `task test:agent-context`, `task test:runtime-e2e`,
 `task test:llm-failure-cli`, and `task docs:check` also passed during iteration.
-The spec remains in Development pending integration evidence.
+After the planner smoke fixture correction, `task smoke:interactive` and a
+second `task verify` passed locally. [PR #36](https://github.com/skills-yaml/nib/pull/36)
+merged as `cc39249757c350e385db0a8b5ca4f6aefbb7cff6` after
+[Linux, macOS, and Windows CI](https://github.com/skills-yaml/nib/actions/runs/36573356652)
+passed, including native interaction smoke on all three platforms.
