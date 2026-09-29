@@ -336,6 +336,7 @@ pub(crate) fn is_failure_outcome(outcome: &str) -> bool {
                 | "model_refusal"
                 | "empty_model_response"
                 | "instruction_context_missing"
+                | "tool_scope_outside_worktree"
                 | "planning_required_active_plan"
                 | "planning_required_active_run"
                 | "plan_binding_changed"

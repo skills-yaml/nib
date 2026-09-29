@@ -17,6 +17,8 @@ impl ToolExecutor {
             terminal_timeout_secs: TerminalConfig::default().timeout,
             approval_handler: Arc::new(StdinApprovalHandler),
             worktree_manager: None,
+            project_read_fallback: false,
+            prepared_worktree_for_batch: false,
             mcp_manager: None,
             policy_rules: resolved.policy_rules,
             policy_hooks: Vec::new(),
@@ -567,10 +569,20 @@ impl ToolExecutor {
             );
         }
 
-        let worktree = match self
-            .ensure_worktree(requires_worktree, &effective_root, effective_session)
-            .await
+        let project_read = matches!(
+            call.tool_name.as_str(),
+            "read_file" | "list_directory" | "grep"
+        );
+        let worktree_result = if (call.tool_name == "git_status"
+            && !self.prepared_worktree_for_batch)
+            || (self.project_read_fallback && project_read)
         {
+            Ok(None)
+        } else {
+            self.ensure_worktree(requires_worktree, &effective_root, effective_session)
+                .await
+        };
+        let worktree = match worktree_result {
             Ok(worktree) => worktree,
             Err(error) => {
                 return self.finish_failure(

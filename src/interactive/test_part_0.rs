@@ -545,6 +545,7 @@ fn terminal_outcomes_explain_the_next_action() {
         "turn_limit_reached",
         "waiting_for_user_input",
         "local_error",
+        "tool_scope_outside_worktree",
         "unresponsive_worker_shutdown",
     ] {
         let message = terminal_outcome_message(outcome);
@@ -555,6 +556,9 @@ fn terminal_outcomes_explain_the_next_action() {
             "internal token leaked: {outcome}"
         );
     }
+    let outside = terminal_outcome_message("tool_scope_outside_worktree");
+    assert!(outside.detail.contains("project path"));
+    assert!(!outside.detail.contains("context_length"));
 }
 
 #[test]

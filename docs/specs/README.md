@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **67 done, 1 development, and 0 backlog**.
+The current lifecycle is **68 done, 1 development, and 0 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -116,6 +116,7 @@ work or narrower guarantees.
 - [T054: Reconcile Local Preflight Failures](done/T054_reconcile_local_preflight_failures.md)
 - [T055: Conversational Repository-Aware Help](done/T055_conversational_repository_aware_help.md)
 - [T056: Session Worktree Preflight Recovery](done/T056_session_worktree_preflight_recovery.md)
+- [T058: Preflight Diagnostics and Independent Read Progress](done/T058_preflight_diagnostics_and_independent_read_progress.md)
 
 ### Feature specs
 
