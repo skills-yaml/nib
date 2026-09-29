@@ -398,3 +398,19 @@ command metadata so it can give a repository-aware answer without creating a pla
 when context is sufficient. `/help` remains the immediate, provider-free command
 reference. Text entered during an active run follows the normal next-turn queue
 rule.
+
+## 2026-09-28 - Preserve changed worktrees and admit fresh work after Git identity changes
+
+- Type: decision
+- Source: T056
+- Confidence: high
+- Review: `task verify` and offline Mock worktree preparation
+
+Content:
+
+An unrelated completed worktree ownership receipt with an older common Git
+directory identity may remain on disk while a fresh worktree is admitted below
+the ownership store limits. Removing that receipt still requires exact Git
+identity and ref recovery. When cached session ownership no longer validates,
+preserve the worktree, registration, branch, and uncommitted files for inspection
+instead of attempting automatic cleanup during reuse.

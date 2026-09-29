@@ -24,6 +24,7 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task test:runtime-e2e` — run the full agent runtime end-to-end integration tests
 - `task test:agent-context` — run offline loop, planner, context-budget, attachment,
   compression, and worktree build-metadata tests
+- `task test:worktree` — run managed session and subagent worktree unit tests
 - `task test:managed-process-capability` — verify the exact managed-process backend probe independently
 - `task test:updater` — run self-update and update-notification unit tests
 - `task test:doctor` — run doctor diagnosis, repair, and CLI persistence tests
