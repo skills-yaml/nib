@@ -29,9 +29,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
     GenerationOptions, LlmDelta, LlmFinishReason, LlmMessage, LlmMessageRole, LlmRequest,
-    LlmRequestScope, LlmResponse, LlmStreamEvent, LlmTerminalStatus, LlmUsage, ProviderCallId,
-    ProviderContinuation, ReasoningOption, StreamEvent, ToolCallAccumulator, ToolCallRequest,
-    ToolChoice, ToolDefinition, ToolResult, ToolResultClass,
+    LlmRequestScope, LlmResponse, LlmStreamEvent, LlmTerminalStatus, LlmUsage, PlanProgress,
+    PlanProgressStep, PlanVerificationProgress, ProviderCallId, ProviderContinuation,
+    ReasoningOption, StreamEvent, ToolCallAccumulator, ToolCallRequest, ToolChoice, ToolDefinition,
+    ToolResult, ToolResultClass,
 };
 
 pub(crate) const MAX_LLM_COMPLETE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;

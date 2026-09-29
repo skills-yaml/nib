@@ -640,33 +640,51 @@ async fn active_unrelated_plan_survives_an_information_answer() {
 }
 
 #[tokio::test]
-async fn project_planning_requirement_and_disabled_default_bypass_answer_only() {
-    for (session_id, enabled, project_requires_planning) in [
-        ("answer-only-project-planning", true, true),
-        ("answer-only-disabled-default", false, false),
-    ] {
-        let root = git_repository();
-        let (summary, persisted, requests) = run_answer_fixture(
-            root.path(),
-            vec![
-                answer_fixture_planner_turn(),
-                answer_fixture_text_turn("Planned answer."),
-            ],
-            enabled,
-            project_requires_planning,
-            session_id,
-            "Answer through required planning.",
-        )
-        .await;
-        assert_eq!(summary.outcome, "completed");
-        assert_eq!(requests.len(), 2);
-        assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
-        assert!(!persisted
-            .events
-            .iter()
-            .any(|event| event.kind.starts_with("answer_route_")));
-        assert_eq!(answer_resource_event(&persisted)["generation_requests"], 2);
-    }
+async fn default_mutation_plan_gate_allows_direct_answer() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![answer_fixture_text_turn("Direct answer.")],
+        true,
+        true,
+        "answer-only-project-planning",
+        "What is the answer?",
+    )
+    .await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response_tool_names(&requests[0]), ["request_plan"]);
+    assert!(persisted.plan.is_none());
+    assert!(persisted.tool_calls.is_empty());
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "answer_route_completed"));
+}
+
+#[tokio::test]
+async fn disabled_answer_route_still_uses_planning() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_answer_fixture(
+        root.path(),
+        vec![
+            answer_fixture_planner_turn(),
+            answer_fixture_text_turn("Planned answer."),
+        ],
+        false,
+        true,
+        "answer-only-disabled-default",
+        "Answer through required planning.",
+    )
+    .await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(response_tool_names(&requests[0]), ["submit_plan"]);
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind.starts_with("answer_route_")));
+    assert_eq!(answer_resource_event(&persisted)["generation_requests"], 2);
 }
 
 #[tokio::test]
@@ -3617,6 +3635,19 @@ Observe the approved plan and verify each tool result.
         .rposition(|event| matches!(event, StreamEvent::Reconciled { .. }))
         .expect("live reconciliation");
     assert!(started < completed && completed < reconciled);
+    let (progress_index, progress) = live_events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            StreamEvent::PlanProgress(progress) => Some((index, progress)),
+            _ => None,
+        })
+        .next_back()
+        .expect("live persisted plan progress");
+    assert!(progress_index < reconciled);
+    assert_eq!(progress.plan_id, persisted.plan.as_ref().expect("plan").id);
+    assert!(progress.complete);
+    assert!(progress.steps.iter().all(|step| step.status == "Completed"));
 
     let restarted_memory = profile.memory_store();
     assert_eq!(

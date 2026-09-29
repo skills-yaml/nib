@@ -1080,6 +1080,29 @@ pub enum LlmStreamEvent {
 
 /// Agent/workload lifecycle events projected to CLI, TUI, gateway, and MCP observers.
 /// Provider adapters never construct this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanProgress {
+    pub plan_id: String,
+    pub current_step_index: usize,
+    pub complete: bool,
+    pub steps: Vec<PlanProgressStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanProgressStep {
+    pub description: String,
+    pub status: String,
+    pub verification: Vec<PlanVerificationProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanVerificationProgress {
+    pub id: String,
+    pub status: crate::session::VerificationStatus,
+    pub authority: crate::session::VerificationAuthority,
+    pub unresolved: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     Content(String),
@@ -1096,6 +1119,7 @@ pub enum StreamEvent {
         step_count: usize,
         steps: Vec<String>,
     },
+    PlanProgress(PlanProgress),
     ApprovalRequired {
         tool_name: String,
     },

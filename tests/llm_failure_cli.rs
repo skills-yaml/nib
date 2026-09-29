@@ -203,6 +203,8 @@ fn configure_interactive_failure(project: &Path, base_url: String) {
     assert!(status.success());
 
     let mut config = NibConfig::default();
+    // This fixture starts with a planner failure and then retries that plan.
+    config.agent.answer_only = false;
     config.llm.active_provider = Some("openai".to_string());
     config.llm.providers.clear();
     config.llm.providers.insert(

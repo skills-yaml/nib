@@ -1356,6 +1356,12 @@ match state {
                 store
                     .record_event(session_id, "reconciliation", reconciliation_details)
                     .map_err(|error| error.to_string())?;
+                emit_plan_progress(
+                    &store,
+                    session_id,
+                    &cfg.stream_tx,
+                    &public_output_sensitive_values,
+                )?;
                 emit(
                     &cfg.stream_tx,
                     StreamEvent::Reconciled {

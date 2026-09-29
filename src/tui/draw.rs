@@ -88,6 +88,11 @@ pub(crate) fn draw_loop(
         ) {
             break Err(error);
         }
+        if worker_finished && worker.is_none() {
+            if let Ok(Some(session)) = store.load_result(&active_session_id) {
+                timeline.refresh_plan_from_session(&session);
+            }
+        }
         if worker_finished
             && worker.is_none()
             && timeline.reconciled_terminal == Some(InteractionTerminalOutcome::Completed)
