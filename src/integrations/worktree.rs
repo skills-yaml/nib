@@ -160,26 +160,17 @@ impl WorktreeManager {
         let Some(worktree) = self.worktrees.get(session_id) else {
             return Ok(None);
         };
-        if worktree.path.starts_with(&self.repo_root)
-            && crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership)
-                .is_ok()
-        {
-            return Ok(Some(worktree.path.clone()));
+        if !worktree.path.starts_with(&self.repo_root) {
+            return Err(
+                "cached session worktree path escapes the project root; it was preserved"
+                    .to_string(),
+            );
         }
-        let ownership = worktree.ownership.clone();
-        let deadline = Instant::now() + SESSION_WORKTREE_CLEANUP_TIMEOUT;
-        crate::sandbox::worktree::cleanup_managed_worktree(
-            &ownership,
-            deadline,
-            SESSION_WORKTREE_CLEANUP_TIMEOUT,
-        )
-        .map_err(|error| {
-            format!(
-                "cached session worktree ownership changed and exact cleanup was incomplete: {error}"
-            )
-        })?;
-        self.worktrees.remove(session_id);
-        Ok(None)
+        crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership)
+            .map_err(|error| {
+                format!("cached session worktree ownership changed; it was preserved: {error}")
+            })?;
+        Ok(Some(worktree.path.clone()))
     }
 
     pub fn get_path(&self, session_id: &str) -> Option<PathBuf> {
@@ -933,15 +924,43 @@ mod tests {
 
         let error = manager
             .create_for_session(session_id)
-            .expect_err("cached replacement must fail exact cleanup");
+            .expect_err("cached replacement must be preserved");
 
         assert!(error.contains("ownership changed"), "{error}");
-        assert!(error.contains("cleanup was incomplete"), "{error}");
+        assert!(error.contains("was preserved"), "{error}");
         assert_eq!(
             std::fs::read(path.join("sentinel")).expect("replacement remains"),
             b"replacement"
         );
         assert!(manager.get_path(session_id).is_none());
+    }
+
+    #[test]
+    fn committed_session_branch_keeps_uncommitted_work_on_reuse_failure() {
+        let repository = repository();
+        let session_id = "committed-branch";
+        let mut manager = WorktreeManager::new(repository.path().to_path_buf());
+        let path = manager
+            .create_for_session(session_id)
+            .expect("session worktree");
+        std::fs::write(path.join("committed.txt"), b"committed\n").expect("committed file");
+        git_stdout(&path, &["add", "committed.txt"]);
+        git_stdout(&path, &["commit", "-m", "session work"]);
+        std::fs::write(path.join("pending.txt"), b"pending\n").expect("uncommitted file");
+
+        let error = manager
+            .create_for_session(session_id)
+            .expect_err("changed branch receipt requires reconciliation");
+        assert!(error.contains("ownership changed"), "{error}");
+        assert_eq!(
+            std::fs::read(path.join("pending.txt")).expect("pending file"),
+            b"pending\n"
+        );
+        assert_eq!(
+            git_stdout(&path, &["show", "HEAD:committed.txt"]),
+            "committed"
+        );
+        assert!(path.join(".git").is_file(), "Git registration was removed");
     }
 
     async fn wait_for_session_pause(pause: &SessionCreatePause) {

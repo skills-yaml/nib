@@ -936,6 +936,16 @@ impl OwnershipCompactionLock {
     }
 }
 
+fn recover_complete_ref_artifacts_if_current(
+    record: &DurableManagedWorktreeOwnership,
+) -> Result<(), String> {
+    let current = crate::daemons::state::StableDirectory::open(&record.common_git_dir)?;
+    if current.directory_removal_receipt()?.identity() != record.common_git_identity {
+        return Ok(());
+    }
+    recover_owned_ref_restart_artifacts(record)
+}
+
 pub(crate) fn compact_complete_ownership_records_with_limits(
     directory: &crate::daemons::state::StableDirectory,
     project_root: &Path,
@@ -948,6 +958,7 @@ pub(crate) fn compact_complete_ownership_records_with_limits(
         pub(crate) path: PathBuf,
         pub(crate) file: std::fs::File,
         pub(crate) bytes: u64,
+        pub(crate) record: DurableManagedWorktreeOwnership,
     }
 
     recover_all_durable_ownership_transactions(directory, project_root)?;
@@ -1012,8 +1023,13 @@ pub(crate) fn compact_complete_ownership_records_with_limits(
             if path == target_path {
                 target_bytes = bytes;
             } else if record.phase == DurableOwnershipPhase::Complete {
-                recover_owned_ref_restart_artifacts(&record)?;
-                candidates.push(Candidate { path, file, bytes });
+                recover_complete_ref_artifacts_if_current(&record)?;
+                candidates.push(Candidate {
+                    path,
+                    file,
+                    bytes,
+                    record,
+                });
             }
             Ok(())
         },
@@ -1029,6 +1045,7 @@ pub(crate) fn compact_complete_ownership_records_with_limits(
         if prospective_count <= max_records && prospective_bytes <= max_aggregate_bytes {
             break;
         }
+        recover_owned_ref_restart_artifacts(&candidate.record)?;
         directory.remove_visible_file_if_matches_direct(&candidate.path, &candidate.file)?;
         prospective_count = prospective_count.saturating_sub(1);
         prospective_bytes = prospective_bytes.saturating_sub(candidate.bytes);
