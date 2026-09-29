@@ -57,6 +57,8 @@ session audit.
 - Agent answer routing, plan lifecycle streaming, and tool gate separation.
 - Typed stream events and interactive/TUI plan projection.
 - Runtime and interaction regression tests; user guide and spec catalog.
+- Existing cross-platform planner smoke fixtures explicitly select the plan-first
+  route for their question, approval, and terminal-state exercises.
 - No persisted schema migration or external service change.
 
 ## Acceptance Criteria

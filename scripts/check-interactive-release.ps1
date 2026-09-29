@@ -163,6 +163,9 @@ model = "mock-model"
 model = "gpt-5"
 api_key = "$privateSentinel"
 
+[agent]
+answer_only = false
+
 [skills]
 enabled = false
 
