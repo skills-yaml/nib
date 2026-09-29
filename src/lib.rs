@@ -9,6 +9,7 @@ pub mod daemons;
 #[doc(hidden)]
 pub mod fs_security;
 pub mod integrations;
+pub mod interaction_card;
 pub mod interactive;
 pub mod llm;
 pub mod mcp_cmd;

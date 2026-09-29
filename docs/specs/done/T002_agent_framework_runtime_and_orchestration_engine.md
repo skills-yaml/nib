@@ -274,7 +274,7 @@ runtime context, gated tools, stdio MCP, and a normalized external-adapter gatew
 
 - The proposed SQLite/global backlog model is historical. `src/session/mod.rs` stores
   indexed sessions and `PlanStep` state under the selected profile; durable terminal
-  and schedule work lives in `src/daemons/workload.rs`.
+  and schedule work lives in `src/daemons/workload/mod.rs`.
 - Telegram, Slack, and Discord authentication, listeners, and reply delivery stay
   outside nib. `src/integrations/gateway.rs` accepts normalized, authenticated payloads.
 
@@ -294,8 +294,8 @@ runtime context, gated tools, stdio MCP, and a normalized external-adapter gatew
 
 ### Implementation Evidence
 
-- `src/agent/state.rs` and `src/agent/loop.rs` implement the lifecycle and bounds.
-- `src/session/mod.rs`, `src/session/memory.rs`, and `src/daemons/workload.rs` implement
+- `src/agent/state.rs` and `src/agent/loop/mod.rs` implement the lifecycle and bounds.
+- `src/session/mod.rs`, `src/session/memory.rs`, and `src/daemons/workload/mod.rs` implement
   the authoritative persistence model; `src/integrations/gateway.rs` implements the
   normalized boundary for externally hosted chat adapters.
 
@@ -340,7 +340,7 @@ and prove the documented edit-and-build lifecycle through the complete agent loo
 
 ### Affected Areas
 
-`src/session/`, `src/agent/`, `src/tools/executor.rs`, Mock LLM scenarios, and runtime
+`src/session/`, `src/agent/`, `src/tools/executor/mod.rs`, Mock LLM scenarios, and runtime
 E2E tests.
 
 ### Implementation Plan

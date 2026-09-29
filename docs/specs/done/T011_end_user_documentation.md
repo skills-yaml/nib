@@ -105,7 +105,7 @@ updates, and uninstall behavior exactly as shipped.
 
 - `tests/installers.rs` covers checksum success/failure and Unix/PowerShell defaults.
 - `tests/docs_integrity.rs::internal_markdown_links_resolve` validates local links.
-- CLI behavior is covered by `src/run.rs`, `src/chat.rs`, `src/config_cmd.rs`,
+- CLI behavior is covered by `src/run.rs`, `src/chat/mod.rs`, `src/config_cmd.rs`,
   `src/mcp_cmd.rs`, and their tests.
 - `task docs:check` passed all five documentation integrity tests on 2026-07-15.
 - Manual release-binary smoke on 2026-07-15 covered help/version output, healthy and

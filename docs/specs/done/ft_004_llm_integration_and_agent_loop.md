@@ -256,12 +256,12 @@ plan-first agent loop; route all actions through `ToolExecutor` and reconcile ou
 ### Affected Areas
 
 `src/llm/`, `src/agent/`, `src/context/`, `src/tools/`, `src/session/`,
-`src/run.rs`, `src/chat.rs`, and runtime/provider tests.
+`src/run.rs`, `src/chat/mod.rs`, and runtime/provider tests.
 
 ### Implementation Evidence
 
 `src/llm/mod.rs` defines `LlmClient`; provider modules implement completion/streaming.
-`src/agent/loop.rs` implements the stateful loop and `src/agent/planner.rs` the structured planner.
+`src/agent/loop/mod.rs` implements the stateful loop and `src/agent/planner.rs` the structured planner.
 
 ### Validation Evidence
 
@@ -299,7 +299,7 @@ credential-free coding E2E that edits and compiles through the loop itself.
 
 ### Affected Areas
 
-`src/agent/`, `src/session/`, `src/llm/mock.rs`, `src/tools/executor.rs`, and runtime
+`src/agent/`, `src/session/`, `src/llm/mock.rs`, `src/tools/executor/mod.rs`, and runtime
 E2E tests.
 
 ### Implementation Plan

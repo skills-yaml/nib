@@ -275,7 +275,13 @@ async fn terminal_audit_redacts_before_retained_tail_truncation() {
     store.create_session_with_id("terminal-redaction-boundary");
     let secret = "active/credential";
     let percent_secret = "active%2Fcredential";
-    let environment = HashMap::from([("DEPLOY_TOKEN".to_string(), secret.to_string())]);
+    let environment = HashMap::from([
+        ("DEPLOY_TOKEN".to_string(), secret.to_string()),
+        (
+            "DEPLOY_TOKEN_ENCODED".to_string(),
+            percent_secret.to_string(),
+        ),
+    ]);
     let mut executor = ToolExecutor::new(root.path().to_path_buf(), execution_without_plan_gate())
         .with_auto_approve(true)
         .with_session_store(store.clone())
@@ -302,7 +308,7 @@ async fn terminal_audit_redacts_before_retained_tail_truncation() {
             call(
                 "run_terminal",
                 json!({
-                    "command": format!("printf %s '{percent_secret}' >&2; exit 7"),
+                    "command": "printf %s \"$DEPLOY_TOKEN_ENCODED\" >&2; exit 7",
                     "max_output_bytes": 8
                 }),
                 root.path(),
@@ -437,6 +443,8 @@ async fn agents_named_boundary_profile_preserves_approval_worktree_and_audit() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();
@@ -615,6 +623,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     let expected_plan_id = plan.id.clone();
@@ -660,6 +670,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     legacy_plan.id.clear();
@@ -684,6 +696,8 @@ async fn mutating_tools_require_an_approved_plan() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     completed_plan.approve();
@@ -746,6 +760,8 @@ async fn caller_plan_id_cannot_forge_or_override_audit_linkage() {
             outcome: None,
             attempts: 0,
             updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
         }],
     );
     plan.approve();

@@ -459,12 +459,12 @@ release qualification behavior are unchanged.
   potentially a new `src/llm/responses.rs`
 - `src/llm/anthropic.rs`, `src/llm/gemini.rs`, and `src/llm/mock.rs` for the shared
   request/completed-turn contract and regression coverage
-- `src/agent/planner.rs` and `src/agent/loop.rs` for structured requests and active-turn
+- `src/agent/planner.rs` and `src/agent/loop/mod.rs` for structured requests and active-turn
   call identity
-- `src/agent/state.rs`, `src/session/`, and `src/daemons/workload.rs` for interrupted-run
+- `src/agent/state.rs`, `src/session/`, and `src/daemons/workload/mod.rs` for interrupted-run
   recovery and authoritative no-reexecution reconciliation
 - `src/context/compression.rs` and every other direct `LlmClient` caller
-- `src/chat.rs`, `src/run.rs`, and `src/tui/` diagnostics and request plumbing
+- `src/chat/mod.rs`, `src/run.rs`, and `src/tui/` diagnostics and request plumbing
 - Provider/config/doctor/runtime integration fixtures
 - `README.md`, `docs/user/guide.md`, `docs/tech/backend_rust.md`, and
   `docs/tech/architecture.md`

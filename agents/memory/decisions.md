@@ -290,12 +290,14 @@ capable terminal and plain mode otherwise; `--plain` and `--tui` force a present
 Content:
 
 FT-019 remains the umbrella interaction contract. The TUI is a presentation of that
-contract, not a second product: two fixed header/status rows, typed activity
-transcript, wrapped composer, and approval/question docks that keep the transcript
-visible. Conversation stays primary; a permanent plan spine is rejected. `/` is
-canonical command discovery. Enter never steers; the first user-visible slice is
-queue-only until the agent loop can bind exact-run steering. Implementation still
-requires child development specs before code.
+contract, not a second product: typed activity transcript, wrapped composer, and
+approval/question docks that keep the transcript visible. Conversation stays primary;
+a permanent plan spine is rejected. `/` is canonical command discovery. Enter never
+steers; the first user-visible slice is queue-only until the agent loop can bind
+exact-run steering. Implementation still requires child development specs before code.
+
+T039 later compacted chrome to one header row (folder + colored branch left, model +
+context right) and a footer of approval mode plus agent mode. Speech renders markdown.
 
 ## 2026-09-02 - Keep v1 production delegation Linux-only
 
@@ -314,6 +316,22 @@ namespace. A protected cleanup authority outside the managed worker trust bounda
 separate product capability owned by backlog spec FT-020. Windows and macOS may graduate
 independently only through that future spec and must not weaken the current rejection
 contract.
+
+## 2026-09-25 - FT-020 ships fail-closed non-Linux production
+
+- Type: decision
+- Source: FT-020 selected design and C01-C07
+- Confidence: high
+- Review: 2026-09-25 spec-compliance then quality review
+- Supersedes: 2026-09-02 backlog ownership of FT-020 as unimplemented future work
+
+Content:
+
+FT-020 is Done as the protected-owner implementation plus a fail-closed Windows
+and macOS `production()` contract. Mechanism tests and Job/process-group
+`current()` backends do not enable production. A later independent native
+qualification record is required before `production()` may return a Windows or
+macOS backend.
 
 ## 2026-09-02 - Qualify every native CI release binary exactly
 
@@ -363,3 +381,20 @@ runtime identity prompts, architecture guidance, and product documentation use t
 term without qualifying nib as a coding agent or workload agent. Coding, planning,
 execution, and workload reconciliation remain concrete capabilities, not the product
 category.
+
+## 2026-09-28 - Make plain-language help a conversational request
+
+- Type: decision
+- Source: user + T055
+- Confidence: high
+- Review: `task verify` and documentation integrity
+- Supersedes: T050's local command-registry response for plain-language help
+
+Content:
+
+Text such as `help` and `what can you do?` follows the ordinary interactive agent
+route. The answer-only prompt receives bounded README, Taskfile, and supported
+command metadata so it can give a repository-aware answer without creating a plan
+when context is sufficient. `/help` remains the immediate, provider-free command
+reference. Text entered during an active run follows the normal next-turn queue
+rule.

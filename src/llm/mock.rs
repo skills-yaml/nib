@@ -197,6 +197,7 @@ fn is_compression_request(messages: &[crate::llm::types::LlmMessage]) -> bool {
         .any(|message| message.content.contains("context compression engine"))
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 #[async_trait]
 impl LlmClient for MockLlmClient {
     async fn complete(&self, request: LlmRequest<'_>) -> Result<LlmResponse, crate::llm::LlmError> {
@@ -386,7 +387,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 1; printf '%s\\n' \"$NIB_DURABLE_TOKEN\"; cat ../../../config.toml",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -399,7 +401,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 30; printf 'must not complete\\n'",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -412,7 +415,8 @@ impl LlmClient for MockLlmClient {
                         "run_terminal",
                         json!({
                             "command": "sleep 2; printf 'durable worker complete\\n'",
-                            "background": true
+                            "background": true,
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -446,7 +450,8 @@ impl LlmClient for MockLlmClient {
                         ToolCallRequest::new(
                             "run_terminal",
                             json!({
-                                "command": "printf changed > mixed-side-effect.txt"
+                                "command": "printf changed > mixed-side-effect.txt",
+                                "affected_paths": ["mixed-side-effect.txt"]
                             }),
                         ),
                     ],
@@ -459,7 +464,8 @@ impl LlmClient for MockLlmClient {
                     vec![ToolCallRequest::new(
                         "run_terminal",
                         json!({
-                            "command": "printf 'recoverable stderr\\n' >&2; exit 7"
+                            "command": "printf 'recoverable stderr\\n' >&2; exit 7",
+                            "affected_paths": ["."]
                         }),
                     )],
                     scope,
@@ -470,7 +476,33 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "printf ok"}),
+                        json!({"command": "printf ok", "affected_paths": ["."]}),
+                    )],
+                    scope,
+                    false,
+                );
+            }
+            if last.contains("one-shot interrupt terminal") {
+                return mock_tool_response(
+                    vec![ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
+                            "command": "sleep 30; echo interrupt-failed > one-shot-interrupt-completed.txt",
+                            "affected_paths": ["."]
+                        }),
+                    )],
+                    scope,
+                    false,
+                );
+            }
+            if last.contains("one-shot interrupt approval") {
+                return mock_tool_response(
+                    vec![ToolCallRequest::new(
+                        "run_terminal",
+                        json!({
+                            "command": "touch one-shot-approval-ran.txt",
+                            "affected_paths": ["one-shot-approval-ran.txt"]
+                        }),
                     )],
                     scope,
                     false,
@@ -480,7 +512,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "sleep 1; printf 'completed before steering\\n'"}),
+                        json!({
+                            "command": "sleep 1; printf 'completed before steering\\n'",
+                            "affected_paths": ["."]
+                        }),
                     )],
                     scope,
                     false,
@@ -497,7 +532,8 @@ impl LlmClient for MockLlmClient {
                         ToolCallRequest::new(
                             "run_terminal",
                             json!({
-                                "command": "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet"
+                                "command": "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet",
+                                "affected_paths": [".tmp", "target"]
                             }),
                         ),
                     ],
@@ -509,7 +545,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "printf changed > delegated-side-effect.txt"}),
+                        json!({
+                            "command": "printf changed > delegated-side-effect.txt",
+                            "affected_paths": ["delegated-side-effect.txt"]
+                        }),
                     )],
                     scope,
                     false,
@@ -519,7 +558,10 @@ impl LlmClient for MockLlmClient {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
                         "run_terminal",
-                        json!({"command": "curl --version > delegated-network-side-effect.txt"}),
+                        json!({
+                            "command": "curl --version > delegated-network-side-effect.txt",
+                            "affected_paths": ["delegated-network-side-effect.txt"]
+                        }),
                     )],
                     scope,
                     false,
@@ -577,6 +619,18 @@ impl LlmClient for MockLlmClient {
             return Ok(LlmResponse::text(
                 "Final answer: replacement steering marker observed.",
             ));
+        }
+
+        if messages.iter().any(|message| {
+            message
+                .content
+                .to_ascii_lowercase()
+                .contains("one-shot long structured final")
+        }) {
+            return Ok(LlmResponse::text(format!(
+                "# Verified result\n\n{}\n\n```text\nLONG_FINAL_SENTINEL\n```",
+                "complete structured paragraph. ".repeat(80)
+            )));
         }
 
         Ok(LlmResponse::text(
@@ -701,6 +755,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     async fn invalid_mock_results_and_continuations_fail_before_a_second_step() {
         let capabilities = crate::llm::registry::provider_descriptor("mock")
             .expect("Mock descriptor")

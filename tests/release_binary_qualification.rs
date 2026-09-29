@@ -426,6 +426,7 @@ fn release_child_output_capture_is_bounded() {
 
 #[test]
 #[ignore = "run through `task qualify:llm-release` after building the optimized binary"]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn exact_release_binary_qualification() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected_commit = expected_source_revision();

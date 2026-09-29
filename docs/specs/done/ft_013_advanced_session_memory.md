@@ -34,7 +34,7 @@ compression behavior.
 ## Affected Areas
 - `src/context/compression.rs` (compression logic)
 - `src/session/mod.rs` (adding summary fields if needed)
-- `src/agent/loop.rs` (implementing the BuildContext memory optimization)
+- `src/agent/loop/mod.rs` (implementing the BuildContext memory optimization)
 
 ## Validation Gates
 - `task check`
@@ -71,7 +71,7 @@ retain the raw audit, and project a bounded hot context into later turns.
 ### Affected Areas
 
 `src/context/compression.rs`, `src/context/budget.rs`, `src/session/`,
-`src/agent/loop.rs`, and compression/session tests.
+`src/agent/loop/mod.rs`, and compression/session tests.
 
 ### Implementation Evidence
 

@@ -93,7 +93,7 @@ Update runtime entrypoints in cli/tui to use the state machine.
 Scope: make approval an observable lifecycle state, enforce session invariants and
 bounds, expose transition traces, and align the implementation with T002.
 
-Affected areas: `src/agent/`, `src/tools/executor.rs`, `src/session/`, and runtime tests.
+Affected areas: `src/agent/`, `src/tools/executor/mod.rs`, `src/session/`, and runtime tests.
 
 Validation gates: transition/order/bound/error tests, diagram trace assertions,
 `task check`, and `task test`.
@@ -117,20 +117,20 @@ an explicit persisted lifecycle.
 
 ### Affected Areas
 
-`src/agent/state.rs`, `src/agent/loop.rs`, `src/session/`, `src/tools/executor.rs`,
+`src/agent/state.rs`, `src/agent/loop/mod.rs`, `src/session/`, `src/tools/executor/mod.rs`,
 `src/tui/mod.rs`, and lifecycle/E2E tests.
 
 ### Implementation Evidence
 
 - `src/agent/state.rs` owns the transition graph.
-- `src/agent/loop.rs` owns bounded dispatch, cancellation reconciliation, plan/step
+- `src/agent/loop/mod.rs` owns bounded dispatch, cancellation reconciliation, plan/step
   updates, questions, tool observations, and terminal `StreamEvent::End` emission.
 
 ### Validation Evidence
 
 - `src/agent/state.rs`: `lifecycle_accepts_diagram_order` and
   `lifecycle_rejects_execution_before_plan_approval`.
-- `src/agent/loop.rs`: audited lifecycle, denied plan, configured bound, question,
+- `src/agent/loop/mod.rs`: audited lifecycle, denied plan, configured bound, question,
   failed-tool correction, and cancellation tests.
 - `tests/test_runtime_e2e.rs`: runtime trace and configured-bound scenarios.
 
@@ -164,7 +164,7 @@ is resumed.
 
 ### Affected Areas
 
-`src/session/mod.rs`, `src/agent/loop.rs`, state/lifecycle tests, and runtime E2E tests.
+`src/session/mod.rs`, `src/agent/loop/mod.rs`, state/lifecycle tests, and runtime E2E tests.
 
 ### Implementation Plan
 

@@ -113,6 +113,7 @@ jobs:
       NIB_LIVE_SCENARIO_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '120' || vars.NIB_LIVE_SCENARIO_TIMEOUT_SECS }}
       NIB_LIVE_PROVIDER_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '3600' || vars.NIB_LIVE_PROVIDER_TIMEOUT_SECS }}
       NIB_LIVE_RUN_TIMEOUT_SECS: ${{ needs.prepare.outputs.mode == 'catalog' && '14400' || vars.NIB_LIVE_RUN_TIMEOUT_SECS }}
+      NIB_LIVE_META_BASE_URL: ${{ vars.NIB_LIVE_META_BASE_URL }}
       RUST_LOG: warn
       RUST_LOG_STYLE: never
       RUST_BACKTRACE: "0"
@@ -132,7 +133,6 @@ jobs:
         shell: bash
         env:
           PROVIDER_API_KEY: ${{ secrets.LLM_API_KEY }}
-          META_BASE_URL: ${{ secrets.NIB_LIVE_META_BASE_URL }}
         run: |
           set -euo pipefail
           if [ "${{ needs.prepare.outputs.mode }}" != "catalog" ]; then
@@ -158,14 +158,11 @@ jobs:
             anthropic) export ANTHROPIC_API_KEY="$PROVIDER_API_KEY" ;;
             google) export GOOGLE_API_KEY="$PROVIDER_API_KEY" ;;
             grok) export XAI_API_KEY="$PROVIDER_API_KEY" ;;
-            meta)
-              export META_API_KEY="$PROVIDER_API_KEY"
-              export NIB_LIVE_META_BASE_URL="$META_BASE_URL"
-              ;;
+            meta) export META_API_KEY="$PROVIDER_API_KEY" ;;
             openrouter) export OPENROUTER_API_KEY="$PROVIDER_API_KEY" ;;
             *) echo "Unsupported provider" >&2; exit 1 ;;
           esac
-          unset PROVIDER_API_KEY META_BASE_URL
+          unset PROVIDER_API_KEY
           task test:llm-live:${{ needs.prepare.outputs.mode }}
 
       - name: Verify sanitized reports exist

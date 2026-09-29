@@ -31,7 +31,7 @@ the immediate context. The reconciliation below records the shipped plan-first l
 
 ## Affected Areas
 - `src/agent/planner.rs` (new file)
-- `src/agent/loop.rs` (AgentLoop logic)
+- `src/agent/loop/mod.rs` (AgentLoop logic)
 - `src/session/mod.rs` (Session schema for plan storage)
 - `src/agent/state.rs` (State machine updates)
 - `src/llm/types.rs` (if new parsing types needed for planner)
@@ -69,7 +69,7 @@ require approval, execute sequential `PlanStep`s, and update outcomes from tool 
 
 ### Affected Areas
 
-`src/agent/planner.rs`, `src/agent/loop.rs`, `src/agent/state.rs`,
+`src/agent/planner.rs`, `src/agent/loop/mod.rs`, `src/agent/state.rs`,
 `src/context/budget.rs`, `src/session/mod.rs`, and planner/runtime tests.
 
 ### Implementation Evidence
@@ -110,8 +110,8 @@ limited to a same-goal continuation.
 
 ### Affected Areas
 
-`src/agent/planner.rs`, `src/agent/loop.rs`, `src/session/mod.rs`,
-`src/tools/executor.rs`, and planner/runtime tests.
+`src/agent/planner.rs`, `src/agent/loop/mod.rs`, `src/session/mod.rs`,
+`src/tools/executor/mod.rs`, and planner/runtime tests.
 
 ### Implementation Plan
 

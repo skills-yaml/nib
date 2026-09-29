@@ -146,7 +146,7 @@ detached durable workers.
 
 - `src/profile/mod.rs` and `src/profile/migration.rs` own resolution and migration.
 - `src/daemons/cron.rs`, `src/daemons/curator.rs`, and
-  `src/daemons/workload.rs` own persisted maintenance and detached task state.
+  `src/daemons/workload/mod.rs` own persisted maintenance and detached task state.
 
 ### Validation Evidence
 
@@ -207,8 +207,8 @@ group while a reaper owns every spawned child.
 
 ### Affected Areas
 
-`src/daemons/task.rs`, `src/daemons/workload.rs`, `src/tools/core.rs`,
-`src/tools/executor.rs`, `src/agent/loop.rs`, and durable-task tests.
+`src/daemons/task.rs`, `src/daemons/workload/mod.rs`, `src/tools/core.rs`,
+`src/tools/executor/mod.rs`, `src/agent/loop/mod.rs`, and durable-task tests.
 
 ### Validation Gates
 
@@ -290,21 +290,21 @@ a stale worker is claimed for reconciliation resume to one terminal outcome.
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/daemons/workload.rs`, `src/daemons/task.rs`,
+`src/daemons/state/mod.rs`, `src/daemons/workload/mod.rs`, `src/daemons/task.rs`,
 `src/daemons/cron.rs`, `src/daemons/curator.rs`, `src/tools/core.rs`,
-`src/tools/delegation.rs`, daemon and durable-task tests, and workload validation
+`src/tools/delegation/mod.rs`, daemon and durable-task tests, and workload validation
 evidence.
 
 ### Implementation Evidence
 
-- `src/daemons/state.rs` owns retained `StableDirectory` capabilities, capability-relative
+- `src/daemons/state/mod.rs` owns retained `StableDirectory` capabilities, capability-relative
   atomic publication, bounded streaming directory scans, and anchored shared locks.
-- `src/daemons/workload.rs` owns capability-bound fixed task/admission stripes, global
+- `src/daemons/workload/mod.rs` owns capability-bound fixed task/admission stripes, global
   legacy cleanup, persisted execution generations, paired worker transitions, and
   resumable reconciliation.
 - `src/daemons/task.rs` and `src/tools/core.rs` correlate terminal and schedule session,
   tool-call, and audit evidence by execution generation with an exact legacy fallback.
-- `src/tools/delegation.rs` places record locks in a fixed stripe namespace outside the
+- `src/tools/delegation/mod.rs` places record locks in a fixed stripe namespace outside the
   replaceable records directory. It atomically publishes native-origin namespace
   evidence and gates the one old per-ID cleanup through an exact, versioned offline
   doctor epoch rather than attempting live coexistence with prior binaries.
@@ -433,7 +433,7 @@ skill tracking with cleanup; and bound both temporary artifacts and recursive cl
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/daemons/workload.rs`, `src/daemons/cron.rs`,
+`src/daemons/state/mod.rs`, `src/daemons/workload/mod.rs`, `src/daemons/cron.rs`,
 `src/daemons/curator.rs`, `src/session/memory.rs`, durable delivery/reconciliation callers,
 and focused process tests.
 
@@ -499,8 +499,8 @@ directories through the existing handle rather than opening a conflicting second
 
 ### Affected Areas
 
-`src/fs_security.rs`, `src/daemons/state.rs`, `src/daemons/curator.rs`, containment
-callers, `src/sandbox/worktree.rs`, Windows-only filesystem/state tests, and the
+`src/fs_security.rs`, `src/daemons/state/mod.rs`, `src/daemons/curator.rs`, containment
+callers, `src/sandbox/worktree/mod.rs`, Windows-only filesystem/state tests, and the
 `windows-sys` feature surface in `Cargo.toml`.
 
 ### Validation Gates
@@ -544,8 +544,8 @@ a conflicting byte range.
 
 ### Affected Areas
 
-`src/fs_security.rs`, `src/daemons/state.rs`, `src/sandbox/process.rs`,
-`src/sandbox/worktree.rs`, `src/integrations/worktree.rs`, `src/tui/mod.rs`, and focused
+`src/fs_security.rs`, `src/daemons/state/mod.rs`, `src/sandbox/process/mod.rs`,
+`src/sandbox/worktree/mod.rs`, `src/integrations/worktree.rs`, `src/tui/mod.rs`, and focused
 Windows filesystem, persistence, and worktree regressions.
 
 ### Validation Gates
@@ -591,8 +591,8 @@ their ownership protocol is active, without weakening live-owner exclusion.
 
 ### Affected Areas
 
-`src/fs_security.rs`, `src/daemons/state.rs`, `src/daemons/curator.rs`,
-`src/sandbox/worktree.rs`, `src/session/mod.rs`, native integration fixtures, focused
+`src/fs_security.rs`, `src/daemons/state/mod.rs`, `src/daemons/curator.rs`,
+`src/sandbox/worktree/mod.rs`, `src/session/mod.rs`, native integration fixtures, focused
 Windows filesystem/worktree regressions, and the hosted Windows job.
 
 ### Validation Gates
@@ -635,7 +635,7 @@ task's exact profile session store when multiple profiles share one workspace ro
 
 ### Affected Areas
 
-`src/daemons/workload.rs`, `src/agent/loop.rs`, `src/session/mod.rs`, and focused durable
+`src/daemons/workload/mod.rs`, `src/agent/loop/mod.rs`, `src/session/mod.rs`, and focused durable
 schedule regressions.
 
 ### Validation Gates
@@ -691,7 +691,7 @@ relying on a fixed child lifetime.
 
 ### Affected Areas
 
-`src/daemons/state.rs`, `src/fs_security.rs`, `src/skill_cmd.rs`,
+`src/daemons/state/mod.rs`, `src/fs_security.rs`, `src/skill_cmd.rs`,
 `src/sandbox/windows_job.rs`, focused atomic-recovery and Windows runtime regressions,
 `tests/managed_process_supervisor_recovery.rs`, and the hosted CI matrix.
 
@@ -745,7 +745,7 @@ finishes.
 
 ### Affected Areas
 
-`src/agent/loop.rs`, `src/daemons/workload.rs`, Windows durable-worker process creation,
+`src/agent/loop/mod.rs`, `src/daemons/workload/mod.rs`, Windows durable-worker process creation,
 `tests/durable_tasks.rs`, durable task validation evidence, and the hosted CI matrix.
 
 ### Validation Gates
@@ -844,7 +844,7 @@ contracts remain unchanged.
 
 ### Affected Areas
 
-`src/agent/mod.rs`, `src/run.rs`, `src/main.rs`, `src/tools/delegation.rs`, this
+`src/agent/mod.rs`, `src/run.rs`, `src/main.rs`, `src/tools/delegation/mod.rs`, this
 development spec, the durable task regression, and the hosted native CI matrix.
 
 ### Validation Gates

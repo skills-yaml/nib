@@ -90,10 +90,10 @@ queue the next turn and never steers.
 
 ## Affected Areas
 
-- `src/agent/loop.rs` and `src/agent/mod.rs` — exact-run steering API, persistence
+- `src/agent/loop/mod.rs` and `src/agent/mod.rs` — exact-run steering API, persistence
   validation, safe-boundary intake, and bounded context application.
-- `src/interactive.rs` — steer parsing/reduction and typed persisted activity projection.
-- `src/chat.rs` and `src/console.rs` — single-owner plain input routing for active-run
+- `src/interactive/mod.rs` — steer parsing/reduction and typed persisted activity projection.
+- `src/chat/mod.rs` and `src/console.rs` — single-owner plain input routing for active-run
   steer, queue, approval, and question input.
 - `src/tui/mod.rs` — worker steering handle, `Ctrl+S`, draft disposition, and live ledger.
 - `src/session/mod.rs` — only additive event evidence; the message schema is unchanged.

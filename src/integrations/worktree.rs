@@ -187,6 +187,10 @@ impl WorktreeManager {
         crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership).ok()?;
         Some(worktree.path.clone())
     }
+
+    pub fn existing_for_session(&mut self, session_id: &str) -> Result<Option<PathBuf>, String> {
+        self.cached_path(session_id)
+    }
 }
 
 pub(crate) fn with_validated_session_worktree<T>(
@@ -240,6 +244,7 @@ impl Drop for BlockingCreateCancellationGuard {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn create_session_worktree(
     repo_root: &Path,
     session_id: &str,

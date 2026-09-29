@@ -2,7 +2,7 @@ use chrono::Utc;
 use nib::agent::CancellationSignal;
 use nib::config::{ExecutionConfig, TerminalConfig};
 use nib::sandbox::worktree::Worktree;
-use nib::session::SessionStore;
+use nib::session::{MessageOrigin, SessionStore};
 #[cfg(all(unix, debug_assertions))]
 use nib::tools::delegation::install_merge_interruption_test_barrier;
 #[cfg(unix)]
@@ -480,6 +480,7 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
     let environment = std::collections::HashMap::new();
     let bounded = nib::tools::core::dispatch(
         "invoke_subagent",
+        nib::tools::ToolInvocationId::new(),
         &json!({"prompt": "explore the project", "max_steps": 1}),
         root.path(),
         &ExecutionConfig::default(),
@@ -508,6 +509,30 @@ async fn spawned_subagents_reach_durable_completed_and_failed_results_without_st
 }
 
 #[cfg(target_os = "linux")]
+fn assert_policy_denial_reconciled(record: &SubagentRecord, child: &nib::session::Session) {
+    let result = record.result.as_ref().expect("failed child result");
+    assert_eq!(result["outcome"], "tool_execution_failed");
+    assert_eq!(
+        result["tool_call_count"], 1,
+        "denied action must not be retried"
+    );
+    assert_eq!(result["bound_reached"], false);
+    let plan = child.plan.as_ref().expect("approved child plan");
+    assert!(plan.approved);
+    assert!(!plan.is_complete());
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert_eq!(plan.outcome.as_deref(), Some("tool_execution_failed"));
+    assert!(child.events.iter().any(|event| {
+        event.kind == "reconciliation"
+            && event.details["outcome"] == "tool_execution_failed"
+            && event.details["continue"] == false
+    }));
+    child
+        .validate_message_sequence()
+        .expect("valid denied-child audit");
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
     let root = git_repository();
@@ -519,12 +544,13 @@ async fn spawned_subagents_approve_their_plan_but_deny_destructive_actions() {
     let id = started["subagent_id"].as_str().expect("subagent id");
     let record = wait_for_terminal_record(root.path(), id).await;
     assert_eq!(
-        record.status, "completed",
+        record.status, "failed",
         "destructive-denial subagent record: {record:#?}"
     );
 
     let store = SessionStore::for_project(&record.worktree_path).expect("child session store");
     let child = store.load(id).expect("child session");
+    assert_policy_denial_reconciled(&record, &child);
     assert!(child.events.iter().any(|event| {
         event.kind == "plan_approved"
             && event
@@ -575,10 +601,11 @@ async fn subagent_policy_allow_cannot_bypass_mutation_or_network_ceiling() {
             .expect("spawn policy fixture");
         let id = started["subagent_id"].as_str().expect("subagent id");
         let record = wait_for_terminal_record(root.path(), id).await;
-        assert_eq!(record.status, "completed", "record: {record:#?}");
+        assert_eq!(record.status, "failed", "record: {record:#?}");
 
         let store = SessionStore::for_project(&record.worktree_path).expect("child session store");
         let child = store.load(id).expect("child session");
+        assert_policy_denial_reconciled(&record, &child);
         let denied = child
             .tool_calls
             .iter()
@@ -652,6 +679,7 @@ fn dropping_the_runtime_cannot_leave_a_spawned_record_running() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn subagent_merge_requires_successful_verification_and_preserves_result() {
     let root = git_repository();
     let worktree = Worktree::create(root.path(), "sub-test").expect("worktree");
@@ -689,6 +717,14 @@ async fn subagent_merge_requires_successful_verification_and_preserves_result() 
         .join(".nib/profiles/default/sessions/child.json")
         .is_file());
     assert!(!worktree.path.join(".nib/sessions").exists());
+    {
+        // Release the child identity file before Windows quarantines the worktree.
+        let child_store = SessionStore::for_project(&worktree.path).expect("child session store");
+        let child = child_store.load("child").expect("child session");
+        assert_eq!(child.messages[0].role, "user");
+        assert_eq!(child.message_origin(0), MessageOrigin::ToolOutput);
+        assert!(child.human_intent.is_empty());
+    }
 
     let failed = execute_merge(&mut executor, root.path(), "parent", "sub-test", "false").await;
     assert!(!failed.success, "verification must gate merge");
@@ -1030,6 +1066,7 @@ async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn pending_recovery_never_aborts_an_unrelated_human_merge() {
     let root = git_repository();
     let base = git_stdout(root.path(), &["rev-parse", "HEAD"]);
@@ -1560,6 +1597,7 @@ async fn cancelled_repository_lock_wait_is_prompt_and_preserves_record() {
 
 #[cfg(all(unix, debug_assertions))]
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn cancelled_active_merge_preserves_user_changes_and_retries_owned_state() {
     let root = git_repository();
     let worktree = Worktree::create(root.path(), "sub-cancel-merge").expect("worktree");

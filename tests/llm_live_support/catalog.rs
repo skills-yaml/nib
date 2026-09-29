@@ -344,6 +344,8 @@ async fn fetch_gemini_from_endpoint(
     CatalogSnapshot::new("google", pages, models)
 }
 
+const MAX_CATALOG_ERROR_BYTES: usize = 8 * 1024;
+
 async fn send_catalog_request(provider: &str, request: RequestBuilder) -> Result<Value, String> {
     let response = request
         .send()
@@ -351,21 +353,54 @@ async fn send_catalog_request(provider: &str, request: RequestBuilder) -> Result
         .map_err(|_| format!("{provider} catalog request failed before a valid response"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(safe_catalog_status(provider, status));
+        let body = read_bounded_error_bytes(response).await;
+        return Err(safe_catalog_status(provider, status, &body));
     }
     read_bounded_catalog_json(response, provider).await
 }
 
-fn safe_catalog_status(provider: &str, status: StatusCode) -> String {
-    let class = match status.as_u16() {
+fn safe_catalog_status(provider: &str, status: StatusCode, body: &[u8]) -> String {
+    let class = catalog_http_error_class(status, body);
+    format!("{provider} catalog {class} with HTTP {}", status.as_u16())
+}
+
+fn catalog_http_error_class(status: StatusCode, body: &[u8]) -> &'static str {
+    match status.as_u16() {
         401 | 403 => "blocked_auth",
         402 => "blocked_billing",
         429 => "blocked_rate_limit",
         451 => "blocked_region",
+        400 if catalog_body_indicates_invalid_key(body) => "blocked_auth",
         500..=599 => "provider_unavailable",
         _ => "catalog_rejected",
-    };
-    format!("{provider} catalog {class} with HTTP {}", status.as_u16())
+    }
+}
+
+fn catalog_body_indicates_invalid_key(body: &[u8]) -> bool {
+    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    lower.contains("api_key_invalid")
+        || lower.contains("invalid_api_key")
+        || lower.contains("api key not valid")
+        || lower.contains("invalid api key")
+}
+
+async fn read_bounded_error_bytes(response: Response) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let take = MAX_CATALOG_ERROR_BYTES.saturating_sub(bytes.len());
+        if take == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..take.min(chunk.len())]);
+        if bytes.len() >= MAX_CATALOG_ERROR_BYTES {
+            break;
+        }
+    }
+    bytes
 }
 
 async fn read_bounded_catalog_json(response: Response, provider: &str) -> Result<Value, String> {
@@ -509,8 +544,8 @@ fn parse_openrouter_page(value: &Value) -> Result<Vec<CatalogModel>, String> {
     required_array(value, "data")?
         .iter()
         .map(|model| {
-            let id = required_string(model, "canonical_slug")
-                .or_else(|_| required_string(model, "id"))?;
+            let id = required_string(model, "id")?;
+            let canonical_slug = optional_string(model, "canonical_slug")?;
             let architecture = model.get("architecture").and_then(Value::as_object);
             let input = architecture
                 .and_then(|value| value.get("input_modalities"))
@@ -531,10 +566,14 @@ fn parse_openrouter_page(value: &Value) -> Result<Vec<CatalogModel>, String> {
                         && output.iter().any(|value| value == "text"),
                 )
             };
+            let aliases = canonical_slug
+                .filter(|slug| slug != &id)
+                .into_iter()
+                .collect();
             Ok(CatalogModel {
                 id,
                 generation_target: None,
-                aliases: Vec::new(),
+                aliases,
                 supports_text_generation: supports_text,
                 supports_tools: Some(parameters.iter().any(|value| value == "tools")),
                 supports_parallel_tools: Some(
@@ -633,19 +672,25 @@ fn parse_gemini_page(value: &Value) -> Result<GeminiPage, String> {
         .iter()
         .map(|model| {
             let resource_name = required_string(model, "name")?;
-            resource_name
+            let from_name = resource_name
                 .strip_prefix("models/")
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
                     "Gemini model name must use the models/ resource prefix".to_string()
-                })?;
-            let generation_target = required_string(model, "baseModelId")?;
-            if generation_target.starts_with("models/") {
-                return Err(
-                    "Gemini baseModelId must be a generation target without the models/ prefix"
-                        .to_string(),
-                );
-            }
+                })?
+                .to_string();
+            // Live ListModels often omits baseModelId. The resource-name suffix is the
+            // generateContent ID; never infer from displayName.
+            let generation_target = match optional_string(model, "baseModelId")? {
+                Some(id) if id.starts_with("models/") => {
+                    return Err(
+                        "Gemini baseModelId must be a generation target without the models/ prefix"
+                            .to_string(),
+                    );
+                }
+                Some(id) => id,
+                None => from_name,
+            };
             let actions = model
                 .get("supportedGenerationMethods")
                 .or_else(|| model.get("supported_actions"))
@@ -743,17 +788,13 @@ fn optional_number(value: &Value, field: &str) -> Result<Option<f64>, String> {
 fn parse_decimal(value: Option<&Value>) -> Result<Option<f64>, String> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => value
+        Some(Value::String(value)) => Ok(value
             .parse::<f64>()
             .ok()
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(Some)
-            .ok_or_else(|| "catalog pricing contains an invalid decimal".to_string()),
-        Some(Value::Number(value)) => value
+            .filter(|value| value.is_finite() && *value >= 0.0)),
+        Some(Value::Number(value)) => Ok(value
             .as_f64()
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(Some)
-            .ok_or_else(|| "catalog pricing contains an invalid number".to_string()),
+            .filter(|value| value.is_finite() && *value >= 0.0)),
         _ => Err("catalog pricing must be a decimal string or number".to_string()),
     }
 }
@@ -904,11 +945,11 @@ mod tests {
         assert_eq!(page.models[0].owner, None);
         assert_eq!(page.models[1].supports_text_generation, Some(false));
         assert!(parse_gemini_page(&json!({"models": [{"name": "gemini-chat"}]})).is_err());
-        assert!(parse_gemini_page(&json!({
-            "models": [{"name": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"]}]
+        let inferred = parse_gemini_page(&json!({
+            "models": [{"name": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"], "displayName": "Gemini Chat"}]
         }))
-        .unwrap_err()
-        .contains("baseModelId"));
+        .expect("resource-name suffix is the generation target when baseModelId is omitted");
+        assert_eq!(inferred.models[0].generation_target(), "gemini-chat");
         assert!(
             parse_gemini_page(&json!({
                 "models": [{"name": "models/gemini-chat", "baseModelId": "models/gemini-chat", "supportedGenerationMethods": ["generateContent"]}]
@@ -952,7 +993,8 @@ mod tests {
             "pricing": {"prompt": "0.000001", "completion": "0.000002", "request": "0"}
         }]}))
         .unwrap();
-        assert_eq!(models[0].id, "owner/model");
+        assert_eq!(models[0].id, "alias/value");
+        assert_eq!(models[0].aliases, ["owner/model"]);
         assert_eq!(models[0].supports_tools, Some(true));
         assert_eq!(models[0].supports_parallel_tools, Some(true));
         assert_eq!(
@@ -971,6 +1013,20 @@ mod tests {
             models[0].pricing.as_ref().unwrap().completion_per_token_usd,
             Some(0.000002)
         );
+    }
+
+    #[test]
+    fn openrouter_sentinel_negative_prices_are_unpriced() {
+        let models = parse_openrouter_page(&json!({"data": [{
+            "id": "openrouter/auto",
+            "canonical_slug": "openrouter/auto",
+            "pricing": {"prompt": "-1", "completion": "-1", "request": "0"}
+        }]}))
+        .expect("OpenRouter auto-router -1 prices are unpriced, not a catalog failure");
+        let pricing = models[0].pricing.as_ref().expect("pricing object");
+        assert_eq!(pricing.prompt_per_token_usd, None);
+        assert_eq!(pricing.completion_per_token_usd, None);
+        assert_eq!(pricing.request_usd, Some(0.0));
     }
 
     #[test]
@@ -1066,12 +1122,35 @@ mod tests {
     #[test]
     fn safe_status_never_contains_remote_body_text() {
         assert_eq!(
-            safe_catalog_status("openai", StatusCode::UNAUTHORIZED),
+            safe_catalog_status("openai", StatusCode::UNAUTHORIZED, b"remote-catalog-secret"),
             "openai catalog blocked_auth with HTTP 401"
         );
         assert_eq!(
-            safe_catalog_status("google", StatusCode::TOO_MANY_REQUESTS),
+            safe_catalog_status("google", StatusCode::TOO_MANY_REQUESTS, b"retry-later"),
             "google catalog blocked_rate_limit with HTTP 429"
+        );
+        assert_eq!(
+            safe_catalog_status(
+                "google",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}"#
+            ),
+            "google catalog blocked_auth with HTTP 400"
+        );
+        let leaked = safe_catalog_status(
+            "google",
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"message":"API key not valid. Please pass a valid API key."}}"#,
+        );
+        assert_eq!(leaked, "google catalog blocked_auth with HTTP 400");
+        assert!(!leaked.contains("API key not valid"));
+        assert_eq!(
+            safe_catalog_status(
+                "openrouter",
+                StatusCode::BAD_REQUEST,
+                b"malformed catalog query"
+            ),
+            "openrouter catalog catalog_rejected with HTTP 400"
         );
     }
 
@@ -1340,6 +1419,33 @@ mod tests {
         server.join().expect("HTTP error fixture server");
         assert_eq!(error, "openai catalog blocked_auth with HTTP 401");
         assert!(!error.contains(remote_sentinel));
+
+        let invalid_key_body = r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#;
+        let (endpoint, _, server) = serve(vec![FixtureResponse::status(
+            "400 Bad Request",
+            invalid_key_body,
+        )]);
+        let error =
+            send_catalog_request("google", test_client(Duration::from_secs(2)).get(endpoint))
+                .await
+                .expect_err("google invalid key");
+        server.join().expect("google 400 fixture server");
+        assert_eq!(error, "google catalog blocked_auth with HTTP 400");
+        assert!(!error.contains("API_KEY_INVALID"));
+        assert!(!error.contains("API key not valid"));
+
+        let (endpoint, _, server) = serve(vec![FixtureResponse::status(
+            "400 Bad Request",
+            r#"{"error":"malformed catalog query"}"#,
+        )]);
+        let error = send_catalog_request(
+            "openrouter",
+            test_client(Duration::from_secs(2)).get(endpoint),
+        )
+        .await
+        .expect_err("openrouter catalog 400");
+        server.join().expect("openrouter 400 fixture server");
+        assert_eq!(error, "openrouter catalog catalog_rejected with HTTP 400");
 
         let (endpoint, _, server) = serve(vec![FixtureResponse::status("200 OK", "{broken")]);
         let error =

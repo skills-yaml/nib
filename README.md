@@ -7,7 +7,7 @@ nib is a command-line AI agent that plans, executes, and reconciles work in loca
 - **Local Sessions:** Stores profile-scoped history under `./.nib/profiles/<id>/sessions/`.
 - **Pluggable LLMs:** Includes OpenAI Responses and Chat Completions transports plus configured adapters for Anthropic, Gemini, Grok, OpenRouter, Meta, and Mock.
 - **Layered Execution:** Isolates mutations in Git worktrees; the default hybrid provider uses Linux `bwrap` when usable and otherwise runs directly in the worktree.
-- **Human-in-the-Loop:** Manual mode prompts for plans and risky actions; explicit deny policies remain authoritative.
+- **Human-in-the-Loop:** Manual mode prompts for unclear questions and risky actions; plans print and continue. Explicit deny policies remain authoritative.
 - **MCP Integration:** Can act as an MCP (Model Context Protocol) server for external IDEs or clients.
 - **Durable Work:** Background commands and scheduled wakes have inspectable, cancellable, lease-fenced records.
 - **Supervised Delegation:** Foreground subagents use an independent cleanup supervisor;
@@ -101,6 +101,8 @@ task build
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
    - `/session` - Preview and resume a persisted session
+   - `/questions [id]` - List or answer unresolved questions for the current plan
+   - `/continue <plan-id>` - Explicitly continue that exact recovered plan
    - `/clear` - Start a fresh session
    - `/skills` - Manage installed skills
    - `/mcp` - Manage MCP servers
@@ -110,14 +112,23 @@ task build
    authentication first. `nib chat` remains an explicit spelling of the same launcher;
    `nib tui` remains a compatibility alias for `nib --tui`.
 
+   Plain-language `help` and `what can you do?` are normal messages. nib can answer
+   with a short overview grounded in the current repository, available validation
+   tasks, and supported interactive commands. `/help` prints the complete command
+   reference immediately, even without a model connection. Other clear information
+   requests can receive a tool-free answer without a plan; nib then waits for the
+   next message. Requests needing inspection or action enter the normal planning
+   path.
+
    The TUI centers the active session's bounded persisted timeline and offers keyboard
    completion. Plain mode provides the same command and session capabilities through
    numbered prompts. `/session` previews history and requires confirmation before
    changing the active session in either mode.
 
 Mutating work remains on a `nib/session/*` worktree branch until you review and merge
-it. `nib run --yes` bypasses interactive plan and tool prompts and should be limited to
-already trusted environments.
+it. Plans are informational and continue without a separate approval prompt.
+`nib run --yes` bypasses eligible interactive tool prompts, but never explicit deny
+policies or execution boundaries, and should be limited to already trusted environments.
 
 ### Upgrading legacy delegation state
 

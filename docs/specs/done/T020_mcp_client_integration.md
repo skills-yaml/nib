@@ -18,7 +18,7 @@ nib needs to connect to MCP (Model Context Protocol) servers to expose their too
 
 - `src/integrations/mcp.rs`
 - `src/config/mod.rs` (if adding MCP server config)
-- `src/tools/executor.rs` and `src/tools/registry.rs` (dynamic tools vs static tools)
+- `src/tools/executor/mod.rs` and `src/tools/registry.rs` (dynamic tools vs static tools)
 
 ## Validation Gates
 
@@ -58,7 +58,7 @@ executor approval and audit.
 ### Affected Areas
 
 `src/integrations/mcp.rs`, `src/integrations/mcp_framing.rs`, `src/config/`,
-`src/tools/executor.rs`, `src/agent/loop.rs`, and MCP tests.
+`src/tools/executor/mod.rs`, `src/agent/loop/mod.rs`, and MCP tests.
 
 ### Implementation Evidence
 
@@ -165,7 +165,7 @@ MCP-routed gated tools must remain bounded, hook-disabled, contained, and compen
 ### Affected Areas
 
 `src/integrations/mcp.rs`, `src/integrations/worktree.rs`,
-`src/sandbox/worktree.rs`, `src/sandbox/mod.rs`, `src/sandbox/windows_job.rs`, MCP
+`src/sandbox/worktree/mod.rs`, `src/sandbox/mod.rs`, `src/sandbox/windows_job.rs`, MCP
 manager construction boundaries, transport fixtures, and cross-platform lifecycle tests.
 
 ### Validation Gates

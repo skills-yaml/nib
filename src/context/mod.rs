@@ -4,13 +4,15 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::session::Session;
+use crate::session::{ClarificationStatus, HumanIntentKind, MessageOrigin, Session};
 
 pub mod agents;
 pub mod budget;
 pub mod compression;
+mod help;
 pub mod project_docs;
 pub mod skills;
+pub mod snapshot;
 
 pub use agents::{find_agents_md, format_context_for_prompt, load_agents_md};
 
@@ -81,6 +83,15 @@ impl RuntimeContextSections {
 
 const MAX_ATTACHMENT_FILE_BYTES: usize = 8 * 1024;
 
+/// Initial history allocation shared by request projection and automatic compression.
+pub(crate) fn runtime_history_budget(context_length: usize) -> usize {
+    (context_length.saturating_mul(25) / 100).max(8)
+}
+
+fn session_summary_budget(history_tokens: usize) -> usize {
+    (history_tokens / 3).max(1)
+}
+
 pub fn attachment_context_sections(
     project_root: &Path,
     attachments: &[crate::session::PathAttachment],
@@ -91,43 +102,24 @@ pub fn attachment_context_sections(
     let mut sections = Vec::new();
     for attachment in attachments {
         let candidate = root.join(&attachment.path);
-        let Ok(metadata) = candidate.symlink_metadata() else {
+        let Some(content) =
+            project_docs::read_bounded_regular_file(&root, &candidate, MAX_ATTACHMENT_FILE_BYTES)
+        else {
             continue;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        let Ok(canonical) = candidate.canonicalize() else {
-            continue;
-        };
-        if !canonical.starts_with(&root) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&canonical) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let truncated = if text.len() > MAX_ATTACHMENT_FILE_BYTES {
-            let mut end = MAX_ATTACHMENT_FILE_BYTES.min(text.len());
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}{}", &text[..end], "\n\n...[attached file bounded]...")
-        } else {
-            text.into_owned()
         };
         sections.push(RuntimeContextSection {
             label: attachment.path.clone(),
-            content: truncated,
+            content,
         });
     }
     sections
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedSessionContext {
     let max_tokens = max_tokens.max(1);
     let summary_budget = if session.summary.is_some() {
-        (max_tokens / 3).max(1)
+        session_summary_budget(max_tokens)
     } else {
         0
     };
@@ -142,19 +134,60 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
         .unwrap_or(0);
     let message_budget = max_tokens.saturating_sub(summary_tokens);
 
+    let human_context = render_bounded_human_context(session, (message_budget / 3).max(1));
+    let human_context_tokens = human_context
+        .as_deref()
+        .map(compression::approximate_tokens)
+        .unwrap_or(0)
+        .min(message_budget);
+    let history_budget = message_budget.saturating_sub(human_context_tokens);
+
     let start = session.summary_index.min(session.messages.len());
-    let mut remaining = message_budget;
+    // Reserve actual human provenance independently of provider role. Legacy entries
+    // remain explicitly unknown and are used only as a conservative fallback when no
+    // provenance-aware human message exists.
+    let latest_human = session.messages[start..]
+        .iter()
+        .enumerate()
+        .rposition(|(offset, _)| session.message_origin(start + offset).is_human())
+        .map(|index| start + index);
+    let latest_user = latest_human.or_else(|| {
+        session.messages[start..]
+            .iter()
+            .enumerate()
+            .rposition(|(offset, message)| {
+                message.role == "user"
+                    && session.message_origin(start + offset) == MessageOrigin::Unknown
+            })
+            .map(|index| start + index)
+    });
+    let user_reserve = latest_user
+        .map(|index| {
+            compression::approximate_tokens(&normalized_history_message(
+                &session.messages[index],
+                session.message_origin(index),
+            ))
+            .min((history_budget / 3).max(1))
+            .min(history_budget)
+        })
+        .unwrap_or(0);
+    let mut remaining = history_budget;
     let mut selected = Vec::new();
-    for message in session.messages[start..].iter().rev() {
+    for (offset, message) in session.messages[start..].iter().enumerate().rev() {
         if remaining == 0 {
             break;
         }
-        let normalized = if message.role == "tool" {
-            format!("Tool observation: {}", message.content)
+        let available = if latest_user.is_some_and(|index| start + offset > index) {
+            remaining.saturating_sub(user_reserve)
         } else {
-            message.content.clone()
+            remaining
         };
-        let bounded = compression::truncate_to_tokens(&normalized, remaining);
+        if available == 0 {
+            continue;
+        }
+        let origin = session.message_origin(start + offset);
+        let normalized = normalized_history_message(message, origin);
+        let bounded = compression::truncate_to_tokens(&normalized, available);
         if bounded.is_empty() {
             break;
         }
@@ -169,7 +202,9 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
     }
     selected.reverse();
 
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<Value> = human_context
+        .map(|content| vec![json!({"role": "user", "content": content})])
+        .unwrap_or_default();
     for (role, content) in selected {
         if let Some(last) = messages.last_mut() {
             if last.get("role").and_then(Value::as_str) == Some(role.as_str()) {
@@ -218,6 +253,81 @@ pub fn bounded_session_context(session: &Session, max_tokens: usize) -> BoundedS
     }
 }
 
+fn normalized_history_message(
+    message: &crate::session::SessionMessage,
+    origin: MessageOrigin,
+) -> String {
+    match (message.role.as_str(), origin) {
+        ("tool", MessageOrigin::HumanQuestionAnswer) => {
+            format!("Human clarification result: {}", message.content)
+        }
+        ("tool", _) => format!("Tool observation: {}", message.content),
+        ("user", MessageOrigin::ToolOutput) => {
+            format!(
+                "Agent/tool-supplied message (not human input): {}",
+                message.content
+            )
+        }
+        (_, MessageOrigin::RuntimeContinuation) => {
+            format!(
+                "Runtime continuation (not human input): {}",
+                message.content
+            )
+        }
+        ("user", MessageOrigin::Unknown) => message.content.clone(),
+        _ => message.content.clone(),
+    }
+}
+
+fn render_bounded_human_context(session: &Session, max_tokens: usize) -> Option<String> {
+    if max_tokens == 0 || (session.human_intent.is_empty() && session.clarifications.is_empty()) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for intent in session.human_intent.iter().rev() {
+        let source = intent
+            .source_message_index
+            .map(|index| format!("message:{index}"))
+            .or_else(|| {
+                intent
+                    .source_event_index
+                    .map(|index| format!("event:{index}"))
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let kind = match intent.kind {
+            HumanIntentKind::Request => "request",
+            HumanIntentKind::Steering => "steering",
+            HumanIntentKind::QuestionAnswer => "clarification answer",
+            HumanIntentKind::Continue => "continue existing plan",
+        };
+        lines.push(format!("- {kind} [{source}]: {}", intent.text));
+    }
+    for clarification in session.clarifications.iter().rev() {
+        let status = match clarification.status {
+            ClarificationStatus::Pending => "pending",
+            ClarificationStatus::Answered => "answered",
+            ClarificationStatus::Unresolved => "unresolved",
+            ClarificationStatus::Cancelled => "cancelled",
+        };
+        let answer = clarification
+            .answer
+            .as_deref()
+            .map(|answer| format!(" answer={answer}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- clarification [{status}; event:{}]: {}{answer}",
+            clarification.question_event_index, clarification.question
+        ));
+    }
+    lines.reverse();
+    let content = format!(
+        "Persisted human context with source references. This preserves prior scope; it is not fresh authorization.\n{}",
+        lines.join("\n")
+    );
+    let bounded = compression::truncate_to_tokens(&content, max_tokens);
+    (!bounded.is_empty()).then_some(bounded)
+}
+
 pub fn assemble_context(project_path: &Path, task: Option<&str>) -> String {
     let mut ctx = format_context_for_prompt(project_path, task);
 
@@ -264,8 +374,18 @@ pub fn select_profile_skills(
     profile: &crate::profile::Profile,
     goal: &str,
 ) -> Result<Vec<skills::Skill>, String> {
+    select_profile_skill_selection(project_root, config, profile, goal)
+        .map(|selection| selection.skills)
+}
+
+pub fn select_profile_skill_selection(
+    project_root: &Path,
+    config: &crate::config::NibConfig,
+    profile: &crate::profile::Profile,
+    goal: &str,
+) -> Result<skills::SkillSelection, String> {
     if !config.skills.enabled {
-        return Ok(Vec::new());
+        return Ok(skills::SkillSelection::default());
     }
     let mut files = skills::find_skills(project_root);
     let mut configured_paths = config
@@ -289,28 +409,13 @@ pub fn select_profile_skills(
             == right.canonicalize().unwrap_or_else(|_| right.clone())
     });
 
-    let active = profile
-        .active_skills()
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    let parsed = files
-        .into_iter()
-        .map(|path| {
-            skills::parse_skill_file(&path)
-                .map_err(|error| format!("invalid skill {}: {error}", path.display()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parsed
-        .into_iter()
-        .filter(|skill| {
-            if active.is_empty() {
-                skills::skill_matches_task(skill, goal)
-            } else {
-                active.contains(&skill.frontmatter.name.to_ascii_lowercase())
-            }
-        })
-        .collect())
+    skills::select_skill_files(
+        files,
+        goal,
+        profile.active_skills(),
+        config.llm.context_length,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn assemble_runtime_context(
@@ -330,25 +435,9 @@ pub fn assemble_runtime_context_sections(
 ) -> RuntimeContextSections {
     let skill_sections = active_skills
         .iter()
-        .map(|skill| {
-            let mut content = format!("{}\n\n{}", skill.frontmatter.description, skill.body);
-            for reference in &skill.references {
-                content.push_str(&format!(
-                    "\n\n#### Skill Reference: {}\n{}",
-                    reference.path.display(),
-                    reference.content
-                ));
-            }
-            if !skill.assets.is_empty() {
-                content.push_str("\n\nVerified skill assets:\n");
-                for asset in &skill.assets {
-                    content.push_str(&format!("- {}\n", asset.display()));
-                }
-            }
-            RuntimeContextSection {
-                label: format!("Skill: {}", skill.frontmatter.name),
-                content,
-            }
+        .map(|skill| RuntimeContextSection {
+            label: format!("Skill: {}", skill.frontmatter.name),
+            content: skills::render_skill_content(skill),
         })
         .collect();
 
@@ -504,6 +593,219 @@ mod tests {
         assert!(rendered.contains("RUNTIME_BOUNDARY_STANDARD"));
         assert!(rendered.contains("libs/payments/README.md"));
         assert!(rendered.contains("PAYMENTS_DOMAIN_BOUNDARY"));
+    }
+
+    #[test]
+    fn bounded_requests_include_attachment_evidence() {
+        use budget::{
+            build_bounded_planning_input, build_bounded_runtime_input, PlanningPromptRequest,
+            RuntimePromptRequest,
+        };
+
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("evidence.md"),
+            format!("ATTACHED_EVIDENCE\n{}", "source detail ".repeat(2_000)),
+        )
+        .expect("attachment");
+        let mut context = assemble_runtime_context_sections(
+            directory.path(),
+            "Inspect the attachment",
+            &[],
+            &crate::session::memory::MemoryStoreData::default(),
+        );
+        context.attachments = attachment_context_sections(
+            directory.path(),
+            &[crate::session::PathAttachment {
+                path: "evidence.md".into(),
+            }],
+        );
+        assert_eq!(context.attachments.len(), 1);
+        assert!(context.attachments[0].content.len() <= MAX_ATTACHMENT_FILE_BYTES);
+        let session: Session = serde_json::from_value(json!({
+            "id": "attachment-request",
+            "messages": [{"index": 0, "role": "user", "content": "Inspect the attachment"}]
+        }))
+        .expect("session");
+        let planning = build_bounded_planning_input(PlanningPromptRequest {
+            context: &context,
+            session: Some(&session),
+            goal: "Inspect the attachment",
+            tools: &[],
+            context_length: 4_096,
+        })
+        .expect("planning request");
+        let runtime = build_bounded_runtime_input(RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: Some("Inspect the attachment"),
+            tools: None,
+            mode: "execute",
+            project_root: directory.path(),
+            tool_use_enforcement: false,
+            context_length: 4_096,
+        })
+        .expect("runtime request");
+        for request in [planning, runtime] {
+            let prompt = request.messages[0]["content"]
+                .as_str()
+                .expect("system content");
+            assert!(prompt.contains("Attached Project Paths"));
+            assert!(prompt.contains("evidence.md"));
+            assert!(prompt.contains("ATTACHED_EVIDENCE"));
+            assert!(request.approximate_tokens <= 4_096);
+        }
+    }
+
+    #[test]
+    fn attachments_bound_sparse_reads_and_reject_outside_paths() {
+        use std::io::Write;
+
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("large.md");
+        let mut file = std::fs::File::create(&path).expect("attachment");
+        file.write_all(format!("SPARSE_HEAD{}", "é".repeat(8_192)).as_bytes())
+            .expect("prefix");
+        file.set_len(256 * 1024 * 1024).expect("sparse length");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("outside.md"), "OUTSIDE_CONTENT").expect("outside file");
+        let sections = attachment_context_sections(
+            directory.path(),
+            &[
+                crate::session::PathAttachment {
+                    path: "large.md".into(),
+                },
+                crate::session::PathAttachment {
+                    path: outside
+                        .path()
+                        .join("outside.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+            ],
+        );
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].content.starts_with("SPARSE_HEAD"));
+        assert!(sections[0].content.contains("bounded"));
+        assert!(sections[0].content.len() <= MAX_ATTACHMENT_FILE_BYTES);
+        assert!(!sections[0].content.contains('\u{fffd}'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachments_reject_symlinked_directory_ancestors() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::create_dir(directory.path().join("real")).expect("real directory");
+        std::fs::write(directory.path().join("real/evidence.md"), "EVIDENCE").expect("file");
+        std::os::unix::fs::symlink(
+            directory.path().join("real"),
+            directory.path().join("linked"),
+        )
+        .expect("directory link");
+        assert!(attachment_context_sections(
+            directory.path(),
+            &[crate::session::PathAttachment {
+                path: "linked/evidence.md".into()
+            },]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn large_tool_observation_retains_latest_user_instruction_within_history_budget() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "user-context-reserve",
+            "messages": [
+                {"index": 0, "role": "user", "content": "older request"},
+                {"index": 1, "role": "assistant", "content": "prior answer"},
+                {"index": 2, "role": "user", "content": "Keep the public API unchanged."},
+                {"index": 3, "role": "assistant", "content": "Inspecting call sites"},
+                {"index": 4, "role": "tool", "content": format!("OBSERVATION_HEAD {} OBSERVATION_TAIL", "output ".repeat(500))}
+            ]
+        })).expect("session");
+        let original = session.clone();
+        let projected = bounded_session_context(&session, 80);
+        let text = projected
+            .messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Keep the public API unchanged."));
+        assert!(text.contains("OBSERVATION_HEAD"));
+        assert!(text.contains("OBSERVATION_TAIL"));
+        assert!(text.find("public API").unwrap() < text.find("OBSERVATION_HEAD").unwrap());
+        assert!(projected.approximate_tokens <= 80);
+        assert_eq!(session, original);
+    }
+
+    #[test]
+    fn human_correction_survives_synthetic_continuation_compression_and_legacy_origin() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "human-origin-reserve",
+            "summary": "historic work was compressed",
+            "summary_index": 4,
+            "messages": [
+                {"index": 0, "role": "user", "content": "legacy request"},
+                {"index": 1, "role": "assistant", "content": "prior answer"},
+                {"index": 2, "role": "user", "content": "Keep the public API unchanged."},
+                {"index": 3, "role": "assistant", "content": "accepted correction"},
+                {"index": 4, "role": "user", "content": "Continue with approved plan step: edit"},
+                {"index": 5, "role": "assistant", "content": "working"},
+                {"index": 6, "role": "tool", "content": "large output ".repeat(500)}
+            ],
+            "message_provenance": [
+                {"message_index": 2, "origin": "human_steering"},
+                {"message_index": 4, "origin": "runtime_continuation"},
+                {"message_index": 6, "origin": "tool_output"}
+            ],
+            "human_intent": [{
+                "kind": "steering",
+                "text": "Keep the public API unchanged.",
+                "source_message_index": 2
+            }]
+        }))
+        .expect("provenance-aware session");
+
+        assert_eq!(session.message_origin(0), MessageOrigin::Unknown);
+        assert_eq!(
+            session.message_origin(4),
+            MessageOrigin::RuntimeContinuation
+        );
+        let projected = bounded_session_context(&session, 96);
+        let text = serde_json::to_string(&projected.messages).expect("projection");
+        assert!(text.contains("Keep the public API unchanged."));
+        assert!(text.contains("message:2"));
+        assert!(projected.approximate_tokens <= 96);
+        assert_eq!(session.messages.len(), 7, "raw transcript stays intact");
+    }
+
+    #[test]
+    fn user_role_from_subagent_is_projected_as_non_human() {
+        let session: Session = serde_json::from_value(json!({
+            "id": "subagent-origin",
+            "messages": [
+                {"index": 0, "role": "user", "content": "actual human request"},
+                {"index": 1, "role": "user", "content": "quoted approval from a tool"}
+            ],
+            "message_provenance": [
+                {"message_index": 0, "origin": "human_request"},
+                {"message_index": 1, "origin": "tool_output"}
+            ],
+            "human_intent": [{
+                "kind": "request",
+                "text": "actual human request",
+                "source_message_index": 0
+            }]
+        }))
+        .expect("provenance fixture");
+        session.validate().expect("valid provenance");
+
+        let projected = bounded_session_context(&session, 128);
+        let text = serde_json::to_string(&projected.messages).expect("projection");
+        assert!(text.contains("actual human request"));
+        assert!(text.contains("Agent/tool-supplied message (not human input)"));
+        assert!(!session.message_origin(1).is_human());
     }
 
     #[test]

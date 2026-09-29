@@ -12,6 +12,8 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 - **CLI Shell**: `clap` is used for command-line argument parsing. `nib` launches the
   unified interactive UI, while `nib run` remains the one-shot interface.
 - **TUI**: `ratatui` with `crossterm` is used for the terminal user interface, providing views for session history, live agent runs, and approval modals.
+  Speech blocks render markdown with `pulldown-cmark`; fenced code uses lightweight
+  keyword/string/comment coloring rather than a full syntax-highlighter grammar.
 - **Async Runtime**: `tokio` is the standard asynchronous runtime.
 - **Configuration**: Managed via `toml` (and `serde`). Config is strictly kept in `.nib/config.toml`.
 - **HTTP / LLMs**: `reqwest` (with `rustls`) is used for all LLM API calls.
@@ -26,7 +28,7 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### Project Structure (Rust specific)
 
 - `src/main.rs`: Entry point. Sets up logging and invokes the `clap` CLI router.
-- `src/chat.rs`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
+- `src/chat/`: Unified `auto`/`plain`/`tui` interactive launcher and plain renderer.
 - `src/auth.rs`, `src/run.rs`, and other command modules: thin CLI command logic.
 - `src/agent/`: The core agent loop and planning abstractions.
 - `src/llm/`: The `LlmProvider` contract and provider implementations (OpenAI, Anthropic,
@@ -41,10 +43,15 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
 ### Build and Testing
 
 - **Taskfile**: All development tasks are orchestrated via `task`.
-- **Quality Gates**: `task check` provides fast installer, formatting, and
-  warning-denying Clippy feedback. `task test` owns the full serial suite, and
-  `task verify` runs both exactly once for completion. `task docs:check` validates
-  links/spec state, and `task coverage` enforces runtime line coverage.
+- **Quality Gates**: `task check` provides fast installer and formatting feedback and
+  runs warning-denying Clippy against all local targets and features. The manifest
+  denies `clippy::all` and the separately selected `clippy::too_many_lines` lint;
+  `.clippy.toml` fixes its threshold at 100 lines. Pre-existing long functions use only
+  the exact reason-bearing T044 `expect` baseline, which becomes an error when stale;
+  new broad or plain `allow` suppressions are forbidden. `task test` owns the full
+  serial suite, and `task verify` runs both exactly once for completion.
+  `task docs:check` validates links/spec state, and `task coverage` enforces runtime
+  line coverage.
 - **Unit and Fixture Tests**: CI runs against `MockLlmClient` to prevent flakiness and network dependencies.
 
 ### OpenAI-Compatible Transport Contract

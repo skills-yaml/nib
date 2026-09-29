@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -12,10 +13,9 @@ fn main() {
     println!("cargo:rustc-env=NIB_BUILD_CHANNEL={build_channel}");
     println!("cargo:rerun-if-env-changed=NIB_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=NIB_BUILD_CHANNEL");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-
-    if let Some(head_ref) = git_head_ref() {
-        println!("cargo:rerun-if-changed=.git/{head_ref}");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    for path in git_metadata_paths(Path::new(".")) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }
 
@@ -39,8 +39,48 @@ fn git_head() -> Option<String> {
     }
 }
 
-fn git_head_ref() -> Option<String> {
-    let head = std::fs::read_to_string(".git/HEAD").ok()?;
-    head.strip_prefix("ref: ")
-        .map(|value| value.trim().to_string())
+fn git_output(project: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(project)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+pub(crate) fn git_metadata_paths(project: &Path) -> Vec<PathBuf> {
+    let git_path = |name: &str| {
+        git_output(project, &["rev-parse", "--git-path", name]).map(|value| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                project.join(path)
+            }
+        })
+    };
+    let mut paths = Vec::new();
+    for name in ["HEAD", "packed-refs"] {
+        if let Some(path) = git_path(name).filter(|path| path.is_file()) {
+            paths.push(path);
+        }
+    }
+    if let Some(reference) = git_output(project, &["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(mut path) = git_path(&reference) {
+            // A packed branch has no loose ref yet. Watch its existing parent so
+            // creating the loose ref on the next commit still invalidates identity.
+            while !path.exists() && path.pop() {}
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }

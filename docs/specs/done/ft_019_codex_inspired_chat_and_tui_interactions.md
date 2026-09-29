@@ -116,7 +116,7 @@ a reviewed spec and compatibility decision.
 
 1. **One interaction model, two renderers.** Parsing, command metadata, state
    transitions, session effects, workload submission, approvals, and reconciliation
-   are presentation-neutral and live in `src/interactive.rs` (plus agent/session
+   are presentation-neutral and live in `src/interactive/mod.rs` (plus agent/session
    persistence where required). TUI and plain/chat translate keys, prompts, and
    worker events into that model. A TUI-only reducer must not own command grammar,
    session effects, or run state.
@@ -461,9 +461,9 @@ or goals; EOF before the delimiter fails the response closed.
 
 ## Affected Areas
 
-- `src/interactive.rs` — command registry, semantic actions, interaction/view model,
+- `src/interactive/mod.rs` — command registry, semantic actions, interaction/view model,
   contextual completion, precedence reducer, and shared state transitions.
-- `src/chat.rs` and `src/console.rs` — plain/chat composer, selectors, streaming,
+- `src/chat/mod.rs` and `src/console.rs` — plain/chat composer, selectors, streaming,
   steering/queue controls, and textual detail views.
 - `src/tui/` — split the current single-file TUI into renderer modules over the shared
   model (`mod.rs` launch/preflight/restore, state/key mapping, view, composer,
@@ -943,3 +943,13 @@ scope by this final matrix and the prior evidence recorded above.
 
 T034 closes on the same native release binaries and platform smokes before this
 umbrella transition, satisfying the FT-019 dependency order.
+
+## T047 supersession (2026-09-21)
+
+[T047](T047_user_interaction_harmonization.md) extends the shared
+interactive command and runtime contract with durable `/questions [id]` recovery and
+exact-plan `/continue <plan-id>`. It also owns the revised default-negative approval,
+Ctrl+C/Ctrl+Q, modal command, one-shot output, and truthful clipboard behavior. The
+checked FT-019 criteria and native evidence above remain historical evidence for that
+revision; they do not qualify T047's changed behavior or its still-required exact-revision
+native matrix.

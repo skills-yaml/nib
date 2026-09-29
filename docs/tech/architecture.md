@@ -63,12 +63,12 @@ User / Workload Owner
 ┌───────────────────────────────────────────────┐
 │              Context + Planner              │
 │  (AGENTS.md/skills + LLM reasoning)           │
-│  src/context/ + src/agent/loop.rs             │
+│  src/context/ + src/agent/loop/mod.rs             │
 └──────────────┬────────────────────────────────┘
                │
                ▼
 ┌───────────────────────────────────────────────┐
-│         Tool Executor (the Gatekeeper)        │  (src/tools/executor.rs)
+│         Tool Executor (the Gatekeeper)        │  (src/tools/executor/mod.rs)
 │  • Tool Registry (metadata + PermissionLevel) │
 │  • Scoping + Worktree isolation               │
 │  • Classification (read-only / safe /         │
@@ -94,7 +94,7 @@ User / Workload Owner
                ▼
 ┌───────────────────────────────────────────────┐
 │              Reconciliation                   │  (Update plan outcome, emit lifecycle state,
-│  (src/agent/loop.rs)                          │   preserve artifacts and audit rationale)
+│  (src/agent/loop/mod.rs)                          │   preserve artifacts and audit rationale)
 └──────────────┬────────────────────────────────┘
                │
                ▼
@@ -118,14 +118,14 @@ User / Workload Owner
 - `src/integrations/gateway.rs` — Normalized console and external-messaging ingress/egress contract.
 - `src/integrations/mcp.rs` — Outbound MCP stdio client lifecycle and tool dispatch.
 - `src/integrations/mcp_framing.rs` — Shared bounded, newline-delimited JSON framing for MCP client/server stdio.
-- `src/integrations/mcp_server.rs` — Inbound MCP server exposing the gated nib runtime.
+- `src/integrations/mcp_server/mod.rs` — Inbound MCP server exposing the gated nib runtime.
 - `src/integrations/worktree.rs` — Session worktree manager built on sandbox ownership receipts.
 - `src/llm/{mod.rs,types.rs,registry.rs,factory.rs,openai.rs,responses.rs,anthropic.rs,gemini.rs,mock.rs}` — Provider-neutral structured requests and private completed-turn streams, retry/response bounds, a central structural adapter-capability registry, explicit Chat Completions and Responses transports, provider construction and diagnostics, concrete APIs, and deterministic test doubles. Registry capabilities describe implemented transports, not live model compatibility.
 - `src/profile/{mod.rs,migration.rs}` — Workspace profile resolution, isolated state roots, environment loading, and legacy state migration.
 - `src/sandbox/mod.rs` — Command-shell resolution, capability checks, direct execution, and optional Linux `bwrap` isolation.
-- `src/sandbox/process.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
+- `src/sandbox/process/mod.rs` — Durable managed-process scopes and Linux PID-namespace, macOS process-group, and Windows Job Object supervision.
 - `src/sandbox/windows_job.rs` — Windows Job Object containment backend.
-- `src/sandbox/worktree.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
+- `src/sandbox/worktree/mod.rs` — Linked-subagent worktree creation, ownership receipts, cleanup, and merge safety.
 - `src/session/{mod.rs,memory.rs}` — Indexed role-safe sessions, plans, additive exact-run steering and lifecycle events, tool audit, profile-scoped persistence, and bounded profile memory.
 - `src/tools/{mod.rs,classifier.rs,models.rs,registry.rs,executor.rs,core.rs,delegation.rs}` — Tool contracts and metadata, classification, the central approval/policy/sandbox gate, built-in tools, and linked-subagent lifecycle.
 - `src/tui/mod.rs` — Current-session-first Ratatui renderer, terminal preflight and
@@ -135,7 +135,7 @@ User / Workload Owner
 
 - `src/main.rs` — Clap command model, no-subcommand interactive dispatch, compatibility
   aliases, runtime setup, and hidden worker/relay entry points.
-- `src/auth.rs`, `src/chat.rs`, and `src/run.rs` — Provider authentication, the unified
+- `src/auth.rs`, `src/chat/mod.rs`, and `src/run.rs` — Provider authentication, the unified
   interactive launcher with its plain renderer, and unchanged one-shot execution.
 - `src/console.rs` — Shared blocking/async console input used by the plain renderer's single-owner active-run broker and other CLI flows.
 - `src/config_cmd.rs`, `src/context_cmd.rs`, and `src/doctor.rs` — Configuration management, rendered context inspection, and runtime health checks.
@@ -186,6 +186,105 @@ User / Workload Owner
 5. **Visibility**
    - The selected plain or TUI renderer shows live session history, tool calls (with
      boundaries/approvals), and loop state.
+
+### Working instructions and resource use
+
+`src/agent/instructions.rs` owns the compact shared behavior contract and the
+planner/executor-specific instructions. The bounded prompt builders preserve this
+contract intact and reject windows too small to hold it. It asks nib to use available
+evidence, clarify consequential unknowns, make low-risk assumptions explicit, keep
+plans proportional, avoid repeated work, and ground implementation in verification.
+These are model instructions; tool permissions, exact plan binding, and reconciliation
+are enforced by Rust independently of model compliance.
+
+Normal planning takes one model request and exposes only `submit_plan`, so a needed
+inspection or clarification becomes an approved plan step. The default-enabled
+`agent.answer_only` route may precede planning for a new interactive execute request
+when the project and caller do not require planning and no plan or run is active. Its
+single bounded request exposes only the typed, non-executable `request_plan` control.
+Plain content completes that activity without creating or advancing a plan; a valid
+control or unsupported result falls back once to normal planning. Invalid controls
+and provider failures terminate the route without also invoking the planner. Active
+plan state is left intact and receives no model or tool call from the new request.
+Execution can call `ask_question` alone, wait for the answer, and resume; skipped or
+unavailable input remains unresolved. Each tool batch continues the current step.
+A response without tools requests completion, but an unresolved tool failure keeps
+the step blocked. When required verification remains unresolved and run bounds permit
+more work, the completion text is withheld and the next bounded request receives the
+exact obligation IDs as runtime corrective context. Bound exhaustion remains terminal.
+Three consecutive unchanged, fully failed batches stop with an audited failure instead
+of consuming the full turn allowance. Changed attempts or results and successful
+intervening work permit recovery.
+
+Required verification is persisted separately from coarse step status. Each obligation
+is bound to its plan and step, authority (`human`, `project`, or approved plan), exact
+tool and normalized arguments, expected result type, audited invocation, managed
+worktree, affected-content digest, and immutable attempt history. The executor rejects
+a mismatched tool call before side effects. Passing evidence becomes stale when later
+audited mutation or completion-time content revalidation finds changed content. Typed
+absence evidence is accepted only from an untruncated empty `grep` result. Project
+requirements such as `task verify` are derived independently from resolved
+instructions; exact human commands are derived from backticks or `$ ` command lines.
+A human may waive an unrun non-project obligation with
+`waive verification <id>: <reason>`; failed, running, passed, and project obligations
+cannot be relabeled as waived. `/status` and plan detail expose each requirement's
+state and authority. History reservation follows authoritative message provenance, so
+a runtime continuation or tool-origin `user` role cannot displace a later human
+correction.
+
+At startup nib resolves bounded global and project-root instruction files, selected
+skill bodies/references, fixed-root project documentation, profile memory, workload
+state, and attached files. Before each tool batch it resolves every declared target
+scope, applies root-to-target and base/local precedence, and refreshes changed file
+identities. An opaque mutating terminal command must declare affected paths; a
+classified safe command may use its working-directory scope. Incomplete, linked,
+oversized, unreadable, or prompt-incompatible required instructions block dependent
+execution. Ordinary files, tool observations, remembered facts, and summaries supply
+evidence; they do not grant permission or replace the current user request.
+
+An explicit active-skill list on the profile selects by name and reports missing,
+ambiguous, or over-budget selections. Otherwise bounded automatic selection uses
+stable name, tag, and meaningful two-token description matches, ranks ties
+deterministically, and loads at most three skills. Only selected skills can contribute
+text, policy, references, or after-tool hooks; selection itself uses no model request.
+
+Fresh requests allocate an initial 45% of the configured window to context sections,
+30% to tools, and 25% to history, then shrink within an aggregate serialized-input
+bound. Counts use a four-characters-per-token estimate, not provider tokenization.
+Attachments participate in this bound and use bounded identity-checked reads. History
+reserves space for the latest unsummarized user message before large tool output.
+Compression starts at the lower of its configured threshold and the history
+allocation, requests a bounded continuation summary, and retains the raw audit trail.
+The summary prioritizes intent, constraints, decisions, unanswered questions, failed
+approaches, verification evidence, and remaining work. Active provider continuations
+retain their separate bounded transport state and defer automatic compression.
+Each agent run also persists bounded `agent_resource_usage` evidence: logical
+generation requests, executable tool attempts, estimated input-token totals and
+maximum, compression requests, and repeated questions. The estimate uses the same
+provider-neutral approximation as prompt budgeting and is labeled approximate; raw
+prompt or question text is not copied into this accounting event.
+
+The added provenance, clarification, resource, and verification fields use serde
+defaults, so current nib reads pre-T041 sessions without inventing human authority or
+passing checks. A legacy plan with no obligations receives currently derivable human
+and project requirements before execution. A legacy obligation without an exact
+invocation contract remains untrusted and makes the plan non-resumable. Older nib
+binaries ignore the new object fields when reading, but would drop them if they write
+the session. Safe rollback therefore means stopping nib, backing up the profile
+session directory, and using the older binary read-only or starting a new session;
+do not resume and save a T041 session with an older binary. Restoring the backup and
+returning to the T041-or-newer binary preserves the evidence.
+
+Self-development uses the same flow as other implementation work: inspect nib's
+instructions/specs and source, edit within the managed worktree, run focused checks
+and required Task gates, review the diff, and report artifacts and outstanding work.
+Editing source does not alter the running executable; review/merge and installation
+remain separate actions. Offline fixtures verify requests, tool execution, and
+reconciliation; they do not establish autonomous success for every live model.
+Build identity watches Git-resolved HEAD and ref paths, including linked-worktree
+and packed-ref layouts, so repeated Task gates do not recompile merely because
+`.git` is a file. A previously built source archive converted to a Git checkout needs
+a clean build to establish the new identity dependency.
 
 ### Sequence Diagram of Interactions
 
@@ -285,7 +384,7 @@ sequenceDiagram
   Explicit `/compact` is an exact-session leased, non-steerable maintenance run that
   bypasses only the automatic compression threshold, preserves raw history, and emits
   the same typed compression evidence without synthesizing chat messages.
-- Structured plans are persisted, approved before execution, and advanced from verified tool outcomes.
+- Structured plans are persisted, printed, auto-approved for execution, and advanced from verified tool outcomes. The user is asked only when a request is unclear or an action requires approval.
 - Compression preserves raw transcripts while bounding model context; profile memory persists environment and user facts.
 - The `manage_memory` tool provides bounded list/get/set/delete operations. Reads are
   read-only, writes require approval or an explicit allow policy, deletes are

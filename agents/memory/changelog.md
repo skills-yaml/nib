@@ -371,3 +371,19 @@ T021, T022, T026, T029, T034, T035, FT-015, FT-016, FT-017, and FT-019. The
 resulting lifecycle is 44 done, 1 development, and 1 backlog. T023 remains the sole
 development spec pending explicit live-provider authority and privacy-reviewed evidence;
 FT-020 remains backlog for protected non-Linux production delegation authority.
+
+## 2026-09-25 - FT-020 done fail-closed; T023 live unverifiable
+
+- Type: implementation / lifecycle milestone
+- Source: development and backlog implementation goal
+- Confidence: high
+- Review: FT-020 two-stage review; T023 live Task fail-closed
+
+Content:
+
+Moved FT-020 to `done/` with protected Windows Job owner/DACL and macOS reaper
+preflight. `production()` remains fail-closed on Windows and macOS; Linux
+PID-namespace production is unchanged. T023 live qualification was re-run through
+the real Task targets and GitHub environment inventory and is unverifiable
+without owner credentials. Catalog lifecycle: 63 done, 1 development (T023), 0
+backlog.

@@ -80,7 +80,7 @@ fn repository_text_normalization_accepts_windows_line_endings() {
 }
 
 #[test]
-fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
+fn task_contract_keeps_fast_feedback_separate_from_full_verification() {
     let taskfile = read_repository_text("Taskfile.yml");
     let check = task_section(&taskfile, "check");
     let test = task_section(&taskfile, "test");
@@ -90,7 +90,7 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
     for required in [
         "task: installers:check",
         "cargo fmt -- --check",
-        "cargo clippy -- -D warnings",
+        "cargo clippy --all-targets --all-features -- -D warnings",
     ] {
         assert!(check.contains(required), "check task lacks {required}");
     }
@@ -122,23 +122,121 @@ fn task_workflow_keeps_fast_feedback_separate_from_full_verification() {
 }
 
 #[test]
+fn task_contract_enforces_strict_clippy_on_every_local_target_and_feature() {
+    let manifest = read_repository_text("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&manifest).expect("parse Cargo.toml");
+    let clippy = manifest
+        .get("lints")
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(toml::Value::as_table)
+        .expect("Cargo.toml [lints.clippy]");
+
+    let all = clippy
+        .get("all")
+        .and_then(toml::Value::as_table)
+        .expect("clippy::all table policy");
+    assert_eq!(all.get("level").and_then(toml::Value::as_str), Some("deny"));
+    assert_eq!(
+        all.get("priority").and_then(toml::Value::as_integer),
+        Some(-1)
+    );
+    assert_eq!(
+        clippy.get("too_many_lines").and_then(toml::Value::as_str),
+        Some("deny")
+    );
+
+    let configuration = read_repository_text(".clippy.toml");
+    let configuration: toml::Value = toml::from_str(&configuration).expect("parse .clippy.toml");
+    assert_eq!(
+        configuration
+            .get("too-many-lines-threshold")
+            .and_then(toml::Value::as_integer),
+        Some(100)
+    );
+
+    let taskfile = read_repository_text("Taskfile.yml");
+    let check = task_section(&taskfile, "check");
+    let fix = task_section(&taskfile, "fix");
+    assert!(check.contains("cargo clippy --all-targets --all-features -- -D warnings"));
+    assert!(fix
+        .contains("cargo clippy --all-targets --all-features --fix --allow-dirty --allow-no-vcs"));
+
+    const ALLOW_OPEN: &str = concat!("all", "ow(");
+    const EXPECT_OPEN: &str = concat!("ex", "pect(");
+    const TOO_MANY_LINES: &str = concat!("clippy::too_many", "_lines");
+    const REVIEWED_EXPECTATION: &str = concat!(
+        "#[expect(clippy::too_many",
+        "_lines,reason=\"legacyfunctionrecordedbyT044\")]"
+    );
+    let mut pending = ["src", "tests"]
+        .map(|relative| repository_root().join(relative))
+        .to_vec();
+    let mut forbidden_suppressions = Vec::new();
+    let mut malformed_expectations = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read Rust source directory") {
+            let entry = entry.expect("read Rust source entry");
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                let source = fs::read_to_string(&path).expect("read Rust source file");
+                let compact = source
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                let has_suppression = compact.split(ALLOW_OPEN).skip(1).any(|tail| {
+                    tail.split_once(')')
+                        .is_some_and(|(body, _)| body.split(',').any(|lint| lint == TOO_MANY_LINES))
+                });
+                if has_suppression {
+                    forbidden_suppressions.push(path.clone());
+                }
+                let expectation_count = compact
+                    .split(EXPECT_OPEN)
+                    .skip(1)
+                    .filter(|tail| {
+                        tail.split_once(")]")
+                            .is_some_and(|(body, _)| body.contains(TOO_MANY_LINES))
+                    })
+                    .count();
+                let reviewed_count = compact.matches(REVIEWED_EXPECTATION).count();
+                if expectation_count != reviewed_count {
+                    malformed_expectations.push(path.clone());
+                }
+            }
+        }
+    }
+    forbidden_suppressions.sort();
+    assert!(
+        forbidden_suppressions.is_empty(),
+        "too_many_lines must be fixed instead of suppressed: {forbidden_suppressions:?}"
+    );
+    malformed_expectations.sort();
+    assert!(
+        malformed_expectations.is_empty(),
+        "too_many_lines expectations require the reviewed T044 reason: {malformed_expectations:?}"
+    );
+}
+
+#[test]
 fn delegation_task_pins_hosted_stabilization_fixtures() {
     const TESTS: [(&str, &str); 4] = [
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
+            "src/tools/delegation/test_part_0.rs",
+            "tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
         ),
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains",
+            "src/tools/delegation/test_part_3.rs",
+            "tools::delegation::tests::test_part_3::persistent_anchor_prevents_replaced_repository_lock_domains",
         ),
         (
-            "src/tools/delegation.rs",
-            "tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
+            "src/tools/delegation/test_part_0.rs",
+            "tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
         ),
         (
-            "src/integrations/mcp_server.rs",
-            "integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root",
+            "src/integrations/mcp_server/test_part_1.rs",
+            "integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root",
         ),
     ];
     let taskfile = read_repository_text("Taskfile.yml");
@@ -171,8 +269,10 @@ fn delegation_task_pins_hosted_stabilization_fixtures() {
 fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let script = read_repository_text("scripts/check-interactive-release.sh");
     let windows_script = read_repository_text("scripts/check-interactive-release.ps1");
+    let windows_pty = read_repository_text("scripts/invoke-windows-pseudoterminal.ps1");
+    let windows_pty_host = read_repository_text("scripts/host-windows-pseudoterminal.ps1");
     let taskfile = read_repository_text("Taskfile.yml");
-    let agent_loop = read_repository_text("src/agent/loop.rs");
+    let agent_loop = read_repository_text("src/agent/loop/part_c.rs");
     let workflow = read_repository_text(".github/workflows/ci.yml");
 
     for contract in [
@@ -191,6 +291,11 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "private_run_ids",
         "private_sentinel",
         "wait_for_pty_output",
+        "Work in this directory",
+        "allowed = true",
+        "nib-policy: require-approval list_directory",
+        "Action: list_directory",
+        "Approve once (y)",
     ] {
         assert!(
             script.contains(contract),
@@ -204,6 +309,9 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("script -q /dev/null /bin/sh -c"));
     assert!(script.contains("terminate_process_tree"));
     assert!(script.contains("printf '/status\\n/quit\\n'"));
+    assert!(script.contains("printf '/copy\\n'"));
+    assert!(script.contains("wait_for_pty_output \"$output\" 'Goodbye.'"));
+    assert!(script.contains("PTY clipboard command did not report delivery"));
     assert!(script.contains("printf 'y\\n\\n'"));
     assert!(script.contains("wait_for_pty_output \"$resume_output\" 'You> '"));
     assert!(script.contains("while [ \"$attempts\" -lt 100 ]; do"));
@@ -233,10 +341,39 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "NO_COLOR = \"1\"",
         "ConsoleModesRestored",
         "ChildConsoleModesRestored",
+        "Work in this directory",
+        "allowed = true",
         "[?1049l",
         "[?2004l",
+        "WaitForOutput = \"Work in this directory\"",
+        "WaitForOutput = \"Allowed work\"",
+        "WaitForOutput = \"again\"",
+        "WaitForOutput = \"You> \"",
+        "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",
+        "ExpectedEvent = \"question_required\"",
+        "ExpectedEvent = \"approval_required\"",
+        "& git -C $fixture add .gitignore README.md",
+        "& git -C $fixture commit --quiet -m initial",
+        "ExpectedEvent = \"tool_started\"",
+        "$interruptSessionId = \"t047-native-interrupt-$($interruptCase.Label)\"",
+        "('\"id\": \"' + $interruptSessionId + '\"')",
+        "Get-Content -LiteralPath $interruptSessionPath -Raw",
+        "$lastInterruptSessionText = $null",
+        "$lastInterruptResult = $null",
+        "$activeStage = \"one-shot-interrupt-$($interruptCase.Label)\"",
+        "WaitForDirectory = $sessionDirectory",
+        "WaitForFileName = \"$interruptSessionId.json\"",
+        "WaitForFileContents = @(",
+        "NativeCtrlC = $true",
+        "-Arguments $oneShotArguments `",
+        "-WorkingDirectory $fixture `",
+        "$_.details.outcome -eq \"cancelled_by_user\"",
+        "[int64]$cancelledEvent.index -le [int64]$expectedStageEvent.index",
+        "\"stage=$activeStage\"",
+        "interrupt_exit_code=$($lastInterruptResult.ExitCode)",
+        "failure-interrupt-output.txt",
     ] {
         assert!(
             windows_script.contains(contract),
@@ -244,6 +381,10 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         );
     }
     assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
+    let child_adapter = include_str!("../scripts/start-windows-pseudoterminal-child.ps1");
+    assert!(child_adapter.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(child_adapter.contains("$child.WaitForExit()"));
+    assert!(!child_adapter.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_script.contains("could not remove its isolated fixture"));
     assert!(windows_script.contains(
         "$startInfo.RedirectStandardInput = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true"
@@ -263,6 +404,18 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     ));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
+    assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));
+    assert!(windows_pty.contains("allow_interrupted_child_without_exit_marker"));
+    assert!(windows_pty.contains("wait_for_file_contents"));
+    assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalFileContents"));
+    assert!(windows_pty_host
+        .contains("$inputChunks.Count -ne 1 -or -not [bool]$inputChunks[0].native_ctrl_c"));
+    assert!(windows_pty_host.contains("GenerateConsoleCtrlEvent"));
+    assert!(windows_pty_host.contains("ConsoleControl]::SendCtrlC"));
+    assert!(windows_pty_host.contains(
+        "$markerMatches.Count -eq 0 -and\n            $allowInterruptedChildWithoutExitMarker -and\n            $output.Contains(\"Run cancelled.\")"
+    ));
+    assert!(windows_pty_host.contains("$modeParts[0] -ne \"1\""));
 
     assert!(taskfile.contains("  test:interactive:\n"));
     assert!(taskfile.contains("      - task: test:interactive\n"));
@@ -299,7 +452,11 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     let windows_native_smoke = windows_job
         .find("run: task smoke:interactive:windows:binary")
         .expect("Windows native interactive smoke");
+    let windows_tests = windows_job
+        .find("run: task test\n")
+        .expect("Windows full test suite");
     assert!(windows_build < windows_native_smoke);
+    assert!(windows_native_smoke < windows_tests);
 
     let macos_job = workflow
         .split_once("  macos-tests:\n")
@@ -479,13 +636,25 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_child.contains("GetConsoleMode"));
     assert!(windows_pty_child.contains("$consoleModesBefore"));
     assert!(windows_pty_child.contains("$consoleModesAfter"));
-    assert!(windows_pty_child.contains("& ([string]$request.executable) @arguments"));
+    assert!(windows_pty_child.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
+    assert!(windows_pty_child.contains("$child.WaitForExit()"));
+    assert!(!windows_pty_child.contains("& ([string]$request.executable) @arguments"));
     assert!(windows_pty_child.contains("[Console]::Out.WriteLine"));
     assert!(windows_pty_invoke.contains("host-windows-pseudoterminal.ps1"));
     assert!(windows_pty_invoke.contains("[object[]]$InputChunks"));
     assert!(windows_pty_invoke.contains("64 chunk limit"));
     assert!(windows_pty_invoke.contains("4096 bytes"));
     assert!(windows_pty_invoke.contains("32768 bytes"));
+    assert!(windows_pty_invoke.contains("WaitForOutput"));
+    assert!(windows_pty_invoke.contains("wait_for_file_name = $waitForFileName"));
+    assert!(windows_pty_host.contains("-FileName $waitForFileName"));
+    assert!(windows_pty_invoke.contains("NibHostDiagnostics"));
+    assert!(windows_pty_host.contains("windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_host.contains("ConPTY output tail:"));
+    assert!(windows_pty_host.contains("$env:NIB_ENABLE_INTERACTIVE_SMOKE -eq \"1\""));
+    assert!(windows_pty_host.contains("Wait-NibWindowsPseudoTerminalOutput"));
+    let windows_pty_output = include_str!("../scripts/windows-pseudoterminal-output.ps1");
+    assert!(windows_pty_output.contains("[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete"));
     assert!(windows_pty_invoke.contains("Get-NibWindowsConsoleModeSnapshot"));
     assert!(windows_pty_invoke.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_invoke.contains("$process.Kill($true)"));
@@ -494,6 +663,11 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(windows_pty_test.contains("Invoke-WindowsPseudoTerminal"));
     assert!(windows_pty_test.contains("-InputChunks"));
     assert!(windows_pty_test.contains("NIB_PSEUDOTERMINAL_INPUT:bounded-input"));
+    assert!(windows_pty_test.contains("test-windows-pseudoterminal-output.ps1"));
+    assert!(windows_pty_test.contains("NIB_PROMPT_INPUT_COMPLETE"));
+    assert!(windows_pty_test.contains("NIB_NATIVE_CTRL_C_RECEIVED"));
+    assert!(windows_pty_test.contains("NativeCtrlC = $true"));
+    assert!(windows_pty_test.contains("NIB_ABSENT_PROMPT"));
     assert!(windows_pty_test.contains("ChildConsoleModesRestored"));
     assert!(windows_pty_test.contains("NibConsoleModeEvidence"));
     assert!(windows_pty_test.contains("[Console]::IsErrorRedirected"));
@@ -784,6 +958,7 @@ impl ReleaseTransactionHarness {
         Self::with_workflow_change(false)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn with_workflow_change(workflow_change: bool) -> Self {
         let temp = tempfile::tempdir().expect("release transaction fixture");
         let remote = temp.path().join("remote.git");
@@ -1326,6 +1501,7 @@ exit "$status"
         self.run_from_ref_with_stage_visibility_delay("main", ReleaseFaults::default(), delay)
     }
 
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn run_from_ref_with_stage_visibility_delay(
         &self,
         source_ref: &str,

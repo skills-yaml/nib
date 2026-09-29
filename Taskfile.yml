@@ -14,7 +14,7 @@ tasks:
     cmds:
       - task: installers:check
       - cargo fmt -- --check
-      - cargo clippy -- -D warnings
+      - cargo clippy --all-targets --all-features -- -D warnings
 
   check:all-targets:
     desc: Type-check every Rust target and feature (supports cross TARGET)
@@ -54,12 +54,43 @@ tasks:
     desc: Auto-format and apply clippy fixes
     cmds:
       - cargo fmt
-      - cargo clippy --fix --allow-dirty --allow-no-vcs
+      - cargo clippy --all-targets --all-features --fix --allow-dirty --allow-no-vcs
 
   test:
     desc: Run unit and integration tests
     cmds:
       - cargo test -- --test-threads=1
+
+  test:integration:
+    desc: Run every integration test target
+    cmds:
+      - "cargo test --test '*' -- --test-threads=1"
+
+  test:llm-failure-cli:
+    desc: Verify local HTTP failure and plain-chat recovery fixtures
+    cmds:
+      - 'cargo test --test llm_failure_cli -- --test-threads=1'
+
+  test:mcp-stack:
+    desc: Run the MCP provider-failure regression with a one MiB test-thread stack
+    cmds:
+      - cargo test --lib --no-run
+      - task: test:mcp-stack:small-stack
+
+  test:mcp-stack:small-stack:
+    internal: true
+    env:
+      RUST_MIN_STACK: '1048576'
+    cmds:
+      - >-
+        cargo test --lib
+        integrations::mcp_server::tests::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error
+        -- --exact --test-threads=1 --nocapture
+
+  test:tui-cache:
+    desc: Verify TUI session display cache refresh and lock-wait behavior
+    cmds:
+      - cargo test --lib tui::tests::session_display_cache_ -- --test-threads=1
 
   verify:
     desc: Run the complete local static and test gates once
@@ -87,23 +118,59 @@ tasks:
     cmds:
       - >-
         cargo test --lib
-        daemons::state::tests::optional_read_write_
+        tools::delegation::tests::test_part_2::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_3::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        daemons::state::tests::test_part_0::optional_read_write_
         -- --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
+        tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::persistent_anchor_prevents_replaced_repository_lock_domains
+        tools::delegation::tests::test_part_3::persistent_anchor_prevents_replaced_repository_lock_domains
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        tools::delegation::tests::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
+        tools::delegation::tests::test_overflow::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
         -- --exact --test-threads=1
       - >-
         cargo test --lib
-        integrations::mcp_server::tests::mcp_subagent_flow_accepts_a_dos_short_project_root
+        tools::delegation::tests::test_part_3::sweep_pair_and_both_half_deletions_stop_at_expired_quarantines
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::missing_legacy_directory_retries_anchor_quarantine_without_creating_state
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::bounded_reconciliation_record_does_not_publish_after_precommit_expiry
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::contradictory_terminal_record_and_manager_states_fail_closed
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_2::dead_anchor_only_record_without_process_scope_requires_recovery
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
+        -- --exact --test-threads=1
+      - >-
+        cargo test --lib
+        integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root
         -- --exact --test-threads=1
       - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
       - cargo test --test delegation -- --test-threads=1
@@ -112,6 +179,13 @@ tasks:
     desc: Run the full agent runtime end-to-end integration tests
     cmds:
       - cargo test --test test_runtime_e2e -- --test-threads=1
+
+  test:agent-context:
+    desc: Run offline agent loop, planner, context, and compression tests
+    cmds:
+      - 'cargo test --lib context:: -- --test-threads=1'
+      - 'cargo test --lib agent:: -- --test-threads=1'
+      - cargo test --test build_metadata -- --test-threads=1
 
   test:managed-process-capability:
     desc: Verify the exact managed-process backend probe independently
@@ -162,18 +236,22 @@ tasks:
     cmds:
       - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal.ps1
 
+  test:windows-pseudoterminal-output:
+    desc: Verify portable prompt synchronization and Windows adapter syntax
+    cmds:
+      - pwsh -NoLogo -NoProfile -File scripts/test-windows-pseudoterminal-output.ps1
+
   test:installers:
     desc: Run installer and release-transaction integration tests
     cmds:
       - cargo test --test installers -- --test-threads=1
 
   test:task-contract:
-    desc: Validate fast-check and full-verification Task composition
+    desc: Validate Task composition and strict Rust lint policy
     cmds:
       - >-
         cargo test --test installers
-        task_workflow_keeps_fast_feedback_separate_from_full_verification --
-        --exact --test-threads=1
+        task_contract_ -- --test-threads=1
 
   test:tui-shutdown:
     desc: Verify TUI cancellation, late modal cleanup, and shutdown deadlines

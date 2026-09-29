@@ -67,6 +67,7 @@ pub(super) fn migrate_legacy_state(base: &Path, profile: &Profile) -> Result<(),
     validate_marker(&marker_path, profile.id())
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn legacy_session_candidates(
     legacy_state: &Path,
     profile: &Profile,

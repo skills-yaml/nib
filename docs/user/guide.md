@@ -138,6 +138,7 @@ reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|ma
 [agent]
 max_turns = 90
 tool_use_enforcement = true
+answer_only = true
 
 [terminal]
 backend = "local"
@@ -158,6 +159,9 @@ network = "disabled"
 
 [approvals]
 mode = "manual"           # manual | smart | policy | off
+
+[workspace]
+allowed = false           # set true after the startup directory grant
 
 [compression]
 enabled = true
@@ -347,13 +351,25 @@ nib run "Refactor the parser and run the canonical checks"
 
 Useful options include `--session <id>` to resume, `--provider <name>`, `--mode plan`,
 `--model <name>`, and `--max-steps <count>`. Omitting `--max-steps` uses
-`agent.max_turns`. Normal execution creates and persists a structured plan before
-mutating tools are allowed. Default manual mode prompts for the plan and calls not
-auto-classified as safe. `--yes` bypasses interactive plan and tool approval; use it
+`agent.max_turns`. Normal execution creates and persists a structured plan, prints it, and continues.
+Default manual mode prompts only when the request is unclear or a call is not
+auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
-When the agent calls `ask_question`, the CLI prints the available options and accepts
-either an option number or free-form text on the same input stream. Closed or empty
-question input stops the run and reconciles the session without continuing execution.
+
+Interactive execute requests use a bounded tool-free answer before planning by
+default when `execution.plan_mode = false`. A clear information question can receive
+one answer with no plan, then nib waits for the next message. Requests needing
+inspection, clarification, or action select the non-executable `request_plan` control;
+partial answer text is discarded before normal planning begins. An incomplete plan
+stays intact when nib answers an unrelated information question; if that request
+needs new planning, nib explains the existing-plan conflict. An active run still
+owns its input. Set `agent.answer_only = false` to require the plan-first path.
+Invalid control output and provider failures do not invoke the planner.
+When the agent calls `ask_question`, the CLI clearly prints the question. If nib
+proposes one answer, choose Approve to accept that exact answer, Reject to leave the
+question unresolved, or Instruct otherwise to type a different answer. An open
+question accepts an option number or free-form text. Question answers never approve
+tools. Closed or empty input stops dependent work and reconciles the session.
 Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. Startup
 and final one-shot status lines are bounded and control-safe and do not echo the full
 goal.
@@ -361,6 +377,46 @@ goal.
 In a normal Git checkout, edits remain in a `nib/session/*` branch under
 `.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
 running inside a linked worktree, edits remain in that worktree.
+
+nib is instructed to inspect available information before asking questions, clarify
+missing details that affect the result, and keep plans and tool use proportional to
+the task. It stops repeated unchanged tool failures and keeps unresolved failed steps
+blocked. Required approvals and the configured turn limit still apply.
+
+Plans can carry required verification separately from their step state. `/status`
+shows every requirement's ID, state, and authority, and `/plan` includes the same
+information with the step detail. A required command receives credit only when its
+exact persisted tool call succeeds on the same managed worktree content; an unrelated
+successful command cannot clear it. Later relevant changes make prior evidence stale.
+Absence checks use the typed `grep` result and pass only when the result is empty and
+untruncated.
+
+If the model tries to finish while required verification remains unresolved, nib
+rejects that completion and supplies the exact outstanding IDs for another corrective
+turn while the configured run bounds allow it. The rejected text is not shown as the
+final answer. If the bound is exhausted, the step remains blocked with the unresolved
+verification outcome.
+
+To remove an unrun human or approved-plan requirement that became inapplicable, enter
+`waive verification <id>: <reason>`. nib binds the waiver to that human message and
+active plan. Project gates and requirements with running, failed, or passed evidence
+cannot be waived. A waiver remains visible as `waived`; it is never reported as a
+passing check.
+
+To ask nib to develop its own source, run it from a nib checkout with a concrete
+change and acceptance criteria, for example:
+
+```bash
+nib run "Fix the reported parser bug. Follow AGENTS.md and the development spec, add a regression test, run task verify, and review the diff."
+```
+
+The same tools and worktree workflow apply to nib's repository. Source changes need
+review and a new build before they affect the executable you are running. A successful
+tool call alone does not establish that the whole requested change is correct; review
+the reported checks and remaining limitations.
+Full verification can take several minutes. The terminal tool accepts a `timeout`
+in seconds, up to 3,600; give long checks an appropriate bounded timeout and track
+an existing background check to completion before starting another.
 
 ### Interactive Session
 
@@ -381,9 +437,28 @@ alias for `nib --tui`. Use `nib run "<goal>"` for unchanged one-shot automation.
 
 Both presentation modes expose these commands:
 
+Plain-language `help` and `what can you do?` are normal messages. When the model can
+answer from supplied context, nib gives a conversational overview of the current
+repository, relevant validation tasks, and a few supported commands without
+starting a plan. `/help` prints the complete command reference immediately without
+a model connection. While a run is active, plain-language help follows the normal
+next-turn queue rule; `/help` remains available for immediate command discovery.
+
 - `/status` shows session, resolved provider/model/transport, approximate persisted
   context usage and limit, configured approval preset, effective execution/sandbox
-  posture, plan, and queued follow-up count.
+  posture, plan, and queued follow-up count. When a run stops, the transcript
+  shows a heading, a reason, and a next action (usually inspect `/status`) instead
+  of an internal token such as `local_error`.
+  If managed Git worktree preparation fails, nib stops before running the proposed
+  tools, records that stage in the session, and advises checking Git worktree health
+  and running `nib doctor` before retrying.
+- `/context` shows the compact occupancy indicator (`ctx ~18k/64k`). `/context details`
+  adds a bounded breakdown of the last prepared/sent request snapshot, response
+  reserve and headroom, contributions, occupancy versus cumulative provider usage,
+  message and summary coverage, retained human intent, unresolved clarifications,
+  selected skills, and the latest run's generation, tool, compression, and
+  repeated-question counters. Inspection is local and read-only, including while a
+  run is active or an approval/question owns the prompt (TUI: F2 then `/context`).
 - `/model` or `/model <name>` lists or selects a model.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox
@@ -391,12 +466,19 @@ Both presentation modes expose these commands:
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
   states are labeled in text rather than by color alone.
 - `/plan [prompt]` shows the current plan or starts a planning turn.
-- `/review` and `/diff` show the git workspace diff.
+- `/review` and `/diff` show the git workspace diff (`Show changes (diff)`).
+- `/questions [id]` lists or answers unresolved questions for the current plan.
+- `/continue <plan-id>` continues that exact plan without retyping its goal.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
-  display name.
-- `/copy` prints the latest completed assistant output.
+  display name. The first user message also names an unnamed session; `/rename`
+  is not overwritten.
+- `/copy` copies the latest completed assistant output through a native clipboard
+  backend when available. Otherwise an interactive terminal may receive an OSC52
+  request labeled as unconfirmed; unsupported and failed attempts are reported
+  explicitly with the transcript or selection retained for manual copying, and
+  redirected output never receives clipboard escapes.
 - `/compact` requests bounded compression for the active session through the configured
   provider. It may bypass the automatic usage threshold, but still respects the
   compression enabled switch, preserves every raw message, and reports the resulting
@@ -421,14 +503,16 @@ Parity matrix (same command/session effect in both renderers):
 | Action | TUI | Plain |
 | --- | --- | --- |
 | Idle submit | `Enter` | `Enter` |
-| Newline | `Ctrl+J` | continuation / editor |
+| Newline | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | continuation / editor |
 | Queue next | `Enter` while running, or `queue: text` | `queue: text` |
 | Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
-| Quit | `Ctrl+Q` or `/quit` | `/quit` (`/exit`, `/q`) |
+| Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
+| Quit | `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
+| Transcript | `Tab`, then arrows / fold / `Ctrl+Y` or `Ctrl+Shift+C` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
-| Approvals | dock on the current tool | Y/N prompt |
+| Approvals | dock on the current tool; Deny is the default | `y`/`yes` or `n`/`no`; `details` |
 | Draft history | `Up`/`Down`; `Ctrl+R` or `/history [query]` search | `/history [query]` numbered search |
 | Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
 | Path attachment | `@` completion, structured context | same `@path` mentions |
@@ -489,39 +573,80 @@ nib --tui --session <id>
 nib tui                            # compatibility alias
 ```
 
-The TUI opens as a conversation-first ledger: two compact header/status rows, a typed
-activity transcript (you, nib, plan, tool, approval, question, compression, reconcile,
+The TUI opens as a conversation-first ledger: one header row, a typed activity
+transcript (you, nib, plan, tool, approval, question, compression, reconcile,
 failure), and a wrapped multi-line composer. nib presents itself as the AI agent for
 the current project; it does not split the interface into separate coding and workload
-personas. Historical sessions are not a permanent pane. The fixed rows abbreviate the
-session, preserve its actual new/resumed/fork origin, and fit the execution posture to
-the current terminal width; `/status` retains the full session, transport, worktree,
-context, and effective-permission diagnostics. If a requested session is missing, the
+personas. Historical sessions are not a permanent pane. The first row shows the
+working directory and git branch on the left and the current model plus context
+usage on the right. The last row shows the command approval mode and the agent
+mode (`idle`, `execute`, `plan`, or `compact`). While an approval is open the
+footer still keeps those fields and reads `WAITING APPROVAL`. A command approval
+uses Enter to confirm the highlighted row and Esc to cancel.
+`/status` retains the full session, transport, worktree path, context, and
+effective-permission diagnostics. If a requested session is missing, the
 ledger shows a shortened recovery notice instead of silently presenting its replacement.
 `--run` submits an initial goal; `--session` hydrates an existing session before input
 is accepted, and `--auth` runs authentication before raw mode starts.
 
 Streamed model output and meaningful tool lifecycle events update typed activity
-entries. Routine run-start and state-transition events update the status row without
-adding transcript noise; their exact records remain in the persisted session audit.
+entries. Routine run-start and state-transition events update the waiting meter and
+footer without adding transcript noise; their exact records remain in the persisted
+session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
-The normal ledger shows one-line plan progress, while `/plan` shows every step. Calls
-that still require interactive approval or a question appear as a dock on the current
-entry so the transcript stays visible. Press `Y` to approve, `N` or `Esc` to deny.
-`Ctrl+J` inserts a newline; `Enter` sends when idle and queues when a turn is running.
+The plan is a live todo list in the transcript (`Working on N to-dos`, with `◐`
+in progress, `○` pending, and `✓` done). It updates as each step finishes so
+you can follow the multi-step work. `/plan` still shows the full list. Execution
+continues without waiting for you to approve the plan. nib asks only when the
+request is unclear or an action needs approval.
+Calls that still require interactive approval use the same under-composer list as `/`
+options. A command approval asks whether to run the exact command. Yes is highlighted.
+The next row remembers that exact command for this project. No asks what to do
+differently. Enter confirms the highlighted row. `y` and `p` confirm only when that
+row is already highlighted. Esc cancels and does not run the command. Other tool
+approvals still start on Deny, with `Approve once`, `Deny`, and `View details`.
+The details view shows the bounded redacted command, patch, or validated arguments;
+scroll with Up/Down and press Escape to return without deciding. Type
+`y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.
+Escape denies. While approval is open the footer reads `WAITING APPROVAL`. When nib
+asks an open question, type a custom answer or move to the numbered suggestions.
+Bare numbers select one-based options; `text: 42` forces literal text. For a proposed
+answer, the question and proposal remain visible above Approve, Reject, and Instruct
+otherwise. Reject and Escape leave it unresolved; approving the answer never grants
+tool permission. Recover later with `/questions [id]` and `/continue <plan-id>`.
+While a question or approval owns the TUI input, F2 opens a prompt-local command
+editor for read-only inspection or an exact live control; Escape returns to the
+unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mode,
+`:command /status` provides the corresponding prompt-local command entry, while
+`text: :command /status` submits that text literally as a question answer.
+While a question is open the footer reads `WAITING QUESTION`.
+`Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
+when idle and queues when a turn is running.
 
-The composer has focus initially and always shows a `> ` prompt. An empty session gives
-a short welcome cue and the empty composer displays `Ask nib anything…`. A
-slash-command prefix opens bounded completion immediately above the composer from the
-same command registry used by parsing and help. Each row shows one command signature
-and one description. Use `Up`/`Down` to select, `Tab` to insert, and `Esc` to close
-completion without clearing the draft. When completion is closed, `Up`/`Down` restore
+The composer has focus initially, a top border, and a `> ` prompt. An empty session
+shows a startup welcome with `Nib <version>`, the working directory, an update
+notice and `nib update` when a newer build is available, `/new` to start a fresh
+session and worktree, `/session` to switch sessions, and the most-used keys, plus
+the prompt. The first interactive start in a project asks permission to work in
+that directory before any goal runs. The composer shows the path and Allow/Decline
+choices sit under the input with Decline focused first. Select Allow and press Enter
+to persist `workspace.allowed`; Enter on the default, or Escape, quits. Later starts
+skip the prompt. A
+slash-command prefix opens bounded completion immediately under the composer from the
+same command registry used by parsing and help. The option list does not cover the
+conversation. Command signatures start on the same column as the `/` in the
+composer and are not prefixed with a caret. Each row shows one command signature
+and one description. Use `Up`/`Down` to select, `Tab` to insert, `Enter` to run a
+complete command, and `Esc` to close completion without clearing the draft. When completion is closed, `Up`/`Down` restore
 bounded in-process draft history. Typing `@` offers
-project-scoped path completion; submitted `@path` mentions become structured
+project-scoped path completion in the same reserved band under the composer; submitted `@path` mentions become structured
 attachments (bounded file context) rather than expanding the file into the prompt
 string. Unknown and incomplete slash commands remain in the composer and show an error
 instead of becoming agent goals.
+While a turn is running or the TUI is waiting, a one-row meter sits between the
+transcript and the composer and shows a spinner, the current job, plan step, elapsed
+time, a token estimate, and status.
 
 Draft history is process-local, retains at most 50 submitted entries, and is never
 persisted or added to model context before a restored draft is submitted again. Press
@@ -530,14 +655,41 @@ type a Unicode query, use `Up`/`Down`, press `Enter` to restore without submitti
 `Esc` to keep the current draft. Plain mode renders the same bounded safe matches as
 numbers and requires explicit confirmation before submitting the selection.
 
-The transcript follows new activity by default. `PageUp` and `PageDown` move by the
-current visible rendered rows without relying on raw terminal scrollback. Manual
+The colored transcript uses Grok-style structure instead of repeating role labels.
+User and assistant speech are markdown with a muted colored `●` on the first line
+(dusty teal vs sage). In `NO_COLOR` or monochrome presentation, textual `you`, `nib`,
+and lifecycle/tool labels replace color-only identity. Tool
+calls show the tool name and path or command (`● read_file  src/lib.rs`) without
+`running` or `ok` on the quiet row. Failed tools still include `failed`. A running
+`run_terminal` nests a spinner line (`Running command…`); the full command stays
+in the expanded body. Expanded results use a slate `·`. Thinking is a folded
+chevron header (`▸ Thought for 14s`, plus `, N tokens` when the waiting meter
+has a count) without a `thought` label. Left/Right expands it. Speech follows Codex communication
+style: a short preamble before tools that says what it is about to do and why,
+then a concise final answer. Speech renders markdown, including headings, lists,
+emphasis, inline code, and fenced code with lightweight syntax coloring.
+`Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
+composer and the transcript. Click in the chat to focus it; drag to select text.
+Releasing the drag copies the selection and clears the highlight. `Esc` or
+`Enter` also clears a leftover selection and returns to the composer; a click
+in the prompt or typing does the same. `Ctrl+A` selects
+the whole chat. `Ctrl+C` cancels an active run or clears idle draft/selection; it
+never copies or quits. `Ctrl+Y` or `Ctrl+Shift+C` copy the selection, the selected
+block, or the last reply. Printable keys return to the composer and insert.
+
+The transcript follows new activity by default. Scroll the conversation with the
+mouse/touch wheel, `PageUp`/`PageDown`, or `Shift+Up`/`Shift+Down` (`Ctrl+Up`/`Ctrl+Down`
+also work). `Ctrl+Home` jumps to the top and `Ctrl+End` follows the tail. Those keys
+still scroll while an approval list is open. Unmodified Up/Down
+select approval or question choices. Manual
 upward movement pauses follow-tail so streaming output does not move the viewport;
-the status/footer labels that state. Submitting input or pressing `Ctrl+End` resumes
-follow-tail. The footer otherwise shows only the relevant idle or active-run actions.
+the footer labels that state. Submitting input or pressing `Ctrl+End` resumes
+follow-tail. The footer otherwise keeps approval mode and agent mode visible.
 Resizes and narrow terminals clamp the row viewport safely.
 
-Run `/session` to open the session switcher. `Up`/`Down` changes the read-only preview,
+`/session`, `/model`, `/history`, and question options use the same under-composer
+list as `/` and `@` completion: no covering overlay, no caret, emphasized selection.
+Run `/session` to list sessions under the prompt. `Up`/`Down` changes the selection,
 and typing an exact session ID can preview an older session omitted from the bounded
 list. `Enter` first loads that exact preview when present, then opens a separate
 confirmation naming the current and target sessions; `Esc` cancels without changing
@@ -548,8 +700,10 @@ active. Switching is rejected while an agent worker is running. `/clear` uses th
 full-view replacement boundary for its new session.
 
 Approval, question, model, and session overlays take input before command completion.
-Switcher and selector errors render on the overlay that caused them. `Ctrl+C` cancels
-an active run; with no active run it exits. `Ctrl+Q` or `/quit` also exits.
+Switcher and selector errors render on the overlay that caused them. `Esc` never
+cancels a run; press it twice within 800ms to clear a non-empty draft. `Ctrl+C`
+cancels an active run, or clears an idle draft/selection, and never quits.
+`Ctrl+Q` twice within 1000ms quits. `/quit`, `/exit`, and `/q` still exit.
 Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.
 
@@ -612,9 +766,10 @@ Timeout, cancellation, manager drop, fatal transport, and direct-server-exit cle
 are bounded, terminate descendants that remain in the managed process group, and reap
 the direct child. During a supervised subagent run, MCP children also remain inside the
 bwrap PID namespace rooted at the validated namespace PID 1 on Linux. Native Job Object
-and process-group mechanism tests exist for Windows and macOS, but production subagent
-delegation fails closed on those
-platforms until managed workers cannot forge the durable cleanup authority. Linux
+and process-group mechanism tests exist for Windows and macOS. Windows Job Objects used
+for those tests carry a non-inheritable protected-owner handle whose DACL denies
+WRITE_DAC and WRITE_OWNER to Everyone. Production subagent delegation still fails
+closed on Windows and macOS until that owner is natively qualified. Linux
 locally proves cleanup of a descendant that calls `setsid`.
 
 HTTP/SSE MCP transports and OAuth are not implemented in this release. Both outbound
@@ -644,13 +799,18 @@ bypass `ToolExecutor` policy.
 nib --version
 nib version
 nib context . --task "inspect the parser"
+nib context --session <session-id>
+nib context --session <session-id> --json
 nib task list
 nib task get <task-id>
 nib task cancel <task-id>
 nib task reconcile
 ```
 
-`nib context` prints assembled AGENTS and skill context. `demo-tool` is a developer
+`nib context` prints assembled AGENTS and skill context (a project preview, not a
+live request). `nib context --session <id>` inspects that session's latest prepared
+or sent request snapshot; `--json` emits a bounded document with
+`kind=live_request` or `kind=project_preview`. `demo-tool` is a developer
 diagnostic rather than a normal agent workflow. Background terminal calls and
 scheduled wakes create profile-scoped durable task records. The task commands emit
 JSON for inspecting them, requesting cancellation, and failing workers whose leases

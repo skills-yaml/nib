@@ -60,6 +60,7 @@ impl std::fmt::Debug for LiveSettings {
 }
 
 impl LiveSettings {
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn from_environment() -> Result<Self, String> {
         require_flag("NIB_LIVE_TESTS")?;
         let mode = LiveMode::parse(&required("NIB_LIVE_MODE")?)?;
@@ -87,7 +88,7 @@ impl LiveSettings {
         }
 
         let max_logical_requests = parse_usize("NIB_LIVE_MAX_REQUESTS", 10_000, 1, 100_000)?;
-        let max_output_tokens_per_request = parse_u32("NIB_LIVE_MAX_OUTPUT_TOKENS", 64, 1, 512)?;
+        let max_output_tokens_per_request = parse_u32("NIB_LIVE_MAX_OUTPUT_TOKENS", 64, 1, 8192)?;
         let default_max_attempts = max_logical_requests
             .checked_mul(3)
             .ok_or_else(|| "live attempt ceiling overflowed".to_string())?;

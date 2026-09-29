@@ -2,6 +2,11 @@
 
 **Status:** Development
 
+**Current stage:** The protected six-provider catalog passed on 2026-09-25.
+Canary reports are retained but still fail provider tool-continuation scenarios;
+selected and full qualification remain open. The latest Anthropic canary passes
+text and streaming and makes a tool call, but refuses the final continuation.
+
 **Related:**
 [FT-004: LLM Integration and Agent Loop](../done/ft_004_llm_integration_and_agent_loop.md),
 [FT-011: LLM Streaming and TUI](../done/ft_011_llm_streaming_and_tui.md),
@@ -447,7 +452,10 @@ The live suite consumes only process environment or CI environment-scoped secret
 - `XAI_API_KEY`
 - `META_API_KEY`
 - `OPENROUTER_API_KEY`
-- `NIB_LIVE_META_BASE_URL` while Meta has no verified repository default
+
+`NIB_LIVE_META_BASE_URL` is a reviewed HTTPS catalog root, not a credential. Protected
+CI reads it from the `llm-live-meta` environment variable until Meta has a verified
+repository default.
 
 Keys must belong to dedicated low-privilege test projects/accounts with provider-side
 spend and rate limits. They must not be user or production keys. The harness never
@@ -828,6 +836,218 @@ The implementation and external evidence boundaries are now explicit:
   provider groups, privacy scans, exact revision and matrix/catalog fingerprints,
   denominators, blockers, and bounded usage/cost evidence before this spec can move to
   `done/`.
+
+### External Authority Audit (2026-09-17)
+
+The remaining work was revalidated against the repository, local environment, and
+GitHub Actions state after T041 integration at development revision `dbd350f`:
+
+- The six `llm-live-*` GitHub environments exist. On 2026-09-17 they were aligned with
+  the existing `release-prod` convention by adding `ejrav` as the required reviewer;
+  the resulting protection rules were reread from GitHub after each update. Their
+  secret and variable inventories are still empty, and the repository has no
+  live-qualification variables. The local environment has none of the six provider
+  credentials, `NIB_LIVE_META_BASE_URL`, or live/cost acknowledgements.
+- Scheduled catalog run
+  [35078889158](https://github.com/skills-yaml/nib/actions/runs/35078889158) at source
+  revision `1537f2cc78eb2178d85c9d686646e4b32334c297` attempted every provider on
+  2026-09-16. Each provider job failed safely during credential preflight with its
+  provider key missing. No sanitized report artifact was produced, so the strict
+  aggregate job also failed. This is blocker evidence, not catalog qualification.
+- Every checked-in OpenRouter entry remains `approved = false`; each rationale still
+  says that authenticated catalog, capability, regional availability, and price review
+  are pending. No source change can truthfully convert those entries into an
+  owner-approved support and spending decision.
+- The T041-integrated implementation tree at `dbd350f` passed `task verify`, including
+  all 66 credential-free live harness tests with the paid entrypoint ignored. No
+  additional repository-side implementation gap was found by this audit.
+
+Closure now requires these external actions in order:
+
+1. Create or designate six dedicated low-privilege provider accounts with hard spend
+   and rate limits, and choose a supported-region Meta catalog root.
+2. Configure `LLM_API_KEY` in each matching `llm-live-*` environment, configure the
+   Meta root as the `llm-live-meta` environment variable `NIB_LIVE_META_BASE_URL`,
+   configure all nine provider-scoped paid ceilings, and use the installed required
+   reviewer gate for live deployments.
+3. Run catalog mode from the intended exact revision. Review the retained catalogs,
+   model capabilities, pricing, regions, privacy scan, and planned denominators.
+4. Approve the exact OpenRouter IDs in `openrouter_models.toml` with current rationale,
+   owner, review/expiry dates, and cost ceilings; update selected IDs only when the
+   catalog evidence requires it.
+5. Run canary, selected, and full modes on that same exact revision, retain the six
+   sanitized reports, inspect their aggregate evidence, and record the results here.
+
+Provider secrets must be installed through GitHub environment secret management or an
+equivalent local secret channel; they must not be pasted into this spec, chat, command
+arguments, repository files, or ordinary workflow variables.
+
+### Historical authority snapshots (2026-09-25)
+
+The following audits record what was known at each point that day. The live qualification follow-up below supersedes their then-current status.
+
+### External Authority Audit (2026-09-25)
+
+Live catalog/canary/selected/full was re-attempted on Linux host
+`ej-assistant-001` against HEAD `c7797c689f68de5c5c3940aeb3708b45107bebb5`.
+Classification: **unverifiable**. T023 remains in `development/`. No acceptance
+checkbox is promoted.
+
+- Process environment: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`,
+  `XAI_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `NIB_LIVE_TESTS`,
+  `NIB_LIVE_ACK_COSTS`, and `NIB_LIVE_META_BASE_URL` are all unset. No local
+  `.env` exists at the documented harness inputs. The harness was not pointed at
+  user or production keys.
+- GitHub `skills-yaml/nib`: repository secrets and variables are empty. Each of
+  the six `llm-live-*` environments still has zero secrets and zero variables.
+- `tests/fixtures/llm_live/openrouter_models.toml` still has every entry
+  `approved = false`.
+- Scheduled workflow `llm-live.yml` run
+  [35078889158](https://github.com/skills-yaml/nib/actions/runs/35078889158)
+  remains a credential-preflight failure. Run
+  [35842462022](https://github.com/skills-yaml/nib/actions/runs/35842462022)
+  is still waiting on environment protection and has produced no reports.
+- Real Task verdicts, not a dry-run substitute:
+  - `task test:llm-live:catalog` without `NIB_LIVE_TESTS` exits 201 at the
+    network-acknowledgement precondition.
+  - `NIB_LIVE_TESTS=1 NIB_LIVE_PROVIDER=all task test:llm-live:catalog` runs the
+    ignored production-path entrypoint and fails safely:
+    `provider 'openai' is blocked_auth because OPENAI_API_KEY is missing`.
+  - `task test:llm-live:{canary,selected,full}` without `NIB_LIVE_ACK_COSTS`
+    exit 201 at the paid-cost precondition.
+  - Paid canary with both acknowledgements but no ceilings/keys fails safely:
+    `blocked_configuration: paid live generation requires an explicit
+    NIB_LIVE_MAX_REQUESTS ceiling`.
+  - `task test:llm-live:offline` passed 66 credential-free tests with the paid
+    entrypoint ignored. That is not live qualification.
+
+No sanitized catalog/canary/selected/full report was published. The external
+closure sequence recorded on 2026-09-17 is unchanged.
+
+A later same-day provision attempt confirmed the six `llm-live-*` GitHub
+environment secret and variable inventories are still empty, repository
+Actions secrets are empty, and organization secret listing is forbidden
+(`admin:org` missing). A personal `~/.nib/config.toml` OpenAI `api_key`
+exists; it was not exported, not copied into GitHub, and not used, because
+T023 requires dedicated low-privilege test credentials in process or
+environment-scoped secrets and forbids loading user config. OpenRouter
+entries remain `approved = false` pending an authenticated catalog review.
+
+### External Authority Audit (2026-09-25 catalog retry)
+
+GitHub Actions catalog on `88a80d47c3fa6c079a84f426fea57892fb3a5017`
+([run 36113356974](https://github.com/skills-yaml/nib/actions/runs/36113356974)):
+
+- `LLM_API_KEY` was present on all six `llm-live-*` environments.
+- `NIB_LIVE_META_BASE_URL` is the `llm-live-meta` environment variable
+  `https://api.meta.ai/v1` (workflow reads `vars`, not secrets).
+- Passed catalogs: OpenAI 138 models, Anthropic 12, Grok 8, Meta 8.
+- Failed catalogs: Google and OpenRouter, 0 pages, `blocker_classification=unknown`,
+  `safe_error_class=catalog_or_plan_failure` (not `blocked_auth`).
+- Aggregate failed. OpenRouter allowlist is still `approved = false`.
+- Canary/selected/full were not run. T023 remains in `development/`.
+
+### External Authority Audit (2026-09-25 catalog pass)
+
+After parser fixes, catalog aggregate succeeded on
+`5b95533379bee0986848ce4456105117f2342da6`
+([run 36116388282](https://github.com/skills-yaml/nib/actions/runs/36116388282)):
+
+- OpenAI 138, Anthropic 12, Gemini 61, Grok 8, Meta 8, OpenRouter 625 models.
+- Gemini live ListModels omits `baseModelId`; generation target is the `models/` suffix.
+- OpenRouter `-1` prices are unpriced; catalog identity is unique `id` (not shared `canonical_slug`).
+- Allowlist exact ids were present with text+tools and were approved for paid modes.
+
+### External Authority Audit (2026-09-25 canary)
+
+Catalog on `bdaecaa3ecfaf8cac10e6e86d719be386cdef145` passed
+([run 36118865398](https://github.com/skills-yaml/nib/actions/runs/36118865398)).
+
+Canary on the same revision
+([run 36119828512](https://github.com/skills-yaml/nib/actions/runs/36119828512))
+now publishes reports. It does not pass:
+
+- OpenAI/Anthropic/Gemini/Meta/Grok/OpenRouter complete+stream often succeed.
+- `single_tool_continuation` fails as `response_mismatch`, `unsupported_request`,
+  or `provider_rejected` on every advertised transport except OpenRouter
+  `x-ai/grok-4.5`.
+- Unpriced catalogs require `NIB_LIVE_ALLOW_UNPRICED=1` plus a spend cap.
+- Report publication no longer dies on aggregate inconsistency after the
+  `blocked_budget` truncation accounting fix.
+
+T023 remains in `development/` until canary, selected, and full pass.
+
+### Live qualification follow-up (2026-09-25)
+
+The six-provider catalog passed in [run 36116388282](https://github.com/skills-yaml/nib/actions/runs/36116388282).
+The OpenRouter allowlist now records reviewed exact IDs and cost ceilings. The
+same-revision six-provider canary in [run 36119828512](https://github.com/skills-yaml/nib/actions/runs/36119828512)
+published sanitized reports but failed. Later bounded, protected canaries have
+isolated Anthropic: at `8206220`, [run 36129038781](https://github.com/skills-yaml/nib/actions/runs/36129038781)
+passed `complete_text` and `streamed_text`, while
+`single_tool_continuation` failed with `provider_rejected` before a tool result.
+
+Anthropic documents that forced tool choice is unavailable with adaptive
+thinking, and that `output_config.effort` can steer tool use on supported
+models ([tool-use guidance](https://platform.claude.com/docs/en/claude_api_primer),
+[effort compatibility](https://platform.claude.com/docs/en/build-with-claude/effort)).
+The `e2500bc` candidate omits forced choice and sends low effort only for an
+explicit `ToolChoice::Required` qualification request. Ordinary `Auto` tool
+requests keep their prior system and effort fields. Its protected
+[run 36182823666](https://github.com/skills-yaml/nib/actions/runs/36182823666)
+passed text completion and streaming. The tool scenario made two successful
+requests, then failed a `response_mismatch` check on its continuation response.
+The sanitized report does not distinguish the final response's finish class,
+tool state, or receipt text, so the next candidate emits only fixed, content-free
+error classes for those checks. The complete local gate also exposed a
+one-connection localhost fixture that could consume an unrelated probe; its
+test now verifies that unrelated requests receive 404 while the expected
+Responses request remains available. The plain CLI recovery fixture likewise
+filters unrelated requests and waits for the next prompt before sending its
+second goal. The protected [run 36190856434](https://github.com/skills-yaml/nib/actions/runs/36190856434)
+at `1449b4b` passed text completion and streaming. Its first tool request
+completed, but the continuation response returned Anthropic's refusal terminal
+status (`response_refused` in the sanitized report). The fixed benign probe
+therefore fails this selected model on the current account and revision. Per
+the refusal policy above, the harness does not retry a different prompt or
+count the first tool call as a pass. A reviewed selected-model decision and a
+fresh exact-revision live pass are still required. Unsupported effort on older
+account-visible models remains a full-matrix risk and must not be misclassified
+as model tool incompatibility.
+
+### Proposed Anthropic selected-model replacement (owner review pending)
+
+Replace only the Anthropic selected-suite entry `claude-opus-5` with
+`claude-sonnet-5` after owner review. Anthropic identifies `claude-sonnet-5` as
+a pinned Claude API model ID, lists tool use and adaptive thinking for Sonnet 5,
+and documents `thinking: {type: "disabled"}` for text requests. The existing
+Anthropic adapter's low-effort tool request and bounded text request therefore
+have documented parameter support on this candidate. Published standard rates
+are $2 per million input tokens and $10 per million output tokens, versus
+$5 and $25 for Opus 5. These are list prices, not an observed qualification cost.
+See [Sonnet 5 specifications](https://platform.claude.com/docs/en/models/sonnet-5/overview),
+[Sonnet 5 thinking behavior](https://platform.claude.com/docs/en/models/sonnet-5/whats-new-sonnet-5),
+[Opus 5 specifications](https://platform.claude.com/docs/en/models/opus-5/overview), and
+[model ID stability](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions).
+
+This is a candidate, not qualification evidence. Sonnet 5 can also refuse some
+requests, and account visibility has not been established from the sanitized
+catalog report. The proposed owner is `nib-maintainers`, with review dated
+2026-09-25 and expiry on 2027-03-25 if approved now. Keep the protected
+Anthropic environment's current $50 run cost ceiling and 200-request,
+600-attempt, 4,096-output-token-per-request limits; do not raise them for this
+candidate. The previous canary reported unknown actual cost because catalog
+pricing was incomplete, so the owner must also confirm the provider-side hard
+spend cap required by the existing unpriced allowance before another paid run.
+The selected-suite fixture currently has one review date and expiry for all
+providers; changing those fields requires a review of the whole suite or a
+per-provider metadata extension. The owner must approve the exact ID, rationale,
+limits, review scope, and expiry before the fixture changes. Then capture account
+catalog visibility, review the resulting dry-run budget, and run protected canary,
+selected, and full exact-revision qualification. Keep the failed Opus 5 result
+in the evidence record. See [Anthropic refusal behavior](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback)
+and the [Sonnet 5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5/migration-guide).
+
 
 ## Affected Areas
 

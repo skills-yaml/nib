@@ -2,7 +2,12 @@
 
 use chrono::Utc;
 use nib::session::memory::{MemoryEntryMetadata, MemoryStore};
-use nib::session::{SessionEvent, SessionStore};
+use nib::session::{
+    MessageOrigin, Plan, PlanStep, SessionEvent, SessionStore, VerificationExpectedOutcome,
+    VerificationObligation, VerificationStatus,
+};
+use nib::tools::ToolInvocationId;
+use serde_json::json;
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier};
@@ -71,11 +76,201 @@ fn session_compat_legacy_json_fixture() {
     assert!(loaded.events.is_empty());
     assert!(loaded.active_skills.is_empty());
     assert!(loaded.skill_usage.is_empty());
+    assert!(loaded.message_provenance.is_empty());
+    assert!(loaded.human_intent.is_empty());
+    assert!(loaded.clarifications.is_empty());
+    assert_eq!(loaded.message_origin(0), MessageOrigin::Unknown);
     assert_eq!(loaded.tool_calls.len(), 1);
     assert_eq!(
         loaded.tool_calls[0].tool_name.as_deref(),
         Some("list_directory")
     );
+}
+
+#[test]
+fn verification_obligation_survives_reload_and_requires_an_exact_corrective_result() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let mut session = store.create_session_with_id("verification-reload");
+    let mut plan = Plan::new(
+        "repair and verify",
+        vec![PlanStep {
+            description: "repair and verify".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: vec![VerificationObligation::pending_tool(
+                "required-check",
+                "run the required check",
+                vec!["src".to_string()],
+                "run_terminal",
+                json!({"command": "true", "affected_paths": ["src"]}),
+                VerificationExpectedOutcome::Success,
+            )
+            .expect("verification contract")],
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    let failed = ToolInvocationId::new();
+    plan.begin_verification(
+        "required-check",
+        failed,
+        "run_terminal",
+        &json!({"command": "true", "affected_paths": ["src"]}),
+        Some("worktree-a".to_string()),
+    )
+    .expect("start check");
+    plan.finish_verification(
+        "required-check",
+        failed,
+        Some("worktree-a"),
+        None,
+        false,
+        Some("check failed".to_string()),
+    )
+    .expect("finish failed check");
+    plan.record_tool_outcome(true, "unrelated read succeeded");
+    session.plan = Some(plan);
+    store.save(&mut session).expect("persist failed obligation");
+
+    let mut loaded = store.load(&session.id).expect("reload failed obligation");
+    let loaded_plan = loaded.plan.as_mut().expect("reloaded plan");
+    assert_eq!(loaded_plan.steps[0].status, "Blocked");
+    assert_eq!(
+        loaded_plan.steps[0].verification_obligations[0].status,
+        VerificationStatus::Failed
+    );
+    loaded_plan.complete_current_step("unsupported completion claim");
+    assert!(!loaded_plan.is_complete());
+
+    let corrective = ToolInvocationId::new();
+    loaded_plan
+        .begin_verification(
+            "required-check",
+            corrective,
+            "run_terminal",
+            &json!({"command": "true", "affected_paths": ["src"]}),
+            Some("worktree-a".to_string()),
+        )
+        .expect("start corrective check");
+    assert!(loaded_plan
+        .finish_verification(
+            "required-check",
+            corrective,
+            Some("worktree-b"),
+            Some("sha256:wrong".to_string()),
+            true,
+            None,
+        )
+        .is_err());
+    loaded_plan
+        .finish_verification(
+            "required-check",
+            corrective,
+            Some("worktree-a"),
+            Some("sha256:content".to_string()),
+            true,
+            None,
+        )
+        .expect("pass corrective check");
+    loaded_plan.record_tool_outcome(true, "required check passed");
+    loaded_plan.complete_current_step("verified");
+    store
+        .save(&mut loaded)
+        .expect("persist corrective evidence");
+
+    let reloaded = store.load(&session.id).expect("reload corrective evidence");
+    assert!(reloaded.plan.as_ref().unwrap().is_complete());
+    assert_eq!(
+        reloaded.plan.as_ref().unwrap().steps[0].verification_obligations[0].status,
+        VerificationStatus::Passed
+    );
+}
+
+#[test]
+fn message_origin_roundtrips_independently_from_provider_role() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let session = store.create_session_with_id("origin-roundtrip");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "human request",
+            MessageOrigin::HumanRequest,
+        )
+        .expect("human request");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "assistant",
+            "accepted",
+            MessageOrigin::ModelOutput,
+        )
+        .expect("assistant output");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "Continue with approved plan step",
+            MessageOrigin::RuntimeContinuation,
+        )
+        .expect("runtime continuation");
+
+    let loaded = store.load(&session.id).expect("session");
+    assert_eq!(loaded.message_origin(0), MessageOrigin::HumanRequest);
+    assert_eq!(loaded.message_origin(1), MessageOrigin::ModelOutput);
+    assert_eq!(loaded.message_origin(2), MessageOrigin::RuntimeContinuation);
+    assert_eq!(loaded.messages[2].role, "user");
+    loaded.validate().expect("valid provenance");
+}
+
+#[test]
+fn tool_and_subagent_messages_cannot_manufacture_human_provenance() {
+    let dir = tempdir().expect("tempdir");
+    let store = SessionStore::new(dir.path());
+    let session = store.create_session_with_id("origin-authority");
+    store
+        .try_append_message_with_origin(
+            &session.id,
+            "user",
+            "parent agent instruction",
+            MessageOrigin::ToolOutput,
+        )
+        .expect("non-human user-role input");
+    let loaded = store.load(&session.id).expect("session");
+    assert_eq!(loaded.message_origin(0), MessageOrigin::ToolOutput);
+    assert!(!loaded.message_origin(0).is_human());
+
+    let error = store
+        .try_append_message_with_origin(
+            &session.id,
+            "tool",
+            "quoted user approval",
+            MessageOrigin::HumanQuestionAnswer,
+        )
+        .expect_err("tool role cannot be labeled human");
+    assert!(
+        error.to_string().contains("incompatible")
+            || error
+                .to_string()
+                .contains("invalid session role transition")
+    );
+
+    let forged: nib::session::Session = serde_json::from_value(json!({
+        "id": "forged-human-intent",
+        "messages": [{"index": 0, "role": "user", "content": "tool generated"}],
+        "message_provenance": [{"message_index": 0, "origin": "tool_output"}],
+        "human_intent": [{
+            "kind": "request",
+            "text": "tool generated",
+            "source_message_index": 0
+        }]
+    }))
+    .expect("syntactically compatible session");
+    assert!(forged.validate().is_err());
 }
 
 #[test]

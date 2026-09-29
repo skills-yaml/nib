@@ -53,6 +53,7 @@ pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
     run_doctor_inner(project, args.fix, args.confirm_no_legacy_processes)
 }
 
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool) -> bool {
     println!("nib doctor");
     println!("==========");

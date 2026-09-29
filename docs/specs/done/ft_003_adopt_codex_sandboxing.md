@@ -148,7 +148,7 @@ network = "restricted"
 ### Updates to Existing Components
 
 - `src/config/mod.rs`: execution providers, boundaries, and named profiles.
-- `src/tools/executor.rs`: hybrid orchestration, worktree selection, approval, and audit.
+- `src/tools/executor/mod.rs`: hybrid orchestration, worktree selection, approval, and audit.
 - `src/sandbox/`: bwrap execution and worktree ownership.
 - CLI/TUI runtime surfaces: plan approval and execution status without separate
   `nib plan` or `nib sandbox-test` commands.
@@ -225,7 +225,7 @@ Scope: make bwrap capability detection executable, fail closed on isolation erro
 persist plan/approval/boundary evidence, apply AGENTS/skill constraints, and prove
 fallback plus hybrid execution.
 
-Affected areas: `src/sandbox/`, `src/tools/executor.rs`, `src/config/`,
+Affected areas: `src/sandbox/`, `src/tools/executor/mod.rs`, `src/config/`,
 `src/session/`, and sandbox/runtime E2E tests.
 
 Validation gates: dedicated allowed/denied/fallback tests, plan-linked E2E,
@@ -251,7 +251,7 @@ boundaries, executable bwrap detection, and a documented hybrid fallback.
 
 ### Affected Areas
 
-`src/sandbox/`, `src/sandbox/worktree.rs`, `src/tools/executor.rs`, `src/config/`,
+`src/sandbox/`, `src/sandbox/worktree/mod.rs`, `src/tools/executor/mod.rs`, `src/config/`,
 `src/session/`, and sandbox/runtime tests.
 
 ### Implementation Evidence
@@ -259,7 +259,7 @@ boundaries, executable bwrap detection, and a documented hybrid fallback.
 `src/sandbox/mod.rs` owns capability probing, bwrap arguments, fallback, output bounds,
 and process cleanup. `src/config/mod.rs` validates additive
 `execution.boundary_profiles` overlays against the configured base boundary.
-`src/tools/executor.rs` resolves `nib-boundary: profile <name>`, upgrades an internal
+`src/tools/executor/mod.rs` resolves `nib-boundary: profile <name>`, upgrades an internal
 provider to hybrid (or bwrap for disabled network), and composes the selected name and
 resolved boundaries through plan, approval, worktree, dispatch, and audit layers.
 

@@ -3,8 +3,108 @@ use std::sync::Arc;
 
 use crate::console::{ConsoleApprovalHandler, ConsoleInput, ConsoleQuestionHandler};
 
+#[cfg(windows)]
+mod one_shot_interrupt {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
+
+    static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "system" fn control_handler(control_type: u32) -> i32 {
+        if control_type == CTRL_C_EVENT {
+            CTRL_C_RECEIVED.store(true, Ordering::Release);
+            1
+        } else {
+            0
+        }
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install() -> Result<Self, String> {
+            CTRL_C_RECEIVED.store(false, Ordering::Release);
+            // SAFETY: the handler is a process-lifetime static function and performs
+            // only an async-signal-safe atomic store. This one-shot process owns the
+            // registration until the returned guard is dropped.
+            if unsafe { SetConsoleCtrlHandler(Some(control_handler), 1) } == 0 {
+                return Err(format!(
+                    "failed to register the Windows Ctrl+C handler: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(Self)
+        }
+
+        pub(super) async fn received(&self) {
+            while !CTRL_C_RECEIVED.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // SAFETY: this removes the exact static handler installed by `install`.
+            unsafe {
+                SetConsoleCtrlHandler(Some(control_handler), 0);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod one_shot_interrupt {
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install() -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        pub(super) async fn received(&self) {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 const MAX_RUN_GOAL_BYTES: usize = 20_000;
-const MAX_RUN_SUMMARY_BYTES: usize = 512;
+const MAX_RUN_ANSWER_BYTES: usize = 64 * 1024;
+
+fn one_shot_stream_line(display: nib::interactive::StreamDisplay) -> Option<String> {
+    match display {
+        // The reconciled summary below owns the one complete final answer. Streaming
+        // this projection as well would print that answer twice.
+        nib::interactive::StreamDisplay::Content(_) => None,
+        nib::interactive::StreamDisplay::Status(status) if status.starts_with("[plan]") => {
+            Some(status)
+        }
+        nib::interactive::StreamDisplay::Status(_) => None,
+    }
+}
+
+fn one_shot_final_output(message: &str, sensitive_values: &[String], session_id: &str) -> String {
+    if message.len() > MAX_RUN_ANSWER_BYTES {
+        return format!(
+            "Final answer omitted from terminal output because the retained session value exceeds the {MAX_RUN_ANSWER_BYTES}-byte display limit. Inspect session {session_id}."
+        );
+    }
+    let message =
+        nib::interactive::bounded_public_text(message, sensitive_values, usize::MAX, true);
+    if message.len() > MAX_RUN_ANSWER_BYTES {
+        return format!(
+            "Final answer omitted from terminal output because the retained session value exceeds the {MAX_RUN_ANSWER_BYTES}-byte display limit. Inspect session {session_id}."
+        );
+    }
+    if message.trim().is_empty() {
+        format!(
+            "Final answer omitted by safety/storage limits. Inspect session {session_id} for the retained record."
+        )
+    } else {
+        message
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -65,6 +165,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     // We use the Rust agent loop directly
     let rt = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
 
+    let cancellation = nib::agent::CancellationSignal::new();
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
     let loop_cfg = nib::agent::AgentLoopConfig {
         max_steps: args.max_steps,
         mode: args.mode.clone(),
@@ -73,47 +175,105 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         auto_approve: args.yes,
         approval_handler: Some(Arc::new(ConsoleApprovalHandler::new(input.clone()))),
         question_handler: Some(Arc::new(ConsoleQuestionHandler::new(input))),
+        stream_tx: Some(stream_tx),
+        cancellation: Some(cancellation.clone()),
         ..Default::default()
     };
 
     let worker_project = project.clone();
     let worker_session_id = sid.clone();
     let worker_goal = args.goal.clone();
+    // Install before the runtime can publish a prompt. On Windows, delaying
+    // registration until an async signal task is first scheduled leaves a native
+    // Ctrl+C race in which the OS default handler terminates the process abruptly.
+    let interrupt = one_shot_interrupt::Guard::install()?;
     let result = nib::agent::block_on_agent_runtime_worker(
         &rt,
         async move {
-            nib::agent::run_agent_loop(worker_project, &worker_session_id, &worker_goal, loop_cfg)
-                .await
+            let cancel = cancellation.clone();
+            let printer = tokio::spawn(async move {
+                while let Some(event) = stream_rx.recv().await {
+                    if let Some(display) =
+                        nib::interactive::display_stream_event_with_sensitive_values(event, &[])
+                    {
+                        if let Some(line) = one_shot_stream_line(display) {
+                            println!("{line}");
+                        }
+                    }
+                }
+            });
+            let mut running = Box::pin(nib::agent::run_agent_loop(
+                worker_project,
+                &worker_session_id,
+                &worker_goal,
+                loop_cfg,
+            ));
+            let result = tokio::select! {
+                biased;
+                _ = interrupt.received() => {
+                    cancel.cancel();
+                    running.await
+                }
+                result = &mut running => result,
+            };
+            let _ = printer.await;
+            result
         },
         "agent runtime worker",
     )?;
 
     match result {
-        Ok(summary) => {
-            if summary.outcome == "waiting_for_user_input" {
-                return Err(format!(
-                    "agent stopped because console question input was unavailable; session {} was reconciled without continuing",
-                    sid
-                ));
-            }
-            if summary.is_failure() {
-                return Err(summary.user_failure_report().unwrap_or_else(|| {
-                    format!("Agent run failed: {}\nSession: {sid}", summary.outcome)
-                }));
-            }
-            println!("Agent run completed for session {}", sid);
-            if let Some(msg) = summary.last_message {
-                let msg = nib::interactive::bounded_public_text(
-                    &msg,
-                    &sensitive_values,
-                    MAX_RUN_SUMMARY_BYTES,
-                    false,
-                );
-                println!("Last: {msg}");
-            }
-            Ok(())
-        }
+        Ok(summary) => report_run_summary(args, &session_store, &sid, &sensitive_values, summary),
         Err(error) => Err(format!("failed to launch agent: {error}")),
+    }
+}
+
+fn report_run_summary(
+    args: &RunArgs,
+    session_store: &nib::session::SessionStore,
+    sid: &str,
+    sensitive_values: &[String],
+    summary: nib::agent::AgentRunSummary,
+) -> Result<(), String> {
+    if summary.outcome == "cancelled_by_user" {
+        eprintln!("Run cancelled.");
+        std::process::exit(interrupt_exit_status());
+    }
+    if summary.outcome == "waiting_for_user_input" {
+        return Err(format!(
+            "Waiting for your answer. Resume with `nib --session {sid}` then `/questions` and `/continue <plan-id>`."
+        ));
+    }
+    if summary.is_failure() {
+        return Err(summary
+            .user_failure_report()
+            .unwrap_or_else(|| nib::interactive::user_visible_stop_report(&summary.outcome, sid)));
+    }
+    println!("Agent run completed for session {sid}");
+    if args.mode == "plan" {
+        if let Ok(Some(session)) = session_store.load_result(sid) {
+            if let Some(plan) = session.plan.as_ref() {
+                println!("Plan {}:", plan.id);
+                for (index, step) in plan.steps.iter().enumerate() {
+                    println!("  {}. {}", index + 1, step.description);
+                }
+            }
+        }
+    }
+    if let Some(msg) = summary.last_message {
+        println!("{}", one_shot_final_output(&msg, sensitive_values, sid));
+    }
+    Ok(())
+}
+
+fn interrupt_exit_status() -> i32 {
+    #[cfg(unix)]
+    {
+        130
+    }
+    #[cfg(not(unix))]
+    {
+        1
     }
 }
 
@@ -213,6 +373,51 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_stream_defers_content_to_the_single_reconciled_summary() {
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Content(
+                "complete final answer".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Status(
+                "[plan] inspect\n[plan] verify".to_string()
+            )),
+            Some("[plan] inspect\n[plan] verify".to_string())
+        );
+        assert_eq!(
+            one_shot_stream_line(nib::interactive::StreamDisplay::Status(
+                "tool running".to_string()
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn one_shot_final_output_preserves_structure_and_labels_legacy_omission() {
+        let structured = format!(
+            "# Result\n\n{}\n\n```rust\nfn verified() {{}}\n```",
+            "complete paragraph. ".repeat(80)
+        );
+        let rendered = one_shot_final_output(&structured, &[], "session-structured");
+        assert_eq!(rendered, structured);
+        assert!(rendered.len() > 512);
+        assert!(rendered.contains("\n\n```rust\n"));
+
+        let oversized = "x".repeat(MAX_RUN_ANSWER_BYTES + 1);
+        let rendered = one_shot_final_output(&oversized, &[], "session-legacy");
+        assert!(rendered.contains("omitted from terminal output"));
+        assert!(rendered.contains("session-legacy"));
+        assert!(!rendered.ends_with("..."));
+
+        let expanding_controls = "\u{1b}".repeat(MAX_RUN_ANSWER_BYTES / 2);
+        let rendered = one_shot_final_output(&expanding_controls, &[], "session-controls");
+        assert!(rendered.contains("omitted from terminal output"));
+        assert!(!rendered.ends_with("..."));
+    }
+
+    #[test]
     #[serial]
     fn run_agent_routes_console_question_answers_back_into_the_same_session() {
         let project = tempdir().expect("project");
@@ -279,7 +484,12 @@ mod tests {
             ConsoleInput::new(Cursor::new(Vec::<u8>::new())),
         )
         .expect_err("closed question input must be visible to the caller");
-        assert!(error.contains("question input was unavailable"));
+        assert!(
+            error.contains("Waiting for your answer")
+                && error.contains("/questions")
+                && error.contains("/continue"),
+            "{error}"
+        );
 
         let store = SessionStore::for_project(project.path()).expect("session store");
         let session_id = store
@@ -299,10 +509,15 @@ mod tests {
         let question = &session.tool_calls[0];
         assert_eq!(question.tool_name.as_deref(), Some("ask_question"));
         assert_eq!(question.result.as_ref().unwrap()["success"], false);
-        assert!(question
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("console input closed")));
+        assert!(
+            question.error.as_deref().is_some_and(|error| {
+                error.contains("console input closed")
+                    || error.contains("input closed")
+                    || error.contains("input_closed")
+            }),
+            "{:?}",
+            question.error
+        );
         assert!(session.tool_calls.iter().all(|record| {
             !matches!(
                 record.tool_name.as_deref(),

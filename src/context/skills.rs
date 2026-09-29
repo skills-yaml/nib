@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 use thiserror::Error;
 
 const MAX_SKILL_FILE_BYTES: u64 = 131_072;
@@ -18,6 +21,62 @@ const MAX_DISCOVERED_SKILLS: usize = 256;
 const MAX_DISCOVERY_ENTRIES: usize = 4_096;
 const MAX_SKILL_DISCOVERY_DEPTH: usize = 4;
 const MAX_SKILL_ID_BYTES: usize = 128;
+const MAX_FRONTMATTER_CACHE_ENTRIES: usize = 512;
+const MAX_SELECTION_REASON_CHARS: usize = 256;
+pub const MAX_AUTOMATIC_SKILLS: usize = 3;
+pub const SKILL_SELECTION_STOPWORDS_VERSION: &str = "v1";
+
+const SKILL_SELECTION_STOPWORDS_V1: &[&str] = &[
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "code",
+    "file",
+    "files",
+    "for",
+    "from",
+    "has",
+    "have",
+    "help",
+    "helper",
+    "in",
+    "into",
+    "is",
+    "it",
+    "manage",
+    "management",
+    "of",
+    "on",
+    "or",
+    "perform",
+    "project",
+    "projects",
+    "repo",
+    "repository",
+    "run",
+    "skill",
+    "skills",
+    "support",
+    "task",
+    "tasks",
+    "that",
+    "the",
+    "this",
+    "to",
+    "use",
+    "used",
+    "using",
+    "with",
+    "work",
+    "working",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct SkillConstraints {
@@ -75,6 +134,25 @@ pub struct Skill {
 pub struct SkillReference {
     pub path: PathBuf,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSelectionSource {
+    Configured,
+    Automatic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSelectionRecord {
+    pub skill_name: String,
+    pub reason: String,
+    pub source: SkillSelectionSource,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillSelection {
+    pub skills: Vec<Skill>,
+    pub records: Vec<SkillSelectionRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,11 +219,49 @@ pub enum SkillDiscoveryError {
     Truncated { kind: &'static str, limit: usize },
 }
 
+#[derive(Debug, Error)]
+pub enum SkillSelectionError {
+    #[error("invalid skill {path}: {source}")]
+    InvalidSkill {
+        path: PathBuf,
+        #[source]
+        source: SkillError,
+    },
+    #[error("configured active skill '{name}' was not found")]
+    MissingConfigured { name: String },
+    #[error("configured active skill '{name}' is ambiguous across: {paths}")]
+    AmbiguousConfigured { name: String, paths: String },
+    #[error(
+        "configured active skills exceed llm.context_length: require {required_tokens} approximate tokens, limit is {available_tokens}"
+    )]
+    ConfiguredOverBudget {
+        required_tokens: usize,
+        available_tokens: usize,
+    },
+    #[error("skill {path} changed while it was being selected")]
+    ChangedDuringSelection { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestStamp {
+    pub(crate) len: u64,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) frontmatter_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct CachedFrontmatter {
+    pub(crate) stamp: ManifestStamp,
+    pub(crate) frontmatter: SkillFrontmatter,
+}
+
+static FRONTMATTER_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedFrontmatter>>> = OnceLock::new();
+
 #[derive(Clone, Copy)]
 struct SkillDiscoveryLimits {
-    max_skills: usize,
-    max_entries: usize,
-    max_depth: usize,
+    pub(crate) max_skills: usize,
+    pub(crate) max_entries: usize,
+    pub(crate) max_depth: usize,
 }
 
 const SKILL_DISCOVERY_LIMITS: SkillDiscoveryLimits = SkillDiscoveryLimits {
@@ -442,7 +558,95 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill, SkillError> {
 /// Parses and bounds the manifest without requiring declared resources to exist yet.
 /// Git installation uses this before checking out the exact declared paths.
 pub fn parse_skill_frontmatter_file(path: &Path) -> Result<SkillFrontmatter, SkillError> {
-    parse_skill_document(path).map(|(frontmatter, _)| frontmatter)
+    let parent = path
+        .parent()
+        .ok_or_else(|| SkillError::InvalidResource(path.display().to_string()))?;
+    verify_skill_directory_components(parent, &path.display().to_string())?;
+    let metadata = fs::symlink_metadata(path)?;
+    validate_skill_manifest_metadata(path, &metadata)?;
+    let canonical = path.canonicalize()?;
+    let (yaml, frontmatter_digest) = read_skill_frontmatter_source(path)?;
+    let stamp = ManifestStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        frontmatter_digest,
+    };
+    let cache = FRONTMATTER_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&canonical)
+        .filter(|cached| cached.stamp == stamp)
+        .cloned()
+    {
+        return Ok(cached.frontmatter);
+    }
+
+    let after = fs::symlink_metadata(path)?;
+    validate_skill_manifest_metadata(path, &after)?;
+    let after_stamp = ManifestStamp {
+        len: after.len(),
+        modified: after.modified().ok(),
+        frontmatter_digest,
+    };
+    if after_stamp != stamp || path.canonicalize()? != canonical {
+        return Err(SkillError::InvalidResource(path.display().to_string()));
+    }
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MAX_FRONTMATTER_CACHE_ENTRIES && !cache.contains_key(&canonical) {
+        cache.clear();
+    }
+    let frontmatter: SkillFrontmatter = serde_yaml::from_str(&yaml)?;
+    let frontmatter = validate_skill_frontmatter(frontmatter)?;
+    cache.insert(
+        canonical,
+        CachedFrontmatter {
+            stamp,
+            frontmatter: frontmatter.clone(),
+        },
+    );
+    Ok(frontmatter)
+}
+
+fn read_skill_frontmatter_source(path: &Path) -> Result<(String, [u8; 32]), SkillError> {
+    let manifest = open_stable_skill_file(path, |metadata| {
+        validate_skill_manifest_metadata(path, metadata)
+    })?;
+    let opened_identity = crate::fs_security::FileIdentity::from_file(manifest.try_clone()?)?;
+    let mut reader = BufReader::new(manifest.take(MAX_SKILL_FILE_BYTES + 1));
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 || line.trim_end_matches(['\r', '\n']) != "---" {
+        return Err(SkillError::MissingFrontmatter);
+    }
+    let mut yaml = String::new();
+    let mut bytes = line.len() as u64;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(SkillError::UnterminatedFrontmatter);
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| SkillError::ManifestTooLarge(path.display().to_string()))?;
+        if bytes > MAX_SKILL_FILE_BYTES {
+            return Err(SkillError::ManifestTooLarge(path.display().to_string()));
+        }
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            break;
+        }
+        yaml.push_str(&line);
+    }
+    let after = open_skill_file_without_following_links(path)?;
+    validate_skill_manifest_metadata(path, &after.metadata()?)?;
+    let after_identity = crate::fs_security::FileIdentity::from_file(after)?;
+    if opened_identity != after_identity {
+        return Err(SkillError::InvalidResource(path.display().to_string()));
+    }
+    let digest = Sha256::digest(yaml.as_bytes()).into();
+    Ok((yaml, digest))
 }
 
 fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), SkillError> {
@@ -476,6 +680,13 @@ fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), Skill
         .trim()
         .to_string();
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml)?;
+    let frontmatter = validate_skill_frontmatter(frontmatter)?;
+    Ok((frontmatter, body))
+}
+
+fn validate_skill_frontmatter(
+    frontmatter: SkillFrontmatter,
+) -> Result<SkillFrontmatter, SkillError> {
     canonical_skill_id(&frontmatter.name)?;
     if frontmatter.references.len() > MAX_SKILL_REFERENCES {
         return Err(SkillError::TooManyResources {
@@ -498,7 +709,7 @@ fn parse_skill_document(path: &Path) -> Result<(SkillFrontmatter, String), Skill
     {
         validated_skill_resource_path(configured)?;
     }
-    Ok((frontmatter, body))
+    Ok(frontmatter)
 }
 
 fn validate_skill_manifest_metadata(
@@ -697,42 +908,326 @@ pub fn parse_skill(path: &Path) -> Option<Skill> {
     parse_skill_file(path).ok()
 }
 
-fn task_tokens(task: &str) -> HashSet<String> {
-    task.split(|value: char| !value.is_ascii_alphanumeric() && value != '-' && value != '_')
-        .filter(|value| !value.is_empty())
+fn lexical_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
         .map(str::to_lowercase)
         .collect()
 }
 
-pub fn skill_matches_task(skill: &Skill, task: &str) -> bool {
-    let task_lower = task.to_lowercase();
-    let tokens = task_tokens(task);
-    let name = skill.frontmatter.name.to_lowercase();
+fn contains_token_phrase(task_tokens: &[String], phrase: &str) -> bool {
+    let phrase = lexical_tokens(phrase);
+    !phrase.is_empty()
+        && phrase.len() <= task_tokens.len()
+        && task_tokens
+            .windows(phrase.len())
+            .any(|window| window == phrase.as_slice())
+}
 
-    task_lower.contains(&name)
-        || skill
-            .frontmatter
-            .tags
+fn is_selection_stopword(token: &str) -> bool {
+    SKILL_SELECTION_STOPWORDS_V1.binary_search(&token).is_ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillMatchScore {
+    pub(crate) exact_name: bool,
+    pub(crate) matched_tags: Vec<String>,
+    pub(crate) matched_description_tokens: Vec<String>,
+}
+
+impl SkillMatchScore {
+    pub(crate) fn is_match(&self) -> bool {
+        self.exact_name
+            || !self.matched_tags.is_empty()
+            || self.matched_description_tokens.len() >= 2
+    }
+
+    pub(crate) fn reason(&self) -> String {
+        if self.exact_name {
+            return bounded_selection_reason("exact skill name phrase");
+        }
+        if !self.matched_tags.is_empty() {
+            return bounded_selection_reason(&format!(
+                "matched tags: {}",
+                self.matched_tags.join(", ")
+            ));
+        }
+        bounded_selection_reason(&format!(
+            "matched description tokens: {}",
+            self.matched_description_tokens.join(", ")
+        ))
+    }
+}
+
+fn skill_match_score(frontmatter: &SkillFrontmatter, task: &str) -> SkillMatchScore {
+    let task_tokens = lexical_tokens(task);
+    let task_distinct = task_tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let exact_name = contains_token_phrase(&task_tokens, &frontmatter.name);
+    let matched_tags = frontmatter
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let tag_tokens = lexical_tokens(tag);
+            let meaningful = tag_tokens.iter().any(|token| !is_selection_stopword(token));
+            (meaningful && contains_token_phrase(&task_tokens, tag)).then(|| tag_tokens.join(" "))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let matched_description_tokens = lexical_tokens(&frontmatter.description)
+        .into_iter()
+        .filter(|token| !is_selection_stopword(token) && task_distinct.contains(token))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    SkillMatchScore {
+        exact_name,
+        matched_tags,
+        matched_description_tokens,
+    }
+}
+
+fn bounded_selection_reason(reason: &str) -> String {
+    reason.chars().take(MAX_SELECTION_REASON_CHARS).collect()
+}
+
+pub fn skill_matches_task(skill: &Skill, task: &str) -> bool {
+    skill_match_score(&skill.frontmatter, task).is_match()
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredSkillMetadata {
+    pub(crate) path: PathBuf,
+    pub(crate) canonical_path: PathBuf,
+    pub(crate) frontmatter: SkillFrontmatter,
+}
+
+#[derive(Debug, Clone)]
+struct AutomaticCandidate {
+    pub(crate) metadata: DiscoveredSkillMetadata,
+    pub(crate) score: SkillMatchScore,
+}
+
+fn canonical_skill_files(
+    files: Vec<PathBuf>,
+) -> Result<Vec<(PathBuf, PathBuf)>, SkillSelectionError> {
+    let mut canonical = BTreeMap::new();
+    for path in files {
+        let identity = path
+            .canonicalize()
+            .map_err(|source| SkillSelectionError::InvalidSkill {
+                path: path.clone(),
+                source: SkillError::Io(source),
+            })?;
+        canonical.entry(identity).or_insert(path);
+    }
+    Ok(canonical
+        .into_iter()
+        .map(|(identity, path)| (path, identity))
+        .collect())
+}
+
+fn load_selected_skill(metadata: &DiscoveredSkillMetadata) -> Result<Skill, SkillSelectionError> {
+    let skill =
+        parse_skill_file(&metadata.path).map_err(|source| SkillSelectionError::InvalidSkill {
+            path: metadata.path.clone(),
+            source,
+        })?;
+    if skill.frontmatter != metadata.frontmatter
+        || skill.path.canonicalize().ok().as_ref() != Some(&metadata.canonical_path)
+    {
+        return Err(SkillSelectionError::ChangedDuringSelection {
+            path: metadata.path.clone(),
+        });
+    }
+    Ok(skill)
+}
+
+pub fn render_skill_content(skill: &Skill) -> String {
+    let mut content = format!("{}\n\n{}", skill.frontmatter.description, skill.body);
+    for reference in &skill.references {
+        content.push_str(&format!(
+            "\n\n#### Skill Reference: {}\n{}",
+            reference.path.display(),
+            reference.content
+        ));
+    }
+    if !skill.assets.is_empty() {
+        content.push_str("\n\nVerified skill assets:\n");
+        for asset in &skill.assets {
+            content.push_str(&format!("- {}\n", asset.display()));
+        }
+    }
+    content
+}
+
+fn skill_prompt_tokens(skill: &Skill) -> usize {
+    crate::context::compression::approximate_tokens(&format!(
+        "### Skill: {}\n{}",
+        skill.frontmatter.name,
+        render_skill_content(skill)
+    ))
+}
+
+/// The execution prompt initially reserves 45% of the aggregate window for runtime
+/// context. Skills have weight 20 beside the always-present agent/task weights 30/20,
+/// so automatic selection may occupy at most 9/70 of the complete request window.
+/// Other context groups can only reduce their eventual share.
+pub fn automatic_skill_token_budget(context_length: usize) -> usize {
+    context_length.saturating_mul(9) / 70
+}
+
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
+pub fn select_skill_files(
+    files: Vec<PathBuf>,
+    task: &str,
+    configured_names: &[String],
+    context_token_budget: usize,
+) -> Result<SkillSelection, SkillSelectionError> {
+    let metadata = canonical_skill_files(files)?
+        .into_iter()
+        .map(|(path, canonical_path)| {
+            let frontmatter = parse_skill_frontmatter_file(&path).map_err(|source| {
+                SkillSelectionError::InvalidSkill {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            Ok(DiscoveredSkillMetadata {
+                path,
+                canonical_path,
+                frontmatter,
+            })
+        })
+        .collect::<Result<Vec<_>, SkillSelectionError>>()?;
+
+    let mut configured = Vec::new();
+    let mut configured_ids = BTreeSet::new();
+    for configured_name in configured_names {
+        let normalized = configured_name.to_lowercase();
+        if !configured_ids.insert(normalized.clone()) {
+            continue;
+        }
+        let matches = metadata
             .iter()
-            .any(|tag| tokens.contains(&tag.to_lowercase()))
-        || skill
-            .frontmatter
-            .description
-            .split(|value: char| !value.is_ascii_alphanumeric())
-            .filter(|word| word.len() > 3)
-            .any(|word| tokens.contains(&word.to_lowercase()))
+            .filter(|candidate| candidate.frontmatter.name.to_lowercase() == normalized)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => {
+                return Err(SkillSelectionError::MissingConfigured {
+                    name: configured_name.clone(),
+                })
+            }
+            [selected] => configured.push((*selected).clone()),
+            duplicates => {
+                let paths = duplicates
+                    .iter()
+                    .map(|candidate| candidate.canonical_path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(SkillSelectionError::AmbiguousConfigured {
+                    name: configured_name.clone(),
+                    paths,
+                });
+            }
+        }
+    }
+
+    let mut selection = SkillSelection::default();
+    let mut used_tokens = 0usize;
+    for selected in configured {
+        let skill = load_selected_skill(&selected)?;
+        used_tokens = used_tokens.saturating_add(skill_prompt_tokens(&skill));
+        selection.records.push(SkillSelectionRecord {
+            skill_name: skill.frontmatter.name.clone(),
+            reason: bounded_selection_reason("profile active skill"),
+            source: SkillSelectionSource::Configured,
+        });
+        selection.skills.push(skill);
+    }
+    if used_tokens > context_token_budget {
+        return Err(SkillSelectionError::ConfiguredOverBudget {
+            required_tokens: used_tokens,
+            available_tokens: context_token_budget,
+        });
+    }
+    let automatic_token_budget = automatic_skill_token_budget(context_token_budget);
+
+    let mut automatic = metadata
+        .into_iter()
+        .filter(|candidate| !configured_ids.contains(&candidate.frontmatter.name.to_lowercase()))
+        .filter_map(|metadata| {
+            let score = skill_match_score(&metadata.frontmatter, task);
+            score
+                .is_match()
+                .then_some(AutomaticCandidate { metadata, score })
+        })
+        .collect::<Vec<_>>();
+    automatic.sort_by(|left, right| {
+        right
+            .score
+            .exact_name
+            .cmp(&left.score.exact_name)
+            .then_with(|| {
+                right
+                    .score
+                    .matched_tags
+                    .len()
+                    .cmp(&left.score.matched_tags.len())
+            })
+            .then_with(|| {
+                right
+                    .score
+                    .matched_description_tokens
+                    .len()
+                    .cmp(&left.score.matched_description_tokens.len())
+            })
+            .then_with(|| {
+                left.metadata
+                    .canonical_path
+                    .cmp(&right.metadata.canonical_path)
+            })
+    });
+
+    let mut automatic_names = BTreeSet::new();
+    for candidate in automatic {
+        let normalized_name = candidate.metadata.frontmatter.name.to_lowercase();
+        if !automatic_names.insert(normalized_name) {
+            continue;
+        }
+        let skill = load_selected_skill(&candidate.metadata)?;
+        let tokens = skill_prompt_tokens(&skill);
+        if used_tokens.saturating_add(tokens) > automatic_token_budget {
+            continue;
+        }
+        used_tokens = used_tokens.saturating_add(tokens);
+        selection.records.push(SkillSelectionRecord {
+            skill_name: skill.frontmatter.name.clone(),
+            reason: candidate.score.reason(),
+            source: SkillSelectionSource::Automatic,
+        });
+        selection.skills.push(skill);
+        if selection
+            .records
+            .iter()
+            .filter(|record| record.source == SkillSelectionSource::Automatic)
+            .count()
+            >= MAX_AUTOMATIC_SKILLS
+        {
+            break;
+        }
+    }
+    Ok(selection)
 }
 
 pub fn relevant_skills(project_path: &Path, task: Option<&str>) -> Vec<Skill> {
     let Some(task) = task.filter(|task| !task.trim().is_empty()) else {
         return Vec::new();
     };
-
-    find_skills(project_path)
-        .into_iter()
-        .filter_map(|path| parse_skill_file(&path).ok())
-        .filter(|skill| skill_matches_task(skill, task))
-        .collect()
+    select_skill_files(find_skills(project_path), task, &[], usize::MAX)
+        .map(|selection| selection.skills)
+        .unwrap_or_default()
 }
 
 pub fn policy_rules_for_skills(skills: &[Skill]) -> Vec<SkillPolicyRule> {
@@ -799,24 +1294,11 @@ pub fn load_relevant_skills(project_path: &Path, task: Option<&str>) -> String {
     let injected: Vec<String> = relevant_skills(project_path, task)
         .into_iter()
         .map(|skill| {
-            let mut rendered = format!(
-                "### Skill: {}\n{}\n\n{}",
-                skill.frontmatter.name, skill.frontmatter.description, skill.body
-            );
-            for reference in &skill.references {
-                rendered.push_str(&format!(
-                    "\n\n#### Skill Reference: {}\n{}",
-                    reference.path.display(),
-                    reference.content
-                ));
-            }
-            if !skill.assets.is_empty() {
-                rendered.push_str("\n\nVerified skill assets:\n");
-                for asset in &skill.assets {
-                    rendered.push_str(&format!("- {}\n", asset.display()));
-                }
-            }
-            rendered
+            format!(
+                "### Skill: {}\n{}",
+                skill.frontmatter.name,
+                render_skill_content(&skill)
+            )
         })
         .collect();
 
@@ -828,486 +1310,5 @@ pub fn load_relevant_skills(project_path: &Path, task: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-    use tempfile::tempdir;
-
-    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-        match value {
-            Some(value) => std::env::set_var(name, value),
-            None => std::env::remove_var(name),
-        }
-    }
-
-    fn write_skill(root: &Path) -> PathBuf {
-        let dir = root.join("rust-safety");
-        fs::create_dir_all(&dir).expect("create skill directory");
-        fs::create_dir_all(dir.join("references")).expect("reference directory");
-        fs::create_dir_all(dir.join("templates")).expect("asset directory");
-        fs::write(dir.join("references/checks.md"), "reference checks\n").expect("reference");
-        fs::write(dir.join("templates/report.md"), "report template\n").expect("asset");
-        let path = dir.join("SKILL.md");
-        fs::write(
-            &path,
-            r#"---
-name: rust-safety
-description: Validate Rust changes safely
-version: "1.2.0"
-tags: [rust, cargo]
-references: [references/checks.md]
-assets: [templates/report.md]
-constraints:
-  deny_commands: ["cargo publish"]
-  require_approval_tools: [apply_patch]
-hooks:
-  after_tool:
-    - tool: apply_patch
-      command: task check
----
-Run the canonical Task gates after editing.
-"#,
-        )
-        .expect("write skill");
-        path
-    }
-
-    #[test]
-    fn parses_structured_frontmatter() {
-        let dir = tempdir().expect("tempdir");
-        let path = write_skill(dir.path());
-        let skill = parse_skill_file(&path).expect("parse skill");
-
-        assert_eq!(skill.frontmatter.version.as_deref(), Some("1.2.0"));
-        assert_eq!(skill.frontmatter.tags, ["rust", "cargo"]);
-        assert_eq!(skill.frontmatter.hooks.after_tool[0].command, "task check");
-        assert!(skill.body.contains("canonical Task gates"));
-        assert_eq!(
-            skill.references[0].path,
-            PathBuf::from("references/checks.md")
-        );
-        assert!(skill.references[0].content.contains("reference checks"));
-        assert_eq!(skill.assets, [PathBuf::from("templates/report.md")]);
-    }
-
-    #[test]
-    fn discovers_matches_and_builds_policy_rules() {
-        let dir = tempdir().expect("tempdir");
-        let path = write_skill(dir.path());
-        let paths = find_skills_in_paths(&[dir.path().to_path_buf()]);
-        assert_eq!(paths, vec![path]);
-
-        let skill = parse_skill_file(&paths[0]).expect("parse skill");
-        assert!(skill_matches_task(&skill, "repair the Rust executor"));
-        assert!(!skill_matches_task(&skill, "write a CSS theme"));
-
-        let rules = policy_rules_for_skills(&[skill]);
-        assert!(rules.iter().any(|rule| {
-            rule.effect == SkillPolicyEffect::Deny
-                && rule.argument_contains.as_deref() == Some("cargo publish")
-        }));
-        assert!(rules.iter().any(|rule| {
-            rule.effect == SkillPolicyEffect::RequireApproval
-                && rule.tool_name.as_deref() == Some("apply_patch")
-        }));
-    }
-
-    #[test]
-    #[serial]
-    fn configured_global_skill_root_is_discovered() {
-        let project = tempdir().expect("project tempdir");
-        let global = tempdir().expect("global tempdir");
-        let manifest = write_skill(global.path());
-        let previous = std::env::var_os("NIB_SKILLS_DIR");
-        std::env::set_var("NIB_SKILLS_DIR", global.path());
-
-        let discovered = find_skills(project.path());
-
-        restore_env("NIB_SKILLS_DIR", previous);
-        assert!(discovered.contains(&manifest));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_regular_file_replacement_between_open_and_recheck() {
-        let directory = tempdir().expect("tempdir");
-        let manifest = directory.path().join("SKILL.md");
-        let replacement = directory.path().join("replacement.md");
-        fs::write(&manifest, "---\nname: original\n---\nBody\n").expect("manifest");
-        fs::write(&replacement, "---\nname: replaced\n---\nBody\n").expect("replacement");
-
-        let result = open_stable_skill_file_with_hook(
-            &manifest,
-            |metadata| validate_skill_manifest_metadata(&manifest, metadata),
-            || {
-                fs::rename(&replacement, &manifest)?;
-                Ok(())
-            },
-        );
-
-        assert!(matches!(result, Err(SkillError::InvalidResource(_))));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_reference_replacement_between_open_and_recheck() {
-        let directory = tempdir().expect("tempdir");
-        let reference = directory.path().join("reference.md");
-        let replacement = directory.path().join("replacement.md");
-        fs::write(&reference, "original reference\n").expect("reference");
-        fs::write(&replacement, "replaced reference\n").expect("replacement");
-
-        let result = open_stable_skill_file_with_hook(
-            &reference,
-            |metadata| validate_skill_reference_metadata("reference.md", metadata),
-            || {
-                fs::rename(&replacement, &reference)?;
-                Ok(())
-            },
-        );
-
-        assert!(matches!(result, Err(SkillError::InvalidResource(_))));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_skill_resources_inside_or_outside_the_skill_root() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().expect("tempdir");
-        let skill_dir = dir.path().join("skill");
-        fs::create_dir_all(&skill_dir).expect("skill dir");
-        let outside = dir.path().join("outside.md");
-        fs::write(&outside, "secret").expect("outside");
-        symlink(&outside, skill_dir.join("reference.md")).expect("symlink");
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: scoped\nreferences: [reference.md]\n---\nBody\n",
-        )
-        .expect("manifest");
-
-        assert!(matches!(
-            parse_skill_file(&skill_dir.join("SKILL.md")),
-            Err(SkillError::InvalidResource(_))
-        ));
-
-        fs::remove_file(skill_dir.join("reference.md")).expect("remove escape symlink");
-        fs::write(skill_dir.join("real.md"), "local reference").expect("local reference");
-        symlink("real.md", skill_dir.join("reference.md")).expect("local symlink");
-        assert!(matches!(
-            parse_skill_file(&skill_dir.join("SKILL.md")),
-            Err(SkillError::InvalidResource(_))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_resource_directory_ancestor() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempdir().expect("tempdir");
-        let skill_dir = directory.path().join("skill");
-        let outside = directory.path().join("outside");
-        fs::create_dir_all(&skill_dir).expect("skill directory");
-        fs::create_dir_all(&outside).expect("outside directory");
-        fs::write(outside.join("secret.md"), "secret").expect("outside resource");
-        symlink(&outside, skill_dir.join("references")).expect("ancestor symlink");
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: ancestor-link\nreferences: [references/secret.md]\n---\nBody\n",
-        )
-        .expect("manifest");
-
-        assert!(matches!(
-            parse_skill_file(&skill_dir.join("SKILL.md")),
-            Err(SkillError::InvalidResource(_))
-        ));
-    }
-
-    #[test]
-    fn discovery_ignores_atomic_install_staging_directories() {
-        let directory = tempdir().expect("tempdir");
-        let published = directory.path().join("published");
-        let staging = directory.path().join(".nib-skill-deadbeef.tmp");
-        fs::create_dir_all(&published).expect("published directory");
-        fs::create_dir_all(&staging).expect("staging directory");
-        fs::write(
-            published.join("SKILL.md"),
-            "---\nname: published\n---\nBody\n",
-        )
-        .expect("published manifest");
-        fs::write(
-            staging.join("SKILL.md"),
-            "---\nname: unpublished\n---\nBody\n",
-        )
-        .expect("staging manifest");
-
-        let discovered = find_skills_in_paths(&[directory.path().to_path_buf()]);
-        assert_eq!(discovered, vec![published.join("SKILL.md")]);
-    }
-
-    #[test]
-    fn strict_discovery_rejects_directory_skill_manifest() {
-        let directory = tempdir().expect("tempdir");
-        let skill = directory.path().join("directory-manifest");
-        let manifest = skill.join("SKILL.md");
-        fs::create_dir_all(&manifest).expect("manifest directory");
-
-        let error = find_skills_in_paths_strict(&[directory.path().to_path_buf()])
-            .expect_err("manifest directory must fail strict discovery");
-        assert!(matches!(
-            error,
-            SkillDiscoveryError::InvalidManifestType { path } if path == manifest
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn strict_discovery_rejects_dangling_symlink_skill_manifest() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempdir().expect("tempdir");
-        let skill = directory.path().join("dangling-manifest");
-        fs::create_dir(&skill).expect("skill directory");
-        let manifest = skill.join("SKILL.md");
-        symlink(directory.path().join("missing-manifest"), &manifest)
-            .expect("dangling manifest symlink");
-
-        let error = find_skills_in_paths_strict(&[directory.path().to_path_buf()])
-            .expect_err("dangling manifest symlink must fail strict discovery");
-        assert!(matches!(
-            error,
-            SkillDiscoveryError::InvalidManifestType { path } if path == manifest
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn strict_discovery_rejects_special_file_skill_manifest() {
-        use std::os::unix::net::UnixListener;
-
-        let directory = tempdir().expect("tempdir");
-        let skill = directory.path().join("special-manifest");
-        fs::create_dir(&skill).expect("skill directory");
-        let manifest = skill.join("SKILL.md");
-        let _listener = UnixListener::bind(&manifest).expect("manifest socket");
-
-        let error = find_skills_in_paths_strict(&[directory.path().to_path_buf()])
-            .expect_err("special-file manifest must fail strict discovery");
-        assert!(matches!(
-            error,
-            SkillDiscoveryError::InvalidManifestType { path } if path == manifest
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_skill_manifest() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempdir().expect("tempdir");
-        let outside = directory.path().join("outside.md");
-        fs::write(&outside, "---\nname: linked\n---\nBody\n").expect("outside manifest");
-        let skill_dir = directory.path().join("skill");
-        fs::create_dir(&skill_dir).expect("skill directory");
-        symlink(&outside, skill_dir.join("SKILL.md")).expect("manifest symlink");
-
-        assert!(matches!(
-            parse_skill_file(&skill_dir.join("SKILL.md")),
-            Err(SkillError::InvalidResource(_))
-        ));
-    }
-
-    #[test]
-    fn discovery_caps_the_number_of_skill_manifests() {
-        let directory = tempdir().expect("tempdir");
-        for index in 0..(MAX_DISCOVERED_SKILLS + 4) {
-            let skill = directory.path().join(format!("skill-{index:03}"));
-            fs::create_dir(&skill).expect("skill directory");
-            fs::write(
-                skill.join("SKILL.md"),
-                format!("---\nname: skill-{index:03}\n---\nBody\n"),
-            )
-            .expect("skill manifest");
-        }
-
-        let discovered = find_skills_in_paths(&[directory.path().to_path_buf()]);
-        assert_eq!(discovered.len(), MAX_DISCOVERED_SKILLS);
-    }
-
-    #[test]
-    fn strict_discovery_reports_skill_count_truncation() {
-        let directory = tempdir().expect("tempdir");
-        for name in ["alpha", "beta"] {
-            let skill = directory.path().join(name);
-            fs::create_dir(&skill).expect("skill directory");
-            fs::write(
-                skill.join("SKILL.md"),
-                format!("---\nname: {name}\n---\nBody\n"),
-            )
-            .expect("skill manifest");
-        }
-
-        let error = find_skills_in_paths_strict_with_limits(
-            &[directory.path().to_path_buf()],
-            SkillDiscoveryLimits {
-                max_skills: 1,
-                max_entries: 16,
-                max_depth: 4,
-            },
-        )
-        .expect_err("strict discovery must report incomplete inventory");
-
-        assert!(matches!(
-            error,
-            SkillDiscoveryError::Truncated {
-                kind: "skill count",
-                limit: 1
-            }
-        ));
-    }
-
-    #[test]
-    fn strict_discovery_reports_directory_entry_truncation() {
-        let directory = tempdir().expect("tempdir");
-        fs::create_dir(directory.path().join("alpha")).expect("first directory");
-        fs::create_dir(directory.path().join("beta")).expect("second directory");
-
-        let error = find_skills_in_paths_strict_with_limits(
-            &[directory.path().to_path_buf()],
-            SkillDiscoveryLimits {
-                max_skills: 16,
-                max_entries: 1,
-                max_depth: 4,
-            },
-        )
-        .expect_err("strict discovery must report incomplete traversal");
-
-        assert!(matches!(
-            error,
-            SkillDiscoveryError::Truncated {
-                kind: "directory entry",
-                limit: 1
-            }
-        ));
-    }
-
-    #[test]
-    fn rejects_aggregate_reference_content_over_context_bound() {
-        let dir = tempdir().expect("tempdir");
-        let skill_dir = dir.path().join("bounded");
-        fs::create_dir_all(&skill_dir).expect("skill dir");
-        let mut configured = Vec::new();
-        for index in 0..3 {
-            let name = format!("reference-{index}.md");
-            fs::write(skill_dir.join(&name), "x".repeat(22_000)).expect("reference");
-            configured.push(name);
-        }
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            format!(
-                "---\nname: bounded\nreferences: [{}]\n---\nBody\n",
-                configured.join(", ")
-            ),
-        )
-        .expect("manifest");
-
-        assert!(matches!(
-            parse_skill_file(&skill_dir.join("SKILL.md")),
-            Err(SkillError::ReferencesTooLarge)
-        ));
-    }
-
-    #[test]
-    fn rejects_oversized_sparse_manifest_and_reference_before_reading() {
-        let directory = tempdir().expect("tempdir");
-        let skill_dir = directory.path().join("bounded");
-        fs::create_dir(&skill_dir).expect("skill directory");
-        let manifest = skill_dir.join("SKILL.md");
-        fs::File::create(&manifest)
-            .and_then(|file| file.set_len(MAX_SKILL_FILE_BYTES + 1))
-            .expect("sparse manifest");
-        assert!(matches!(
-            parse_skill_file(&manifest),
-            Err(SkillError::ManifestTooLarge(_))
-        ));
-
-        let reference = skill_dir.join("reference.md");
-        fs::File::create(&reference)
-            .and_then(|file| file.set_len(MAX_REFERENCE_BYTES + 1))
-            .expect("sparse reference");
-        fs::write(
-            &manifest,
-            "---\nname: bounded\nreferences: [reference.md]\n---\nBody\n",
-        )
-        .expect("bounded manifest");
-        assert!(matches!(
-            parse_skill_file(&manifest),
-            Err(SkillError::ReferenceTooLarge(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_oversized_and_aggregate_assets_before_installation() {
-        let directory = tempdir().expect("tempdir");
-        let skill_dir = directory.path().join("asset-bounds");
-        fs::create_dir(&skill_dir).expect("skill directory");
-        let manifest = skill_dir.join("SKILL.md");
-        let oversized = skill_dir.join("oversized.bin");
-        fs::File::create(&oversized)
-            .and_then(|file| file.set_len(MAX_ASSET_BYTES + 1))
-            .expect("sparse oversized asset");
-        fs::write(
-            &manifest,
-            "---\nname: asset-bounds\nassets: [oversized.bin]\n---\nBody\n",
-        )
-        .expect("manifest");
-        assert!(matches!(
-            parse_skill_file(&manifest),
-            Err(SkillError::AssetTooLarge(_))
-        ));
-
-        let mut assets = Vec::new();
-        for index in 0..5 {
-            let name = format!("asset-{index}.bin");
-            fs::File::create(skill_dir.join(&name))
-                .and_then(|file| file.set_len(MAX_ASSET_BYTES))
-                .expect("sparse aggregate asset");
-            assets.push(name);
-        }
-        fs::write(
-            &manifest,
-            format!(
-                "---\nname: asset-bounds\nassets: [{}]\n---\nBody\n",
-                assets.join(", ")
-            ),
-        )
-        .expect("aggregate manifest");
-        assert!(matches!(
-            parse_skill_file(&manifest),
-            Err(SkillError::AssetsTooLarge)
-        ));
-    }
-
-    #[test]
-    fn rejects_resource_paths_beyond_the_depth_bound_before_resolution() {
-        let directory = tempdir().expect("tempdir");
-        let skill_dir = directory.path().join("deep-resource");
-        fs::create_dir(&skill_dir).expect("skill directory");
-        let relative = (0..=MAX_RESOURCE_DEPTH)
-            .map(|index| format!("level-{index}"))
-            .collect::<Vec<_>>()
-            .join("/");
-        let manifest = skill_dir.join("SKILL.md");
-        fs::write(
-            &manifest,
-            format!("---\nname: deep-resource\nassets: [{relative}]\n---\nBody\n"),
-        )
-        .expect("manifest");
-
-        assert!(matches!(
-            parse_skill_frontmatter_file(&manifest),
-            Err(SkillError::InvalidResource(_))
-        ));
-    }
-}
+#[path = "skills_tests.rs"]
+mod tests;

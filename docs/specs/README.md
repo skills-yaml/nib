@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **46 done, 1 development, and 1 backlog**.
+The current lifecycle is **65 done, 1 development, and 0 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -33,6 +33,9 @@ FT-019. The clean Linux, macOS, and Windows jobs passed their complete serial su
 native all-target checks, exact release-binary qualification, and platform smokes.
 The final Linux coverage result was 85.87 percent (102,061/118,862).
 
+T042 ships complete-request `/context` snapshots, input-allowance admission,
+chunked compression coverage, continuation accounting, `ctx ~Nk/Mk` occupancy,
+and session `--json` inspection. Live-model quality and billed usage remain T023.
 T023 remains in development. Its bounded credential-free implementation and offline
 native matrix are green, but no paid or credentialed live run was authorized. It still
 requires owner-approved exact OpenRouter IDs, provider accounts and credentials, hard
@@ -41,11 +44,17 @@ catalog/canary/selected/full evidence for all six provider groups. T036 complete
 conversation-first TUI hierarchy refinement with local verification and native PTY smoke.
 T037 closes a cancellation modal-cleanup race identified while qualifying the revised
 interaction on hosted macOS, with deterministic regression and native local evidence.
-FT-020 remains backlog for any future protected Windows/macOS production delegation
-authority. The completed FT-015/FT-017 v1 production boundary remains Linux with usable
-bwrap containment; native non-Linux mechanism tests are complete and production use
-continues to fail closed. Remote MCP transport remains separate future scope; shipped
-MCP v1 is stdio-only.
+T038 and T039 complete the block transcript, safe key contract, visible tool lifecycle,
+under-composer decisions, compact chrome, markdown speech, and startup workspace
+consent. Live tool blocks use exact invocation identity, so repeated same-name calls
+remain distinct through streaming and completion. T045 restyles thought and tool
+rows into a scan list (`▸ Thought for Ns`, quiet `●` tool hints, nested running
+spinner) without changing T038 keys.
+FT-020 is done with a fail-closed Windows/macOS production contract: Windows Job
+creation uses a protected cleanup owner, macOS production stays fail-closed without
+a bootstrap reaper, and Linux FT-015/FT-017 production is unchanged. Enabling
+Windows or macOS `production()` remains a later independent native qualification.
+Remote MCP transport remains separate future scope; shipped MCP v1 is stdio-only.
 
 Each audited file has an `Implementation Reconciliation (2026-07-15)` section that
 supersedes older proposal text. Later dated remediation sections and their unchecked
@@ -86,6 +95,25 @@ work or narrower guarantees.
 - [T035: Fast Incremental Check and Single Full Verification](done/T035_fast_incremental_check_and_single_full_verification.md)
 - [T036: Conversational TUI Visual Hierarchy](done/T036_conversational_tui_visual_hierarchy.md)
 - [T037: TUI Cancellation Modal Cleanup](done/T037_tui_cancellation_modal_cleanup.md)
+- [T038: TUI Block Transcript and Key Contract](done/T038_tui_block_transcript_and_key_contract.md)
+- [T039: Visible Tool Blocks and Explicit Approval Card](done/T039_visible_tool_blocks_and_explicit_approval.md)
+- [T040: Resourceful Agent Loop and Context](done/T040_resourceful_agent_loop_and_context.md)
+- [T041: Task-Aware Context and Verified Completion](done/T041_task_aware_context_and_verified_completion.md)
+- [T042: Context Budgeting and Live Visibility](done/T042_context_budgeting_and_live_visibility.md)
+- [T043: Oversized Modules and Coverage-Artifact Hygiene](done/T043_oversized_modules_and_coverage_artifact_hygiene.md)
+- [T044: Strict Clippy Quality Gate](done/T044_strict_clippy_quality_gate.md)
+- [T045: Codex-Style Thought and Tool Rows](done/T045_codex_style_thought_and_tool_rows.md)
+- [T046: Cross-platform CI repairs](done/T046_cross_platform_ci_repairs.md)
+- [T047: User Interaction Harmonization](done/T047_user_interaction_harmonization.md)
+  ([implementation plan](done/T047_user_interaction_harmonization.plan.md))
+- [T048: Active TUI Render Responsiveness](done/T048_active_tui_render_responsiveness.md)
+- [T049: Command Approval Card](done/T049_interaction_card.md)
+- [T050: Plan-Free Answers, Decision Prompts, and Run Outcomes](done/T050_plan_free_answers_decision_prompts_and_run_outcomes.md)
+- [T051: Windows MCP Provider-Failure Test Stack](done/T051_windows_mcp_provider_failure_stack.md)
+- [T052: Windows TUI Session Cache Refresh](done/T052_windows_tui_session_cache_refresh.md)
+- [T053: Visible Stop Reasons](done/T053_visible_stop_reasons.md)
+- [T054: Reconcile Local Preflight Failures](done/T054_reconcile_local_preflight_failures.md)
+- [T055: Conversational Repository-Aware Help](done/T055_conversational_repository_aware_help.md)
 
 ### Feature specs
 
@@ -104,7 +132,7 @@ work or narrower guarantees.
 - [FT-017: Managed Process Supervisor](done/ft_017_managed_process_supervisor.md)
 - [FT-018: Self-Update Command and Update Availability Notices](done/ft_018_self_update_and_update_notifications.md)
 - [FT-019: Codex-Inspired Chat and TUI Interactions](done/ft_019_codex_inspired_chat_and_tui_interactions.md)
-- [FT-020: Protected Non-Linux Production Delegation Authority](backlog/ft_020_protected_non_linux_production_delegation_authority.md)
+- [FT-020: Protected Non-Linux Production Delegation Authority](done/ft_020_protected_non_linux_production_delegation_authority.md)
 
 ## Current Validation (2026-09-02)
 
