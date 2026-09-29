@@ -850,6 +850,13 @@ path/ref provenance, registration and filesystem identities, and cleanup phases 
 restart can resume only exact owned work; completed receipts are compacted under a
 bounded store policy.
 
+A completed receipt with an old Git directory filesystem identity does not block a
+new session while the ownership store has room. Nib still requires exact identity
+before compacting that receipt or resuming an older active worktree. If a filesystem
+remount changes that identity, preserve the older worktree for inspection and start
+a new session for new work. Nib will not automatically delete a session worktree
+whose branch receipt has changed.
+
 Foreground subagents run in a hidden worker owned by an independent supervisor. The
 interactive owner holds a lifetime pipe; EOF, explicit cancellation, and normal worker
 completion all drive bounded scope cleanup. The launcher records the exact supervisor

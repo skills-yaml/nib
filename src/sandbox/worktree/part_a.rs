@@ -970,6 +970,56 @@ fn completed_tombstone_compaction_recovers_stale_cas_and_keeps_remove_idempotent
         .expect("collected tombstone uses bounded absence proof");
 }
 
+#[cfg(unix)]
+#[test]
+fn unrelated_complete_tombstone_with_old_device_does_not_block_new_worktree() {
+    let repository = repository();
+    Worktree::create(repository.path(), "old-device-complete").expect("old worktree");
+    Worktree::remove(repository.path(), "old-device-complete").expect("complete old worktree");
+    let directory =
+        managed_worktree_ownership_directory(repository.path()).expect("ownership directory");
+    let old_path = managed_worktree_ownership_path(
+        &directory,
+        ManagedWorktreeKind::Subagent,
+        "old-device-complete",
+    );
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&old_path).expect("old tombstone"))
+            .expect("valid tombstone");
+    let device = old["common_git_identity"]["device"]
+        .as_u64()
+        .expect("Unix device identity");
+    old["common_git_identity"]["device"] = (device + 1).into();
+    std::fs::write(
+        &old_path,
+        serde_json::to_vec(&old).expect("encode old tombstone"),
+    )
+    .expect("write old-device fixture");
+
+    let fresh = Worktree::create(repository.path(), "fresh-after-device-change")
+        .expect("unrelated completed tombstone must not block admission");
+    assert!(
+        old_path.exists(),
+        "old tombstone was removed without identity proof"
+    );
+    Worktree::remove(repository.path(), &fresh.id).expect("remove fresh worktree");
+
+    let error = compact_complete_ownership_records_with_limits(
+        &directory,
+        repository.path(),
+        &directory.path().join("new-admission.json"),
+        0,
+        1,
+        MAX_MANAGED_WORKTREE_OWNERSHIP_BYTES,
+    )
+    .expect_err("compaction must still require exact old Git identity");
+    assert!(
+        error.contains("common Git directory identity changed"),
+        "{error}"
+    );
+    assert!(old_path.exists(), "failed compaction removed old tombstone");
+}
+
 #[test]
 fn removing_branch_resumes_from_anchor_only_after_restart() {
     let repository = repository();
