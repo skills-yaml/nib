@@ -188,6 +188,8 @@ impl Drop for EnvironmentGuard {
 
 pub(crate) fn save_mock_config(project: &Path) {
     let mut config = NibConfig::default();
+    // These scripted interaction fixtures exercise the planner and its modals.
+    config.agent.answer_only = false;
     config
         .llm
         .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);

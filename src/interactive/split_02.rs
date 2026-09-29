@@ -737,6 +737,7 @@ pub(crate) fn display_stream_event_unchecked(event: StreamEvent) -> Option<Strea
             let noun = if step_count == 1 { "step" } else { "steps" };
             StreamDisplay::Status(format!("[plan] generated {step_count} {noun}"))
         }
+        StreamEvent::PlanProgress(progress) => display_plan_progress(&progress)?,
         StreamEvent::ApprovalRequired { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
             StreamDisplay::Status(format!("[approval required] {tool_name}"))
@@ -804,6 +805,37 @@ pub(crate) fn display_stream_event_unchecked(event: StreamEvent) -> Option<Strea
         StreamEvent::End(reason) => StreamDisplay::Status(stream_end_status_line(&reason)),
     };
     Some(display)
+}
+
+pub(crate) fn display_plan_progress(progress: &crate::llm::PlanProgress) -> Option<StreamDisplay> {
+    if progress.steps.len() < 2 {
+        return None;
+    }
+    let completed = progress
+        .steps
+        .iter()
+        .filter(|step| step.status == "Completed")
+        .count();
+    let total = progress.steps.len();
+    let state = if progress.complete {
+        "complete".to_string()
+    } else if let Some(step) = progress.steps.get(progress.current_step_index) {
+        let label = bounded_status_value(&step.description);
+        if step.status == "Blocked" {
+            format!("blocked: {label}")
+        } else if step.status == "Cancelled" {
+            format!("stopped: {label}")
+        } else if step.status == "InProgress" {
+            format!("working on: {label}")
+        } else {
+            "ready".to_string()
+        }
+    } else {
+        "ready".to_string()
+    };
+    Some(StreamDisplay::Status(format!(
+        "[plan] {completed}/{total} done · {state}"
+    )))
 }
 
 pub(crate) fn display_reconciliation_status(outcome: &str) -> StreamDisplay {

@@ -27,6 +27,8 @@ pub struct ActivityEntry {
     /// Runtime-only correlation for a live tool block. It is deliberately kept
     /// out of the rendered text and persisted session projection.
     pub tool_invocation_id: Option<ToolInvocationId>,
+    /// Correlates a live progress row with its persisted plan.
+    pub plan_id: Option<String>,
     /// Runtime-only start time for an open thought block. Ignored in equality.
     pub live_since: Option<Instant>,
 }
@@ -38,6 +40,7 @@ impl PartialEq for ActivityEntry {
             && self.body == other.body
             && self.folded == other.folded
             && self.tool_invocation_id == other.tool_invocation_id
+            && self.plan_id == other.plan_id
     }
 }
 
@@ -70,6 +73,7 @@ impl ActivityEntry {
             body: body.into(),
             folded: false,
             tool_invocation_id: None,
+            plan_id: None,
             live_since: None,
         }
     }
@@ -284,6 +288,7 @@ pub(crate) fn upsert_thought_activity(activities: &mut Vec<ActivityEntry>, _stat
         body: String::new(),
         folded: true,
         tool_invocation_id: None,
+        plan_id: None,
         live_since: Some(Instant::now()),
     });
 }

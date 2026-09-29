@@ -636,6 +636,24 @@ impl ActiveTimeline {
         }
     }
 
+    pub(crate) fn refresh_plan_from_session(&mut self, session: &crate::session::Session) {
+        let Some(plan) = session.plan.as_ref().filter(|plan| plan.steps.len() > 1) else {
+            return;
+        };
+        let activity = crate::interactive::plan_activity(plan, &self.sensitive_values);
+        if let Some(existing) = self.activities.iter_mut().rev().find(|entry| {
+            entry.kind == ActivityKind::Plan && entry.plan_id.as_deref() == Some(plan.id.as_str())
+        }) {
+            if *existing != activity {
+                *existing = activity;
+                self.render_generation = self.render_generation.wrapping_add(1);
+            }
+        } else {
+            self.activities.push(activity);
+            self.render_generation = self.render_generation.wrapping_add(1);
+        }
+    }
+
     pub(crate) fn push_status(&mut self, status: String) {
         self.render_generation = self.render_generation.wrapping_add(1);
         let status =

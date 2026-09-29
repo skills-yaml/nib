@@ -357,7 +357,7 @@ auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
 
 Interactive execute requests use a bounded tool-free answer before planning by
-default when `execution.plan_mode = false`. A clear information question can receive
+default, independently of `execution.plan_mode`. A clear information question can receive
 one answer with no plan, then nib waits for the next message. Requests needing
 inspection, clarification, or action select the non-executable `request_plan` control;
 partial answer text is discarded before normal planning begins. An incomplete plan
@@ -595,11 +595,14 @@ footer without adding transcript noise; their exact records remain in the persis
 session audit.
 Failures remain visible after reopening a session, while matching successful terminal
 and reconciliation records appear as one outcome.
-The plan is a live todo list in the transcript (`Working on N to-dos`, with `◐`
-in progress, `○` pending, and `✓` done). It updates as each step finishes so
-you can follow the multi-step work. `/plan` still shows the full list. Execution
-continues without waiting for you to approve the plan. nib asks only when the
-request is unclear or an action needs approval.
+For work with two or more plan steps, the TUI transcript shows a live checklist
+(`◐` in progress, `○` pending, `!` blocked, `×` stopped, and `✓` done).
+Plain chat prints short progress updates. Both follow saved plan state as steps
+change. A one-step plan does not add a checklist to the transcript; `/plan`
+can still show it. Clear questions that nib can answer
+from its current context receive an answer without a plan. Execution continues
+without waiting for you to approve a generated plan. nib asks when the request
+is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
 options. A command approval asks whether to run the exact command. Yes is highlighted.
 The next row remembers that exact command for this project. No asks what to do

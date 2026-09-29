@@ -200,7 +200,8 @@ are enforced by Rust independently of model compliance.
 Normal planning takes one model request and exposes only `submit_plan`, so a needed
 inspection or clarification becomes an approved plan step. The default-enabled
 `agent.answer_only` route may precede planning for a new interactive execute request
-when the project and caller do not require planning and no plan or run is active. Its
+when the caller has not requested explicit plan mode and no prior run is active.
+The mutation gate `execution.plan_mode` remains independent. Its
 single bounded request exposes only the typed, non-executable `request_plan` control.
 Plain content completes that activity without creating or advancing a plan; a valid
 control or unsupported result falls back once to normal planning. Invalid controls

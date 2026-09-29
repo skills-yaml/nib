@@ -250,6 +250,50 @@ fn timeline_ignores_intermediate_plan_reconciliation_and_deduplicates_end() {
 }
 
 #[test]
+fn finished_worker_refreshes_a_dropped_plan_progress_event_from_session() {
+    let directory = tempdir().expect("dir");
+    let store = SessionStore::at_dir(directory.path().join("sessions"));
+    let mut session = store.try_create_session().expect("session");
+    session.plan = Some(crate::session::Plan::new(
+        "inspect and finish",
+        ["inspect", "finish"]
+            .into_iter()
+            .map(|description| crate::session::PlanStep {
+                description: description.to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
+    ));
+    let mut timeline = ActiveTimeline::from_session(&session, Vec::new());
+    assert!(timeline.activities.iter().any(|entry| {
+        entry.kind == ActivityKind::Plan && entry.body == "○ inspect\n○ finish"
+    }));
+    let plan = session.plan.as_mut().expect("plan");
+    plan.approve();
+    plan.complete_current_step("inspected");
+    plan.complete_current_step("finished");
+    timeline.refresh_plan_from_session(&session);
+    assert!(timeline.activities.iter().any(|entry| {
+        entry.kind == ActivityKind::Plan
+            && entry.title == "Completed 2 to-dos"
+            && entry.body == "✓ inspect\n✓ finish"
+    }));
+    assert_eq!(
+        timeline
+            .activities
+            .iter()
+            .filter(|entry| entry.kind == ActivityKind::Plan)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn timeline_preserves_a_final_error_after_successful_reconciliation() {
     let mut timeline = ActiveTimeline::default();
     timeline.apply_event(StreamEvent::Reconciled {
@@ -1192,7 +1236,12 @@ fn question_handler_round_trips_ui_response() {
 #[test]
 fn tui_shutdown_cancels_and_joins_a_worker_blocked_on_approval() {
     let directory = tempdir().expect("tempdir");
-    save_config(directory.path(), &mock_config()).expect("save mock config");
+    let mut config = NibConfig {
+        llm: mock_config(),
+        ..Default::default()
+    };
+    config.agent.answer_only = false;
+    save_nib_config_full(directory.path(), &mut config).expect("save mock config");
     let store = SessionStore::for_project(directory.path()).expect("session store");
     let goal = "ask a question";
     let mut session = store.create_session();

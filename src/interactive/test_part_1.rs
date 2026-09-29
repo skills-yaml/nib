@@ -461,6 +461,10 @@ fn status_and_plan_projection_show_verification_state_and_authority() {
     assert!(status.contains("required-project-gate | pending | project"));
     let plan = session.plan.as_ref().expect("plan");
     let activity = plan_activity(plan, &[]);
+    assert_eq!(
+        activity,
+        plan_progress_activity(&plan_progress_from_plan(plan, &[]), &[])
+    );
     assert!(activity.title.contains("1 verification pending"));
     assert!(activity
         .body
@@ -748,15 +752,19 @@ fn activity_projection_redacts_before_the_first_body_bound() {
     session.summary_index = 1;
     session.plan = Some(crate::session::Plan::new(
         "boundary projection",
-        vec![crate::session::PlanStep {
-            description: straddles_body_bound(&secret),
-            status: "InProgress".to_string(),
-            outcome: None,
-            attempts: 1,
-            updated_at: None,
-            verification_obligations: Vec::new(),
-            content_generation: 0,
-        }],
+        [straddles_body_bound(&secret), "follow up".to_string()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, description)| crate::session::PlanStep {
+                description,
+                status: if index == 0 { "InProgress" } else { "Pending" }.to_string(),
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
     ));
 
     let sensitive_values = vec![secret.clone()];
@@ -1148,15 +1156,22 @@ fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
     });
     session.plan = Some(crate::session::Plan::new(
         "inspect wrap",
-        vec![crate::session::PlanStep {
-            description: "write tests".to_string(),
-            status: "InProgress".to_string(),
-            outcome: None,
-            attempts: 1,
-            updated_at: None,
-            verification_obligations: Vec::new(),
-            content_generation: 0,
-        }],
+        ["write tests", "review result"]
+            .into_iter()
+            .map(|description| crate::session::PlanStep {
+                description: description.to_string(),
+                status: if description == "write tests" {
+                    "InProgress".to_string()
+                } else {
+                    "Pending".to_string()
+                },
+                outcome: None,
+                attempts: 1,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
     ));
     session.messages.push(crate::session::SessionMessage {
         index: 1,
@@ -1210,8 +1225,37 @@ fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
         &mut state,
         &[],
     );
+    let mut live_plan = crate::session::Plan::new(
+        "inspect wrap",
+        ["inspect wrap", "write tests"]
+            .into_iter()
+            .map(|description| crate::session::PlanStep {
+                description: description.to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
+    );
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&live_plan, &[])),
+        &mut state,
+        &[],
+    );
     assert_eq!(live[1].kind, ActivityKind::Plan);
-    assert_eq!(live[1].title, "Working on 2 to-dos");
+    assert_eq!(live[1].title, "Planned 2 to-dos");
+    assert_eq!(live[1].body, "○ inspect wrap\n○ write tests");
+    live_plan.approve();
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&live_plan, &[])),
+        &mut state,
+        &[],
+    );
     assert_eq!(live[1].body, "◐ inspect wrap\n○ write tests");
     apply_stream_event(
         &mut live,
@@ -1228,6 +1272,14 @@ fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
         &mut state,
         &[],
     );
+    live_plan.complete_current_step("inspected");
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&live_plan, &[])),
+        &mut state,
+        &[],
+    );
+    assert_eq!(live[1].body, "✓ inspect wrap\n◐ write tests");
     apply_stream_event(
         &mut live,
         StreamEvent::Reconciled {
@@ -1236,7 +1288,14 @@ fn typed_activities_keep_local_work_distinct_from_assistant_speech() {
         &mut state,
         &[],
     );
-    assert_eq!(live[1].body, "✓ inspect wrap\n◐ write tests");
+    live_plan.complete_current_step("tested");
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&live_plan, &[])),
+        &mut state,
+        &[],
+    );
+    assert_eq!(live[1].body, "✓ inspect wrap\n✓ write tests");
     apply_stream_event(
         &mut live,
         StreamEvent::Reconciled {
@@ -1312,7 +1371,7 @@ fn terminal_failure_closes_unfinished_proposals_and_preserves_completed_tools() 
 }
 
 #[test]
-fn approved_plan_projection_keeps_the_todo_list() {
+fn one_step_plan_stays_out_of_transcript_but_remains_inspectable() {
     let directory = tempdir().expect("dir");
     let mut session = SessionStore::at_dir(directory.path().join("s"))
         .try_create_session()
@@ -1332,12 +1391,173 @@ fn approved_plan_projection_keeps_the_todo_list() {
     plan.approve();
     session.plan = Some(plan);
     let projected = project_session_activities(&session, &[]);
-    let summary = projected
+    assert!(projected
         .iter()
-        .find(|entry| entry.kind == ActivityKind::Plan)
-        .expect("plan todo list");
-    assert_eq!(summary.title, "Working on 1 to-do");
-    assert!(summary.body.contains("◐ write tests"), "{}", summary.body);
+        .all(|entry| entry.kind != ActivityKind::Plan));
+    assert!(format_current_plan(Some(&session), &[]).contains("◐ write tests"));
+    let mut live = Vec::new();
+    let mut state = None;
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(
+            session.plan.as_ref().expect("plan"),
+            &[],
+        )),
+        &mut state,
+        &[],
+    );
+    assert!(live.is_empty());
+}
+
+#[test]
+fn live_multi_step_progress_matches_persisted_stopped_blocked_and_completed_plan() {
+    let mut plan = crate::session::Plan::new(
+        "check and fix",
+        ["check", "fix"]
+            .into_iter()
+            .map(|description| crate::session::PlanStep {
+                description: description.to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
+    );
+    plan.approve();
+    let mut live = Vec::new();
+    let mut state = None;
+    for expected in [
+        "× check\n○ fix",
+        "! check\n○ fix",
+        "✓ check\n◐ fix",
+        "✓ check\n✓ fix",
+    ] {
+        match expected {
+            "× check\n○ fix" => plan.steps[0].status = "Cancelled".to_string(),
+            "! check\n○ fix" => plan.steps[0].status = "Blocked".to_string(),
+            "✓ check\n◐ fix" => {
+                plan.steps[0].status = "InProgress".to_string();
+                plan.complete_current_step("checked");
+            }
+            _ => plan.complete_current_step("fixed"),
+        }
+        apply_stream_event(
+            &mut live,
+            StreamEvent::PlanProgress(plan_progress_from_plan(&plan, &[])),
+            &mut state,
+            &[],
+        );
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].body, expected);
+        assert_eq!(live[0], plan_activity(&plan, &[]));
+    }
+    assert_eq!(live[0].title, "Completed 2 to-dos");
+}
+
+#[test]
+fn truncated_progress_keeps_saved_status_and_separate_plan_identity() {
+    let mut plan = crate::session::Plan::new(
+        "long plan",
+        [
+            "x".repeat(MAX_ACTIVITY_BODY_BYTES * 2),
+            "finish".to_string(),
+        ]
+        .into_iter()
+        .map(|description| crate::session::PlanStep {
+            description,
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        })
+        .collect(),
+    );
+    plan.approve();
+    let mut live = Vec::new();
+    let mut state = None;
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&plan, &[])),
+        &mut state,
+        &[],
+    );
+    assert!(live[0].body.len() <= MAX_ACTIVITY_BODY_BYTES);
+    plan.complete_current_step("done");
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&plan, &[])),
+        &mut state,
+        &[],
+    );
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].title, "Working on 2 to-dos");
+    let other = crate::session::Plan::new(
+        "other",
+        ["one", "two"]
+            .into_iter()
+            .map(|description| crate::session::PlanStep {
+                description: description.to_string(),
+                status: "Pending".to_string(),
+                outcome: None,
+                attempts: 0,
+                updated_at: None,
+                verification_obligations: Vec::new(),
+                content_generation: 0,
+            })
+            .collect(),
+    );
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&other, &[])),
+        &mut state,
+        &[],
+    );
+    let other_before = live[1].clone();
+    plan.complete_current_step("done");
+    apply_stream_event(
+        &mut live,
+        StreamEvent::PlanProgress(plan_progress_from_plan(&plan, &[])),
+        &mut state,
+        &[],
+    );
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0].title, "Completed 2 to-dos");
+    assert_eq!(live[1], other_before);
+}
+
+#[test]
+fn plain_progress_summarizes_multi_step_state_only() {
+    let mut progress = crate::llm::PlanProgress {
+        plan_id: "plan".to_string(),
+        current_step_index: 1,
+        complete: false,
+        steps: ["inspect", "verify"]
+            .into_iter()
+            .map(|description| crate::llm::PlanProgressStep {
+                description: description.to_string(),
+                status: "Pending".to_string(),
+                verification: Vec::new(),
+            })
+            .collect(),
+    };
+    progress.steps[0].status = "Completed".to_string();
+    progress.steps[1].status = "InProgress".to_string();
+    assert_eq!(
+        display_stream_event(StreamEvent::PlanProgress(progress.clone())),
+        Some(StreamDisplay::Status(
+            "[plan] 1/2 done · working on: verify".to_string()
+        ))
+    );
+    progress.steps.truncate(1);
+    assert_eq!(
+        display_stream_event(StreamEvent::PlanProgress(progress)),
+        None
+    );
 }
 
 #[test]

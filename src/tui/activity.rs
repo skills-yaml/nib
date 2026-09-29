@@ -156,7 +156,7 @@ pub(crate) fn plan_todo_lines(
     let indent = "  ";
     let inner = width.saturating_sub(2).max(1);
     for line in entry.body.lines() {
-        let style = if line.starts_with('◐') {
+        let style = if line.starts_with('◐') || line.starts_with('!') || line.starts_with('×') {
             ink_style(ChannelInk::ToolCall, no_color)
         } else if line.starts_with('✓') {
             muted_style(no_color)
