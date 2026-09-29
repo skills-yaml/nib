@@ -453,7 +453,7 @@ async fn denied_plan_has_no_tool_side_effects() {
     save_config(dir.path(), &mock_config()).unwrap();
     let store = SessionStore::for_project(dir.path()).unwrap();
     let session = store.create_session();
-    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(32);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
 
     let summary = run_agent_loop(
         dir.path().to_path_buf(),
@@ -617,7 +617,9 @@ async fn recovered_question_continues_the_exact_plan_with_answer_only_on_or_off(
             AgentLoopConfig {
                 max_steps: 5,
                 auto_approve: true,
-                interactive_request: true,
+                // Seed a plan-first question; the continuation below exercises
+                // both answer-route settings against that persisted plan.
+                interactive_request: false,
                 ..Default::default()
             },
         )

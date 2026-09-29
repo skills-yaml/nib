@@ -23,7 +23,7 @@ The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsuppo
 claims moved through `development/`; missing feasible behavior was implemented and
 historical proposal text was reconciled. Repeated compliance and quality/security
 reviews reopened owning specs whenever completion claims exceeded the implementation.
-The current lifecycle is **66 done, 1 development, and 0 backlog**.
+The current lifecycle is **66 done, 2 development, and 0 backlog**.
 
 Exact implementation run
 [33683995100](https://github.com/skills-yaml/nib/actions/runs/33683995100)
@@ -81,6 +81,7 @@ work or narrower guarantees.
 - [T021: OpenAI-Compatible Reasoning and Tool Transport Compatibility](done/T021_openai_compatible_reasoning_and_tool_transport_compatibility.md)
 - [T022: Provider-Neutral LLM Contract and Adapter Conformance](done/T022_provider_neutral_llm_contract_and_adapter_conformance.md)
 - [T023: Live LLM Provider and Model Integration Qualification](development/T023_live_llm_provider_model_integration_qualification.md)
+- [T057: Contextual Answers and Plan Progress](development/T057_contextual_answers_and_plan_progress.md) — active correction of default answer routing and live multi-step checklist state.
 - [T024: Configurable Provider Model Catalog and Curated Defaults](done/T024_configurable_provider_model_catalog_and_curated_defaults.md)
 - [T025: Interactive Chat and TUI Capability Parity](done/T025_interactive_chat_tui_capability_parity.md)
 - [T026: Actionable, Redaction-Safe LLM Failure Reporting](done/T026_actionable_redaction_safe_llm_failure_reporting.md)

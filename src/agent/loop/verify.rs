@@ -1006,6 +1006,47 @@ pub(crate) async fn emit(stream_tx: &Option<Sender<StreamEvent>>, event: StreamE
     }
 }
 
+pub(crate) fn emit_plan_progress(
+    store: &SessionStore,
+    session_id: &str,
+    stream_tx: &Option<Sender<StreamEvent>>,
+    sensitive_values: &[String],
+) -> Result<(), String> {
+    if stream_tx.is_none() {
+        return Ok(());
+    }
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load persisted plan progress: {error}"))?;
+    if let Some(plan) = session
+        .as_ref()
+        .and_then(|session| session.plan.as_ref())
+        .filter(|plan| plan.steps.len() > 1)
+    {
+        emit_progress_nonblocking(
+            stream_tx,
+            StreamEvent::PlanProgress(crate::interactive::plan_progress_from_plan(
+                plan,
+                sensitive_values,
+            )),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_progress_nonblocking(
+    stream_tx: &Option<Sender<StreamEvent>>,
+    event: StreamEvent,
+) {
+    if let Some(sender) = stream_tx {
+        // Progress is advisory. Keep space for the terminal event when an
+        // observer is not draining its bounded channel.
+        if sender.capacity() > 4 {
+            let _ = sender.try_send(event);
+        }
+    }
+}
+
 pub(crate) fn emit_nonblocking(stream_tx: &Option<Sender<StreamEvent>>, event: StreamEvent) {
     if let Some(sender) = stream_tx {
         let _ = sender.try_send(event);

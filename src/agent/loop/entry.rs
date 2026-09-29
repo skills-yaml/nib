@@ -229,6 +229,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
     let explicit_compaction = cfg.mode == "compact";
     let cancellation = cfg.cancellation.clone();
     let stream_tx = cfg.stream_tx.clone();
+    let stream_sensitive_values = runtime.nib_cfg.public_session_sensitive_values();
     let cancellation_store = runtime.session_store.clone();
     let run_result = match recovery_result {
         Err(error) => Err(error),
@@ -306,6 +307,19 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
         )),
     };
     if let Ok(summary) = &result {
+        if !explicit_compaction && summary.steps_taken == 0 {
+            if let Ok(Some(session)) = cancellation_store.load_result(session_id) {
+                if let Some(plan) = session.plan.as_ref().filter(|plan| plan.steps.len() > 1) {
+                    emit_progress_nonblocking(
+                        &stream_tx,
+                        StreamEvent::PlanProgress(crate::interactive::plan_progress_from_plan(
+                            plan,
+                            &stream_sensitive_values,
+                        )),
+                    );
+                }
+            }
+        }
         if let Some(failure) = &summary.failure {
             emit_terminal_bounded(
                 &stream_tx,

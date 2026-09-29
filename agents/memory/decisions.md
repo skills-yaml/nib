@@ -414,3 +414,21 @@ the ownership store limits. Removing that receipt still requires exact Git
 identity and ref recovery. When cached session ownership no longer validates,
 preserve the worktree, registration, branch, and uncommitted files for inspection
 instead of attempting automatic cleanup during reuse.
+
+## 2026-09-29 - Route simple answers independently of mutation plans
+
+- Type: decision
+- Source: user + T057
+- Confidence: high
+- Review: local `task verify` and documentation integrity
+- Supersedes: T050's accidental coupling to `execution.plan_mode`
+
+Content:
+
+Interactive execute requests may return a context-sufficient, tool-free answer
+without a plan or approval even when the mutation plan gate is enabled.
+`execution.plan_mode` still requires an approved persisted plan for mutations.
+Only multi-step plans appear as live transcript checklists; plain chat reports
+concise progress, and `/plan` remains available for a one-step plan. Live
+multi-step progress comes from persisted step state rather than parsed display
+text, with distinct pending, active, blocked, stopped, and completed markers.

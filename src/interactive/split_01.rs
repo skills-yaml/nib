@@ -764,7 +764,7 @@ pub fn project_session_activities(
             .then_with(|| left.source_index.cmp(&right.source_index))
     });
     activities.extend(persisted.into_iter().map(|entry| entry.activity));
-    if let Some(plan) = &session.plan {
+    if let Some(plan) = session.plan.as_ref().filter(|plan| plan.steps.len() > 1) {
         activities.push(plan_activity(plan, sensitive_values));
     }
     if let Some(summary) = &session.summary {
@@ -912,15 +912,21 @@ pub fn apply_stream_event(
             upsert_tool_activity(activities, invocation_id, &name, "requested", detail, &hint)
         }
         StreamEvent::ToolCallChunk { .. } => {}
-        StreamEvent::PlanGenerated { step_count, steps } => {
+        StreamEvent::PlanGenerated { .. } => {
             freeze_open_thought(activities);
-            let mut activity = ActivityEntry::new(
-                ActivityKind::Plan,
-                todo_plan_title(step_count, false),
-                todo_plan_body_from_descriptions(&steps, 0, sensitive_values),
-            );
-            sanitize_activity(&mut activity, sensitive_values);
-            activities.push(activity);
+        }
+        StreamEvent::PlanProgress(progress) => {
+            if progress.steps.len() > 1 {
+                let activity = plan_progress_activity(&progress, sensitive_values);
+                if let Some(previous) = activities.iter_mut().rev().find(|entry| {
+                    entry.kind == ActivityKind::Plan
+                        && entry.plan_id.as_deref() == Some(progress.plan_id.as_str())
+                }) {
+                    *previous = activity;
+                } else {
+                    activities.push(activity);
+                }
+            }
         }
         StreamEvent::ApprovalRequired { tool_name } => {
             let tool_name = bounded_status_value(&crate::tools::executor::redact_text(&tool_name));
@@ -1009,15 +1015,7 @@ pub fn apply_stream_event(
             )
             .folded(),
         ),
-        StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {
-            if let Some(plan) = activities
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.kind == ActivityKind::Plan)
-            {
-                advance_todo_plan(plan, sensitive_values);
-            }
-        }
+        StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {}
         StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {}
         StreamEvent::Reconciled { outcome } if outcome == "instruction_context_missing" => {
             activities.push(ActivityEntry::new(
@@ -1403,6 +1401,8 @@ pub fn summarize_tool_result(
 pub(crate) const TODO_PENDING: char = '○';
 pub(crate) const TODO_ACTIVE: char = '◐';
 pub(crate) const TODO_DONE: char = '✓';
+pub(crate) const TODO_BLOCKED: char = '!';
+pub(crate) const TODO_CANCELLED: char = '×';
 
 pub(crate) fn todo_plan_title(count: usize, complete: bool) -> String {
     let noun = if count == 1 { "to-do" } else { "to-dos" };
@@ -1413,98 +1413,75 @@ pub(crate) fn todo_plan_title(count: usize, complete: bool) -> String {
     }
 }
 
-pub(crate) fn todo_marker_for_step(
-    status: &str,
-    index: usize,
-    current: usize,
-    complete: bool,
-) -> char {
-    if complete || status.eq_ignore_ascii_case("Completed") || index < current {
+pub(crate) fn todo_marker_for_step(status: &str) -> char {
+    if status.eq_ignore_ascii_case("Completed") {
         TODO_DONE
-    } else if status.eq_ignore_ascii_case("InProgress") || index == current {
+    } else if status.eq_ignore_ascii_case("Cancelled") {
+        TODO_CANCELLED
+    } else if status.eq_ignore_ascii_case("Blocked") {
+        TODO_BLOCKED
+    } else if status.eq_ignore_ascii_case("InProgress") {
         TODO_ACTIVE
     } else {
         TODO_PENDING
     }
 }
 
-pub(crate) fn todo_plan_body_from_descriptions(
-    steps: &[String],
-    current: usize,
+pub(crate) fn plan_progress_from_plan(
+    plan: &crate::session::Plan,
     sensitive_values: &[String],
-) -> String {
-    let body = steps
-        .iter()
-        .map(|step| step.trim())
-        .filter(|step| !step.is_empty())
-        .enumerate()
-        .map(|(index, step)| {
-            let marker = todo_marker_for_step("Pending", index, current, false);
-            format!("{marker} {step}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    bounded_activity_body(&body, sensitive_values)
-}
-
-pub(crate) fn parse_todo_line(line: &str) -> Option<(char, &str)> {
-    let mut chars = line.chars();
-    let mark = chars.next()?;
-    if chars.next() != Some(' ') || !matches!(mark, TODO_PENDING | TODO_ACTIVE | TODO_DONE) {
-        return None;
+) -> crate::llm::PlanProgress {
+    crate::llm::PlanProgress {
+        plan_id: plan.id.clone(),
+        current_step_index: plan.current_step_index,
+        complete: plan.is_complete(),
+        steps: plan
+            .steps
+            .iter()
+            .map(|step| crate::llm::PlanProgressStep {
+                description: bounded_public_text(
+                    &step.description,
+                    sensitive_values,
+                    MAX_ACTIVITY_BODY_BYTES,
+                    false,
+                ),
+                status: step.status.clone(),
+                verification: step
+                    .verification_obligations
+                    .iter()
+                    .map(|obligation| crate::llm::PlanVerificationProgress {
+                        id: bounded_public_text(&obligation.id, sensitive_values, 128, false),
+                        status: obligation.status,
+                        authority: obligation.authority,
+                        unresolved: obligation.is_unresolved_required(),
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
-    Some((mark, chars.as_str()))
-}
-
-pub(crate) fn advance_todo_plan(activity: &mut ActivityEntry, sensitive_values: &[String]) {
-    let mut items = activity
-        .body
-        .lines()
-        .filter_map(parse_todo_line)
-        .map(|(mark, text)| (mark, text.to_string()))
-        .collect::<Vec<_>>();
-    if items.is_empty() {
-        return;
-    }
-    let mut activate_next = false;
-    for item in &mut items {
-        if item.0 == TODO_ACTIVE {
-            item.0 = TODO_DONE;
-            activate_next = true;
-        } else if activate_next && item.0 == TODO_PENDING {
-            item.0 = TODO_ACTIVE;
-            break;
-        }
-    }
-    let complete = items.iter().all(|(mark, _)| *mark == TODO_DONE);
-    activity.title = todo_plan_title(items.len(), complete);
-    let body = items
-        .into_iter()
-        .map(|(mark, text)| format!("{mark} {text}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    activity.body = bounded_activity_body(&body, sensitive_values);
-    activity.folded = false;
 }
 
 pub(crate) fn plan_activity(
     plan: &crate::session::Plan,
     sensitive_values: &[String],
 ) -> ActivityEntry {
-    let current = plan.current_step_index.min(plan.steps.len());
-    let complete = plan.is_complete()
-        || plan
-            .steps
-            .iter()
-            .all(|step| step.status.eq_ignore_ascii_case("Completed"));
-    let body = plan
+    plan_progress_activity(
+        &plan_progress_from_plan(plan, sensitive_values),
+        sensitive_values,
+    )
+}
+
+pub(crate) fn plan_progress_activity(
+    progress: &crate::llm::PlanProgress,
+    sensitive_values: &[String],
+) -> ActivityEntry {
+    let body = progress
         .steps
         .iter()
-        .enumerate()
-        .flat_map(|(index, step)| {
-            let marker = todo_marker_for_step(&step.status, index, current, complete);
+        .flat_map(|step| {
+            let marker = todo_marker_for_step(&step.status);
             let mut lines = vec![format!("{marker} {}", step.description.trim())];
-            lines.extend(step.verification_obligations.iter().map(|obligation| {
+            lines.extend(step.verification.iter().map(|obligation| {
                 format!(
                     "   verify {} [{}; {}]",
                     obligation.id,
@@ -1516,25 +1493,42 @@ pub(crate) fn plan_activity(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let unresolved = plan
+    let unresolved = progress
         .steps
-        .get(plan.current_step_index)
+        .get(progress.current_step_index)
         .map(|step| {
-            step.verification_obligations
+            step.verification
                 .iter()
-                .filter(|obligation| obligation.is_unresolved_required())
+                .filter(|obligation| obligation.unresolved)
                 .count()
         })
         .unwrap_or(0);
-    let mut title = todo_plan_title(plan.steps.len(), complete);
+    let blocked = progress.steps.iter().any(|step| step.status == "Blocked");
+    let cancelled = progress.steps.iter().any(|step| step.status == "Cancelled");
+    let noun = if progress.steps.len() == 1 {
+        "to-do"
+    } else {
+        "to-dos"
+    };
+    let mut title = if cancelled {
+        format!("Stopped {} {noun}", progress.steps.len())
+    } else if blocked {
+        format!("Blocked {} {noun}", progress.steps.len())
+    } else if !progress.complete && progress.steps.iter().all(|step| step.status == "Pending") {
+        format!("Planned {} {noun}", progress.steps.len())
+    } else {
+        todo_plan_title(progress.steps.len(), progress.complete)
+    };
     if unresolved > 0 {
         title.push_str(&format!(" · {unresolved} verification pending"));
     }
-    ActivityEntry::new(
+    let mut activity = ActivityEntry::new(
         ActivityKind::Plan,
         title,
         bounded_activity_body(&body, sensitive_values),
-    )
+    );
+    activity.plan_id = Some(progress.plan_id.clone());
+    activity
 }
 
 pub(crate) fn verification_status_label(

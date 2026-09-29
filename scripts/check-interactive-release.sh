@@ -145,6 +145,9 @@ printf '%s\n' \
   'model = "gpt-5"' \
   "api_key = \"$private_sentinel\"" \
   '' \
+  '[agent]' \
+  'answer_only = false' \
+  '' \
   '[skills]' \
   'enabled = false' \
   '' \

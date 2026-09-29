@@ -79,8 +79,9 @@ pub(crate) async fn run_agent_loop_inner(
         )
         .await;
     }
-    let answer_only_eligible =
-        answer_only_candidate && !nib_cfg.execution.plan_mode && !active_prior_run;
+    // The execution plan gate protects mutations; it does not decide whether a
+    // tool-free conversational answer may be returned.
+    let answer_only_eligible = answer_only_candidate && !active_prior_run;
 
     let project_root = profile.root_path().to_path_buf();
     let max_turns = if cfg.max_steps == 0 {
@@ -730,6 +731,12 @@ pub(crate) async fn run_agent_loop_inner(
                                     },
                                 )
                                 .await;
+                                emit_plan_progress(
+                                    &store,
+                                    session_id,
+                                    &cfg.stream_tx,
+                                    &public_output_sensitive_values,
+                                )?;
                                 if cfg.mode == "plan" {
                                     reconciliation_reason = Some("plan_ready".to_string());
                                     transition_state(
@@ -914,6 +921,12 @@ pub(crate) async fn run_agent_loop_inner(
                         )
                         .await?
                     } else {
+                        emit_plan_progress(
+                            &store,
+                            session_id,
+                            &cfg.stream_tx,
+                            &public_output_sensitive_values,
+                        )?;
                         if llm_turns < max_turns {
                             open_steering_admission(
                                 steering_enabled,
