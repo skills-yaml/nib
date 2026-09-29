@@ -25,7 +25,7 @@ impl ToolRisk {
 
 pub fn classify_tool_call(call: &ToolCall) -> ToolRisk {
     match call.tool_name.as_str() {
-        "read_file" | "list_directory" | "grep" => ToolRisk::ReadOnly,
+        "read_file" | "list_directory" | "grep" | "git_status" => ToolRisk::ReadOnly,
         "manage_subagents" => match call
             .arguments
             .get("action")

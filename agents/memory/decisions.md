@@ -432,3 +432,22 @@ Only multi-step plans appear as live transcript checklists; plain chat reports
 concise progress, and `/plan` remains available for a one-step plan. Live
 multi-step progress comes from persisted step state rather than parsed display
 text, with distinct pending, active, blocked, stopped, and completed markers.
+
+## 2026-09-29 - Keep local preflight failures scoped to affected tools
+
+- Type: decision
+- Source: user + T058
+- Confidence: high
+- Review: local verification and documentation integrity
+- Supersedes: T054/T056 whole-batch stop for independent repository reads
+
+Content:
+
+Managed worktree preparation and tool instruction scope failures are recorded as
+bounded local categories. A rejected invocation receives one audited failure; eligible
+project reads in the same batch may continue under their own instructions. If worktree
+preparation fails, project reads use the main checkout and mutating tools remain
+blocked. The read-only `git_status` tool uses the repository view selected for the
+batch without creating a worktree. `nib doctor` reports stale owned session receipts
+without repairing uncertain Git or filesystem state. Skill-creation answers can use
+the bounded project guide in answer-only context.

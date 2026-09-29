@@ -361,6 +361,8 @@ pub(crate) async fn run_agent_loop_inner(
     let mut response_content: Option<String> = None;
     let mut pending_response_events: Vec<StreamEvent> = Vec::new();
     let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
+    let mut preflight_failures: std::collections::HashMap<ToolInvocationId, &'static str> =
+        std::collections::HashMap::new();
     let mut reconciliation_reason: Option<String> = None;
     let mut instruction_context_detail: Option<String> = None;
     let mut reconciliation_failure: Option<LlmError> = None;

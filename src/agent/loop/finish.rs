@@ -1182,6 +1182,7 @@ pub(crate) fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "turn_limit_reached"
                 | "provider_continuation_interrupted"
                 | "instruction_context_missing"
+                | "tool_scope_outside_worktree"
                 | "unresolved_clarification"
                 | "planning_required_active_plan"
                 | "planning_required_active_run"

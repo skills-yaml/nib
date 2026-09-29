@@ -38,7 +38,9 @@ async fn worktree_preflight_failure_reconciles_without_running_proposed_tool() {
         .any(|event| matches!(event.kind.as_str(), "tool_attempted" | "tool_started")));
     assert_eq!(saved.plan.as_ref().unwrap().steps[0].status, "Blocked");
     assert!(saved.events.iter().any(|event| {
-        event.kind == "local_preflight_failed" && event.details["stage"] == "managed_worktree"
+        event.kind == "local_preflight_failed"
+            && event.details["stage"] == "managed_worktree"
+            && event.details["category"] == "git_state"
     }));
     assert!(saved.events.iter().any(|event| {
         event.kind == "run_terminal" && event.details["outcome"] == "worktree_preparation_failed"
@@ -46,6 +48,95 @@ async fn worktree_preflight_failure_reconciles_without_running_proposed_tool() {
     let report = summary.user_failure_report().expect("safe stop report");
     assert!(report.contains("Worktree preparation failed"));
     assert!(!report.contains("not a git repository"));
+}
+
+#[tokio::test]
+async fn mixed_preflight_failure_preserves_independent_project_read() {
+    for (goal, rejected_category) in [
+        ("mixed outside scope read", "outside_worktree"),
+        ("mixed worktree read", "managed_worktree"),
+    ] {
+        let directory = tempdir().expect("project without Git");
+        save_config(directory.path(), &mock_config()).expect("mock config");
+        let store = SessionStore::for_project(directory.path()).expect("session store");
+        let mut session = store.create_session_with_id(goal.replace(' ', "-"));
+        let mut plan = pending_plan(goal, goal);
+        plan.approve();
+        session.plan = Some(plan);
+        store.save(&mut session).expect("approved plan");
+
+        run_agent_loop(
+            directory.path().to_path_buf(),
+            &session.id,
+            goal,
+            AgentLoopConfig {
+                max_steps: 4,
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("run reconciles");
+
+        let saved = store.load(&session.id).expect("saved run");
+        let completed = saved
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 2, "{goal}");
+        assert_eq!(
+            completed
+                .iter()
+                .filter(|event| event.details["success"] == true)
+                .count(),
+            1,
+            "{goal}"
+        );
+        assert_eq!(
+            saved
+                .events
+                .iter()
+                .filter(|event| event.kind == "tool_attempted")
+                .count(),
+            1,
+            "{goal}"
+        );
+        assert!(saved.events.iter().any(|event| {
+            event.kind == "tool_preflight_rejected"
+                && event.details["category"] == rejected_category
+        }));
+        let tool_message = saved
+            .messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .expect("provider-facing observations");
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&tool_message.content).expect("observation JSON");
+        let observations = tool_payload["observations"]
+            .as_array()
+            .expect("observation array");
+        assert_eq!(observations.len(), 2, "{goal}");
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| observation["success"] == true)
+                .count(),
+            1,
+            "{goal}"
+        );
+        let mut invocation_ids = observations
+            .iter()
+            .map(|observation| observation["invocation_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        invocation_ids.sort_unstable();
+        invocation_ids.dedup();
+        assert_eq!(invocation_ids.len(), 2, "{goal}");
+        assert!(!saved
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("increase llm.context_length") }));
+    }
 }
 
 #[tokio::test]

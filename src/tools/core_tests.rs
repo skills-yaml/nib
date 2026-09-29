@@ -1,6 +1,22 @@
 use super::*;
 use std::net::SocketAddr;
 
+#[tokio::test]
+async fn git_status_reads_repository_without_creating_a_session_worktree() {
+    let directory = tempfile::tempdir().expect("repository");
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(directory.path())
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    std::fs::write(directory.path().join("untracked.txt"), "content\n").expect("fixture");
+
+    let output = git_status(directory.path()).await.expect("Git status");
+    assert!(output["status"].as_str().unwrap().contains("untracked.txt"));
+    assert!(!directory.path().join(".nib/worktrees").exists());
+}
+
 struct EnvironmentGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,

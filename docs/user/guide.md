@@ -449,9 +449,13 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   posture, plan, and queued follow-up count. When a run stops, the transcript
   shows a heading, a reason, and a next action (usually inspect `/status`) instead
   of an internal token such as `local_error`.
-  If managed Git worktree preparation fails, nib stops before running the proposed
-  tools, records that stage in the session, and advises checking Git worktree health
-  and running `nib doctor` before retrying.
+  If managed Git worktree preparation fails, nib records a bounded failure category
+  and rejects tools that require the worktree. Independent project reads may still
+  run from the main checkout. If every tool needs the worktree, the run stops and
+  advises running `nib doctor`. Doctor checks owned session receipt paths, Git
+  registrations, and branches without repairing uncertain state.
+  A tool path outside the active worktree receives a path-scope failure rather
+  than context-length advice; eligible project reads in the same batch may run.
 - `/context` shows the compact occupancy indicator (`ctx ~18k/64k`). `/context details`
   adds a bounded breakdown of the last prepared/sent request snapshot, response
   reserve and headroom, contributions, occupancy versus cumulative provider usage,
@@ -715,6 +719,22 @@ completion, and management capabilities are shared.
 A skill is a directory containing a `SKILL.md` with YAML frontmatter. Skills can be
 project-local under `.nib/skills/` or installed globally under
 `~/.config/nib/skills/`.
+
+To create a project skill, add `.nib/skills/my-skill/SKILL.md`:
+
+```markdown
+---
+name: my-skill
+description: Explain when this skill should be used
+tags: [example]
+---
+Give the agent clear steps and project-specific checks here.
+```
+
+`/skills` lists installed project and global skills in an interactive session;
+`nib skill list` does the same from a shell. `/skill` and `/skills create` are not
+commands. Use `nib skill install ./path/to/my-skill` when you want to install an
+existing local skill globally.
 
 ```bash
 nib skill list

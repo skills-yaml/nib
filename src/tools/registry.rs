@@ -83,6 +83,14 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
             }),
         ),
         metadata(
+            "git_status",
+            "Read the active repository's bounded Git status without creating a session worktree.",
+            PermissionLevel::ReadOnly,
+            false,
+            false,
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        ),
+        metadata(
             "apply_patch",
             "Validate or apply a unified diff in the session worktree.",
             PermissionLevel::Safe,

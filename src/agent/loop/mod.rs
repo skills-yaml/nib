@@ -24,7 +24,7 @@ use crate::session::{
 };
 use crate::tools::executor::ApprovalHandler;
 use crate::tools::models::{AfterToolHook, PolicyEffect, PolicyRule, ToolCall};
-use crate::tools::ToolExecutor;
+use crate::tools::{ToolExecutor, ToolInvocationId};
 use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

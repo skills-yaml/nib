@@ -368,6 +368,29 @@ impl LlmClient for MockLlmClient {
                     true,
                 );
             }
+            if last.contains("mixed outside scope read") {
+                return mock_tool_response(
+                    vec![
+                        ToolCallRequest::new("list_directory", json!({"path": "."})),
+                        ToolCallRequest::new("list_directory", json!({"path": "/"})),
+                    ],
+                    scope,
+                    true,
+                );
+            }
+            if last.contains("mixed worktree read") {
+                return mock_tool_response(
+                    vec![
+                        ToolCallRequest::new("list_directory", json!({"path": "."})),
+                        ToolCallRequest::new(
+                            "run_terminal",
+                            json!({"command": "printf ok", "affected_paths": ["."]}),
+                        ),
+                    ],
+                    scope,
+                    true,
+                );
+            }
             if let Some(("parent", token)) = &managed_process_smoke {
                 return mock_tool_response(
                     vec![ToolCallRequest::new(
