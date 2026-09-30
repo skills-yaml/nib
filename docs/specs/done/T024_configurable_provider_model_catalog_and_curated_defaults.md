@@ -89,6 +89,12 @@ The initial curated defaults are:
 These are text-output models appropriate for nib's current LLM surface. Provider-wide
 specialized catalogs remain discoverable by T023 but are not picker defaults.
 
+On 2026-09-29, the OpenRouter picker suggestions gained
+`deepseek/deepseek-v4.1-flash`, the top named model in OpenRouter's
+[coding usage collection](https://openrouter.ai/collections/programming/). The current
+OpenRouter catalog entry records this review date. The selected default and T023's
+owner-reviewed paid-test allowlist did not change.
+
 ### User Configuration
 
 Extend `ProviderEntry` with an optional list:

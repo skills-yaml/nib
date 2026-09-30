@@ -1510,7 +1510,7 @@ expires_at = "2027-02-06"
                 .iter()
                 .map(|plan| plan.accounting.len())
                 .sum::<usize>(),
-            19
+            20
         );
         assert_eq!(
             plans.iter().map(|plan| plan.profiles.len()).sum::<usize>(),

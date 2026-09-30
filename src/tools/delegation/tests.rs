@@ -285,7 +285,8 @@ pub(crate) fn prime_fixed_subagent_record_lock_namespace(project_root: &Path) {
     let records = ensure_records_directory_capability_until(project_root, None)
         .expect("authorized records for fixed lock priming");
     let timeout = if cfg!(windows) {
-        Duration::from_secs(15)
+        // Priming all 64 durable lock files can exceed 15 seconds on loaded CI disks.
+        Duration::from_secs(60)
     } else {
         SUBAGENT_RECORD_LOCK_TIMEOUT
     };
