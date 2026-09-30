@@ -41,9 +41,10 @@ models = [
   "anthropic/claude-opus-5",
   "google/gemini-3.6-flash",
   "x-ai/grok-4.5",
+  "deepseek/deepseek-v4.1-flash",
 ]
 source_url = "https://openrouter.ai/models"
-verified_on = "2026-08-06"
+verified_on = "2026-09-29"
 
 [providers.meta]
 default_model = "muse-spark-1.1"

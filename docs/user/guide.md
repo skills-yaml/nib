@@ -222,7 +222,7 @@ verified defaults and picker suggestions are:
 | Anthropic | `claude-opus-5` | `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
 | Google Gemini | `gemini-3.6-flash` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` |
 | xAI Grok | `grok-4.5` | `grok-4.5`, `grok-4.3`, `grok-build-0.1` |
-| OpenRouter | `openai/gpt-5.6-sol` | `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`, `google/gemini-3.6-flash`, `x-ai/grok-4.5` |
+| OpenRouter | `openai/gpt-5.6-sol` | `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`, `google/gemini-3.6-flash`, `x-ai/grok-4.5`, `deepseek/deepseek-v4.1-flash` |
 | Meta | `muse-spark-1.1` | `muse-spark-1.1` |
 | Mock | `mock-model` | `mock-model` |
 
@@ -230,6 +230,11 @@ The list is advisory rather than an allowlist. Omit `models` to inherit the bund
 suggestions, set it to an ordered list to replace them for that provider, or set it to
 `[]` to show only the selected `model`. nib never rewrites an existing selected model
 when its bundled catalog changes.
+
+The OpenRouter list includes `deepseek/deepseek-v4.1-flash`, a widely used coding
+model in OpenRouter's [coding usage collection](https://openrouter.ai/collections/programming/).
+Its inclusion is a picker suggestion, not a live qualification result or an entry in
+the separately reviewed OpenRouter test allowlist.
 
 `terminal.backend` is `local` in this release. `profiles.default` selects a workspace
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
