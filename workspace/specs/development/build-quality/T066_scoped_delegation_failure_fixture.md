@@ -67,8 +67,8 @@ strict. Do not claim the first failure was a timeout without retained evidence.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Classify the bounded fixture repair after review and validation.
+Status: none
+Rationale: This bounded test-fixture repair restores the documented failure-isolation contract and creates no new durable project decision.
 
 ## Independent Plan Review
 
@@ -77,3 +77,11 @@ unconsumed injection failure. Approved scoped test-only RAII cleanup,
 consumption/error diagnostics, observable normal/unwind coverage and the
 existing fixture setup guard. The first underlying error remains unknown;
 production deadlines and expiry assertions are preserved.
+
+## Validation Evidence
+
+Candidate 54a97e73114c5a503b46b4c931d10333ce17beb9 passed task check and
+task test:delegation with strict native bwrap enabled. The selected delegation
+target does not execute the new guard cases or changed owner-boundary case;
+the frozen full task test and revised hosted Windows run must execute them.
+Independent exact-candidate spec and quality review found no findings.

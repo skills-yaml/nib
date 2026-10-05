@@ -3,7 +3,7 @@ schema_version: 1
 coordination_id: t066-fixture-isolation
 status: active
 base_revision: af24b71dabf76f59182490d6a8c39796242c57fb
-updated_at: 2026-10-05T19:03:37Z
+updated_at: 2026-10-05T19:10:00Z
 ---
 
 # Peer Task
