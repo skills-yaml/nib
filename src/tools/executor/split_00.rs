@@ -794,6 +794,7 @@ impl StdinApprovalHandler {
 }
 
 pub struct ToolExecutor {
+    pub(crate) question_outcome_invocation: Option<crate::tools::ToolInvocationId>,
     pub session_store: Option<SessionStore>,
     pub(crate) implicit_session_id: Option<String>,
     pub approval_mode: ApprovalMode,

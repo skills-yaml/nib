@@ -308,6 +308,7 @@ fn render_bounded_human_context(session: &Session, max_tokens: usize) -> Option<
             ClarificationStatus::Answered => "answered",
             ClarificationStatus::Unresolved => "unresolved",
             ClarificationStatus::Cancelled => "cancelled",
+            ClarificationStatus::Discussed => "discussed (answer still required)",
         };
         let answer = clarification
             .answer

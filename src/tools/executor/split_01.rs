@@ -7,6 +7,7 @@ impl ToolExecutor {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
         let resolved = resolve_execution_config(&project_root, execution_config);
         Self {
+            question_outcome_invocation: None,
             session_store: None,
             implicit_session_id: None,
             approval_mode: ApprovalMode::Manual,
@@ -166,7 +167,21 @@ impl ToolExecutor {
         schemas
     }
 
+    /// Runtime-only outcome publication. Model/MCP calls cannot supply human results.
+    pub(crate) async fn execute_question_form(
+        &mut self,
+        call: ToolCall,
+        session_id: Option<&str>,
+    ) -> ToolResult {
+        self.question_outcome_invocation = Some(call.invocation_id);
+        let result = self.execute(call, session_id).await;
+        result
+    }
+
     pub async fn execute(&mut self, mut call: ToolCall, session_id: Option<&str>) -> ToolResult {
+        let question_outcome_admitted = self.question_outcome_invocation.take()
+            == Some(call.invocation_id)
+            && call.tool_name == "ask_question";
         let requested_session = session_id
             .map(str::to_string)
             .or_else(|| call.session_id.clone());
@@ -176,7 +191,13 @@ impl ToolExecutor {
             None => {
                 if let Some(session_id) = self.implicit_session_id.clone() {
                     return self
-                        .execute_inner(call, Some(&session_id), true, false)
+                        .execute_inner(
+                            call,
+                            Some(&session_id),
+                            true,
+                            false,
+                            question_outcome_admitted,
+                        )
                         .await;
                 }
                 if self.session_store.is_none() {
@@ -249,6 +270,7 @@ impl ToolExecutor {
             Some(&effective_session),
             true,
             has_authoritative_session,
+            question_outcome_admitted,
         )
         .await
     }
@@ -335,6 +357,7 @@ impl ToolExecutor {
         session_id: Option<&str>,
         run_after_hooks: bool,
         has_authoritative_session: bool,
+        question_outcome_admitted: bool,
     ) -> ToolResult {
         let start = Instant::now();
         let effective_session = session_id.or(call.session_id.as_deref());
@@ -457,7 +480,14 @@ impl ToolExecutor {
                 )
             }
         };
-        let validation_arguments = schema_validation_arguments(&call);
+        let mut validation_arguments = schema_validation_arguments(&call);
+        if call.tool_name == "ask_question" && !question_outcome_admitted {
+            for key in ["_question_outcome", "answer", "answer_error"] {
+                if let Some(value) = call.arguments.get(key) {
+                    validation_arguments[key] = value.clone();
+                }
+            }
+        }
         if let Err(error) =
             validate_tool_arguments(&call.tool_name, &input_schema, &validation_arguments)
         {
@@ -765,6 +795,7 @@ impl ToolExecutor {
                     hook_session_id.as_deref(),
                     false,
                     has_authoritative_session,
+                    false,
                 ))
                 .await;
                 hook_results.push(json!({
@@ -905,6 +936,7 @@ impl ToolExecutor {
             session_id,
             false,
             session_id.is_some(),
+            false,
         ))
         .await;
         let evidence = crate::tools::delegation::VerificationEvidence {
@@ -1688,6 +1720,7 @@ pub(crate) fn schema_validation_arguments(call: &ToolCall) -> Value {
         "ask_question" => {
             object.remove("answer");
             object.remove("answer_error");
+            object.remove("_question_outcome");
         }
         _ => {}
     }
@@ -1716,6 +1749,9 @@ pub(crate) fn validate_tool_arguments(
         })
         .collect();
     if errors.is_empty() {
+        if tool_name == "ask_question" {
+            crate::interactive::parse_question_form(arguments)?;
+        }
         Ok(())
     } else {
         const MAX_VALIDATION_ERROR_BYTES: usize = 8 * 1024;
