@@ -57,7 +57,7 @@ pub(crate) fn execute_prepared_agent_step(
                         let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
                     }
                     if let Some(prompt) = pending_question.take() {
-                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::Cancelled);
+                        let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::Cancelled);
                     }
                     if let Some(response) = pending_modal_response.take() {
                         response.fail_closed();
@@ -121,46 +121,25 @@ pub(crate) fn execute_prepared_agent_step(
                 }
                 Some(prompt) = question_rx.recv(), if pending_question.is_none() => {
                     if input_open {
-                        println!("\nQuestion: {}", prompt.question);
-                        if let Some(proposal) = prompt.proposed_answer.as_deref() {
-                            println!("Proposed answer: {proposal}");
-                            println!("1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise");
-                        }
-                        if prompt.proposed_answer.is_none() {
-                            for (index, option) in prompt.options.iter().enumerate() {
-                                println!("  {}. {}", index + 1, option);
-                            }
-                        }
-                        if prompt.proposed_answer.is_some() {
-                            print!("Decision or answer: ");
-                        } else if prompt.options.is_empty() {
-                            print!("Answer: ");
-                        } else {
-                            print!("Answer (number or text): ");
-                        }
-                        let _ = io::stdout().flush();
                         pending_question = Some(prompt);
+                        if let Some(prompt) = pending_question.as_ref() {
+                            print!("{}", prompt.form.render(&prompt.sensitive_values));
+                            let _ = io::stdout().flush();
+                        }
                         if let Some(line) = buffered_modal_line.take() {
-                            if let Some(prompt) = pending_question.as_ref() {
-                                match interpret_plain_question_line(&line, &prompt.options, prompt.proposed_answer.as_deref()) {
-                                    PlainQuestionLine::Outcome(outcome) => {
-                                        let prompt = pending_question.take().expect("question");
-                                        pending_modal_response = Some(PendingPlainModalResponse::Question {
-                                            outcome,
-                                            reply: prompt.reply,
-                                        });
-                                        request_plain_modal_frame_delimiter();
-                                    }
-                                    PlainQuestionLine::Retry(message) => println!("{message}"),
-                                    PlainQuestionLine::Command(_) => println!(
-                                        "buffered command was not applied; enter it after the prompt is shown"
-                                    ),
-                                }
+                            if line.trim_start().starts_with(":command") {
+                                println!("buffered command was not applied; enter it after the prompt is shown");
+                            } else if let Some(outcome) = pending_question.as_mut().and_then(|prompt| prompt.form.submit_line(&line)) {
+                                let prompt = pending_question.take().expect("question");
+                                pending_modal_response = complete_plain_question_prompt(prompt, outcome);
+                            } else if let Some(prompt) = pending_question.as_ref() {
+                                print!("{}", prompt.form.render(&prompt.sensitive_values));
+                                let _ = io::stdout().flush();
                             }
                         }
                     } else {
                         modal_state.clear();
-                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
+                        let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::InputClosed);
                     }
                 }
                 line = input.read_line_async(), if input_open && buffered_modal_line.is_none() => {
@@ -176,7 +155,7 @@ pub(crate) fn execute_prepared_agent_step(
                                 let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied_input_closed());
                             }
                             if let Some(prompt) = pending_question.take() {
-                                let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
+                                let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::InputClosed);
                             }
                             continue;
                         }
@@ -245,49 +224,26 @@ pub(crate) fn execute_prepared_agent_step(
                         continue;
                     }
                     if pending_question.is_some() {
-                        let prompt = pending_question.as_ref().expect("question");
-                        let options = prompt.options.clone();
-                        let proposed_answer = prompt.proposed_answer.clone();
-                        match interpret_plain_question_line(&line, &options, proposed_answer.as_deref()) {
-                            PlainQuestionLine::Outcome(outcome) => {
-                                let prompt = pending_question.take().expect("question");
-                                pending_modal_response = Some(PendingPlainModalResponse::Question {
-                                    outcome,
-                                    reply: prompt.reply,
-                                });
-                                request_plain_modal_frame_delimiter();
-                            }
-                            PlainQuestionLine::Retry(message) => {
-                                println!("{message}");
-                                if proposed_answer.is_some() {
-                                    print!("Decision or answer: ");
-                                } else if options.is_empty() {
-                                    print!("Answer: ");
-                                } else {
-                                    print!("Answer (number or text): ");
-                                }
-                                let _ = io::stdout().flush();
-                            }
-                            PlainQuestionLine::Command(command) => {
-                                match execute_interactive_command_in_state(
-                                    command,
-                                    scope.project,
-                                    scope.profile_id,
-                                    scope.session_store,
-                                    session_id,
-                                    "running",
-                                ) {
-                                    Ok(InteractiveEffect::Output(output)) => {
-                                        println!("{output}")
+                        if line.trim_start().starts_with(":command") {
+                            match parse_plain_question_answer(&line, &[]) {
+                                InteractionReduction::ModalCommand(command) => {
+                                    match execute_interactive_command_in_state(command, scope.project, scope.profile_id, scope.session_store, session_id, "running") {
+                                        Ok(InteractiveEffect::Output(output)) => println!("{output}"),
+                                        Ok(_) => println!("command completed without changing the pending question"),
+                                        Err(error) => println!("{error}"),
                                     }
-                                    Ok(_) => println!(
-                                        "command completed without changing the pending question"
-                                    ),
-                                    Err(error) => println!("{error}"),
                                 }
-                                print!("Decision or answer: ");
-                                let _ = io::stdout().flush();
+                                InteractionReduction::Error { message, .. } => println!("{message}"),
+                                _ => println!("invalid prompt-local command"),
                             }
+                        } else if let Some(outcome) = pending_question.as_mut().and_then(|prompt| prompt.form.submit_line(&line)) {
+                            let prompt = pending_question.take().expect("question");
+                            pending_modal_response = complete_plain_question_prompt(prompt, outcome);
+                            continue;
+                        }
+                        if let Some(prompt) = pending_question.as_ref() {
+                            print!("{}", prompt.form.render(&prompt.sensitive_values));
+                            let _ = io::stdout().flush();
                         }
                         continue;
                     }
@@ -389,6 +345,20 @@ pub(crate) fn execute_prepared_agent_step(
     })
 }
 
+fn complete_plain_question_prompt(
+    prompt: PlainQuestionPrompt,
+    outcome: nib::interactive::QuestionFormOutcome,
+) -> Option<PendingPlainModalResponse> {
+    if outcome.is_success() {
+        request_plain_modal_frame_delimiter();
+        Some(PendingPlainModalResponse::Question { outcome, reply: prompt.reply })
+    } else {
+        // Interrupts reach the worker immediately, even while stdin remains open.
+        let _ = prompt.reply.send(outcome);
+        None
+    }
+}
+
 pub(crate) fn execute_plain_continuation(
     scope: &PlainAgentScope<'_>,
     session_id: &str,
@@ -407,6 +377,65 @@ pub(crate) fn execute_plain_continuation(
         cfg.continuation_plan_id = Some(plan_id.to_string());
     }
     execute_prepared_agent_step(prepared, scope, session_id, goal, input, modal_state)
+}
+
+pub(crate) fn execute_plain_question_recovery(
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    mut effect: nib::interactive::QuestionRecoveryEffect,
+    input: &ConsoleInput,
+    modal_state: PlainModalState,
+) -> Result<PlainAgentDisposition, String> {
+    use nib::interactive::QuestionRecoveryEffect;
+    let sensitive_values = nib::config::load_nib_config_full(scope.project)
+        .map_err(|error| error.to_string())?.public_session_sensitive_values();
+    loop {
+        match effect {
+            QuestionRecoveryEffect::Output(output) => {
+                println!("{}", nib::interactive::bounded_public_text(&output, &sensitive_values, 64 * 1024, true));
+                return Ok(PlainAgentDisposition::Completed);
+            }
+            QuestionRecoveryEffect::OpenForm(persisted) => {
+                effect = complete_plain_recovery_form(scope, session_id, persisted, None, input, &sensitive_values)?;
+            }
+            QuestionRecoveryEffect::OpenEditor { form, question_index } => {
+                effect = complete_plain_recovery_form(scope, session_id, form, Some(question_index), input, &sensitive_values)?;
+            }
+            QuestionRecoveryEffect::ContinuePlan { plan_id, goal } => {
+                return execute_plain_continuation(scope, session_id, &goal, &plan_id, input, modal_state);
+            }
+            QuestionRecoveryEffect::ContinueDiscussion { plan_id, goal, invocation_id } => {
+                let mut prepared = PreparedPlainAgentStep::prepare(scope, session_id, InteractiveAgentMode::Execute, modal_state.clone())?;
+                if let Some(cfg) = prepared.loop_cfg.as_mut() {
+                    cfg.continuation_plan_id = Some(plan_id);
+                    cfg.discussion_invocation_id = Some(invocation_id);
+                }
+                return execute_prepared_agent_step(prepared, scope, session_id, &goal, input, modal_state);
+            }
+        }
+    }
+}
+
+fn complete_plain_recovery_form(
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    persisted: nib::session::PersistedQuestionForm,
+    editor: Option<Option<usize>>,
+    input: &ConsoleInput,
+    sensitive_values: &[String],
+) -> Result<nib::interactive::QuestionRecoveryEffect, String> {
+    let mut form = crate::console::LineQuestionForm::new(persisted.form, persisted.initial_answers);
+    if let Some(index) = editor { form.enter_editor(index)?; }
+    let outcome = loop {
+        print!("{}", form.render(sensitive_values));
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let line = match input.read_line_blocking() {
+            Ok(line) => line,
+            Err(_) => break nib::interactive::QuestionFormOutcome::InputClosed,
+        };
+        if let Some(outcome) = form.submit_line(&line) { break outcome; }
+    };
+    nib::interactive::complete_question_recovery(scope.session_store, session_id, persisted.invocation_id, outcome)
 }
 
 pub(crate) fn execute_plain_turn_and_queued_follow_ups(

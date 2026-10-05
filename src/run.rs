@@ -174,7 +174,7 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         model: args.model.clone(),
         auto_approve: args.yes,
         approval_handler: Some(Arc::new(ConsoleApprovalHandler::new(input.clone()))),
-        question_handler: Some(Arc::new(ConsoleQuestionHandler::new(input))),
+        question_handler: Some(Arc::new(ConsoleQuestionHandler::with_sensitive_values(input, sensitive_values.clone()))),
         stream_tx: Some(stream_tx),
         cancellation: Some(cancellation.clone()),
         ..Default::default()
@@ -241,7 +241,7 @@ fn report_run_summary(
     }
     if summary.outcome == "waiting_for_user_input" {
         return Err(format!(
-            "Waiting for your answer. Resume with `nib --session {sid}` then `/questions` and `/continue <plan-id>`."
+            "Waiting for your answer. Resume with `nib --session {sid}` then answer the pending question or ask to resume."
         ));
     }
     if summary.is_failure() {
@@ -486,8 +486,9 @@ mod tests {
         .expect_err("closed question input must be visible to the caller");
         assert!(
             error.contains("Waiting for your answer")
-                && error.contains("/questions")
-                && error.contains("/continue"),
+                && error.contains("answer the pending question or ask to resume")
+                && !error.contains("/questions")
+                && !error.contains("/continue"),
             "{error}"
         );
 
