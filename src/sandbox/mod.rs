@@ -1378,8 +1378,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn git_status_has_only_read_only_repository_bindings_and_no_network() {
         let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _restore = EnvironmentVariableGuard::set("HOME", home.path().as_os_str());
         let cwd = root.path().canonicalize().unwrap();
         let (args, home) = read_only_git_status_args(&cwd).unwrap();
         let path = cwd.to_str().unwrap();

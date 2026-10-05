@@ -2,8 +2,11 @@ use super::*;
 use std::net::SocketAddr;
 
 #[tokio::test]
+#[serial_test::serial]
 async fn git_status_reads_repository_without_creating_a_session_worktree() {
     let directory = tempfile::tempdir().expect("repository");
+    let home = tempfile::tempdir().expect("private home");
+    let _home = EnvironmentGuard::set("HOME", home.path().to_str().unwrap());
     let status = std::process::Command::new("git")
         .args(["init", "--quiet"])
         .current_dir(directory.path())

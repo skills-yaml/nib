@@ -77,11 +77,14 @@ async fn git_status_requires_strict_isolation_when_unavailable() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[serial_test::serial]
 async fn git_status_disables_fsmonitor_and_preserves_index() {
     if !strict_available() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = super::tests::EnvironmentGuard::set("HOME", home.path().to_str().unwrap());
     tracked_fixture(root.path());
     script(
         &root.path().join(".git/hooks/hostile"),
@@ -170,11 +173,14 @@ async fn git_status_isolates_clean_filter_and_populated_submodule() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[serial_test::serial]
 async fn git_status_bounds_output_without_mutating_repository() {
     if !strict_available() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = super::tests::EnvironmentGuard::set("HOME", home.path().to_str().unwrap());
     init(root.path());
     for number in 0..700 {
         std::fs::write(
