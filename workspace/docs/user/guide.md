@@ -370,29 +370,11 @@ stays intact when nib answers an unrelated information question; if that request
 needs new planning, nib explains the existing-plan conflict. An active run still
 owns its input. Set `agent.answer_only = false` to require the plan-first path.
 Invalid control output and provider failures do not invoke the planner.
-When the agent calls `ask_question`, nib displays one question or a related set of
-up to eight questions. Choices have short labels and optional descriptions; choosing
-one returns its label. A proposed answer offers Approve proposed answer, Reject and
-leave unanswered, and Instruct otherwise. Approve accepts only the displayed answer.
-Ordinary questions also have Type something.; proposed answers retain Instruct
-otherwise. Every call has a separate Chat about this row.
-
-A single answer returns immediately. Sets keep answer drafts until you choose Submit;
-in plain, console, and one-shot mode, Enter at the final answer summary submits all
-answers, and a question number reopens its draft. Chat about this asks for a message,
-discards the call's drafts, and lets nib discuss the question while its dependent work
-stays blocked. Question answers and discussion never approve tools or waive required
-verification. Esc interrupts the whole question operation without an answer. Closed
-input also saves the unresolved questions and stops dependent work. Empty editor input
-retries locally.
-
-After reopening the same session, reply with an exact option label or `text: your
-answer`, or say `resume` to reopen the saved form. For a set, `Title: answer` opens
-that answer as a draft for review and Submit. A recognized single answer resumes the
-interrupted approved plan when all its questions are answered. Ambiguous answers ask
-which operation you mean; unrelated conversation leaves questions unanswered. Known
-completed, stopped, or superseded operations are not restarted, and an uncertain
-provider continuation is not replayed.
+When the agent calls `ask_question`, the CLI clearly prints the question. If nib
+proposes one answer, choose Approve to accept that exact answer, Reject to leave the
+question unresolved, or Instruct otherwise to type a different answer. An open
+question accepts an option number or free-form text. Question answers never approve
+tools. Closed or empty input stops dependent work and reconciles the session.
 Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. Startup
 and final one-shot status lines are bounded and control-safe and do not echo the full
 goal.
@@ -407,8 +389,8 @@ the task. It stops repeated unchanged tool failures and keeps unresolved failed 
 blocked. Required approvals and the configured turn limit still apply.
 
 Plans can carry required verification separately from their step state. `/status`
-shows every requirement's ID, state, and authority together with the saved plan
-and step detail. A required command receives credit only when its
+shows every requirement's ID, state, and authority, and `/plan` includes the same
+information with the step detail. A required command receives credit only when its
 exact persisted tool call succeeds on the same managed worktree content; an unrelated
 successful command cannot clear it. Later relevant changes make prior evidence stale.
 Absence checks use the typed `grep` result and pass only when the result is empty and
@@ -499,10 +481,10 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
   states are labeled in text rather than by color alone.
+- `/plan [prompt]` shows the current plan or starts a planning turn.
 - `/review` and `/diff` show the git workspace diff (`Show changes (diff)`).
-- `/continue <plan-id>` optionally continues that exact plan without retyping its goal.
-  Answering saved questions or saying `resume` in ordinary conversation also recovers
-  the interrupted operation; sets still require Submit.
+- `/questions [id]` lists or answers unresolved questions for the current plan.
+- `/continue <plan-id>` continues that exact plan without retyping its goal.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a
@@ -632,7 +614,7 @@ and reconciliation records appear as one outcome.
 For work with two or more plan steps, the TUI transcript shows a live checklist
 (`◐` in progress, `○` pending, `!` blocked, `×` stopped, and `✓` done).
 Plain chat prints short progress updates. Both follow saved plan state as steps
-change. A one-step plan does not add a checklist to the transcript; `/status`
+change. A one-step plan does not add a checklist to the transcript; `/plan`
 can still show it. Clear questions that nib can answer
 from its current context receive an answer without a plan. Execution continues
 without waiting for you to approve a generated plan. nib asks when the request
@@ -647,33 +629,17 @@ The details view shows the bounded redacted command, patch, or validated argumen
 scroll with Up/Down and press Escape to return without deciding. Type
 `y`/`yes` or `n`/`no` and press Enter, or move the selection and press Enter.
 Escape denies. While approval is open the footer reads `WAITING APPROVAL`. When nib
-asks an open question, the first row is selected with `› `. Up/Down select and
-Enter chooses the visible row; a digit moves selection without submitting. Typing
-text opens a visible editor, where digits and `Y` are literal text. Type something.
-always opens that editor. For a proposed answer, the question and proposal remain
-visible above Approve proposed answer, Reject and leave unanswered, and Instruct
-otherwise. Reject or Esc interrupts the operation without answering.
-
-For a set, question tabs show `☐` until drafted and `✔` afterward. Left/Right move
-between tabs and Submit, wrapping at the ends. Choosing an answer moves to the next
-missing question or Submit. Incomplete Submit focuses a missing question. A completed
-set returns answers only when you confirm Submit. Chat about this appears below a
-rule and opens a message editor for the whole call; it discards drafts and leaves
-all question obligations unresolved while nib continues discussing them.
-
-In plain, console, and one-shot mode, a choice number answers that question. The
-last numbered question row opens text entry, and the following row starts discussion.
-Exact `chat` starts discussion and exact `esc` interrupts. `text: 42` forces literal
-numeric text; `text: chat` and `text: esc` force those words as answers. Inside text
-or discussion editors, bare `chat` is ordinary text. Reopen the same session and
-answer conversationally, or say `resume`; a completed set still needs Submit.
+asks an open question, type a custom answer or move to the numbered suggestions.
+Bare numbers select one-based options; `text: 42` forces literal text. For a proposed
+answer, the question and proposal remain visible above Approve, Reject, and Instruct
+otherwise. Reject and Escape leave it unresolved; approving the answer never grants
+tool permission. Recover later with `/questions [id]` and `/continue <plan-id>`.
 While a question or approval owns the TUI input, F2 opens a prompt-local command
 editor for read-only inspection or an exact live control; Escape returns to the
 unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mode,
 `:command /status` provides the corresponding prompt-local command entry, while
 `text: :command /status` submits that text literally as a question answer.
-The question list footer reads `Up/Down select · Enter choose · Esc interrupt
-operation`; the editor footer reads `Enter submit · Esc interrupt operation`.
+While a question is open the footer reads `WAITING QUESTION`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
 when idle and queues when a turn is running.
 

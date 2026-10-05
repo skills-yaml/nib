@@ -1448,20 +1448,31 @@ fn live_input_distinguishes_queue_and_exact_run_steering() {
 }
 
 #[test]
-fn removed_interactive_commands_are_not_advertised_or_parsed() {
-    for command in [
-        "/plan",
-        "/plan inspect",
-        "/questions",
-        "/questions exact-id",
-    ] {
-        assert!(parse_interactive_command(command).is_err());
-        assert!(interactive_completions(command).is_empty());
-    }
-    let help = interactive_help();
-    assert!(!help.contains("/plan"));
-    assert!(!help.contains("/questions"));
+fn plan_prompt_returns_a_typed_plan_mode_effect() {
+    let directory = tempdir().expect("project");
+    let store = SessionStore::at_dir(directory.path().join("sessions"));
+    let session = store.try_create_session().expect("session");
+
+    let effect = execute_interactive_command(
+        InteractiveCommand::Plan {
+            prompt: Some("inspect without mutation".to_string()),
+        },
+        directory.path(),
+        &store,
+        &session.id,
+    )
+    .expect("plan effect");
+
+    assert_eq!(
+        effect,
+        InteractiveEffect::RunAgent {
+            goal: "inspect without mutation".to_string(),
+            mode: InteractiveAgentMode::Plan,
+        }
+    );
+    assert_eq!(InteractiveAgentMode::Execute.as_str(), "execute");
     assert_eq!(InteractiveAgentMode::Plan.as_str(), "plan");
+    assert_eq!(InteractiveAgentMode::Compact.as_str(), "compact");
 }
 
 #[test]

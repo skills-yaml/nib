@@ -132,10 +132,9 @@ pub fn format_session_status(
         &config.approvals,
     );
     Ok(format!(
-        "{header}\n{status}\n{}\n{}\n{}",
+        "{header}\n{status}\n{}\n{}",
         format_effective_execution_posture(&posture),
         format_verification_status(session.as_ref(), store.public_sensitive_values()),
-        format_current_plan(session.as_ref(), store.public_sensitive_values()),
     ))
 }
 
@@ -983,6 +982,13 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
                 Some(arguments.join(" "))
             },
         },
+        "plan" => InteractiveCommand::Plan {
+            prompt: if arguments.is_empty() {
+                None
+            } else {
+                Some(arguments.join(" "))
+            },
+        },
         "review" if arguments.is_empty() => InteractiveCommand::Review,
         "diff" if arguments.is_empty() => InteractiveCommand::Diff,
         "compact" if arguments.is_empty() => InteractiveCommand::Compact,
@@ -1015,6 +1021,9 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         },
         "skills" => InteractiveCommand::Skills(parse_skill_command(&arguments)?),
         "mcp" => InteractiveCommand::Mcp(parse_mcp_command(&arguments)?),
+        "questions" if arguments.len() <= 1 => InteractiveCommand::Questions {
+            id: arguments.first().cloned(),
+        },
         "continue" if arguments.len() == 1 => InteractiveCommand::Continue {
             plan_id: arguments[0].clone(),
         },
@@ -1131,6 +1140,21 @@ pub fn execute_interactive_command_in_state(
             project_root,
             &mode,
         )?)),
+        InteractiveCommand::Plan { prompt: None } => {
+            let session = store
+                .load_result(session_id)
+                .map_err(|error| format!("failed to load session {session_id}: {error}"))?;
+            Ok(InteractiveEffect::Output(format_current_plan(
+                session.as_ref(),
+                store.public_sensitive_values(),
+            )))
+        }
+        InteractiveCommand::Plan {
+            prompt: Some(prompt),
+        } => Ok(InteractiveEffect::RunAgent {
+            goal: prompt,
+            mode: InteractiveAgentMode::Plan,
+        }),
         InteractiveCommand::Review | InteractiveCommand::Diff => {
             Ok(InteractiveEffect::Output(bounded_session_workspace_diff(
                 project_root,
@@ -1259,10 +1283,70 @@ pub fn execute_interactive_command_in_state(
                 "Successfully removed MCP server '{name}'."
             )))
         }
+        InteractiveCommand::Questions { id } => {
+            load_questions_effect(store, session_id, id.as_deref())
+        }
         InteractiveCommand::Continue { plan_id } => {
             load_continue_plan_effect(store, session_id, &plan_id)
         }
     }
+}
+
+pub(crate) fn load_questions_effect(
+    store: &SessionStore,
+    session_id: &str,
+    invocation_id: Option<&str>,
+) -> Result<InteractiveEffect, String> {
+    let session = store
+        .load_result(session_id)
+        .map_err(|error| format!("failed to load session {session_id}: {error}"))?
+        .ok_or_else(|| format!("session {session_id} was not found"))?;
+    let active_plan = session.plan.as_ref().map(|plan| plan.id.as_str());
+    let unresolved: Vec<&crate::session::ClarificationRecord> = session
+        .clarifications
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                crate::session::ClarificationStatus::Pending
+                    | crate::session::ClarificationStatus::Unresolved
+            ) && record.plan_id.as_deref() == active_plan
+        })
+        .collect();
+    let Some(invocation_id) = invocation_id else {
+        return Ok(InteractiveEffect::Output(format_unresolved_questions(
+            &unresolved,
+        )));
+    };
+    let record = unresolved
+        .iter()
+        .find(|record| record.invocation_id.to_string() == invocation_id)
+        .ok_or_else(|| format!("no unresolved question {invocation_id} for the current plan"))?;
+    Ok(InteractiveEffect::OpenQuestion {
+        invocation_id: record.invocation_id.to_string(),
+        question: record.question.clone(),
+        proposed_answer: record.proposed_answer.clone(),
+        options: record.options.clone(),
+    })
+}
+
+pub(crate) fn format_unresolved_questions(
+    records: &[&crate::session::ClarificationRecord],
+) -> String {
+    if records.is_empty() {
+        return "No unresolved questions for the current plan. Use /questions <id> with an exact invocation id.".to_string();
+    }
+    let mut output = String::from("Unresolved questions:");
+    for record in records {
+        output.push_str(&format!(
+            "\n  {}  [{}]  {}",
+            record.invocation_id,
+            format!("{:?}", record.status).to_ascii_lowercase(),
+            bounded_status_value(&record.question)
+        ));
+    }
+    output.push_str("\nAnswer with /questions <id>, then /continue <plan-id> to resume.");
+    output
 }
 
 pub(crate) fn load_continue_plan_effect(
@@ -1303,7 +1387,7 @@ pub(crate) fn load_continue_plan_effect(
     }
     if session.has_unresolved_clarification(Some(&plan.id)) {
         return Err(
-            "unresolved questions still block this plan; answer here or say resume to reopen the saved form"
+            "unresolved questions still block this plan; answer them with /questions first"
                 .to_string(),
         );
     }
@@ -1338,42 +1422,95 @@ pub(crate) fn persist_recovered_question_response(
     answer: &str,
     approved_proposal: bool,
 ) -> Result<String, String> {
-    let session = store
-        .load_result(session_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the clarification session was not found".to_string())?;
-    let records = session
-        .clarifications
-        .iter()
-        .filter(|record| record.invocation_id.to_string() == invocation_id)
-        .collect::<Vec<_>>();
-    let record = records
-        .first()
-        .ok_or_else(|| "the question was not found".to_string())?;
-    if record.status == crate::session::ClarificationStatus::Answered {
-        return Err("question was already answered".to_string());
-    }
-    if records.len() != 1 {
-        return Err("a question set requires every draft and explicit Submit".to_string());
-    }
     let answer = if approved_proposal {
         answer
     } else {
         answer.trim()
     };
-    crate::session::persist_recovered_form_answers(
-        store,
-        session_id,
-        record.invocation_id,
-        &[super::QuestionAnswer {
-            answer: bounded_public_text(answer, store.public_sensitive_values(), 20_000, true),
-            source: if approved_proposal {
-                super::QuestionAnswerSource::ApprovedProposal
-            } else {
-                super::QuestionAnswerSource::Text
-            },
-        }],
-    )
+    if answer.trim().is_empty() {
+        return Err("recovered question answer cannot be empty".to_string());
+    }
+    // UI-local idleness is not sufficient because another process may own this
+    // session. Hold the authoritative run lease across the identity re-read and
+    // durable answer publication.
+    let run_lease = store
+        .try_acquire_run_lease(session_id)
+        .map_err(|error| error.to_string())?;
+    run_lease.verify().map_err(|error| error.to_string())?;
+    let result = store
+        .update_session(session_id, |session| {
+            let active_plan = session
+                .plan
+                .as_ref()
+                .map(|plan| plan.id.clone())
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(
+                        "recovered questions require an active plan".to_string(),
+                    )
+                })?;
+            let index = session
+                .clarifications
+                .iter()
+                .position(|record| record.invocation_id.to_string() == invocation_id)
+                .ok_or_else(|| {
+                    crate::session::SessionError::InvalidMutation(format!(
+                        "question {invocation_id} was not found"
+                    ))
+                })?;
+            let record = &session.clarifications[index];
+            if record.plan_id.as_deref() != Some(active_plan.as_str()) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "question does not belong to the current plan".to_string(),
+                ));
+            }
+            if record.status == crate::session::ClarificationStatus::Answered {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "question was already answered".to_string(),
+                ));
+            }
+            if approved_proposal && record.proposed_answer.as_deref() != Some(answer) {
+                return Err(crate::session::SessionError::InvalidMutation(
+                    "the proposed answer changed; reopen the question".to_string(),
+                ));
+            }
+            let event_index = session.events.len();
+            session.events.push(SessionEvent {
+                index: event_index,
+                kind: "human_question_answer_received".to_string(),
+                details: serde_json::json!({
+                    "invocation_id": invocation_id,
+                    "answer": answer,
+                    "recovered": true,
+                    "decision": if approved_proposal { "approved_proposal" } else { "answered" },
+                }),
+                timestamp: Some(Utc::now()),
+            });
+            session
+                .human_intent
+                .push(crate::session::HumanIntentRecord {
+                    kind: crate::session::HumanIntentKind::QuestionAnswer,
+                    text: answer.to_string(),
+                    source_message_index: None,
+                    source_event_index: Some(event_index),
+                });
+            let record = &mut session.clarifications[index];
+            record.status = crate::session::ClarificationStatus::Answered;
+            record.answer = Some(answer.to_string());
+            record.outcome = Some(
+                if approved_proposal {
+                    "approved_proposal"
+                } else {
+                    "answered"
+                }
+                .to_string(),
+            );
+            record.reason = Some("recovered via /questions".to_string());
+            record.answer_event_index = Some(event_index);
+            Ok(active_plan)
+        })
+        .map_err(|error| error.to_string());
+    drop(run_lease);
+    result
 }
 
 pub fn set_active_model(project_root: &Path, model: &str) -> Result<String, String> {

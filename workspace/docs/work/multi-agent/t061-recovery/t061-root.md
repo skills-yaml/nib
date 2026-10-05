@@ -19,11 +19,20 @@ scope:
 
 ## Assignment
 
-Implement T061 conversational recovery, interactive command removal, user documentation, and focused gate coverage under T067 AC-6 through AC-9.
+Implement T061 conversational recovery APIs and focused gate coverage under T067 AC-6, AC-8 and AC-9, providing prerequisites for AC-7. Final command removal and documentation reconcile after frontend integration through the published follow-up task.
 
 ## Actions
 
-Created an isolated worktree through an atomic peer claim. Removed the two interactive slash commands from registration, parsing, typed dispatch, and help; preserved plan inspection in status. Expanded the focused gate to include shared form modules. Added conversational recovery and explicit editor-mode effects, lease-fenced legacy bridges, and behavioral fixtures for atomic Submit, ambiguity, run eligibility, trusted discussion and restart. Updated the guide for tabs, sources, discussion and natural recovery.
+Created an isolated worktree through an atomic peer claim. Added conversational
+recovery/editor effects and behavioral fixtures for atomic Submit, ambiguity,
+terminal eligibility, trusted discussion and restart. Expanded the focused gate
+to select all shared interaction modules. Independent source review found reserved
+input precedence and successful answer commit reporting defects; both were fixed
+with regressions and the revised candidate was rereviewed. Preserved the complete
+command/documentation draft in committed history; split its final reconciliation
+into a published follow-up to avoid a cyclic frontend/API integration dependency.
+No intermediate internal revision is delivered to the shared branches.
+
 
 ## Validation
 

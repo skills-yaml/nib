@@ -158,6 +158,16 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         },
     ),
     spec(
+        "plan",
+        &[],
+        "/plan [prompt]",
+        "Show the current plan or request planning",
+        InteractiveArgumentSchema::OptionalText,
+        InteractiveMutability::Runtime,
+        InteractiveWorkerPolicy::RequiresIdle,
+        NO_COMPLETION,
+    ),
+    spec(
         "review",
         &[],
         "/review",
@@ -321,6 +331,16 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         InteractiveArgumentSchema::None,
         InteractiveMutability::ReadOnly,
         InteractiveWorkerPolicy::ReadOnly,
+        NO_COMPLETION,
+    ),
+    spec(
+        "questions",
+        &[],
+        "/questions [id]",
+        "List or answer unresolved questions for the active plan",
+        InteractiveArgumentSchema::OptionalSingle,
+        InteractiveMutability::Session,
+        InteractiveWorkerPolicy::RequiresIdle,
         NO_COMPLETION,
     ),
     spec(
@@ -721,6 +741,7 @@ pub enum InteractiveCommand {
     Context { details: bool },
     Providers,
     Permissions { selection: Option<String> },
+    Plan { prompt: Option<String> },
     Review,
     Diff,
     Compact,
@@ -737,6 +758,7 @@ pub enum InteractiveCommand {
     Model { selection: Option<String> },
     Skills(SkillCommand),
     Mcp(McpCommand),
+    Questions { id: Option<String> },
     Continue { plan_id: String },
 }
 
@@ -749,6 +771,7 @@ impl InteractiveCommand {
             Self::Context { .. } => "context",
             Self::Providers => "providers",
             Self::Permissions { .. } => "permissions",
+            Self::Plan { .. } => "plan",
             Self::Review => "review",
             Self::Diff => "diff",
             Self::Compact => "compact",
@@ -765,6 +788,7 @@ impl InteractiveCommand {
             Self::Model { .. } => "model",
             Self::Skills(_) => "skills",
             Self::Mcp(_) => "mcp",
+            Self::Questions { .. } => "questions",
             Self::Continue { .. } => "continue",
         };
         find_command_spec(name).expect("every typed interactive command has registry metadata")
@@ -777,6 +801,7 @@ pub fn command_effect_class(command: &InteractiveCommand) -> CommandEffectClass 
         InteractiveCommand::Help
         | InteractiveCommand::Status
         | InteractiveCommand::Context { .. }
+        | InteractiveCommand::Plan { prompt: None }
         | InteractiveCommand::Ps => CommandEffectClass::ReadOnlyInspection,
         InteractiveCommand::Stop { task_id: Some(_) } => CommandEffectClass::LiveControl,
         _ => CommandEffectClass::RequiresIdle,
@@ -1391,20 +1416,20 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
         "context_compacted" => ("Context compacted", "Older context was summarized; raw session history remains saved."),
         "context_unchanged" => ("Context unchanged", "No compression was needed or available. The session remains ready."),
         "cancelled_by_user" => ("Run cancelled", "Active work stopped after reconciliation. Check /status before continuing."),
-        "waiting_for_user_input" | "unresolved_clarification" => ("Waiting for your answer", "Dependent work is paused. Answer here or say resume to reopen the saved form."),
+        "waiting_for_user_input" | "unresolved_clarification" => ("Waiting for your answer", "Dependent work is paused. Use /questions to answer, then /continue <plan-id>."),
         "model_refusal" => ("Model declined the request", "No further work ran. Rephrase the request or select a different model."),
         "empty_model_response" => ("Model returned no answer", "No result was produced. Retry the request or inspect /status."),
         "tool_execution_failed" => ("Tool failed", "The current work is incomplete. Inspect the tool result and give corrected instructions."),
         "repeated_tool_failure" => ("Repeated tool failure", "The run stopped after unchanged failures. Inspect the last tool result before retrying."),
-        "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /status and resolve its blocker."),
-        "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /status and run or repair the exact check."),
-        "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /status before requesting more work."),
+        "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /plan and resolve its blocker."),
+        "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /plan and run or repair the exact check."),
+        "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /plan and /status before requesting more work."),
         "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the same plan."),
         "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the same plan."),
         "tool_scope_outside_worktree" => ("Tool path outside project", "A proposed tool targeted a path outside the active worktree. Choose a project path and retry."),
         "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning. Finish or resolve the current plan, or start a new session."),
         "planning_required_active_run" => ("Run is still active", "Wait for reconciliation or cancel the active run before starting another request."),
-        "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /status before continuing."),
+        "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /plan before continuing."),
         "plan_approval_denied" => ("Plan approval declined", "No plan actions were run. Revise the request or start a new plan."),
         "local_error" => (
             "Run stopped",
