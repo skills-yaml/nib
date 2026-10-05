@@ -3,6 +3,7 @@ mod governance;
 
 use serde_json::json;
 use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 
 fn write(root: &Path, name: &str, text: &str) {
@@ -38,6 +39,159 @@ fn current_repository_satisfies_every_workspace_module() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     governance::validate(root, "all").expect("current repository");
     assert!(governance::validate(root, "unknown").is_err());
+}
+
+fn fixture_git(root: &Path, args: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_ATTR_SOURCE")
+        .env_remove("GIT_SHALLOW_FILE")
+        .env_remove("GIT_NAMESPACE")
+        .output()
+        .expect("Git fixture command");
+    assert!(
+        output.status.success(),
+        "Git fixture {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn shallow_source_fixture(source: &Path, revision: &str) -> TempDir {
+    let shallow_source = tempfile::tempdir().expect("shallow source fixture");
+    fixture_git(shallow_source.path(), &["init", "--quiet"]);
+    fixture_git(
+        shallow_source.path(),
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--depth=1",
+            "--update-shallow",
+            source.to_str().expect("source path"),
+            revision,
+        ],
+    );
+    fixture_git(
+        shallow_source.path(),
+        &["checkout", "--quiet", "--detach", revision],
+    );
+    assert_eq!(
+        String::from_utf8(fixture_git(
+            shallow_source.path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ))
+        .expect("source shallow status")
+        .trim(),
+        "true"
+    );
+    shallow_source
+}
+
+#[test]
+fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = tempfile::tempdir().expect("checkout fixture");
+    let revision =
+        String::from_utf8(fixture_git(source, &["rev-parse", "HEAD"])).expect("source revision");
+    let shallow_source = shallow_source_fixture(source, revision.trim());
+    fixture_git(checkout.path(), &["init", "--quiet"]);
+    fixture_git(checkout.path(), &["config", "core.autocrlf", "true"]);
+    fixture_git(checkout.path(), &["config", "core.eol", "crlf"]);
+    fixture_git(
+        checkout.path(),
+        &[
+            "config",
+            "core.symlinks",
+            if cfg!(windows) { "false" } else { "true" },
+        ],
+    );
+    fixture_git(
+        checkout.path(),
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--update-shallow",
+            shallow_source.path().to_str().expect("shallow source path"),
+            revision.trim(),
+        ],
+    );
+    fixture_git(
+        checkout.path(),
+        &["checkout", "--quiet", "--detach", revision.trim()],
+    );
+    assert_eq!(
+        String::from_utf8(fixture_git(checkout.path(), &["rev-parse", "HEAD"]))
+            .expect("checkout revision")
+            .trim(),
+        revision.trim()
+    );
+    assert_eq!(
+        String::from_utf8(fixture_git(
+            checkout.path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ))
+        .expect("checkout shallow status")
+        .trim(),
+        "true"
+    );
+
+    let control = std::fs::read(checkout.path().join("README.md")).expect("ordinary text");
+    assert!(
+        control.windows(2).any(|pair| pair == b"\r\n"),
+        "ordinary text must exercise CRLF conversion"
+    );
+    governance::validate(checkout.path(), "all").expect("forced-CRLF full governance");
+
+    let package_file = "workspace/instructions/standards/workspace-docs/AGENT_MIGRATION.md";
+    let path = checkout.path().join(package_file);
+    let original = std::fs::read(&path).expect("upstream bytes");
+    let mut changed = original.clone();
+    changed.push(b'\n');
+    std::fs::write(&path, changed).expect("tamper upstream bytes");
+    assert_eq!(
+        governance::validate(checkout.path(), "structure")
+            .expect_err("raw integrity must reject changed bytes"),
+        "modified source package: AGENT_MIGRATION.md"
+    );
+    std::fs::write(path, original).expect("restore upstream bytes");
+
+    write(
+        checkout.path(),
+        ".gitattributes",
+        "# Fixture removes checkout protection.\n",
+    );
+    for name in ["AGENTS.md", package_file] {
+        std::fs::remove_file(checkout.path().join(name)).expect("remove protected checkout");
+    }
+    fixture_git(
+        checkout.path(),
+        &["checkout-index", "--force", "--", "AGENTS.md", package_file],
+    );
+    let unprotected = std::fs::read(checkout.path().join(package_file)).expect("unprotected bytes");
+    assert!(unprotected.windows(2).any(|pair| pair == b"\r\n"));
+    assert!(
+        governance::validate(checkout.path(), "all").is_err(),
+        "unprotected CRLF checkout must fail governance"
+    );
 }
 
 #[test]

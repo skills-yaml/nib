@@ -39,7 +39,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
 | [T062](test/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | test | Confirmed development integration at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; exact reviewed native/hosted gates passed; main promotion pending. |
 | [T063](test/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | test | Strict Git-status isolation integrated at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; independent review and native/hosted gates passed; main promotion pending. |
-| [T064](development/release-delivery/T064_interrupt_smoke_input_lifetime.md) | release-delivery | development | Active bounded offline interrupt-feeder repair; exact native macOS qualification required. |
+| [T064](test/release-delivery/T064_interrupt_smoke_input_lifetime.md) | release-delivery | test | Confirmed integration at 3cc4550b7d807f39a5fecf07196ee2b703503b24; repaired native Linux/macOS qualification passed; main all-platform delivery pending. |
 | [T001](done/agent-runtime/T001_implement_core_agent_tools.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T002](done/agent-runtime/T002_agent_framework_runtime_and_orchestration_engine.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T005](done/agent-runtime/T005_full_runtime_state_machine_and_lifecycle.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
@@ -110,6 +110,8 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [FT-014](done/tools-sandbox/ft_014_smart_approval_classifier.md) | tools-sandbox | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [FT-017](done/tools-sandbox/ft_017_managed_process_supervisor.md) | tools-sandbox | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
+| [T065](development/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | development | Active checkout-byte repair after Windows SHA-256 failure; full forced-CRLF governance and revised Windows qualification required. |
+| [T066](development/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | development | Active confirmed failure-injection cleanup repair; native Windows requalification and verified delivery required. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact

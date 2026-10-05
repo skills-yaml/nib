@@ -234,7 +234,7 @@ exact CI-qualified merge revision above; their complete trees are identical.
 Frozen task verify passed with required native bwrap: all 1265 library tests,
 93 CLI tests, every integration suite and doctests. Serialized peer integration
 ac8083b768315de65f764dc80a5e3af5170b8471 also passed every registered native gate.
-Hosted CI37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
+Hosted CI 37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
 exact-source release-binary qualification, native interaction and managed-process
 smokes. Both qualified binaries identify this exact development revision.
 
@@ -242,3 +242,73 @@ The remote development ref and PR42 merged state confirm the actual event.
 Main promotion and Windows qualification remain required; publication is separate.
 The repaired ten-case native Git-status suite passed before the frozen full run,
 and all independent findings are resolved. Historical done records are unchanged.
+
+## Qualification Gate Repair
+
+The development push CI 37338656478 first attempt failed macOS interruption
+smoke: Ctrl+C followed by feeder EOF was observed as Ctrl+D, and the child
+reported waiting_for_user_input/status 1 instead of cancellation/status 130.
+Independent review confirmed the offline feeder ownership race. Linked
+[T064](../release-delivery/T064_interrupt_smoke_input_lifetime.md)
+adds bounded waits for child cancellation before closing stdin; all existing
+assertions remain. A superseded diagnostic rerun was canceled after retaining
+the original failure, without treating an intermittent pass as a repair.
+
+Main CI 37339187764 passed Linux/macOS but Windows timed out at the existing
+15-second final-turn tool-start readiness bound (1165 library tests passed).
+This establishes a readiness timeout, not a confirmed runtime root cause.
+The unchanged fixture reruns on the repaired candidate; promotion remains
+blocked until fresh required native and hosted qualification passes.
+
+## Development Publication Evidence
+
+Release Artifacts 37338656596 passed all four builds and publication. The public
+development-latest nib-release.json binds version 0.2.0 to exact development
+commit 8bc243d00ec3ec82e7287c704fcdd897ff78204a, published 2026-10-05T16:26:43Z.
+Production still reports 0.1.0 at 15123a3ef275458efc87200400219aeacc3e9ea9.
+The ledger records the released development event separately from main delivery.
+T061 membership is accepted-contract documentation only; runtime implementation
+and acceptance delivery remain pending and require a fresh atomic reservation.
+
+## Repaired Qualification Development Integration
+
+PR44 merged exact CI-qualified development revision
+`3cc4550b7d807f39a5fecf07196ee2b703503b24` on 2026-10-05T17:35:20Z.
+CI 37344993093 passed Linux/macOS full suites, exact binary qualification,
+84.26 percent coverage and repaired native interruption smokes. Frozen
+combined task verify passed at 9528c7ce80d68480914acea842b17a9521b38e30;
+all 1265 library and 93 CLI tests, integration suites and doctests passed with
+native bwrap required. Main qualification and completion remain pending.
+
+## Windows Checkout Qualification Follow-up
+
+Main CI 37344943162 passed Linux/macOS, Windows library (1166), CLI (93),
+runtime and other integration suites, exact release qualification and native
+smokes. The prior tool-start readiness timeout did not repeat; its root cause
+remains unconfirmed. The final Workspace positive fixture failed raw upstream
+SHA-256 integrity on AGENT_MIGRATION.md after checkout conversion. Linked
+[T065](../../development/workspace-governance/T065_preserve_workspace_checkout_bytes.md)
+preserves generated-context/Workspace LF and exact upstream package bytes,
+with a real forced-CRLF full-governance fixture and unchanged raw integrity
+validator. Independent review approved exact source bcbd8ab and combined
+656099c; all eight native Workspace cases, five documentation cases and both
+Task contracts passed. Renewed main CI 37354295208 and development CI
+37354351025 exercise the reviewed source; Windows early canonical governance
+has passed, while remaining full acceptance and main delivery are pending.
+
+Release Artifacts 37349551414 also passed all builds/publication for repaired
+development revision 3cc4550b7d807f39a5fecf07196ee2b703503b24. The public
+manifest independently confirms version 0.2.0 at that commit, published
+2026-10-05T17:46:17Z. This updates development publication only.
+
+## Delegation Fixture Isolation Follow-up
+
+Superseded main CI 37354295208 Windows failed the owner boundary fixture and
+then a later deadline fixture received its unconsumed global injection (1164
+library cases passed, two failed). The first actual error was not reported, so
+its cause is unconfirmed. Linked
+[T066](../../development/build-quality/T066_scoped_delegation_failure_fixture.md)
+adds test-only scoped cleanup, observable guard tests, consumption/error
+diagnostics and the existing fixture setup guard, preserving production and
+deadline-specific budgets/assertions. New full native and hosted qualification
+are required; earlier green subsets do not establish final completion.
