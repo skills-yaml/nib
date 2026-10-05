@@ -447,7 +447,7 @@ pub(crate) fn model_action_for_key(
 impl PendingQuestion {
     pub(crate) fn new(request: TuiQuestionRequest) -> Self {
         let state = crate::interactive::QuestionFormState::new(request.form.clone(), &request.initial_answers);
-        Self { request, recovery: None, state, description_scroll: 0 }
+        Self { request, recovery: None, state, description_scroll: 0, subject_scroll: 0 }
     }
 
     pub(crate) fn recovered(request: TuiQuestionRequest, target: RecoveredQuestionTarget) -> Self {
@@ -460,9 +460,9 @@ impl PendingQuestion {
 pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Option<crate::interactive::QuestionFormOutcome> {
     use crate::interactive::QuestionFormEvent as Input;
     match code {
-        KeyCode::PageDown if question.state.editor.is_none() => { question.description_scroll = question.description_scroll.saturating_add(4); return None; }
-        KeyCode::PageUp if question.state.editor.is_none() => { question.description_scroll = question.description_scroll.saturating_sub(4); return None; }
-        _ => question.description_scroll = 0,
+        KeyCode::PageDown => { question.description_scroll = question.description_scroll.saturating_add(4); question.subject_scroll = question.subject_scroll.saturating_add(1); return None; }
+        KeyCode::PageUp => { question.description_scroll = question.description_scroll.saturating_sub(4); question.subject_scroll = question.subject_scroll.saturating_sub(1); return None; }
+        _ => { question.description_scroll = 0; question.subject_scroll = 0; },
     }
     let input = match code {
         KeyCode::Esc => Input::Interrupt,

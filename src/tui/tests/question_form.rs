@@ -149,7 +149,7 @@ fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
     let mut pending = None;
     let mut worker = None;
     let mut timeline = ActiveTimeline::load(&store, &session_id).unwrap();
-    start_tui_conversation("resume".to_string(), &scope, &store, &session_id, &mut pending, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx).unwrap();
+    start_tui_conversation("resume".to_string(), QuestionConversationContext { scope: &scope, store: &store, session_id: &session_id, pending: &mut pending, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }).unwrap();
     assert!(worker.is_none());
     assert_eq!(pending.as_ref().unwrap().recovery.as_ref().unwrap().invocation_id, invocation_id);
     assert!(store.load(&session_id).unwrap().clarifications[0].answer.is_none());
@@ -167,4 +167,50 @@ fn long_description_scroll_keeps_question_and_selected_label_visible() {
     terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you  context", &Composer::default(), None, Some(&pending))).unwrap();
     let rendered = buffer_text(terminal.backend().buffer());
     for expected in ["Are prices final?", "› 1. Final", "Description line 39"] { assert!(rendered.contains(expected), "{rendered}"); }
+}
+
+#[test]
+fn narrow_subject_scroll_exposes_question_and_proposal_tails_before_exact_approval() {
+    let (reply, mut response) = oneshot::channel();
+    let proposal = format!("{}\nPROPOSAL TAIL", "A long proposed answer with full content. ".repeat(60));
+    let mut request = TuiQuestionRequest::single(
+        format!("Inspect this question. {}\nQUESTION TAIL", "Long question content. ".repeat(60)),
+        Some(proposal.clone()), vec!["Hidden option".to_string()], reply,
+    );
+    request.form.header = Some("Review proposal".to_string());
+    let mut pending = Some(PendingQuestion::new(request));
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    let mut saw_question_tail = false;
+    let mut saw_proposal_tail = false;
+    for _ in 0..200 {
+        terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you context", &Composer::default(), None, pending.as_ref())).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        saw_question_tail |= rendered.contains("QUESTION TAIL");
+        saw_proposal_tail |= rendered.contains("PROPOSAL TAIL");
+        assert!(rendered.contains("Inspect this question."), "{rendered}");
+        assert!(rendered.contains("› 1. Approve proposed answer"), "{rendered}");
+        assert!(rendered.contains("Esc interrupt operation"), "{rendered}");
+        question_action_for_key(pending.as_mut().unwrap(), KeyCode::PageDown);
+    }
+    assert!(saw_question_tail && saw_proposal_tail, "Both accepted fields must be fully inspectable");
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    assert_eq!(response.try_recv().unwrap(), form_answer(proposal.clone(), crate::interactive::QuestionAnswerSource::ApprovedProposal));
+}
+
+#[test]
+fn subject_scroll_preserves_visible_editor_and_input_error() {
+    let (reply, _response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions[0].question = "A long question. ".repeat(100);
+    request.form.questions[0].proposed_answer = Some("A long proposal. ".repeat(100));
+    let mut pending = PendingQuestion::new(request);
+    pending.state.open_editor(crate::interactive::QuestionEditorKind::Answer);
+    pending.state.error = Some("Empty answer retries".to_string());
+    question_action_for_key(&mut pending, KeyCode::PageDown);
+    let (rows, visible) = question_composer_rows(&pending, 40);
+    assert!(visible);
+    assert!(rows.len() <= 6, "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("Your answer:")));
+    assert!(rows.iter().any(|row| row.contains("Input error:")));
+    assert!(rows[1].contains("A long question."));
 }

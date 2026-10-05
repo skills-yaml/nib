@@ -61,15 +61,13 @@ pub(crate) fn draw_loop(
 
     if welcome.consent_directory.is_none() {
         if let Some(goal) = pending_goal.take() {
-            start_tui_conversation(goal, &agent_profile_scope, &store, &active_session_id,
-                &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx)?;
+            start_tui_conversation(goal, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx })?;
         }
     }
 
     let loop_result = loop {
         while let Ok(effect) = recovery_rx.try_recv() {
-            apply_question_recovery_effect(effect, &agent_profile_scope, &store, &active_session_id,
-                &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx)?;
+            apply_question_recovery_effect(effect, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx })?;
         }
 
         drain_stream_events_bounded(&mut stream_rx, &mut timeline, 64);
@@ -431,8 +429,7 @@ pub(crate) fn draw_loop(
                                     timeline
                                         .push_status("Allowed work in this directory.".to_string());
                                     if let Some(goal) = released_goal {
-                                        if let Err(error) = start_tui_conversation(goal, &agent_profile_scope, &store, &active_session_id,
-                                            &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx) {
+                                        if let Err(error) = start_tui_conversation(goal, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }) {
                                             break Err(error);
                                         }
                                     }
@@ -1150,8 +1147,7 @@ pub(crate) fn draw_loop(
                                     &mut chrome_generation,
                                 );
                                 timeline.push_status(format!("[user] {goal}"));
-                                if let Err(error) = start_tui_conversation(goal.clone(), &agent_profile_scope, &store, &active_session_id,
-                                    &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx) {
+                                if let Err(error) = start_tui_conversation(goal.clone(), QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }) {
                                     composer.set_text(goal);
                                     timeline.push_status(format!("[recovery error] {error}"));
                                 }

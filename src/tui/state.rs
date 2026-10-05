@@ -924,6 +924,7 @@ pub(crate) struct PendingQuestion {
     pub(crate) recovery: Option<RecoveredQuestionTarget>,
     pub(crate) state: crate::interactive::QuestionFormState,
     pub(crate) description_scroll: usize,
+    pub(crate) subject_scroll: usize,
 }
 
 pub(crate) struct RecoveredQuestionTarget {

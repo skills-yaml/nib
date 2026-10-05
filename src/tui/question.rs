@@ -112,48 +112,50 @@ pub(crate) fn question_composer_rows(question: &PendingQuestion, width: u16) -> 
     let state = &question.state;
     let mut rows = Vec::new();
     if let Some(header) = &state.form.header { rows.push(truncate_display_cells(header, usize::from(width))); }
+    let mut details = Vec::new();
     if let Some(current) = state.current_question() {
-        let has_proposal = current.proposed_answer.is_some();
-        let limit = if state.editor.is_some() { 1 } else if has_proposal { 2 } else { 4 };
-        append_question_subject_rows(&mut rows, &format!("> {}", current.question), width, limit);
+        let mut subject = wrapped_display_rows(&format!("> {}", current.question), width.max(1));
+        rows.push(subject.remove(0));
+        details.extend(subject);
         if let Some(proposal) = &current.proposed_answer {
-            append_question_subject_rows(&mut rows, &format!("Proposed answer: {proposal}"), width, if state.editor.is_some() { 1 } else { 2 });
+            details.extend(wrapped_display_rows(&format!("Proposed answer: {proposal}"), width.max(1)));
         }
     } else { rows.push("> Submit all question answers".to_string()); }
-    if let Some(editor) = &state.editor {
+    let editor_rows = state.editor.as_ref().map(|editor| {
         let name = if editor.kind == crate::interactive::QuestionEditorKind::Discussion { "Chat about this" } else { "Your answer" };
-        let editor_rows = wrapped_display_rows(&format!("{name}: {}", editor.text), width.max(1));
-        rows.extend(editor_rows.into_iter().rev().take(2).collect::<Vec<_>>().into_iter().rev());
+        wrapped_display_rows(&format!("{name}: {}", editor.text), width.max(1)).into_iter().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+    }).unwrap_or_default();
+    let fixed = rows.len() + editor_rows.len() + usize::from(state.error.is_some());
+    let marker = usize::from(state.editor.is_none() && details.len() > 6usize.saturating_sub(fixed));
+    let capacity = 6usize.saturating_sub(fixed + marker).max(1);
+    let offset = question.subject_scroll.min(details.len().saturating_sub(capacity));
+    rows.extend(details.iter().skip(offset).take(capacity).cloned());
+    if marker > 0 {
+        rows.push(truncate_display_cells(&format!("Details {}/{} · PgUp/PgDn scroll", offset + 1, details.len()), usize::from(width)));
     }
+    rows.extend(editor_rows);
     if let Some(error) = &state.error { rows.push(truncate_display_cells(&format!("Input error: {error}"), usize::from(width))); }
     (rows, state.editor.is_some())
 }
 
-fn append_question_subject_rows(rows: &mut Vec<String>, text: &str, width: u16, limit: usize) {
-    let wrapped = wrapped_display_rows(text, width.max(1));
-    let truncated = wrapped.len() > limit;
-    rows.extend(wrapped.into_iter().take(limit));
-    if truncated {
-        if let Some(last) = rows.last_mut() {
-            *last = format!("{}…", truncate_display_cells(last, usize::from(width).saturating_sub(1)));
-        }
-    }
+pub(crate) struct QuestionConversationContext<'a> {
+    pub(crate) scope: &'a TuiAgentProfileScope,
+    pub(crate) store: &'a SessionStore,
+    pub(crate) session_id: &'a str,
+    pub(crate) pending: &'a mut Option<PendingQuestion>,
+    pub(crate) worker: &'a mut Option<TuiAgentWorker>,
+    pub(crate) timeline: &'a mut ActiveTimeline,
+    pub(crate) approval_tx: &'a mpsc::Sender<TuiApprovalRequest>,
+    pub(crate) question_tx: &'a mpsc::Sender<TuiQuestionRequest>,
+    pub(crate) stream_tx: &'a tokio::sync::mpsc::Sender<SessionStreamEvent>,
+    pub(crate) recovery_tx: &'a mpsc::Sender<crate::interactive::QuestionRecoveryEffect>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_question_recovery_effect(
     effect: crate::interactive::QuestionRecoveryEffect,
-    scope: &TuiAgentProfileScope,
-    store: &SessionStore,
-    session_id: &str,
-    pending: &mut Option<PendingQuestion>,
-    worker: &mut Option<TuiAgentWorker>,
-    timeline: &mut ActiveTimeline,
-    approval_tx: &mpsc::Sender<TuiApprovalRequest>,
-    question_tx: &mpsc::Sender<TuiQuestionRequest>,
-    stream_tx: &tokio::sync::mpsc::Sender<SessionStreamEvent>,
-    recovery_tx: &mpsc::Sender<crate::interactive::QuestionRecoveryEffect>,
+    context: QuestionConversationContext<'_>,
 ) -> io::Result<()> {
+    let QuestionConversationContext { scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx } = context;
     use crate::interactive::QuestionRecoveryEffect as Effect;
     match effect {
         Effect::Output(output) => timeline.push_status(output),
@@ -166,7 +168,7 @@ pub(crate) fn apply_question_recovery_effect(
             ));
         }
         Effect::OpenEditor { form, question_index } => {
-            apply_question_recovery_effect(Effect::OpenForm(form), scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx)?;
+            apply_question_recovery_effect(Effect::OpenForm(form), QuestionConversationContext { scope, store, session_id, pending: &mut *pending, worker: &mut *worker, timeline: &mut *timeline, approval_tx, question_tx, stream_tx, recovery_tx })?;
             if let Some(question) = pending.as_mut() {
                 question.state.focus_tab(question_index.unwrap_or(0));
                 question.state.open_editor(if question_index.is_some() { crate::interactive::QuestionEditorKind::Answer } else { crate::interactive::QuestionEditorKind::Discussion });
@@ -186,22 +188,13 @@ pub(crate) fn apply_question_recovery_effect(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_tui_conversation(
     goal: String,
-    scope: &TuiAgentProfileScope,
-    store: &SessionStore,
-    session_id: &str,
-    pending: &mut Option<PendingQuestion>,
-    worker: &mut Option<TuiAgentWorker>,
-    timeline: &mut ActiveTimeline,
-    approval_tx: &mpsc::Sender<TuiApprovalRequest>,
-    question_tx: &mpsc::Sender<TuiQuestionRequest>,
-    stream_tx: &tokio::sync::mpsc::Sender<SessionStreamEvent>,
-    recovery_tx: &mpsc::Sender<crate::interactive::QuestionRecoveryEffect>,
+    context: QuestionConversationContext<'_>,
 ) -> io::Result<()> {
+    let QuestionConversationContext { scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx } = context;
     if let Some(effect) = crate::interactive::recover_question_conversation(store, session_id, &goal).map_err(io::Error::other)? {
-        return apply_question_recovery_effect(effect, scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx);
+        return apply_question_recovery_effect(effect, QuestionConversationContext { scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx });
     }
     *worker = Some(spawn_tui_agent_worker(scope.clone(), session_id.to_string(), goal, InteractiveAgentMode::Execute, approval_tx.clone(), question_tx.clone(), stream_tx.clone())?);
     timeline.bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
