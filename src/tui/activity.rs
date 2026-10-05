@@ -750,7 +750,10 @@ pub(crate) fn render_session_activities(
                 if let Some(question) = pending_question.filter(|question| {
                     waiting == WaitingKind::Question && question.state.editor.is_some()
                 }) {
-                    (u16::try_from(rows.last().map_or(0, |row| unicode_display_width(row))).unwrap_or(u16::MAX), u16::try_from(rows.len().saturating_sub(1)).unwrap_or(u16::MAX))
+                    {
+                        let row = rows.len().saturating_sub(1 + usize::from(question.state.error.is_some()));
+                        (u16::try_from(rows.get(row).map_or(0, |row| unicode_display_width(row))).unwrap_or(u16::MAX), u16::try_from(row).unwrap_or(u16::MAX))
+                    }
                 } else {
                     (COMPOSER_PROMPT_CELLS, 0)
                 }

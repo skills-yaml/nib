@@ -69,3 +69,88 @@ fn form_discussion_returns_message_and_escape_interrupts_either_editor() {
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     buffer.content.iter().map(|cell| cell.symbol()).collect()
 }
+
+#[test]
+fn proposed_form_rows_hide_model_options_and_preserve_exact_sources() {
+    let (reply, mut response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions[1].proposed_answer = Some("Exact monthly proposal".to_string());
+    let mut pending = Some(PendingQuestion::new(request));
+    handle_question_key(&mut pending, KeyCode::Enter);
+    let question = pending.as_ref().unwrap();
+    let rows = question_form_lines(question, 80).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join("\n");
+    for expected in ["› 1. Approve proposed answer", "2. Reject and leave unanswered", "3. Instruct otherwise", "4. Chat about this"] { assert!(rows.contains(expected), "{rows}"); }
+    assert!(!rows.contains("Final"));
+    assert!(!rows.contains("Type something."));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap() else { panic!("submitted answers") };
+    assert_eq!(answers[1].answer, "Exact monthly proposal");
+    assert_eq!(answers[1].source, crate::interactive::QuestionAnswerSource::ApprovedProposal);
+}
+
+#[test]
+fn narrow_tab_strip_shows_overflow_and_keeps_the_focused_submit_visible() {
+    let (reply, _response) = oneshot::channel();
+    let mut question = PendingQuestion::new(form_request(reply));
+    question.state.focus_tab(2);
+    let line = question_tab_line(&question.state, 18);
+    let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+    assert!(text.contains('←') && text.contains('→'), "{text}");
+    assert!(text.contains("☐ Submit"), "{text}");
+    assert!(line.spans.iter().any(|span| span.content.contains("Submit") && span.style != Style::default()));
+}
+
+#[test]
+fn tui_question_escape_stops_worker_with_waiting_outcome_without_global_cancel() {
+    let directory = tempdir().unwrap();
+    let mut config = NibConfig { llm: mock_config(), ..Default::default() };
+    config.agent.answer_only = false;
+    save_nib_config_full(directory.path(), &mut config).unwrap();
+    let store = SessionStore::for_project(directory.path()).unwrap();
+    let goal = "ask a question";
+    let mut session = store.create_session();
+    session.plan = Some(crate::session::Plan::new(goal, vec![crate::session::PlanStep {
+        description: goal.to_string(), status: "Pending".to_string(), outcome: None,
+        attempts: 0, updated_at: None, verification_obligations: Vec::new(), content_generation: 0,
+    }]));
+    store.save(&mut session).unwrap();
+    let (approval_tx, _approval_rx) = mpsc::channel();
+    let (question_tx, question_rx) = mpsc::channel();
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
+    let mut worker = spawn_tui_agent_worker(TuiAgentProfileScope {
+        project_root: directory.path().to_path_buf(), profile_id: "default".to_string(), sessions_dir: store.sessions_dir().to_path_buf(),
+    }, session.id.clone(), goal.to_string(), InteractiveAgentMode::Execute, approval_tx, question_tx, stream_tx).unwrap();
+    let request = question_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut pending = Some(PendingQuestion::new(request));
+    assert!(handle_question_key(&mut pending, KeyCode::Esc));
+    assert!(!worker.cancellation.is_cancelled());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !worker.is_finished() && Instant::now() < deadline {
+        while stream_rx.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(worker.is_finished(), "Esc must stop the active worker");
+    worker.join().unwrap();
+    let persisted = store.load(&session.id).unwrap();
+    assert_eq!(persisted.plan.as_ref().unwrap().outcome.as_deref(), Some("waiting_for_user_input"));
+    assert!(persisted.clarifications.iter().all(|record| record.answer.is_none()));
+    assert!(persisted.events.iter().any(|event| event.kind == "run_terminal" && event.details["outcome"] == "waiting_for_user_input"));
+}
+
+#[test]
+fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
+    let (directory, store, session_id, invocation_id) = recoverable_question_session();
+    let scope = TuiAgentProfileScope { project_root: directory.path().to_path_buf(), profile_id: "default".to_string(), sessions_dir: store.sessions_dir().to_path_buf() };
+    let (approval_tx, _approval_rx) = mpsc::channel();
+    let (question_tx, _question_rx) = mpsc::channel();
+    let (stream_tx, _stream_rx) = tokio::sync::mpsc::channel(100);
+    let (recovery_tx, _recovery_rx) = mpsc::channel();
+    let mut pending = None;
+    let mut worker = None;
+    let mut timeline = ActiveTimeline::load(&store, &session_id).unwrap();
+    start_tui_conversation("resume".to_string(), &scope, &store, &session_id, &mut pending, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx).unwrap();
+    assert!(worker.is_none());
+    assert_eq!(pending.as_ref().unwrap().recovery.as_ref().unwrap().invocation_id, invocation_id);
+    assert!(store.load(&session_id).unwrap().clarifications[0].answer.is_none());
+}

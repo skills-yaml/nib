@@ -96,15 +96,16 @@ pub(crate) fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, q
 
 pub(crate) fn question_composer_rows(question: &PendingQuestion, width: u16) -> (Vec<String>, bool) {
     let state = &question.state;
-    let mut text = String::new();
-    if let Some(header) = &state.form.header { text.push_str(header); text.push('\n'); }
+    let mut rows = Vec::new();
+    if let Some(header) = &state.form.header { rows.push(truncate_display_cells(header, usize::from(width))); }
     if let Some(current) = state.current_question() {
-        text.push_str(&current.question);
-        if let Some(proposal) = &current.proposed_answer { text.push_str(&format!("\nProposed answer: {proposal}")); }
-    } else { text.push_str("Submit all question answers"); }
-    let mut rows = wrapped_display_rows(&format!("> {text}"), width.max(1));
-    let fixed_limit = if state.editor.is_some() { 3 } else { 5 };
-    if rows.len() > fixed_limit { rows.truncate(fixed_limit); rows.last_mut().unwrap().push('…'); }
+        let has_proposal = current.proposed_answer.is_some();
+        let limit = if state.editor.is_some() { 1 } else if has_proposal { 2 } else { 4 };
+        append_question_subject_rows(&mut rows, &format!("> {}", current.question), width, limit);
+        if let Some(proposal) = &current.proposed_answer {
+            append_question_subject_rows(&mut rows, &format!("Proposed answer: {proposal}"), width, if state.editor.is_some() { 1 } else { 2 });
+        }
+    } else { rows.push("> Submit all question answers".to_string()); }
     if let Some(editor) = &state.editor {
         let name = if editor.kind == crate::interactive::QuestionEditorKind::Discussion { "Chat about this" } else { "Your answer" };
         let editor_rows = wrapped_display_rows(&format!("{name}: {}", editor.text), width.max(1));
@@ -112,6 +113,17 @@ pub(crate) fn question_composer_rows(question: &PendingQuestion, width: u16) -> 
     }
     if let Some(error) = &state.error { rows.push(truncate_display_cells(&format!("Input error: {error}"), usize::from(width))); }
     (rows, state.editor.is_some())
+}
+
+fn append_question_subject_rows(rows: &mut Vec<String>, text: &str, width: u16, limit: usize) {
+    let wrapped = wrapped_display_rows(text, width.max(1));
+    let truncated = wrapped.len() > limit;
+    rows.extend(wrapped.into_iter().take(limit));
+    if truncated {
+        if let Some(last) = rows.last_mut() {
+            *last = format!("{}…", truncate_display_cells(last, usize::from(width).saturating_sub(1)));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,5 +169,27 @@ pub(crate) fn apply_question_recovery_effect(
             timeline.bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_tui_conversation(
+    goal: String,
+    scope: &TuiAgentProfileScope,
+    store: &SessionStore,
+    session_id: &str,
+    pending: &mut Option<PendingQuestion>,
+    worker: &mut Option<TuiAgentWorker>,
+    timeline: &mut ActiveTimeline,
+    approval_tx: &mpsc::Sender<TuiApprovalRequest>,
+    question_tx: &mpsc::Sender<TuiQuestionRequest>,
+    stream_tx: &tokio::sync::mpsc::Sender<SessionStreamEvent>,
+    recovery_tx: &mpsc::Sender<crate::interactive::QuestionRecoveryEffect>,
+) -> io::Result<()> {
+    if let Some(effect) = crate::interactive::recover_question_conversation(store, session_id, &goal).map_err(io::Error::other)? {
+        return apply_question_recovery_effect(effect, scope, store, session_id, pending, worker, timeline, approval_tx, question_tx, stream_tx, recovery_tx);
+    }
+    *worker = Some(spawn_tui_agent_worker(scope.clone(), session_id.to_string(), goal, InteractiveAgentMode::Execute, approval_tx.clone(), question_tx.clone(), stream_tx.clone())?);
+    timeline.bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
     Ok(())
 }
