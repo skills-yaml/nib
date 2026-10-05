@@ -19,11 +19,11 @@ and deadline-specific fixtures remain unchanged. No paid calls.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Owned test injection clears on normal exit and panic unwinding;
+- [x] AC-1: Owned test injection clears on normal exit and panic unwinding;
   normal consumed/unconsumed and panic paths have observable counter coverage.
-- [ ] AC-2: Owner-failure fixture verifies clean initial state, intended injected
+- [x] AC-2: Owner-failure fixture verifies clean initial state, intended injected
   error and consumption, with actual diagnostics and exact namespace assertions.
-- [ ] AC-3: Only its setup uses the existing test-only preparation budget;
+- [x] AC-3: Only its setup uses the existing test-only preparation budget;
   production deadlines and deliberately expiring fixtures remain unchanged.
 - [ ] AC-4: Independent exact review, affected delegation/static/docs gates,
   frozen full native verification and revised native Windows qualification pass.
@@ -85,3 +85,13 @@ task test:delegation with strict native bwrap enabled. The selected delegation
 target does not execute the new guard cases or changed owner-boundary case;
 the frozen full task test and revised hosted Windows run must execute them.
 Independent exact-candidate spec and quality review found no findings.
+
+## Frozen Native Evidence
+
+Independent exact author/combined and projected-stage review found no findings.
+Frozen stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered
+task check and task test with NIB_REQUIRE_BWRAP_TESTS=1 on 2026-10-05.
+These commands exactly compose task verify; the internal integration ref
+advanced only after both succeeded. Full native tests execute all new guard
+cases and the changed owner-boundary fixture; selected delegation evidence
+is not substituted. Hosted Windows and actual delivery remain pending.
