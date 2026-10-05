@@ -243,6 +243,46 @@ fn waiting_run_recovers_after_reloading_the_session() {
 }
 
 #[test]
+fn later_run_metadata_cannot_identify_an_older_legacy_question() {
+    let (_directory, store, session_id, invocation_id, _) = recoverable_question_fixture();
+    store
+        .record_event(
+            &session_id,
+            "run_started",
+            json!({"run_id":"later-unrelated-run"}),
+        )
+        .unwrap();
+    store
+        .record_event(
+            &session_id,
+            "run_terminal",
+            json!({"run_id":"later-unrelated-run","outcome":"waiting_for_user_input"}),
+        )
+        .unwrap();
+    let restored = SessionStore::at_dir(store.sessions_dir().to_path_buf());
+    let before = serde_json::to_value(restored.load(&session_id).unwrap()).unwrap();
+    for input in ["beta", "resume"] {
+        assert!(recover_question_conversation(&restored, &session_id, input)
+            .unwrap()
+            .is_none());
+    }
+    assert!(complete_question_recovery(
+        &restored,
+        &session_id,
+        invocation_id,
+        QuestionFormOutcome::Answered(vec![QuestionAnswer {
+            answer: "beta".to_string(),
+            source: QuestionAnswerSource::Option,
+        }]),
+    )
+    .is_err());
+    assert_eq!(
+        serde_json::to_value(restored.load(&session_id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn discussion_preserves_all_blockers_and_has_trusted_human_provenance() {
     let (_directory, store, session_id, invocation_id, plan_id) = recoverable_question_fixture();
     append_second_question(&store, &session_id, invocation_id, true);

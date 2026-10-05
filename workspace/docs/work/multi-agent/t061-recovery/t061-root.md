@@ -7,7 +7,7 @@ status: active
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T22:05:13Z
+updated_at: 2026-10-05T23:24:00Z
 scope:
   - Taskfile.yml
   - src/interactive
@@ -32,6 +32,9 @@ with regressions and the revised candidate was rereviewed. Preserved the complet
 command/documentation draft in committed history; split its final reconciliation
 into a published follow-up to avoid a cyclic frontend/API integration dependency.
 No intermediate internal revision is delivered to the shared branches.
+Added a restart regression proving later unrelated run metadata cannot identify
+an older unbound legacy question through conversational routing or modal completion;
+rejected recovery leaves the complete durable session unchanged.
 
 
 ## Validation
@@ -44,7 +47,8 @@ Core form and durable recovery APIs are supplied by the separately claimed contr
 
 ## Next Step
 
-Implement and validate the task.
+Merge the verified core integration, then run affected native gates, reconcile
+records and renew independent exact-candidate review before handoff.
 
 ## Handoff
 
