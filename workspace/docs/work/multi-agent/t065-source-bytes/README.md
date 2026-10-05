@@ -1,9 +1,9 @@
 ---
 schema_version: 1
 coordination_id: t065-source-bytes
-status: active
+status: complete
 base_revision: f5c38a1651b6e7d89c19fc6a0cb4e14a2f0915a5
-updated_at: 2026-10-05T18:02:13Z
+updated_at: 2026-10-05T18:13:34Z
 ---
 
 # Peer Task
@@ -19,3 +19,5 @@ t062-delivery.
 ## Integration
 
 Independent peer review and transactional integration are required.
+
+Peer integration contains reviewed source revision `bcbd8ab84a8ea2f36d37fb734d12609c3274960b`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.
