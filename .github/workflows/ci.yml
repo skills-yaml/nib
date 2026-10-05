@@ -94,6 +94,9 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Workspace governance
+        run: task workspace:check
+
       - name: Smoke headless Windows pseudoterminal
         run: task test:windows-pseudoterminal
 
@@ -170,6 +173,9 @@ jobs:
         uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Workspace governance
+        run: task workspace:check
 
       - name: Check all targets and features
         run: task check:all-targets

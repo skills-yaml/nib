@@ -564,3 +564,20 @@ cleanup. Global/system Git configuration is excluded. Unsupported or unavailable
 isolation returns an actionable error without executing Git directly. Repositories
 requiring global-only configuration or masked linked-worktree metadata may need
 an approved isolated terminal inspection.
+
+## 2026-10-05 - Preserve Workspace checkout bytes
+
+- Type: decision
+- Source: T065 + native Windows qualification failure
+- Confidence: high
+- Review: independent exact-candidate review required before delivery
+- Supersedes: implicit platform-dependent Workspace checkout conversion
+
+Content:
+
+Git checkout keeps AGENTS.md and Workspace text at LF; the more-specific
+vendored Workspace Docs package rule disables text conversion entirely so its
+raw upstream SHA-256 hashes remain authoritative. Governance does not normalize
+or rewrite imported bytes. The forced-CRLF full-governance fixture retains an
+ordinary-text conversion control and rejects removed protection and modified
+source bytes. Windows and macOS check canonical governance before long suites.
