@@ -41,46 +41,43 @@ fn current_repository_satisfies_every_workspace_module() {
     assert!(governance::validate(root, "unknown").is_err());
 }
 
-#[test]
-fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let checkout = tempfile::tempdir().expect("checkout fixture");
+fn fixture_git(root: &Path, args: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_ATTR_SOURCE")
+        .env_remove("GIT_SHALLOW_FILE")
+        .env_remove("GIT_NAMESPACE")
+        .output()
+        .expect("Git fixture command");
+    assert!(
+        output.status.success(),
+        "Git fixture {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn shallow_source_fixture(source: &Path, revision: &str) -> TempDir {
     let shallow_source = tempfile::tempdir().expect("shallow source fixture");
-    let git = |root: &Path, args: &[&str]| {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-            .env_remove("GIT_CONFIG")
-            .env_remove("GIT_CONFIG_PARAMETERS")
-            .env_remove("GIT_CONFIG_COUNT")
-            .env_remove("GIT_ATTR_SOURCE")
-            .env_remove("GIT_SHALLOW_FILE")
-            .env_remove("GIT_NAMESPACE")
-            .output()
-            .expect("Git fixture command");
-        assert!(
-            output.status.success(),
-            "Git fixture {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output.stdout
-    };
-    let revision = String::from_utf8(git(source, &["rev-parse", "HEAD"])).expect("source revision");
-    git(shallow_source.path(), &["init", "--quiet"]);
-    git(
+    fixture_git(shallow_source.path(), &["init", "--quiet"]);
+    fixture_git(
         shallow_source.path(),
         &[
             "fetch",
@@ -89,15 +86,15 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
             "--depth=1",
             "--update-shallow",
             source.to_str().expect("source path"),
-            revision.trim(),
+            revision,
         ],
     );
-    git(
+    fixture_git(
         shallow_source.path(),
-        &["checkout", "--quiet", "--detach", revision.trim()],
+        &["checkout", "--quiet", "--detach", revision],
     );
     assert_eq!(
-        String::from_utf8(git(
+        String::from_utf8(fixture_git(
             shallow_source.path(),
             &["rev-parse", "--is-shallow-repository"]
         ))
@@ -105,10 +102,20 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         .trim(),
         "true"
     );
-    git(checkout.path(), &["init", "--quiet"]);
-    git(checkout.path(), &["config", "core.autocrlf", "true"]);
-    git(checkout.path(), &["config", "core.eol", "crlf"]);
-    git(
+    shallow_source
+}
+
+#[test]
+fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = tempfile::tempdir().expect("checkout fixture");
+    let revision =
+        String::from_utf8(fixture_git(source, &["rev-parse", "HEAD"])).expect("source revision");
+    let shallow_source = shallow_source_fixture(source, revision.trim());
+    fixture_git(checkout.path(), &["init", "--quiet"]);
+    fixture_git(checkout.path(), &["config", "core.autocrlf", "true"]);
+    fixture_git(checkout.path(), &["config", "core.eol", "crlf"]);
+    fixture_git(
         checkout.path(),
         &[
             "config",
@@ -116,7 +123,7 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
             if cfg!(windows) { "false" } else { "true" },
         ],
     );
-    git(
+    fixture_git(
         checkout.path(),
         &[
             "fetch",
@@ -127,18 +134,18 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
             revision.trim(),
         ],
     );
-    git(
+    fixture_git(
         checkout.path(),
         &["checkout", "--quiet", "--detach", revision.trim()],
     );
     assert_eq!(
-        String::from_utf8(git(checkout.path(), &["rev-parse", "HEAD"]))
+        String::from_utf8(fixture_git(checkout.path(), &["rev-parse", "HEAD"]))
             .expect("checkout revision")
             .trim(),
         revision.trim()
     );
     assert_eq!(
-        String::from_utf8(git(
+        String::from_utf8(fixture_git(
             checkout.path(),
             &["rev-parse", "--is-shallow-repository"]
         ))
@@ -175,7 +182,7 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
     for name in ["AGENTS.md", package_file] {
         std::fs::remove_file(checkout.path().join(name)).expect("remove protected checkout");
     }
-    git(
+    fixture_git(
         checkout.path(),
         &["checkout-index", "--force", "--", "AGENTS.md", package_file],
     );
