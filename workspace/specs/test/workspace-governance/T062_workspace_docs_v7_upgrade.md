@@ -242,3 +242,30 @@ The remote development ref and PR42 merged state confirm the actual event.
 Main promotion and Windows qualification remain required; publication is separate.
 The repaired ten-case native Git-status suite passed before the frozen full run,
 and all independent findings are resolved. Historical done records are unchanged.
+
+## Qualification Gate Repair
+
+The development push CI37338656478 first attempt failed macOS interruption
+smoke: Ctrl+C followed by feeder EOF was observed as Ctrl+D, and the child
+reported waiting_for_user_input/status 1 instead of cancellation/status 130.
+Independent review confirmed the offline feeder ownership race. Linked
+[T064](../../development/release-delivery/T064_interrupt_smoke_input_lifetime.md)
+adds bounded waits for child cancellation before closing stdin; all existing
+assertions remain. A superseded diagnostic rerun was canceled after retaining
+the original failure, without treating an intermittent pass as a repair.
+
+Main CI37339187764 passed Linux/macOS but Windows timed out at the existing
+15-second final-turn tool-start readiness bound (1165 library tests passed).
+This establishes a readiness timeout, not a confirmed runtime root cause.
+The unchanged fixture reruns on the repaired candidate; promotion remains
+blocked until fresh required native and hosted qualification passes.
+
+## Development Publication Evidence
+
+Release Artifacts 37338656596 passed all four builds and publication. The public
+development-latest nib-release.json binds version 0.2.0 to exact development
+commit 8bc243d00ec3ec82e7287c704fcdd897ff78204a, published 2026-10-05T16:26:43Z.
+Production still reports 0.1.0 at 15123a3ef275458efc87200400219aeacc3e9ea9.
+The ledger records the released development event separately from main delivery.
+T061 membership is accepted-contract documentation only; runtime implementation
+and acceptance delivery remain pending and require a fresh atomic reservation.
