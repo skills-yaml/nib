@@ -11,11 +11,19 @@ updated_at: 2026-10-05T22:05:46Z
 ## Assignments
 
 t061-lines self-claimed this task through the shared peer board.
+The bounded lane implements native line forms and recovery adapters for
+[T061](../../../../specs/development/interactive/T061_question_form.md) and
+[T067](../../../../specs/development/interactive/T067_question_form_runtime_implementation.md).
+The [owning work record](t061-lines.md) tracks implementation and gate evidence.
 
 ## Dependencies
 
 None.
+Source compilation requires the shared contract/runtime APIs and recovery router
+from the corresponding implementation lanes. Cargo runs remain serialized.
 
 ## Integration
 
 Independent peer review and transactional integration are required.
+The implementation checkpoint is not a verified handoff; focused/native gates
+and combined exact-candidate review remain pending.
