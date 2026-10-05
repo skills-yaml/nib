@@ -336,3 +336,35 @@ T023 live catalog/canary/selected/full is unverifiable: process provider keys,
 OpenRouter `approved = true` entries are all absent. Real Task catalog with
 `NIB_LIVE_TESTS=1` failed `blocked_auth` on missing `OPENAI_API_KEY`. Offline
 harness 66/66 non-ignored tests passed and is not a Done substitute.
+
+## 2026-10-05 - Workspace Docs 7 delivery and current lifecycle
+
+- Type: fact
+- Source: T062 actual integration/main events, exact hosted CI and native Task gates
+- Confidence: high
+- Review: independent exact-candidate spec, security and quality reviews
+- Supersedes: earlier current lifecycle counts and pending T062 delivery snapshots
+
+Content:
+
+Workspace Docs 7 is delivered through verified main merge
+`4b0245b9890bb15a4c99ff46ec7296d42bf9401f` via PR43 on 2026-10-05T20:20:23Z, following
+confirmed development integration `30e9ecf8151768ca236367ed4984e1a06bc96380` via PR45.
+CI 37361857315 passed Linux/macOS/Windows complete suites, exact binary
+qualification, native interaction smokes and Linux coverage. Frozen native
+stage `42550166c79df8d7acf4d0c405f65ce04d5947e8` passed strict ordered task check/test.
+Event records receive renewed review and verification before final delivery.
+The migration preserves the approved manual policy and all 70 historical done
+records; canonical instructions/specs/docs/memory live under workspace/.
+T063 enforces isolated read-only Git status; T065 preserves canonical LF text
+and exact upstream standard bytes. T064/T066 restore existing test-fixture
+contracts and have no new durable memory impact. No paid calls were made.
+
+The canonical lifecycle has 75 done specs, T023/T061 in development and
+FT-021/FT-022 in backlog. T023 retains newer protected catalog/canary evidence
+and open continuation/selected/full qualification. T061 has an accepted
+contract awaiting runtime implementation; released 0.2.0 membership covers
+documentation only and implementation needs a fresh atomic reservation from
+latest published state. The shared 0.2.0 target was applied once and development
+publication was verified separately; main completion does not claim production
+publication.

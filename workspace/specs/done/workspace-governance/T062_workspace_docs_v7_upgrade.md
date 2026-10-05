@@ -1,11 +1,13 @@
 # T062: Workspace Docs 7 Upgrade
 
-**Status:** Test
+**Status:** Done
 
-State: test
+State: done
 Primary Feature: workspace-governance
 
 ## Scope
+
+Migration Mode: version update (workspace-docs@1.2.0 -> 7.0.0).
 
 Upgrade this repository from workspace-docs@1.2.0 to workspace-docs@7.0.0.
 The user approved the assessed migration map and necessary manual-policy,
@@ -312,3 +314,22 @@ adds test-only scoped cleanup, observable guard tests, consumption/error
 diagnostics and the existing fixture setup guard, preserving production and
 deadline-specific budgets/assertions. New full native and hosted qualification
 are required; earlier green subsets do not establish final completion.
+
+## Main Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.

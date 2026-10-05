@@ -14,3 +14,10 @@ with membership reconciled or a linked implementation spec. Released 0.2.0
 cannot authorize future T061 code. Applied versions and publication are separate. Backlog proposal-only artifacts declare none until
 implementation is approved and reserved. Check remote published state and current
 shared reservations again before integration/publication.
+
+Main delivery is verified at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f via PR43
+on 2026-10-05T20:20:23Z after final development integration
+30e9ecf8151768ca236367ed4984e1a06bc96380 via PR45. Current exact-source native
+and all-platform qualification passed without another bump. Lifecycle record
+reconciliation preserves the released 0.2.0 target and documentation-only T061
+membership; publication remains a separate verified event.

@@ -462,3 +462,19 @@ raw-byte preservation of the imported standard. A real Git forced-CRLF fixture
 passes full governance and rejects removed protection and source-byte changes;
 ordinary text proves conversion is active. Main delivery remains separately
 verified and no checksum gate is relaxed.
+
+## 2026-10-05 - Verified Workspace Docs 7 main delivery
+
+- Type: fact / lifecycle update
+- Source: T062 and linked delivery repairs
+- Confidence: high
+- Review: independent exact source/main-candidate reviews and canonical native/hosted gates
+
+Content:
+
+Recorded in facts.md the actual development/main delivery, 75 done / two
+development / two backlog lifecycle, preserved historical boundary and separate
+version/publication events. Durable governance, isolated Git-status and checkout
+policies remain in decisions.md. T023/T061 implementation/qualification remain
+active; no completion or paid-call authority is inferred for them. T064/T066
+memory is none because their bounded fixture repairs restore existing contracts.

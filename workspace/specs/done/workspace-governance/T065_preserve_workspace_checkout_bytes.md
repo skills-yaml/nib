@@ -1,14 +1,14 @@
 # T065: Preserve Workspace Checkout Bytes
 
-**Status:** Test
+**Status:** Done
 
-State: test
+State: done
 Primary Feature: workspace-governance
 
 ## Scope
 
 Resolve the Windows checkout-byte failure discovered during
-[T062](../../test/workspace-governance/T062_workspace_docs_v7_upgrade.md) main qualification. CI37344943162
+[T062](T062_workspace_docs_v7_upgrade.md) main qualification. CI37344943162
 passed library, CLI, runtime and binary qualification, but the final Workspace
 positive fixture rejected modified source package AGENT_MIGRATION.md.
 Preserve root generated context and Workspace text as LF at checkout, while
@@ -26,9 +26,9 @@ interface change, and no paid provider calls.
   rejects removal of checkout protection or modified upstream bytes.
 - [x] AC-3: Windows and macOS run task workspace:check immediately after Task
   installation, retaining existing full tests, qualifiers and smoke assertions.
-- [ ] AC-4: Independent exact-candidate review, affected native gates, full
+- [x] AC-4: Independent exact-candidate review, affected native gates, full
   native verification and revised hosted Windows qualification pass.
-- [ ] AC-5: Confirmed development integration and main merge precede done;
+- [x] AC-5: Confirmed development integration and main merge precede done;
   catalog, version rationale and durable memory are reconciled.
 
 ## Affected Areas
@@ -152,10 +152,29 @@ Outcome: passed
 
 PR45 and the actual remote ref confirm verified development integration
 on 2026-10-05T19:51:41Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
-exact merge previews passed CI 37361857527 (development Linux/macOS)
+exact merge previews passed CI 37361857527 (development Linux/macOS).
 Main all-platform qualification remains required before done. Full development suites, strict native
 containment, exact binary identities, coverage and native smokes passed.
 Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
 and task test, exactly composing task verify. The new T066 guard/owner cases
 executed in the full native suites; earlier selected-test evidence is not substituted.
 Publication is tracked separately. Main reconciliation and final frozen lifecycle verification remain pending.
+
+## Main Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.

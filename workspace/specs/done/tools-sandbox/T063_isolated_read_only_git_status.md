@@ -1,8 +1,8 @@
 # T063: Isolated Read-Only Git Status
 
-**Status:** Test
+**Status:** Done
 
-State: test
+State: done
 Primary Feature: tools-sandbox
 
 ## Scope
@@ -136,3 +136,22 @@ The remote development ref and PR42 merged state confirm the actual event.
 Main promotion and Windows qualification remain required; publication is separate.
 The repaired ten-case native Git-status suite passed before the frozen full run,
 and all independent findings are resolved. Historical done records are unchanged.
+
+## Main Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.

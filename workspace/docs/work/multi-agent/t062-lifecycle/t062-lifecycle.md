@@ -7,7 +7,7 @@ status: active
 base_revision: ac8083b768315de65f764dc80a5e3af5170b8471
 task_ref: detached
 branch_authorization: user task authorizes ordinary safe T062 lifecycle delivery
-updated_at: 2026-10-05T19:31:00Z
+updated_at: 2026-10-05T20:21:36Z
 scope:
   - workspace
 ---
@@ -20,20 +20,20 @@ Reconcile T062 and linked T063/T064/T065/T066 through confirmed development inte
 
 ## Actions
 
-Claimed isolated workspace scope after reviewed implementation integration. Confirmed exact development events PR42/PR44, reconciled T062/T063/T064 test states, and verified separate 0.2.0 development publication. Combined independently reviewed T065 checkout repair while retaining its development state; renewed native and hosted qualification. Combined independently reviewed T066 fixture isolation after confirmed Windows injection leakage; its first underlying error remains unconfirmed.
+Verified PR42/PR44 and final PR45 development events, separate development publication and actual PR43 main merge 4b0245b9890bb15a4c99ff46ec7296d42bf9401f on 2026-10-05T20:20:23Z. Reconciled T062/T063/T064/T065/T066 to done with acceptance/main evidence, catalog, release membership, current inventory and durable facts/changelog. Preserved 70 historical done records and active T023/T061.
 
 ## Validation
 
-Independent source/combined-main review and frozen source task verify passed. Development CI passed Linux/macOS, coverage, binary qualification and native smokes. Lifecycle record review and fresh final gates remain required.
+Exact source/main/development preview independent reviews passed. Strict frozen full native verification passed at 42550166c79df8d7acf4d0c405f65ce04d5947e8; full exact-source hosted CI 37361857315 and 37361857527 passed, including new guard/owner cases, native smokes and binary identities. Final closure records require fresh focused docs/version/Workspace8, exact review and frozen ordered check/test before transactional integration.
 
 ## Blockers and Dependencies
 
-Fresh native ordered task check/test passed at 42550166c79df8d7acf4d0c405f65ce04d5947e8 with strict bwrap, including all T066 guard/owner cases. Hosted complete qualification remains pending; no paid live calls are required or authorized.
+No implementation or delivery blockers. Final lifecycle review/verification remains required; no paid calls.
 
 ## Next Step
 
-Review test-state records, freeze and verify, then promote the exact all-platform qualified main candidate. Record done only after verified main merge.
+Review/freeze the reconciled candidate, run final canonical gates and deliver the verified resulting revision to main/development. Preserve the primary capture while reconciling its checkout.
 
 ## Handoff
 
-Memory impact: updated through T062/T063 durable governance and security decisions. nib-next is released at 0.2.0 through separately verified development publication; main completion remains pending. T065 adds durable checkout-byte policy; T064 and T066 memory impact is none; both restore existing fixture contracts.
+Memory: updated for durable verified v7/security/checkout facts and current lifecycle. T064/T066: none because bounded fixture repairs restore existing contracts. Shared nib-next remains released at 0.2.0 with T061 documentation-only membership; production publication is separate. Captures and peer worktrees remain retained for recovery.
