@@ -42,7 +42,7 @@ binary and release manifests remain unchanged.
 
 1. Reproduce the failure with a full committed repository checkout under
    core.autocrlf=true and core.eol=crlf, including an ordinary-text control.
-2. Pin AGENTS.md and workspace text to LF; apply a more-specific -text rule
+2. Pin AGENTS.md and detected workspace text to LF, preserving binary assets; apply a more-specific -text rule
    to preserve vendored standard bytes exactly.
 3. Run governance early on Windows/macOS and independently review the exact
    candidate; run affected and full native gates and all hosted main gates.
@@ -87,3 +87,11 @@ real forced-CRLF full governance, ordinary-text conversion, raw-byte tamper
 rejection and protection-removal rejection. The initial negative fixture was
 corrected to remove files before fresh checkout and assert actual CRLF bytes;
 no pre-fix gate pass or final hosted acceptance is inferred.
+
+## Review Refinements
+
+Use text=auto for the Workspace tree so future binary reference assets retain
+bytes, while AGENTS.md is explicitly text. The fixture excludes ambient Git
+repository, object, config and attribute overrides and disables system/global
+configuration and system attributes. The upstream -text override and raw hash
+validator remain unchanged.
