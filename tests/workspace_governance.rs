@@ -97,11 +97,13 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         &["checkout", "--quiet", "--detach", revision.trim()],
     );
     assert_eq!(
-        git(
+        String::from_utf8(git(
             shallow_source.path(),
             &["rev-parse", "--is-shallow-repository"]
-        ),
-        b"true\n"
+        ))
+        .expect("source shallow status")
+        .trim(),
+        "true"
     );
     git(checkout.path(), &["init", "--quiet"]);
     git(checkout.path(), &["config", "core.autocrlf", "true"]);
@@ -130,8 +132,19 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         &["checkout", "--quiet", "--detach", revision.trim()],
     );
     assert_eq!(
-        git(checkout.path(), &["rev-parse", "HEAD"]),
-        revision.as_bytes()
+        String::from_utf8(git(checkout.path(), &["rev-parse", "HEAD"]))
+            .expect("checkout revision")
+            .trim(),
+        revision.trim()
+    );
+    assert_eq!(
+        String::from_utf8(git(
+            checkout.path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ))
+        .expect("checkout shallow status")
+        .trim(),
+        "true"
     );
 
     let control = std::fs::read(checkout.path().join("README.md")).expect("ordinary text");
