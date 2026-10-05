@@ -977,9 +977,7 @@ fn chat_reconciles_closed_question_input_without_a_role_violation() {
     }));
 }
 
-#[test]
-#[serial]
-fn plain_recovered_question_retries_invalid_input_before_persisting() {
+fn plain_recovery_project() -> (tempfile::TempDir, SessionStore, String, nib::tools::ToolInvocationId) {
     let project = tempdir().expect("project");
     save_mock_config(project.path());
     let store = SessionStore::for_project(project.path()).expect("session store");
@@ -1030,7 +1028,15 @@ fn plain_recovered_question_retries_invalid_input_before_persisting() {
         });
     store.save(&mut session).expect("recoverable question");
     let session_id = session.id.clone();
-    let input = format!("resume {invocation_id}\n0\n2\n/quit\n");
+    (project, store, session_id, invocation_id)
+
+}
+
+#[test]
+#[serial]
+fn plain_recovered_question_retries_invalid_input_before_persisting() {
+    let (project, store, session_id, invocation_id) = plain_recovery_project();
+    let input = format!("resume {invocation_id}\n:command /status\n0\n2\n\n/quit\n");
     let _cwd = CurrentDirGuard::enter(project.path());
 
     run_chat_with_input(
@@ -1121,4 +1127,45 @@ async fn plain_native_form_retains_drafts_until_explicit_set_submit() {
         QuestionAnswer { answer: "beta".into(), source: QuestionAnswerSource::Option }
     ]));
     assert_eq!(modal_state.current(), PLAIN_MODAL_IDLE);
+}
+
+
+#[test]
+#[serial]
+fn recovered_plain_question_rejects_delayed_surplus_before_resuming() {
+    let (project, store, session_id, invocation_id) = plain_recovery_project();
+    let _cwd = CurrentDirGuard::enter(project.path());
+    let surplus = "surplus recovery line is not a new request";
+    let reader = ScriptedLineReader {
+        lines: [
+            (std::time::Duration::ZERO, format!("resume {invocation_id}\n")),
+            (std::time::Duration::ZERO, "1\n".into()),
+            (std::time::Duration::from_millis(25), format!("{surplus}\n")),
+            (std::time::Duration::ZERO, "\n".into()),
+            (std::time::Duration::ZERO, "/quit\n".into()),
+        ].into(), current: Vec::new(), offset: 0,
+    };
+    run_chat_with_input(&ChatArgs { session: Some(session_id.clone()), plain: true, ..Default::default() }, reader).expect("recovered plain frame");
+    let session = store.load(&session_id).expect("framed recovered session");
+    assert_eq!(session.clarifications[0].answer.as_deref(), Some("alpha"));
+    assert!(!session.messages.iter().any(|message| message.role == "user" && message.content.contains(surplus)), "surplus input became a conversation turn");
+    assert!(!session.events.iter().any(|event| event.details.to_string().contains(surplus)), "surplus input became queued work or steering");
+}
+
+#[test]
+#[serial]
+fn recovered_plain_question_preserves_literal_modal_command_answers() {
+    let (project, store, session_id, invocation_id) = plain_recovery_project();
+    let _cwd = CurrentDirGuard::enter(project.path());
+    run_chat_with_input(&ChatArgs { session: Some(session_id.clone()), plain: true, ..Default::default() }, Cursor::new(format!("resume {invocation_id}\ntext: :command /status\n\n/quit\n").into_bytes())).expect("literal recovered answer");
+    let session = store.load(&session_id).expect("literal answer session");
+    assert_eq!(session.clarifications[0].answer.as_deref(), Some(":command /status"));
+    assert_eq!(session.clarifications[0].answer_source, Some(nib::interactive::QuestionAnswerSource::Text));
+}
+
+#[test]
+fn successful_recovery_frame_interrupts_on_esc_or_eof_without_submission() {
+    let outcome = nib::interactive::QuestionFormOutcome::Discussed("draft discussion".into());
+    assert_eq!(frame_plain_recovery_outcome(&ConsoleInput::new(Cursor::new(b"esc\n".to_vec())), outcome.clone()), nib::interactive::QuestionFormOutcome::LeftUnanswered);
+    assert_eq!(frame_plain_recovery_outcome(&ConsoleInput::new(Cursor::new(Vec::<u8>::new())), outcome), nib::interactive::QuestionFormOutcome::InputClosed);
 }

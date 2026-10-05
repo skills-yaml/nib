@@ -584,6 +584,12 @@ fn one_shot_question_discussion_is_successful_without_answering() {
 
 #[test]
 fn plain_esc_reconciles_with_live_input_without_a_modal_delimiter() {
+    for interruption in [b"esc\n".as_slice(), b"1\nesc\n".as_slice()] {
+        assert_plain_live_interruption(interruption);
+    }
+}
+
+fn assert_plain_live_interruption(interruption: &[u8]) {
     let project = configured_project();
     let mut child = Command::new(env!("CARGO_BIN_EXE_nib"))
         .arg("--plain").env("NIB_NO_UPDATE_CHECK", "1").current_dir(project.path())
@@ -593,7 +599,7 @@ fn plain_esc_reconciles_with_live_input_without_a_modal_delimiter() {
     input.write_all(b"ask a question before continuing\n").expect("start question");
     let store = SessionStore::for_project(project.path()).expect("session store");
     wait_for_plain_question_event(&mut child, &store, "question_required");
-    input.write_all(b"esc\n").expect("interrupt without delimiter");
+    input.write_all(interruption).expect("interrupt without delimiter");
     let session = wait_for_plain_question_event(&mut child, &store, "run_terminal");
     assert!(child.try_wait().expect("chat status").is_none(), "interactive stdin remains open");
     assert!(session.events.iter().any(|event| event.kind == "run_terminal" && event.details["outcome"] == "waiting_for_user_input"));

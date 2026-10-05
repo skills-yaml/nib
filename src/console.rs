@@ -428,9 +428,10 @@ fn render_line_question(question: &FormQuestion) -> String {
         4
     } else {
         for (index, option) in question.options.iter().enumerate() {
-            output.push_str(&format!("  {}. {}\n", index + 1, option.label));
+            let prefix = format!("  {}. ", index + 1);
+            output.push_str(&format!("{prefix}{}\n", option.label));
             if let Some(description) = &option.description {
-                output.push_str(&format!("     {description}\n"));
+                output.push_str(&format!("{}{description}\n", " ".repeat(prefix.len())));
             }
         }
         output.push_str(&format!("  {}. Type something.\n", question.options.len() + 1));
@@ -829,6 +830,17 @@ mod tests {
         let handler = ConsoleQuestionHandler::with_sensitive_values(input.clone(), vec!["private-first".into(), "private-second".into()]);
         assert!(matches!(handler.ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form: &form, initial_answers: &[] }).await, QuestionFormOutcome::InputUnavailable(_)));
         assert!(!input.broker_started(), "ambiguous displayed options were rejected before input consumption");
+    }
+
+
+    #[test]
+    fn native_descriptions_align_with_double_digit_option_labels() {
+        let mut question = form_question("Many choices", None);
+        question.options = (1..=10).map(|index| nib::interactive::QuestionOption {
+            label: format!("choice{index}"), description: (index == 10).then(|| "Aligned description".into()),
+        }).collect();
+        let form = LineQuestionForm::new(QuestionForm { header: None, questions: vec![question] }, vec![]);
+        assert!(form.render(&[]).contains("  10. choice10\n      Aligned description"));
     }
 
 }

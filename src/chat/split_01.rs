@@ -167,6 +167,10 @@ pub(crate) fn execute_prepared_agent_step(
                                 .expect("checked pending modal response");
                             modal_state.clear();
                             response.deliver();
+                        } else if line.trim() == "esc" && matches!(pending_modal_response, Some(PendingPlainModalResponse::Question { .. })) {
+                            if let Some(PendingPlainModalResponse::Question { reply, .. }) = pending_modal_response.take() {
+                                let _ = reply.send(nib::interactive::QuestionFormOutcome::LeftUnanswered);
+                            }
                         } else {
                             println!(
                                 "[input rejected] surplus modal line was not applied; press Enter on an empty line to return input ownership"
@@ -224,18 +228,8 @@ pub(crate) fn execute_prepared_agent_step(
                         continue;
                     }
                     if pending_question.is_some() {
-                        if line.trim_start().starts_with(":command") {
-                            match parse_plain_question_answer(&line, &[]) {
-                                InteractionReduction::ModalCommand(command) => {
-                                    match execute_interactive_command_in_state(command, scope.project, scope.profile_id, scope.session_store, session_id, "running") {
-                                        Ok(InteractiveEffect::Output(output)) => println!("{output}"),
-                                        Ok(_) => println!("command completed without changing the pending question"),
-                                        Err(error) => println!("{error}"),
-                                    }
-                                }
-                                InteractionReduction::Error { message, .. } => println!("{message}"),
-                                _ => println!("invalid prompt-local command"),
-                            }
+                        if inspect_plain_question_command(&line, scope, session_id, "running") {
+                            // Inspection keeps the same question responder and drafts.
                         } else if let Some(outcome) = pending_question.as_mut().and_then(|prompt| prompt.form.submit_line(&line)) {
                             let prompt = pending_question.take().expect("question");
                             pending_modal_response = complete_plain_question_prompt(prompt, outcome);
@@ -433,9 +427,51 @@ fn complete_plain_recovery_form(
             Ok(line) => line,
             Err(_) => break nib::interactive::QuestionFormOutcome::InputClosed,
         };
+        if inspect_plain_question_command(&line, scope, session_id, "waiting_for_user_input") {
+            continue;
+        }
         if let Some(outcome) = form.submit_line(&line) { break outcome; }
     };
+    let outcome = frame_plain_recovery_outcome(input, outcome);
     nib::interactive::complete_question_recovery(scope.session_store, session_id, persisted.invocation_id, outcome)
+}
+
+fn inspect_plain_question_command(
+    line: &str,
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    state: &str,
+) -> bool {
+    if !line.trim_start().starts_with(":command") { return false; }
+    match parse_plain_question_answer(line, &[]) {
+        InteractionReduction::ModalCommand(command) => {
+            match execute_interactive_command_in_state(command, scope.project, scope.profile_id, scope.session_store, session_id, state) {
+                Ok(InteractiveEffect::Output(output)) => println!("{output}"),
+                Ok(_) => println!("command completed without changing the pending question"),
+                Err(error) => println!("{error}"),
+            }
+        }
+        InteractionReduction::Error { message, .. } => println!("{message}"),
+        _ => println!("invalid prompt-local command"),
+    }
+    true
+}
+
+pub(crate) fn frame_plain_recovery_outcome(
+    input: &ConsoleInput,
+    outcome: nib::interactive::QuestionFormOutcome,
+) -> nib::interactive::QuestionFormOutcome {
+    use nib::interactive::QuestionFormOutcome;
+    if !outcome.is_success() { return outcome; }
+    request_plain_modal_frame_delimiter();
+    loop {
+        match input.read_line_blocking() {
+            Ok(line) if line.trim().is_empty() => return outcome,
+            Ok(line) if line.trim() == "esc" => return QuestionFormOutcome::LeftUnanswered,
+            Ok(_) => println!("[input rejected] surplus modal line was not applied; press Enter on an empty line to return input ownership"),
+            Err(_) => return QuestionFormOutcome::InputClosed,
+        }
+    }
 }
 
 pub(crate) fn execute_plain_turn_and_queued_follow_ups(

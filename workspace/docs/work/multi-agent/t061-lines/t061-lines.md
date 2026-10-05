@@ -33,6 +33,12 @@ reopen and Submit; native console/plain handlers share this flow and bridge
 legacy entrypoints. Added natural recovery and trusted discussion continuation.
 Interruptions return immediately; successful plain replies retain the ownership
 fence. Added native handler/broker and live-open-input interruption fixtures.
+Independent review identified missing successful recovery framing and reserved
+command interception. Recovered successes now reject surplus lines until the
+empty delimiter before persistence/resumption; inspection retains the responder
+and escaped command text stays literal. Added delayed-surplus and command
+recovery regressions. Esc also interrupts pending successful question frames.
+Description indentation now follows the numbered prefix width for rows 10–20.
 
 ## Validation
 
