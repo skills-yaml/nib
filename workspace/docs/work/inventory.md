@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@7.0.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-10-02
+- Last reviewed: 2026-10-05
 
 ## Adopted Files
 
@@ -30,23 +30,28 @@ Metadata:
 
 ## Current V7 Inventory
 
-The current catalog contains 70 preserved historical done specs, three development
-specs (T023, T061, T062), and two backlog proposals. The complete standard,
+The current catalog contains 75 done specs (including 70 preserved historical
+records), two development specs (T023 and T061), and two backlog proposals.
+T062 and linked T063/T064/T065/T066 are complete after verified main delivery. The complete standard,
 DESIGN.md, blocked/test directories, feature catalog and native gates are adopted.
 Older inventory counts below are historical snapshots, superseded by this section.
 
 ## Active Gaps and Future Scope
 
-- T023 is in `development/`. Its credential-free harness is locally green, but live
-  catalog/canary/selected/full evidence requires owner-approved credentials, budgets,
-  OpenRouter exact IDs, and protected-workflow authority. A 2026-09-25 re-audit
-  classified that live matrix as unverifiable without those secrets.
+- T023 remains in `development/`. The protected six-provider catalog passed on
+  2026-09-25 and reviewed OpenRouter IDs/retained canary reports are recorded.
+  Tool-continuation failures remain open, including Anthropic final-response refusal;
+  selected/full qualification has not passed. The 2026-10-01 decision retains the
+  current Anthropic default and fixes continuation. Further paid runs require
+  protected approvals, budgets and reviewed evidence.
+- T061 remains in `development/` with an accepted question-form contract; runtime
+  implementation has not started. Its released 0.2.0 membership records contract
+  documentation only. Implementation needs a fresh atomic version reservation
+  from the latest published baseline and reconciled membership or a linked spec.
 - FT-020 is in `done/`. Protected Windows Job owner/DACL and macOS reaper preflight
   shipped; `production()` stays fail-closed on Windows and macOS. Current v1
   production delegation remains Linux+bwrap only until a later native qualification
   enables those platforms.
-- `workspace/specs/feature/` and `workspace/specs/task/` are retained only as empty legacy
-  directories; active lifecycle state uses the canonical state directories.
 - MCP v1 is stdio-only; HTTP/SSE and OAuth require a separate future spec.
 - Live paid-provider qualification remains an active external gate and
   remains explicitly authorization-bound. Completed Windows/macOS mechanism evidence
@@ -55,11 +60,11 @@ Older inventory counts below are historical snapshots, superseded by this sectio
 
 ## Legacy Spec Paths (Aligned)
 
-The product foundation remains under `foundation/`. Feature and task specs have been
-migrated from the legacy `feature/` and `task/` paths into `development/` or `done/`
-so their lifecycle state is explicit.
+The product foundation is preserved under `workspace/specs/legacy/foundation/`.
+Current specs use their single primary-feature directory under the canonical
+lifecycle states. Old feature/task paths below are historical references only.
 
-See `workspace/specs/README.md` for details. Canonical states (`backlog/`, `development/`, `done/`) are now preferred for future specs.
+See `workspace/specs/README.md` for details. Canonical states are `backlog/`, `development/`, `test/`, `done/` and `blocked/`.
 
 ## Quality Gates Available
 
@@ -75,7 +80,23 @@ See `workspace/specs/README.md` for details. Canonical states (`backlog/`, `deve
 - `task smoke:interactive`
 - `task smoke:managed-process`
 
-## Current Validation Run
+## Current T062 Delivery Evidence
+
+Verified main merge `4b0245b9890bb15a4c99ff46ec7296d42bf9401f` through PR43 on
+2026-10-05T20:20:23Z follows development integration
+`30e9ecf8151768ca236367ed4984e1a06bc96380` through PR45. Exact-source CI
+[37361857315](https://github.com/skills-yaml/nib/actions/runs/37361857315)
+passed Linux, macOS and Windows full suites, binary qualification and native
+smokes; development CI 37361857527 passed its Linux/macOS gates.
+Frozen native stage `42550166c79df8d7acf4d0c405f65ce04d5947e8` passed ordered `task check` and
+`task test` with required native bwrap, exactly composing `task verify`.
+The new guard/owner cases execute in the full suites. Event/catalog/memory
+reconciliation requires renewed exact review, focused documentation/version/
+Workspace regression gates and frozen canonical verification before final delivery.
+Publication is a separate event; the already-published shared version is 0.2.0.
+No paid live qualification was performed by this migration.
+
+## Historical 2026-09-02 Validation
 
 On 2026-09-02, local `task verify` passed 1,062 library tests, 86 CLI tests,
 every integration suite, and doctests. Exact hosted run
@@ -107,8 +128,8 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 63 specs are in `done/`, T023 is the sole `development/` spec, and
-  `backlog/` is empty. `workspace/specs/README.md` is the authoritative per-spec
+- Lifecycle: 75 specs are in `done/`, T023/T061 are in `development/`, and
+  FT-021/FT-022 remain in `backlog/`. `workspace/specs/README.md` is the authoritative per-spec
   index.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate

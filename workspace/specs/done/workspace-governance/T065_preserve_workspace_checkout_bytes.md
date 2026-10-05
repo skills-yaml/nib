@@ -1,8 +1,8 @@
 # T065: Preserve Workspace Checkout Bytes
 
-**Status:** Development
+**Status:** Done
 
-State: development
+State: done
 Primary Feature: workspace-governance
 
 ## Scope
@@ -26,9 +26,9 @@ interface change, and no paid provider calls.
   rejects removal of checkout protection or modified upstream bytes.
 - [x] AC-3: Windows and macOS run task workspace:check immediately after Task
   installation, retaining existing full tests, qualifiers and smoke assertions.
-- [ ] AC-4: Independent exact-candidate review, affected native gates, full
+- [x] AC-4: Independent exact-candidate review, affected native gates, full
   native verification and revised hosted Windows qualification pass.
-- [ ] AC-5: Confirmed development integration and main merge precede done;
+- [x] AC-5: Confirmed development integration and main merge precede done;
   catalog, version rationale and durable memory are reconciled.
 
 ## Affected Areas
@@ -129,3 +129,52 @@ format and strict all-target/all-feature Clippy) and task test:workspace (eight
 cases). Git invocation and shallow-source setup use focused helpers within the
 unchanged function-length limit; no lint suppression or assertion is added or
 removed. Native full verification and renewed hosted acceptance remain pending.
+
+## Frozen Native Correction Evidence
+
+Independent reviewer t062-review approved exact correction a765745 and combined
+source e65bf187, then confirmed projected stage
+af24b71dabf76f59182490d6a8c39796242c57fb changes only owning records to complete.
+That frozen stage passed fresh ordered task check and task test with
+NIB_REQUIRE_BWRAP_TESTS=1; these are exactly Taskfile task verify composition.
+The actual internal integration ref advanced only after both commands succeeded.
+No receipt is presented as verification of another revision. Native source,
+Task/workflow definitions, attributes, test bytes and imported package bytes
+are identical to reviewed main/development previews; event records are reviewed
+and receive renewed focused gates. Both current hosted Linux full suites passed
+on the corrected shallow-aware source; coverage and complete macOS/Windows
+qualification remain pending before actual integration/main delivery.
+
+## Integration Evidence
+
+Revision: 30e9ecf8151768ca236367ed4984e1a06bc96380
+Outcome: passed
+
+PR45 and the actual remote ref confirm verified development integration
+on 2026-10-05T19:51:41Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS).
+Main all-platform qualification remains required before done. Full development suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Main reconciliation and final frozen lifecycle verification remain pending.
+
+## Main Merge Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.

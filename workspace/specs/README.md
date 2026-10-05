@@ -35,11 +35,11 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | --- | --- | --- | --- |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
-| [T061](development/interactive/T061_question_form.md) | interactive | development | Accepted question-form contract; implementation pending. |
+| [T061](development/interactive/T061_question_form.md) | interactive | development | Published accepted-contract documentation only; runtime implementation pending and requires a fresh atomic reservation before starting. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
-| [T062](development/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | development | Local Workspace upgrade and verification; shared integration and main merge pending. |
-| [T063](development/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | development | Required security follow-up before T062 main promotion; isolated read-only Git status implementation active. |
-| [T064](development/release-delivery/T064_interrupt_smoke_input_lifetime.md) | release-delivery | development | Active bounded offline interrupt-feeder repair; exact native macOS qualification required. |
+| [T062](done/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
+| [T063](done/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
+| [T064](done/release-delivery/T064_interrupt_smoke_input_lifetime.md) | release-delivery | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T001](done/agent-runtime/T001_implement_core_agent_tools.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T002](done/agent-runtime/T002_agent_framework_runtime_and_orchestration_engine.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T005](done/agent-runtime/T005_full_runtime_state_machine_and_lifecycle.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
@@ -110,8 +110,8 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [FT-014](done/tools-sandbox/ft_014_smart_approval_classifier.md) | tools-sandbox | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [FT-017](done/tools-sandbox/ft_017_managed_process_supervisor.md) | tools-sandbox | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
-| [T065](development/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | development | Active checkout-byte repair after Windows SHA-256 failure; full forced-CRLF governance and revised Windows qualification required. |
-| [T066](development/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | development | Active confirmed failure-injection cleanup repair; native Windows requalification and verified delivery required. |
+| [T065](done/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
+| [T066](done/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact

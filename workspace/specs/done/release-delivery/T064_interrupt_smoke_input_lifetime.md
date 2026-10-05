@@ -1,8 +1,8 @@
 # T064: Interrupt Smoke Input Lifetime
 
-**Status:** Development
+**Status:** Done
 
-State: development
+State: done
 Primary Feature: release-delivery
 
 ## Scope
@@ -22,9 +22,9 @@ No product runtime or published interface change.
   wait with a bound for the exact expected child status before closing stdin.
 - [x] AC-2: Existing interruption, artifact, persisted-state and terminal-mode
   assertions remain unchanged; no blind sleep or weakened acceptance.
-- [ ] AC-3: Independent exact-candidate review, installer/Task/static gates,
+- [x] AC-3: Independent exact-candidate review, installer/Task/static gates,
   complete native gates and revised exact-source macOS qualification pass.
-- [ ] AC-4: Confirmed development integration and main merge precede done;
+- [x] AC-4: Confirmed development integration and main merge precede done;
   catalog, version rationale and memory are reconciled.
 
 ## Affected Areas
@@ -35,7 +35,7 @@ instruction policies remain unchanged.
 
 ## Implementation Plan
 
-1. Record the failed development CI37338656478 evidence and bounded scope.
+1. Record the failed development CI 37338656478 evidence and bounded scope.
 2. Keep each Ctrl+C feeder open using wait_for_pty_output on the exact child
    status marker 130, retaining the existing bound and assertions.
 3. Independently review and run affected native gates; requalify the revised
@@ -73,3 +73,40 @@ Reviewer t062-review confirmed the existing macOS Ctrl+D translation and the
 Rust SIGINT fixture's open-stdin ownership pattern. Approved bounded feeder
 repair and justified none version impact before implementation. The passing
 main candidate smoke is intermittent evidence, not resolution of this race.
+
+## Integration Evidence
+
+Revision: 3cc4550b7d807f39a5fecf07196ee2b703503b24
+Outcome: passed
+
+PR44 and the remote development ref confirm actual integration on
+2026-10-05T17:35:20Z. This is the exact independently reviewed, CI-qualified
+merge preview; its tree equals approved combined source 6a645e2.
+CI 37344993093 passed Linux/macOS full tests, 84.26 percent runtime line
+coverage (101546/120517), exact-release qualification and native interaction
+smokes, including all three repaired interruption cases. Both qualified
+binaries identify the exact revision above. Independent source review approved
+ff1050d, combined review approved 6a645e2 and staged peer review approved f5c38a1.
+Frozen task verify passed on 9528c7ce80d68480914acea842b17a9521b38e30 with
+required native bwrap: 1265 library tests, 93 CLI tests, all integration suites
+and doctests. Serialized T064 peer integration f5c38a1 also passed fresh task
+check and task test. Main all-platform qualification and completion remain pending.
+
+## Main Merge Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.

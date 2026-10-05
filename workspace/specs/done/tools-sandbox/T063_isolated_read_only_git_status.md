@@ -1,8 +1,8 @@
 # T063: Isolated Read-Only Git Status
 
-**Status:** Development
+**Status:** Done
 
-State: development
+State: done
 Primary Feature: tools-sandbox
 
 ## Scope
@@ -30,7 +30,7 @@ Related: [T058](../../done/tools-sandbox/T058_preflight_diagnostics_and_independ
   Managed child cleanup covers helper descendants on exit, cancellation and timeout.
 - [x] AC-3: Observable fixtures cover fsmonitor, executable filters, populated
   submodules, private environment/home, index preservation and unavailable isolation.
-- [ ] AC-4: Independent exact-candidate review, task test:git-status, task docs:check
+- [x] AC-4: Independent exact-candidate review, task test:git-status, task docs:check
   and task verify pass; guide, catalog, version and memory records are reconciled.
 
 ## Affected Areas
@@ -116,3 +116,42 @@ tmpfs mask, and pins that same canonical directory on the child environment.
 Missing, nonexistent, non-directory and unmaskable homes fail before spawning.
 Deterministic regression cases also prove the child cannot inherit a later HOME
 change. Renewed exact-candidate review and final verification remain required.
+
+## Integration Evidence
+
+Revision: 8bc243d00ec3ec82e7287c704fcdd897ff78204a
+Outcome: passed
+
+Confirmed shared development integration on 2026-10-05 through PR42. Independent
+review approved exact source 7b5b8e506daa2c61377c4632918d1ceed14b5bc1 and the
+exact CI-qualified merge revision above; their complete trees are identical.
+Frozen task verify passed with required native bwrap: all 1265 library tests,
+93 CLI tests, every integration suite and doctests. Serialized peer integration
+ac8083b768315de65f764dc80a5e3af5170b8471 also passed every registered native gate.
+Hosted CI37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
+exact-source release-binary qualification, native interaction and managed-process
+smokes. Both qualified binaries identify this exact development revision.
+
+The remote development ref and PR42 merged state confirm the actual event.
+Main promotion and Windows qualification remain required; publication is separate.
+The repaired ten-case native Git-status suite passed before the frozen full run,
+and all independent findings are resolved. Historical done records are unchanged.
+
+## Main Merge Evidence
+
+Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
+Outcome: passed
+
+PR43 and the actual remote ref confirm verified main merge
+on 2026-10-05T20:20:23Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+and CI 37361857315 (main Linux/macOS/Windows). Full suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Final event/catalog/memory records receive renewed exact review and frozen canonical verification before delivery.
+
+All acceptance criteria have implementation/review/validation evidence above.
+T062/T063/T065 memory is updated; T064/T066 memory is none because these
+bounded fixture repairs restore existing contracts without new durable context.
