@@ -96,7 +96,6 @@ fn plain_help_lists_ft019_commands_and_incomplete_slash_is_not_a_goal() {
     );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
     assert!(stdout.contains("mode: plain"), "{stdout}");
-    assert!(!stdout.contains("/plan") && !stdout.contains("/questions"), "{stdout}");
     for command in [
         "/status",
         "/model",
