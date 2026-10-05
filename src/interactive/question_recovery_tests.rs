@@ -295,3 +295,80 @@ fn proposal_approval_requires_explicit_recognized_conversation() {
         Some(QuestionAnswerSource::ApprovedProposal)
     );
 }
+
+#[test]
+fn recovery_opens_the_requested_editor_without_losing_intent() {
+    let (_directory, store, session_id, _, _) = recoverable_question_fixture();
+    assert!(matches!(
+        recover_question_conversation(&store, &session_id, "chat").unwrap(),
+        Some(QuestionRecoveryEffect::OpenEditor {
+            question_index: None,
+            ..
+        })
+    ));
+    assert!(matches!(
+        recover_question_conversation(&store, &session_id, "3").unwrap(),
+        Some(QuestionRecoveryEffect::OpenEditor {
+            question_index: Some(0),
+            ..
+        })
+    ));
+    assert!(store.load(&session_id).unwrap().clarifications[0]
+        .answer
+        .is_none());
+}
+
+#[test]
+fn exact_text_escape_is_an_answer_but_does_not_approve_a_tool() {
+    let (_directory, store, session_id, _, _) = recoverable_question_fixture();
+    assert!(matches!(
+        recover_question_conversation(&store, &session_id, "text: esc").unwrap(),
+        Some(QuestionRecoveryEffect::ContinuePlan { .. })
+    ));
+    let session = store.load(&session_id).unwrap();
+    assert_eq!(session.clarifications[0].answer.as_deref(), Some("esc"));
+    assert_eq!(
+        session.clarifications[0].answer_source,
+        Some(QuestionAnswerSource::Text)
+    );
+    assert!(session.tool_calls.is_empty());
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| event.kind.contains("approval")));
+}
+
+#[test]
+fn changed_current_plan_and_uncertain_provider_state_never_recover() {
+    for changed_plan in [false, true] {
+        let (_directory, store, session_id, invocation_id, _) = recoverable_question_fixture();
+        store
+            .update_session(&session_id, |session| {
+                let plan = session.plan.as_mut().unwrap();
+                if changed_plan {
+                    plan.id = "replacement-plan".to_string();
+                } else {
+                    plan.outcome = Some("provider_continuation_interrupted".to_string());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(!matches!(
+            recover_question_conversation(&store, &session_id, "beta").unwrap(),
+            Some(QuestionRecoveryEffect::ContinuePlan { .. })
+        ));
+        assert!(complete_question_recovery(
+            &store,
+            &session_id,
+            invocation_id,
+            QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer: "beta".to_string(),
+                source: QuestionAnswerSource::Option
+            }])
+        )
+        .is_err());
+        assert!(store.load(&session_id).unwrap().clarifications[0]
+            .answer
+            .is_none());
+    }
+}

@@ -47,6 +47,14 @@ fn plan_admission(session: &Session) -> Result<(), String> {
     {
         return Err("the current plan is not eligible for clarification recovery".to_string());
     }
+    if matches!(
+        plan.outcome.as_deref(),
+        Some("cancelled" | "cancelled_by_user" | "stopped" | "superseded")
+    ) {
+        return Err(
+            "this question operation was stopped or superseded and cannot be resumed".to_string(),
+        );
+    }
     if plan.outcome.as_deref() == Some("provider_continuation_interrupted") {
         return Err("the provider continuation is uncertain and cannot be replayed".to_string());
     }
