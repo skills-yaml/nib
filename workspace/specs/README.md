@@ -130,10 +130,14 @@ The following pre-v7 audit records retain their original completion semantics.
 
 T060 corrects Task listing instruction preflight, terminal scope recovery, and
 home-installed Task availability under bwrap. See [T060](done/tools-sandbox/T060_terminal_listing_instruction_preflight.md).
-T061 is in development for the question form. The contract is accepted and
-implementation has not started. The 2026-10-01 revision uses conversational
-recovery, Esc interruption, and proposal chat, and removes `/plan` and `/questions`
-from the planned interactive command surface. See [T061](development/interactive/T061_question_form.md).
+T061 is in development for the accepted question-form contract, with runtime
+implementation active under linked [T067](development/interactive/T067_question_form_runtime_implementation.md)
+at reserved version 0.3.0. Independently reviewed core code has passed aggregate
+native gates in internal peer integration; frontend, compatibility and command
+reconciliation continue before shared test/main delivery. The accepted interaction
+uses conversational recovery, Esc interruption and proposal chat and removes
+`/plan` and `/questions` from the final interactive command surface. See
+[T061](development/interactive/T061_question_form.md).
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
@@ -239,7 +243,7 @@ work or narrower guarantees.
 - [T055: Conversational Repository-Aware Help](done/context-memory/T055_conversational_repository_aware_help.md)
 - [T056: Session Worktree Preflight Recovery](done/tools-sandbox/T056_session_worktree_preflight_recovery.md)
 - [T058: Preflight Diagnostics and Independent Read Progress](done/tools-sandbox/T058_preflight_diagnostics_and_independent_read_progress.md)
-- [T061: Question Form](development/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; implementation has not started.
+- [T061: Question Form](development/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; runtime implementation is active under T067, with shared branch delivery pending.
 
 ### Feature specs
 
