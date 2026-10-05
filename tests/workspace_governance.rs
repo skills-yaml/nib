@@ -119,10 +119,15 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         ".gitattributes",
         "# Fixture removes checkout protection.\n",
     );
+    for name in ["AGENTS.md", package_file] {
+        std::fs::remove_file(checkout.path().join(name)).expect("remove protected checkout");
+    }
     git(
         checkout.path(),
         &["checkout-index", "--force", "--", "AGENTS.md", package_file],
     );
+    let unprotected = std::fs::read(checkout.path().join(package_file)).expect("unprotected bytes");
+    assert!(unprotected.windows(2).any(|pair| pair == b"\r\n"));
     assert!(
         governance::validate(checkout.path(), "all").is_err(),
         "unprotected CRLF checkout must fail governance"
