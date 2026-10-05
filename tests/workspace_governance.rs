@@ -74,13 +74,8 @@ fn fixture_git(root: &Path, args: &[&str]) -> Vec<u8> {
     output.stdout
 }
 
-#[test]
-fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let checkout = tempfile::tempdir().expect("checkout fixture");
+fn shallow_source_fixture(source: &Path, revision: &str) -> TempDir {
     let shallow_source = tempfile::tempdir().expect("shallow source fixture");
-    let revision =
-        String::from_utf8(fixture_git(source, &["rev-parse", "HEAD"])).expect("source revision");
     fixture_git(shallow_source.path(), &["init", "--quiet"]);
     fixture_git(
         shallow_source.path(),
@@ -91,12 +86,12 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
             "--depth=1",
             "--update-shallow",
             source.to_str().expect("source path"),
-            revision.trim(),
+            revision,
         ],
     );
     fixture_git(
         shallow_source.path(),
-        &["checkout", "--quiet", "--detach", revision.trim()],
+        &["checkout", "--quiet", "--detach", revision],
     );
     assert_eq!(
         String::from_utf8(fixture_git(
@@ -107,6 +102,16 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         .trim(),
         "true"
     );
+    shallow_source
+}
+
+#[test]
+fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = tempfile::tempdir().expect("checkout fixture");
+    let revision =
+        String::from_utf8(fixture_git(source, &["rev-parse", "HEAD"])).expect("source revision");
+    let shallow_source = shallow_source_fixture(source, revision.trim());
     fixture_git(checkout.path(), &["init", "--quiet"]);
     fixture_git(checkout.path(), &["config", "core.autocrlf", "true"]);
     fixture_git(checkout.path(), &["config", "core.eol", "crlf"]);
