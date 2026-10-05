@@ -3,11 +3,11 @@ schema_version: 1
 coordination_id: t066-fixture-isolation
 agent_id: t066-author
 role: implementer
-status: active
+status: complete
 base_revision: af24b71dabf76f59182490d6a8c39796242c57fb
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T19:10:00Z
+updated_at: 2026-10-05T19:14:12Z
 scope:
   - src/tools/delegation
   - workspace
@@ -38,3 +38,5 @@ Publish exact handoff for independent review and frozen full native integration;
 ## Handoff
 
 Committed test-only repair with no production, Task, workflow, vendor-byte or version change. Full native and hosted Windows execution are required before delivery.
+
+Peer integration contains reviewed source revision `a1dafe020bc8cbdd51451ee6902714ceca3d93c8`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.
