@@ -914,6 +914,71 @@ fn is_valid_environment_name(name: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
+pub(crate) fn read_only_git_status_command(cwd: &Path) -> Result<tokio::process::Command, String> {
+    read_only_git_status_command_with_capabilities(cwd, &detect_capabilities())
+}
+
+fn read_only_git_status_command_with_capabilities(
+    cwd: &Path,
+    capabilities: &SandboxCapabilities,
+) -> Result<tokio::process::Command, String> {
+    if !cfg!(target_os = "linux") || !capabilities.bwrap_available {
+        return Err("Read-only Git status requires usable strict Linux bwrap isolation. Inspect files or use an approved isolated terminal command.".to_string());
+    }
+    let cwd = canonical_directory(cwd)?;
+    let (args, home) = read_only_git_status_args(&cwd)?;
+    let mut command = tokio::process::Command::new("bwrap");
+    command.args(args).current_dir(cwd);
+    apply_child_environment(&mut command, &HashMap::new());
+    command
+        .env("HOME", home)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1");
+    Ok(command)
+}
+
+fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), String> {
+    let home = std::env::var_os("HOME")
+        .ok_or("Read-only Git status requires a valid private HOME directory for isolation")?;
+    let home = canonical_directory(&PathBuf::from(home)).map_err(|_| {
+        "Read-only Git status requires a valid private HOME directory for isolation"
+    })?;
+    if home == cwd || home.starts_with(cwd) {
+        return Err(
+            "Read-only Git status requires a repository outside the private home root.".to_string(),
+        );
+    }
+    let boundaries = BoundaryConfig {
+        allow_write: Vec::new(),
+        network: "disabled".to_string(),
+    };
+    let mut args = build_bwrap_args(
+        "exec git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short --branch",
+        cwd,
+        &boundaries,
+        "restricted",
+    )?;
+    let home_str = home.to_str().ok_or("private HOME is not valid UTF-8")?;
+    if !args.windows(2).any(|pair| pair == ["--tmpfs", home_str]) {
+        return Err(
+            "Read-only Git status could not isolate the private HOME directory".to_string(),
+        );
+    }
+    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
+    let binding = args
+        .windows(3)
+        .position(|triple| triple == ["--bind", cwd_str, cwd_str])
+        .ok_or("Read-only Git status has no exact repository binding")?;
+    args[binding] = "--ro-bind".to_string();
+    if args.iter().any(|argument| argument == "--bind") {
+        return Err("Read-only Git status cannot include writable bindings".to_string());
+    }
+    Ok((args, home))
+}
+
 fn build_bwrap_args(
     command: &str,
     cwd: &Path,
@@ -1032,9 +1097,78 @@ fn append_home_isolation(args: &mut Vec<String>, cwd: &Path) -> Result<HomeIsola
                 append_read_only_toolchain_mount(args, toolchain)?;
             }
         }
+        append_task_executable_mount(args, &home, cwd)?;
     }
 
     Ok(HomeIsolation { hidden, cargo_home })
+}
+
+fn append_task_executable_mount(
+    args: &mut Vec<String>,
+    home: &Path,
+    cwd: &Path,
+) -> Result<(), String> {
+    let Some(search_path) = std::env::var_os("PATH") else {
+        return Ok(());
+    };
+    for directory in std::env::split_paths(&search_path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd.join(directory)
+        };
+        let candidate = directory.join("task");
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        let source = candidate
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve Task executable: {error}"))?;
+        let destination = directory
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve Task executable directory: {error}"))?
+            .join("task");
+        // The PATH entry or its symlink target may be hidden by the home tmpfs.
+        // Rebind only the selected executable, never its containing directory.
+        let destination = if destination.starts_with(home) && !destination.starts_with(cwd) {
+            destination
+        } else if source.starts_with(home) && !source.starts_with(cwd) {
+            source.clone()
+        } else {
+            return Ok(());
+        };
+        let parent = destination
+            .parent()
+            .ok_or("Task executable has no parent directory")?;
+        args.extend([
+            "--dir".to_string(),
+            parent
+                .to_str()
+                .ok_or("Task directory is not valid UTF-8")?
+                .to_string(),
+            "--ro-bind".to_string(),
+            source
+                .to_str()
+                .ok_or("Task executable is not valid UTF-8")?
+                .to_string(),
+            destination
+                .to_str()
+                .ok_or("Task executable destination is not valid UTF-8")?
+                .to_string(),
+        ]);
+        return Ok(());
+    }
+    Ok(())
 }
 
 fn resolve_toolchain_home(
@@ -1226,6 +1360,95 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn git_status_unavailable_capabilities_never_construct_a_direct_command() {
+        let capabilities = SandboxCapabilities {
+            bwrap_installed: false,
+            bwrap_available: false,
+            bwrap_error: Some("fixture unavailable".to_string()),
+            managed_process_available: false,
+            managed_process_error: None,
+            git_available: true,
+        };
+        let root = tempdir().unwrap();
+        let error = read_only_git_status_command_with_capabilities(root.path(), &capabilities)
+            .expect_err("no direct fallback");
+        assert!(error.contains("strict Linux bwrap isolation"));
+    }
+
+    #[test]
+    #[serial]
+    fn git_status_has_only_read_only_repository_bindings_and_no_network() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _restore = EnvironmentVariableGuard::set("HOME", home.path().as_os_str());
+        let cwd = root.path().canonicalize().unwrap();
+        let (args, home) = read_only_git_status_args(&cwd).unwrap();
+        let path = cwd.to_str().unwrap();
+        assert!(args
+            .windows(3)
+            .any(|triple| triple == ["--ro-bind", path, path]));
+        assert!(!args.iter().any(|argument| argument == "--bind"));
+        assert!(args.iter().any(|argument| argument == "--unshare-net"));
+        assert!(args.iter().any(|argument| argument == "--unshare-pid"));
+        assert!(args.last().unwrap().contains("core.fsmonitor=false"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--tmpfs", home.to_str().unwrap()]));
+    }
+
+    #[test]
+    #[serial]
+    fn git_status_rejects_missing_invalid_and_unmaskable_home() {
+        let root = tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let _restore = EnvironmentVariableGuard::set("HOME", OsStr::new(""));
+        std::env::remove_var("HOME");
+        assert!(read_only_git_status_args(&cwd)
+            .unwrap_err()
+            .contains("valid private HOME"));
+        std::env::set_var("HOME", cwd.join("missing"));
+        assert!(read_only_git_status_args(&cwd)
+            .unwrap_err()
+            .contains("valid private HOME"));
+        let file = cwd.join("not-a-directory");
+        std::fs::write(&file, "fixture").unwrap();
+        std::env::set_var("HOME", file);
+        assert!(read_only_git_status_args(&cwd)
+            .unwrap_err()
+            .contains("valid private HOME"));
+        std::env::set_var("HOME", &cwd);
+        assert!(read_only_git_status_args(&cwd)
+            .unwrap_err()
+            .contains("outside the private home"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[serial]
+    fn git_status_child_home_is_pinned_to_the_masked_directory() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let _restore = EnvironmentVariableGuard::set("HOME", home.as_os_str());
+        let capabilities = SandboxCapabilities {
+            bwrap_installed: true,
+            bwrap_available: true,
+            bwrap_error: None,
+            managed_process_available: true,
+            managed_process_error: None,
+            git_available: true,
+        };
+        let command = read_only_git_status_command_with_capabilities(root.path(), &capabilities)
+            .expect("strict command");
+        std::env::set_var("HOME", root.path());
+        let child_home = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == OsStr::new("HOME")).then_some(value).flatten());
+        assert_eq!(child_home, Some(home.as_os_str()));
+    }
 
     #[test]
     fn sandbox_route_resolution_matches_fallback_and_fail_closed_rules() {
@@ -1881,6 +2104,92 @@ mod tests {
             "toolchain stderr: {}",
             String::from_utf8_lossy(&toolchain_output.stderr)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn task_executable_mount_is_one_read_only_file_and_follows_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempdir().expect("mount fixture");
+        let home = root.path().join("home");
+        let bin = home.join(".local/bin");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = home.canonicalize().unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        let source = root.path().join("task-binary");
+        std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&source, bin.join("task")).unwrap();
+        let _path = EnvironmentVariableGuard::set("PATH", bin.as_os_str());
+        let mut args = Vec::new();
+        append_task_executable_mount(&mut args, &home, &cwd).expect("Task mount");
+        let source = source.canonicalize().unwrap();
+        let destination = bin.canonicalize().unwrap().join("task");
+        assert!(args.windows(3).any(|window| window[0] == "--ro-bind"
+            && window[1] == source.to_string_lossy()
+            && window[2] == destination.to_string_lossy()));
+        assert_eq!(args.iter().filter(|arg| *arg == "--ro-bind").count(), 1);
+        assert!(!args.iter().any(|arg| arg == "--bind"));
+        // A non-executable PATH entry must not shadow the selected executable.
+        std::fs::remove_file(bin.join("task")).unwrap();
+        std::fs::write(bin.join("task"), "not executable").unwrap();
+        let mut args = Vec::new();
+        append_task_executable_mount(&mut args, &home, &cwd).unwrap();
+        assert!(args.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn bwrap_preserves_home_installed_task_without_exposing_siblings() {
+        use std::os::unix::fs::PermissionsExt;
+        if !detect_capabilities().bwrap_available {
+            return;
+        }
+        let root = tempdir().expect("Task sandbox fixture");
+        let home = root.path().join("home");
+        let bin = home.join(".local/bin");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let executable = bin.join("task");
+        let original = "#!/bin/sh\nprintf 'Task listing fixture\\n'\n";
+        std::fs::write(&executable, original).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("private.txt"), "private sibling").unwrap();
+        std::fs::write(home.join("private.txt"), "private home").unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let search_path = std::env::join_paths(paths).unwrap();
+        let _path = EnvironmentVariableGuard::set("PATH", &search_path);
+        let _home = EnvironmentVariableGuard::set("HOME", home.as_os_str());
+        let command = r#"
+            task --list &&
+            test ! -e "$HOME/private.txt" &&
+            test ! -e "$HOME/.local/bin/private.txt" &&
+            ! printf changed > "$HOME/.local/bin/task"
+        "#;
+        let (output, _) = run_sandboxed_with_provider(
+            command,
+            &cwd,
+            "bwrap",
+            "restricted",
+            &BoundaryConfig::default(),
+        )
+        .await
+        .expect("strict Task execution");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Task listing fixture"));
+        assert_eq!(std::fs::read_to_string(executable).unwrap(), original);
     }
 
     #[test]

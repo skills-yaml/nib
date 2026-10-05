@@ -130,7 +130,7 @@ pub fn safe_command_requires_isolation(command: &str) -> bool {
         .first()
         .and_then(|word| word.rsplit('/').next())
         .unwrap_or_default();
-    matches!(program, "cargo" | "git")
+    matches!(program, "cargo" | "git" | "task")
 }
 
 fn command_words(command: &str) -> Vec<&str> {
@@ -193,6 +193,9 @@ fn is_safe_command(words: &[&str]) -> bool {
     let program = words[0].rsplit('/').next().unwrap_or(words[0]);
     match program {
         "echo" | "printf" => true,
+        // Listing still loads executable Taskfile configuration; keep it Safe
+        // and isolated rather than treating it as a pure filesystem read.
+        "task" => words.len() == 2 && matches!(words[1], "--list" | "-l" | "--list-all" | "-a"),
         "cargo" => matches!(
             words.get(1).copied(),
             Some("test" | "check" | "build" | "fmt" | "clippy" | "metadata")
@@ -261,6 +264,32 @@ mod tests {
         assert!(safe_command_requires_isolation("cargo check"));
         assert!(safe_command_requires_isolation("git status --short"));
         assert!(!safe_command_requires_isolation("ls ."));
+    }
+
+    #[test]
+    fn task_listing_is_bounded_without_trusting_arbitrary_tasks() {
+        for command in ["task --list", "task -l", "task --list-all", "task -a"] {
+            assert_eq!(classify_command(command), ToolRisk::Safe, "{command}");
+            assert!(safe_command_requires_isolation(command));
+        }
+        for command in [
+            "task",
+            "task verify",
+            "task deploy --list",
+            "task --list deploy",
+            "task --list --global",
+            "task --list --taskfile other.yml",
+            "task --list --dir ../outside",
+            "task --list > inventory.txt",
+            "task --list && echo done",
+            "task --list EXTRA=value",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                ToolRisk::RequiresApproval,
+                "{command}"
+            );
+        }
     }
 
     #[test]

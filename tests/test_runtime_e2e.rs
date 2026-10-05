@@ -4679,3 +4679,170 @@ async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() 
         Some("fixture::nib_run")
     );
 }
+
+#[tokio::test]
+async fn task_listing_without_affected_paths_executes_in_the_session_worktree() {
+    let root = git_repository();
+    std::fs::write(root.path().join("Taskfile.yml"),
+        "version: '3'\ntasks:\n  inventory:\n    desc: T060 listing fixture\n    cmds:\n      - echo unexpected > listing-mutation.txt\n"
+    ).expect("Task listing fixture");
+    git(root.path(), &["add", "Taskfile.yml"]);
+    git(root.path(), &["commit", "-qm", "Task listing fixture"]);
+    let (summary, persisted, _) = run_failure_fixture(
+        root.path(),
+        vec![
+            failure_fixture_tool_turn(
+                "task-listing",
+                vec![
+                    (
+                        "run_terminal",
+                        json!({"command": "task --list", "cwd": "."}),
+                    ),
+                    ("run_terminal", json!({"command": "pwd", "cwd": "."})),
+                ],
+            ),
+            failure_fixture_text_turn(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(
+        summary.outcome,
+        "completed",
+        "{:?}",
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_completed")
+            .map(|event| &event.details)
+            .collect::<Vec<_>>()
+    );
+    let records = persisted
+        .tool_calls
+        .iter()
+        .filter(|record| record.tool_name.as_deref() == Some("run_terminal"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    let worktree = Path::new(
+        records[0]
+            .worktree_path
+            .as_deref()
+            .expect("isolated listing"),
+    );
+    assert_ne!(worktree, root.path());
+    assert_eq!(records[0].worktree_path, records[1].worktree_path);
+    assert!(!worktree.join("listing-mutation.txt").exists());
+    assert!(!root.path().join("listing-mutation.txt").exists());
+    let completed = persisted
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == "tool_completed" && event.details["tool_name"] == "run_terminal"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2);
+    assert!(completed
+        .iter()
+        .all(|event| event.details["success"] == true));
+    assert!(completed[0].details["output"]
+        .to_string()
+        .contains("T060 listing fixture"));
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "tool_preflight_rejected"));
+}
+
+#[tokio::test]
+async fn missing_terminal_scopes_reconcile_with_actionable_recovery() {
+    for affected_paths in [None, Some(json!([]))] {
+        let root = git_repository();
+        let mut arguments = json!({"command": "task verify", "cwd": "."});
+        if let Some(paths) = affected_paths {
+            arguments["affected_paths"] = paths;
+        }
+        let (summary, persisted, requests) = run_failure_fixture(
+            root.path(),
+            vec![failure_fixture_tool_turn(
+                "missing-terminal-scope",
+                vec![("run_terminal", arguments)],
+            )],
+            None,
+        )
+        .await;
+        assert_eq!(summary.outcome, "tool_scope_required");
+        assert_eq!(summary.tool_call_count, 0);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+        assert!(persisted
+            .events
+            .iter()
+            .any(|event| event.kind == "tool_preflight_rejected"
+                && event.details["category"] == "scope_required"));
+        assert!(!persisted
+            .events
+            .iter()
+            .any(|event| event.kind == "instruction_context_missing"));
+        let report = summary.user_failure_report().expect("scope failure report");
+        assert!(report.contains("affected_paths"));
+        assert!(!report.contains("context_length"));
+        let observation = persisted
+            .events
+            .iter()
+            .find(|event| event.kind == "tool_completed")
+            .expect("rejected tool result");
+        assert!(observation.details["error"]
+            .as_str()
+            .unwrap()
+            .contains("affected_paths"));
+    }
+}
+
+#[tokio::test]
+async fn missing_terminal_scope_preserves_independent_batch_reads() {
+    let root = git_repository();
+    let (summary, persisted, requests) = run_failure_fixture(
+        root.path(),
+        vec![
+            failure_fixture_tool_turn(
+                "mixed-terminal-scope",
+                vec![
+                    ("list_directory", json!({"path": "."})),
+                    ("run_terminal", json!({"command": "task verify"})),
+                ],
+            ),
+            failure_fixture_text_turn(),
+        ],
+        None,
+    )
+    .await;
+    assert_ne!(summary.outcome, "completed");
+    assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    let completed = persisted
+        .events
+        .iter()
+        .filter(|event| event.kind == "tool_completed")
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| event.details["success"] == true)
+            .count(),
+        1
+    );
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "tool_preflight_rejected"
+            && event.details["category"] == "scope_required"));
+    assert!(requests[1].to_string().contains("affected_paths"));
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "instruction_context_missing"));
+    assert!(!persisted
+        .messages
+        .iter()
+        .any(|message| message.content.contains("increase llm.context_length")));
+}

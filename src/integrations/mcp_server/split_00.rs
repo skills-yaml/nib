@@ -364,7 +364,7 @@ impl McpCancellationAuditState {
             #[cfg(test)]
             if self
                 .injected_failures
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::AcqRel,
                     std::sync::atomic::Ordering::Acquire,
                     |remaining| remaining.checked_sub(1),
@@ -381,7 +381,7 @@ impl McpCancellationAuditState {
                     if _wrote_event
                         && self
                             .injected_post_commit_failures
-                            .fetch_update(
+                            .try_update(
                                 std::sync::atomic::Ordering::AcqRel,
                                 std::sync::atomic::Ordering::Acquire,
                                 |remaining| remaining.checked_sub(1),

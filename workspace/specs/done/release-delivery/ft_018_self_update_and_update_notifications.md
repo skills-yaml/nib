@@ -1,0 +1,637 @@
+# FT-018: Self-Update Command and Update Availability Notices
+
+**Status:** Done
+
+State: done
+Primary Feature: release-delivery
+
+## Summary
+
+Add an explicit `nib update` command that safely replaces an installed official nib
+binary with the current release from its existing rolling channel. When that channel
+already points at the installed build, the command reports that there is nothing to
+update and makes no filesystem changes.
+
+Every ordinary user-facing nib launch also performs a bounded, best-effort availability
+check. If the selected channel contains a different build, nib prints a concise notice
+that directs the user to `nib update`; startup checks never install software.
+
+## Decision
+
+- Official release builds update only within their embedded `prod` or `development`
+  channel.
+- Build identity is the exact embedded commit SHA, not only the Cargo package version,
+  because nib currently publishes mutable `prod-latest` and `development-latest`
+  releases.
+- Each rolling Release publishes a bounded `nib-release.json` manifest containing its
+  channel, tag, commit, package version, and exact platform artifact metadata.
+- `nib update` performs a foreground, integrity-checked update. Automatic startup checks
+  only read the manifest and notify.
+- Local, unknown, source-built, or otherwise unmanaged builds are not overwritten. They
+  receive explicit reinstall guidance from `nib update` and do not emit automatic update
+  notices.
+- The repository release workflow remains the exclusive rolling-release writer defined
+  by [T010](T010_release_process.md).
+
+## Problem
+
+nib users must currently know that updating means rerunning a platform installer. The
+CLI contains an unused updater stub, but it points at a placeholder repository, invokes
+Git to compare a tag, and only prints installer guidance. There is no shipped `update`
+subcommand and no routine notification that a newer channel build is available.
+
+Cargo version `0.1.0` is also insufficient as the sole comparison key while the product
+uses rolling channel tags. Two different release builds can have the same package
+version, so availability must be bound to the release commit and channel.
+
+## Goals
+
+- Provide `nib update` on Linux, macOS, and Windows for official release binaries.
+- Keep an already-current invocation a successful, observable no-op.
+- Preserve the installed binary on download, validation, extraction, smoke, or
+  replacement failure.
+- Reuse the existing release channels, artifacts, checksum policy, and exclusive-writer
+  transaction instead of creating a second distribution system.
+- Check for channel updates during every eligible user-facing launch and notify only
+  when an update is available.
+- Keep startup checks bounded, non-mutating, quiet on network failure, and isolated from
+  machine-readable protocols.
+- Make all network, archive, path, concurrency, and replacement behavior deterministic
+  enough for local and native-platform regression tests.
+
+## Non-Goals
+
+- Installing updates automatically without an explicit `nib update` command.
+- Switching an installed binary between production and development channels.
+- Updating source builds, package-manager installations, or arbitrary forks.
+- Introducing semantic-version ordering or immutable versioned releases in this feature.
+- Adding a background update daemon, scheduled task, telemetry, or a new global config
+  store.
+- Signing release artifacts. This feature retains the existing GitHub HTTPS plus
+  SHA-256 trust boundary; artifact signing requires a separate supply-chain decision.
+- Changing the release workflow's exclusive-writer policy or its recovery model.
+
+## Terminology And Invariants
+
+- **Managed build:** a binary with embedded channel `prod` or `development`, a valid
+  lowercase 40-hex commit SHA, and an executable path that the updater can replace
+  without privilege escalation.
+- **Current channel build:** the build described by `nib-release.json` at the installed
+  build's rolling tag.
+- **Update available:** the validated manifest commit differs from the installed
+  embedded commit. Because tags are rolling, user-facing copy says "channel update"
+  rather than claiming semantic-version ordering.
+- **Already current:** the manifest channel and commit exactly equal the installed
+  channel and commit.
+- Update checking and installation are product-maintenance operations. They do not
+  create a project session, mutate the workload model, or pass through `ToolExecutor`.
+- A startup check never mutates the executable, release state, project state, profile
+  state, or session state.
+
+## Proposed Design
+
+### Release Manifest Contract
+
+The release workflow adds `nib-release.json` to both rolling releases. The manifest is
+UTF-8 JSON, has a maximum accepted size of 64 KiB, rejects unknown fields, and contains:
+
+```json
+{
+  "schema_version": 1,
+  "repository": "skills-yaml/nib",
+  "channel": "prod",
+  "tag": "prod-latest",
+  "version": "0.1.0",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "assets": {
+    "nib-linux-x86_64.tar.gz": {
+      "sha256": "<64 lowercase hex characters>",
+      "size": 1
+    }
+  }
+}
+```
+
+The real manifest contains all four supported archives. Publication validates that:
+
+- repository, channel, tag, package version, and candidate commit match the release
+  transaction;
+- the asset map contains exactly the supported platform archives;
+- every size is positive and every digest matches both the archive and its existing
+  `.sha256` asset;
+- the manifest, four archives, and four checksum files are uploaded to the staged
+  Release before promotion; and
+- recovery preserves or rolls back the manifest with the same atomic release unit as
+  the other assets.
+
+Existing installers remain compatible because adding the manifest does not change
+their archive or checksum URLs. The manifest URL is:
+
+```text
+https://github.com/skills-yaml/nib/releases/download/<rolling-tag>/nib-release.json
+```
+
+The client accepts HTTPS redirects only to a bounded allowlist of GitHub-controlled
+release hosts. It does not accept a repository or manifest URL from project config,
+environment variables, or release content.
+
+### `nib update` Command
+
+`nib update` follows this flow:
+
+1. Read and validate the embedded build channel, commit, package version, target OS,
+   architecture, and current executable path.
+2. Reject unmanaged builds before network or filesystem mutation, with guidance to
+   rerun the official installer.
+3. Acquire an exclusive, installation-target-scoped update lock. A concurrent updater
+   exits nonzero with `another nib update is already in progress`.
+4. Fetch and strictly validate the channel manifest with bounded redirects, response
+   bytes, connect timeout, total timeout, and no unbounded retry.
+5. If the manifest commit equals the embedded commit, print the current version,
+   channel, and short commit plus `nib is already up to date`; exit zero without
+   downloading an archive or touching the executable.
+6. Select exactly one supported archive from the compiled target OS and architecture.
+7. Download that archive and its `.sha256` asset into a fresh private temporary
+   directory under explicit byte and time limits.
+8. Require the manifest digest, checksum asset digest, and downloaded archive digest to
+   match exactly before extraction.
+9. Extract without following links or accepting absolute paths, `..` traversal, device
+   entries, unexpected files, duplicate binary entries, or an oversized expanded
+   binary.
+10. Execute the staged binary with `version` under `NIB_NO_UPDATE_CHECK=1` and require
+    its embedded repository contract, channel, version, and full commit to match the
+    manifest.
+11. Revalidate the locked target path and file identity immediately before replacement.
+    A replaced path, changed identity, symlink/reparse-point ambiguity, or lost lock
+    fails closed.
+12. Commit the new executable through a same-directory, same-filesystem replacement
+    protocol. Unix uses an atomic rename over the old executable after syncing the
+    staged file and parent directory. Windows uses a native, tested self-replacement
+    protocol that succeeds only after the target path names the verified new binary;
+    cleanup of the old in-use image may be deferred but must be bounded and recoverable.
+13. Print the previous and installed version/channel/short-commit identities and exit
+    zero.
+
+The updater never invokes `sudo`, changes `PATH`, mutates Git tags or Releases, or
+silently falls back to executing a downloaded installer script. A non-writable or
+unsupported installation returns a nonzero error with the exact manual installer
+command for the embedded channel.
+
+### Output Contract
+
+Successful no-op:
+
+```text
+nib is already up to date: 0.1.0 (prod, 0123456)
+```
+
+Successful replacement:
+
+```text
+Updated nib: 0.1.0 (prod, 0123456) -> 0.1.0 (prod, 89abcde)
+```
+
+Unmanaged build:
+
+```text
+This nib build is not self-update managed (channel: local). Reinstall from an official prod or development release.
+```
+
+Normal results go to stdout. Actionable failures go to stderr and return nonzero. Error
+messages identify the failing stage without exposing temporary paths or unbounded HTTP
+response bodies.
+
+### Startup Availability Check
+
+After command parsing, every ordinary user-facing process launch invokes the same
+manifest comparison code with a one-second maximum total budget and no retry. The
+check:
+
+- runs for visible commands such as the default UI, `chat`, `run`, `tui`, `auth`,
+  `context`, `config`, `doctor`, `skill`, `mcp`, `task`, and `version`;
+- is replaced by the foreground update flow for `nib update`;
+- is skipped for Clap's early `--help`/`--version` exits, `mcp-server`, stdio relay,
+  task workers, supervisor/worker commands, and test fixtures;
+- is skipped for unmanaged builds and when `NIB_NO_UPDATE_CHECK=1` is set;
+- downloads only the bounded manifest and never an archive;
+- emits at most one notice per process, to stderr, only when stderr is an interactive
+  terminal and a different validated commit is available;
+- remains silent when the current build matches, the network is offline, the request
+  times out, the manifest is missing, or validation fails; and
+- never changes the invoked command's exit status.
+
+The notice is concise and includes the channel, package version, and short commit:
+
+```text
+[nib] Channel update available: 0.1.0 (prod, 89abcde). Run `nib update`.
+```
+
+Startup failures may be recorded through debug logging, but they are not written to
+session history and do not create durable update state. The environment opt-out and
+the fact that startup checks contact GitHub are documented for offline and privacy-
+sensitive environments.
+
+### Shared Components
+
+The explicit command and startup notice share typed code for:
+
+- channel-to-tag mapping;
+- embedded and remote build identity validation;
+- platform-to-asset selection;
+- manifest fetching, size limits, timeouts, and redirect policy; and
+- exact `Current`, `Available`, `Unmanaged`, and `Unavailable` outcomes.
+
+Only the explicit command can call archive download, verification, extraction, locking,
+or replacement code. This separation prevents a startup-check call site from gaining
+mutation capability accidentally.
+
+## Security And Reliability Requirements
+
+- Validate all release metadata before constructing download paths.
+- Keep the official repository and rolling tags compile-time controlled.
+- Reuse `rustls`; do not add a native TLS dependency or shell out to Git/curl.
+- Bound manifest, checksum, archive, expanded-binary, redirect, response-time, and
+  extraction-entry counts.
+- Require three-way archive digest agreement: manifest, checksum asset, and downloaded
+  bytes.
+- Smoke the staged executable and verify its embedded identity before replacement.
+- Reuse the project's filesystem identity and no-link primitives where applicable.
+- Serialize mutation per installed target and recheck identity immediately before the
+  commit point.
+- Preserve the prior executable on every pre-commit error and across injected process
+  failures. Post-commit recovery must converge on one complete verified executable.
+- Never let update-check output enter MCP stdout, JSON output, model context, or session
+  audit records.
+
+## Affected Areas
+
+- `src/main.rs` — public subcommand and eligible-startup dispatch.
+- `src/updater.rs` — replace the placeholder implementation with typed check, download,
+  verification, and replacement logic.
+- `src/version.rs` and `build.rs` — expose and validate a consistent full build identity.
+- `src/fs_security.rs` — reuse or extend exact path/file identity checks if required.
+- `Cargo.toml` / `Cargo.lock` — bounded archive or platform replacement support, if the
+  standard library and existing dependencies are insufficient.
+- `.github/workflows/release.yml` and `scripts/publish-release.sh` — generate, validate,
+  stage, recover, and publish `nib-release.json` within T010's transaction.
+- `tests/installers.rs` and CLI/integration tests — release contract, failure injection,
+  replacement, output, and startup-check coverage.
+- `README.md`, `workspace/docs/user/guide.md`, `workspace/instructions/tech/ci.md`, and
+  `workspace/instructions/tech/project_structure.md` — command, notification, opt-out, release manifest,
+  and updater architecture documentation.
+- [T010](T010_release_process.md) — coordinated release evidence and
+  exact-current remote rollout gate; its lifecycle state remains independently owned.
+
+The agent loop, tool permission model, sessions, durable tasks, MCP protocol, and
+workload persistence are not modified.
+
+## Alternatives Considered
+
+- **Keep rerunning installers:** safe but rejected as the primary experience because it
+  provides neither a discoverable command nor availability notices.
+- **Use `git ls-remote`:** rejected because update discovery should not spawn Git,
+  inherit repository config, or depend on local Git transport behavior.
+- **Use the unauthenticated GitHub REST API on every run:** rejected because API quota
+  and response variability are unnecessary for a fixed rolling release asset.
+- **Compare only `CARGO_PKG_VERSION`:** rejected because rolling releases can contain
+  distinct commits with the same package version.
+- **Download the full archive to check availability:** rejected because startup checks
+  require only small bounded metadata.
+- **Automatically update during startup:** rejected because executable mutation must be
+  an explicit user action with visible errors.
+- **Execute a freshly downloaded installer script:** rejected because the updater can
+  verify and replace the known platform artifact directly without executing mutable
+  remote shell code.
+
+## Rollout Plan
+
+1. Extend T010's staged release transaction and installer regressions to generate and
+   verify `nib-release.json` without changing existing archive/checksum URLs.
+2. Implement typed manifest checking and `nib update` behind the new public command;
+   validate no-op and replacement flows against a local fake release server.
+3. Add the bounded startup check only after the explicit checker has deterministic
+   timeout, output-isolation, and unmanaged-build behavior.
+4. Publish and inspect a development-channel release containing the manifest and
+   updater. Use the existing installer for this bootstrap release.
+5. From that installed development build, publish a second development release and
+   prove notification plus end-to-end self-update on Linux, macOS Intel, macOS Apple
+   Silicon, and Windows x86_64.
+6. Promote the same contract to production only after all local and hosted gates pass.
+
+The first updater-capable release still requires the existing installer. Self-update is
+available from that release onward. A missing manifest makes startup checking silent and
+causes `nib update` to fail with installer guidance; it never guesses from partial data.
+
+## Implementation Plan
+
+1. Define the manifest schema and pure build/channel/platform comparison types.
+2. Extend release generation, staged-asset validation, and recovery tests.
+3. Implement bounded manifest transport and deterministic result classification.
+4. Implement archive verification, safe extraction, staged-binary identity smoke, and
+   per-target locking.
+5. Implement and natively test Unix and Windows replacement protocols.
+6. Wire `nib update`, then wire the read-only startup check through an explicit command
+   eligibility policy.
+7. Update user, technical, installer, and CLI documentation.
+8. Run local gates, hosted platform gates, and two consecutive development releases
+   before production rollout.
+
+## Validation Gates
+
+- Pure tests cover channel/tag mapping, equal and different commits, unmanaged builds,
+  malformed identities, unsupported targets, unknown fields, manifest byte limits, and
+  exact asset selection.
+- HTTP fixture tests cover success, offline/timeout, redirects, redirect rejection,
+  truncated/oversized responses, malformed JSON, wrong repository/channel/tag/commit,
+  and retry bounds.
+- Update integration tests cover current no-op, successful replacement, checksum and
+  manifest mismatch, unsafe archives, staged-binary identity mismatch, non-writable
+  targets, replaced target identities, concurrent invocations, and injected failures at
+  every pre- and post-commit boundary.
+- CLI tests assert stable stdout, stderr, and exit status for current, updated,
+  unmanaged, unavailable, and failed outcomes.
+- Startup tests prove every eligible command invokes the checker, excluded protocol and
+  worker commands do not, only interactive stderr receives notices, timeouts stay within
+  budget, and check failures never change command results.
+- Release transaction tests prove the manifest is part of the complete staged asset set
+  and survives forward recovery or rollback coherently with all archives/checksums.
+- Native Linux, macOS Intel, macOS Apple Silicon, and Windows tests replace a real copied
+  executable and verify the next invocation reports the manifest identity.
+- `task installers:check`, `task docs:check`, `task test`, `task check`, `task coverage`,
+  and `task build` pass.
+- Two consecutive exact-revision development release runs prove bootstrap installation,
+  update notification, verified self-replacement, and complete published assets before
+  production enablement.
+
+## Acceptance Criteria
+
+- [x] `nib update` is visible in CLI help on supported release targets.
+- [x] When the installed commit equals the validated channel manifest, `nib update`
+  exits zero, prints `nib is already up to date`, downloads no archive, and leaves the
+  executable untouched.
+- [x] When a different valid channel build exists, `nib update` downloads only the
+  correct platform archive, validates the manifest/checksum/archive digests, smokes the
+  staged identity, replaces the executable safely, and reports both identities.
+- [x] Local, unknown, unsupported, non-writable, and ambiguous installations fail
+  without mutation and provide actionable official-installer guidance.
+- [x] Download, checksum, extraction, smoke, race, or replacement failure cannot leave
+  the target path missing, partially written, or pointing at an unverified binary.
+- [x] Concurrent update attempts serialize and cannot overwrite a newer verified
+  installation with stale downloaded state.
+- [x] Every eligible user-facing launch performs a bounded availability check and emits
+  at most one interactive stderr notice when a different validated commit exists.
+- [x] Startup checks never install, never alter exit status, stay silent for current or
+  unavailable state, honor `NIB_NO_UPDATE_CHECK=1`, and cannot contaminate MCP or other
+  machine-readable output.
+- [x] The rolling release transaction publishes and validates `nib-release.json`
+  coherently with the existing four archives and four checksum assets.
+- [x] User and technical docs describe the command, rolling-channel identity, automatic
+  check, opt-out, failure behavior, bootstrap limitation, and manual recovery path.
+- [x] All local, hosted cross-platform, release, documentation, coverage, and consecutive
+  development self-update gates pass on exact committed revisions.
+
+## Risks And Tradeoffs
+
+- A remote request on ordinary starts adds latency and reveals a GitHub release check.
+  The request is manifest-only, bounded to one second, silent on failure, and can be
+  disabled with `NIB_NO_UPDATE_CHECK=1`.
+- Checksums obtained from the same GitHub release do not protect against compromise of
+  the repository's release authority. This matches the current installer boundary but
+  does not replace future artifact signing.
+- Rolling tags can intentionally move backward during recovery or operator rollback.
+  Exact identity comparison remains truthful, while UI copy avoids claiming semantic
+  precedence.
+- Windows in-use executable semantics make replacement more complex than Unix rename.
+  Production acceptance requires a native hosted end-to-end replacement, not only
+  cross-compilation or mocked filesystem tests.
+- Extending the exact release asset set changes T010's recovery harness. The manifest
+  must enter the existing transaction atomically; a parallel publisher is prohibited.
+- An executable installed through an unsupported package manager could be writable but
+  should not be overwritten. The embedded managed-channel requirement prevents local
+  builds from being mistaken for official updater-owned installations.
+
+## Dependencies
+
+- T010 is the completed authoritative release publication and recovery contract. Its
+  exact manifest-producing development and production workflows are green.
+- Existing release build metadata must continue embedding the exact channel and commit.
+- The four current platform archives and `.sha256` assets remain the installation unit.
+
+## Open Questions
+
+None are blocking for development. Package-manager ownership detection, signed
+artifacts, channel switching, configurable persistent check cadence, and immutable
+versioned releases require separate follow-up decisions if they enter scope.
+
+## Implementation Reconciliation (2026-08-01)
+
+### Implemented Scope
+
+- `nib update` is a public command and local/unmanaged builds fail before network I/O.
+- Official builds use their embedded channel and exact commit identity.
+- Strict manifest parsing, bounded GitHub release transport, allowlisted redirects,
+  target selection, checksum parsing, three-way SHA-256 agreement, safe tar/zip
+  extraction, staged identity smoke, target locking, identity recheck, and Unix/Windows
+  replacement paths are implemented in `src/updater.rs`.
+- Ordinary visible commands invoke a one-second best-effort check. Update, MCP stdio,
+  relay, task worker, and subagent worker/supervisor paths are excluded; notices require
+  an interactive stderr and `NIB_NO_UPDATE_CHECK=1` disables checks.
+- The release transaction generates `nib-release.json`, uploads it as the ninth candidate
+  asset, and preserves legacy eight-asset releases as valid predecessors during rollout.
+- README, user, architecture, CI, structure, Task, and lifecycle documentation describe
+  the delivered local contract.
+
+### Local Evidence
+
+- `task test:updater`: 7 updater unit tests and 2 CLI integration tests passed. The
+  localhost HTTP fixture requires a host that permits loopback binding.
+- `task test:installers`: all 23 installer and release-transaction tests passed,
+  including failure/recovery paths with the manifest candidate and legacy predecessor.
+- Host `task check:all-targets` passed.
+- Windows MSVC `task check:all-targets TARGET=x86_64-pc-windows-msvc` passed; warnings
+  are pre-existing cross-target dead-code warnings outside FT-018.
+- macOS cross-check reaches `ring` but cannot compile on this Linux host because an
+  Apple compiler/SDK is unavailable; this is an environment gate, not updater evidence.
+
+### Historical Remaining Gates
+
+These items describe the 2026-08-01 implementation snapshot; the production evidence
+below closes them.
+
+- The four overlapping T021/T022 Clippy findings and eight stale provider-continuation
+  fixtures are repaired locally; the canonical `task check` gate passes.
+- Workflow-changing production publication used T010's marked forward-only mode so
+  the Actions token never creates a backup ref at an older workflow revision. The local
+  25-test release harness covered success and process-loss recovery; hosted publication
+  was still required at that snapshot.
+- Native macOS and Windows executable replacement had not yet executed.
+- A manifest-producing development release and a second release exercising actual
+  notification and self-replacement had not yet run, so the spec remained in
+  Development at that snapshot.
+
+## Hosted Consecutive-Development Qualification (2026-08-06)
+
+### Scope And Design
+
+Add a manually dispatched, read-only GitHub Actions qualification workflow for the
+rollout steps above. The workflow accepts the successful bootstrap and candidate
+Release Artifacts run IDs, the bootstrap commit, and the held production run ID. It
+downloads the bootstrap run's four native archives and runs one job on each matching
+Linux, macOS Intel, macOS Apple Silicon, and Windows runner. Each job installs the
+bootstrap binary into an isolated temporary directory, requires an interactive startup
+notice for the already-published second development commit, runs `nib update`, verifies
+that the executable at the same path now reports the exact second commit and manifest
+version, and proves a subsequent update is a byte-preserving current-build no-op.
+
+The qualification is accepted only when dispatched from the `development` branch. It
+receives `actions: read` and `contents: read`, never release-write permission, and
+validates both exact 40-hex commits before running. The rolling release workflow remains
+the sole publisher and exclusive writer.
+
+GitHub requires a manually dispatched workflow to exist on the default branch. The
+candidate therefore lands on `main` behind a required `release-prod` reviewer, without
+approving its production publication, and the exact same SHA is published from
+`development`. Qualification requires that exact main/development identity, a still-held
+production run, successful exact bootstrap and candidate runs from the release workflow,
+bootstrap ancestry, chronological and run-ID order, and no intervening successful
+development publication. After the four native jobs, a final read-only job requires the
+same production deployment to remain pending on `release-prod` and proves that no
+production ref moved. Passing qualification authorizes approval only for that held
+production run and SHA.
+
+The rollout also requires draft publication to create the reserved staging Git ref at
+the exact candidate SHA before uploading assets and to create the draft with
+`--verify-tag`. This avoids GitHub's `untagged-*` draft placeholder path and keeps the
+rolling channel unchanged until the complete candidate has been validated.
+
+### Acceptance Criteria And Validation Gates
+
+- [x] The first exact-revision development release succeeds and publishes the complete
+  manifest plus four archive/checksum pairs.
+- [x] A distinct second exact-revision development release succeeds with the same
+  complete asset contract.
+- [x] Native Linux, macOS Intel, macOS Apple Silicon, and Windows jobs each observe the
+  second-build startup notice from the first binary, replace that executable through
+  `nib update`, verify the second full commit identity, and prove a checksum-stable
+  already-current update.
+- [x] The qualification workflow is manual-only, development-only, read-only, pinned to
+  immutable action revisions, and consumes artifacts only from the supplied successful
+  bootstrap run.
+- [x] The candidate SHA exactly matches `main`, `development-latest`, the successful
+  candidate development run, and a still-unapproved `release-prod` run; the bootstrap
+  is its ancestor and no successful development publication occurred between the two.
+- [x] Documentation-only and agent-memory-only reconciliation commits do not publish a
+  new binary after the exact qualified production revision.
+- [x] `task installers:check`, `task test:installers`, `task test:updater`, `task check`,
+  and hosted CI pass on the exact second revision before production promotion.
+
+Affected areas are `.github/workflows/release.yml`,
+`.github/workflows/release-update-qualification.yml`,
+`scripts/qualify-release-update.sh`, `scripts/qualify-release-update.ps1`,
+`Taskfile.yml`, `tests/installers.rs`, `workspace/instructions/tech/ci.md`, and `workspace/instructions/tech/task.md`.
+
+## Windows In-Use Replacement Remediation (2026-08-06)
+
+### Reproduction And Scope
+
+Read-only qualification run `31141318203` proved the updater and release contract on
+Linux, macOS Intel, and macOS Apple Silicon, but the Windows job failed while the
+bootstrap process attempted to replace its own running image. `MoveFileExW` with
+`MOVEFILE_REPLACE_EXISTING` returned `Access is denied. (os error 5)` at the exact
+same-path replacement boundary. Production remains held and unapproved.
+
+Replace the unsupported overwrite with a repository-owned Windows handoff protocol.
+The verified candidate creates a cleanup worker before mutation. After a bounded
+readiness handshake, the parent renames the running target to a unique same-directory
+backup and publishes the already-verified staged candidate at the original path. A
+failed publish restores the backup before returning failure. The worker holds a real
+handle to the parent process, waits for that exact process to exit, then reconciles
+only digest-proven states: remove the old backup after a successful publish, restore it
+if the target is absent, or preserve ambiguous evidence without deleting either
+candidate. Worker and staging cleanup are bounded and cannot turn a successful update
+into an unbounded foreground wait.
+
+The private worker entrypoint runs before Clap parsing and is available only through a
+strict, updater-owned request passed in the environment. Request paths are confined to
+direct children of the target and staging directories; expected old and candidate
+SHA-256 digests bind every recovery decision. The public CLI and startup-notice policy
+do not expose or invoke the worker.
+
+Readiness publication writes and syncs a private sibling first, then atomically renames
+it to the observed readiness name without replacement. Readers can therefore observe
+only absence or the complete request-bound nonce, never a partial handshake.
+
+The first repaired development publication is release run `31145574017` at commit
+`8ff32b2ea5bd7f905bfde3f5c04eed3d77f084e8`. The distinct second repaired candidate
+adds a deterministic recovery replay regression: reconciling an already-committed,
+backup-free state more than once must remain a no-op, preserve the exact candidate
+bytes, and not recreate the old-image backup. This test-only hardening produces a new
+embedded build commit while keeping the qualified updater protocol unchanged.
+
+### Acceptance Criteria And Validation Gates
+
+- [x] Windows never attempts to overwrite or unlink the currently running image.
+- [x] Parent/worker readiness has a finite timeout, and mutation starts only after the
+  worker has opened the exact parent process and durably signalled readiness.
+- [x] Successful replacement leaves the original executable path naming the verified
+  candidate before `nib update` reports success; old-image and staging cleanup
+  converges after the parent exits.
+- [x] A publish failure rolls the same digest-proven backup back to the target, and a
+  crash between the two renames is recoverable by the worker without accepting an
+  unverified file.
+- [x] A later updater is fenced while any prior Windows staging or backup evidence
+  remains, so two replacement/cleanup protocols cannot overlap at one target.
+- [x] Missing, malformed, replayed, path-escaping, digest-mismatched, and ambiguous
+  worker requests fail closed and preserve recovery evidence.
+- [x] Replaying recovery after a digest-proven committed-clean state is idempotent:
+  the candidate bytes remain unchanged and no backup is recreated.
+- [x] Deterministic tests cover cleanup-state classification, publish rollback, bounded
+  readiness, and debris detection; the Windows qualification rejects leftover
+  `.nib-update-*` staging or backup paths after convergence.
+- [x] `task test:updater`, `task test:installers`, Windows MSVC checks, `task check`,
+  `task docs:check`, and exact-revision hosted CI pass.
+- [x] Two distinct development publications containing the repaired updater qualify
+  on all four native platforms. The first repaired publication is the bootstrap and
+  the second is the candidate; an older bootstrap cannot qualify code it does not run.
+- [x] Only the exact held production run for the second repaired revision is approved,
+  after the final read-only job confirms production is still unchanged and held.
+
+Affected areas are `src/updater.rs`, the pre-parse startup boundary in `src/main.rs`,
+Windows updater tests, `scripts/qualify-release-update.ps1`, installer/workflow static
+tests, and the consecutive-development release evidence.
+
+## Production Rollout Evidence (2026-08-07)
+
+This section supersedes earlier remaining-gate and pending-release statements.
+
+- First repaired development release run `31145574017` published commit
+  `8ff32b2ea5bd7f905bfde3f5c04eed3d77f084e8` with the complete nine-asset contract.
+- Distinct candidate development release run `31148235010` published commit
+  `2ecf9d23d951a293238c46d605f2f92e3db3b946` next, with no intervening successful
+  development publication. Both release manifests and all archive checksums were
+  re-read successfully.
+- Candidate CI runs `31148222357` and `31148234996` passed Validate, macOS, and native
+  Windows jobs. Local `task check`, `task docs:check`, and `task test:updater` passed,
+  and independent spec-compliance and code-quality reviews returned PASS.
+- Read-only qualification run `31149505681` passed provenance validation, Linux,
+  macOS Intel, macOS Apple Silicon, Windows, and the final held-production check. The
+  Windows job exercised the repaired in-use handoff and rejected leftover
+  `.nib-update-*` debris.
+- Only exact candidate production run `31148222338` was approved. It published the
+  non-draft, non-prerelease `prod-latest` Release at the candidate commit with
+  `nib-release.json`, four archives, and four matching checksums.
+- A downloaded production Linux binary reported the full candidate identity, and
+  `nib update` reported the build already current without mutation. The docs/memory
+  reconciliation is restricted to release-workflow ignored paths so it cannot publish
+  a different binary after this qualified revision.
+
+## Version Impact
+
+| Component | Impact | Release | Rationale |
+| --- | --- | --- | --- |
+| nib | minor | historical | Retrospective classification of the preserved pre-v7 outcome; no new bump or release identity is inferred. |
+
+## Memory Impact
+
+Status: none
+Rationale: This historical outcome is preserved; migration adds no new durable decision for this spec. Existing dated memory evidence remains authoritative.

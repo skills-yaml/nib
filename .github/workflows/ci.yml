@@ -79,6 +79,7 @@ jobs:
 
   windows-tests:
     name: Windows Tests
+    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: windows-latest
 
     steps:

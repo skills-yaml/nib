@@ -1,0 +1,391 @@
+schema_version: 1
+kind: skills
+project: nib
+agents:
+- claude
+- codex
+- cursor
+- grok
+- hermes
+skills:
+- name: workspace/address-review-feedback
+  version: 0.4.0
+  source: default
+- name: workspace/adopt-workspace-structure
+  version: 0.6.0
+  source: default
+- name: workspace/analyze-repository
+  version: 0.3.0
+  source: default
+- name: workspace/coordinate-multi-agent-development
+  version: 0.2.0
+  source: default
+- name: workspace/fix-bug
+  version: 0.4.0
+  source: default
+- name: workspace/fix-ci
+  version: 0.4.0
+  source: default
+- name: workspace/implement-spec
+  version: 0.4.0
+  source: default
+- name: workspace/maintain-project-docs
+  version: 0.3.0
+  source: default
+- name: workspace/monitor-ci
+  version: 0.4.0
+  source: default
+- name: workspace/plan-implementation
+  version: 0.4.0
+  source: default
+- name: workspace/review-changes
+  version: 0.4.0
+  source: default
+- name: workspace/review-security
+  version: 0.4.0
+  source: default
+- name: workspace/wk-adopt
+  version: 0.3.0
+  source: default
+- name: workspace/wk-analyze
+  version: 0.3.0
+  source: default
+- name: workspace/wk-deliver
+  version: 0.3.0
+  source: default
+- name: workspace/wk-document
+  version: 0.3.0
+  source: default
+- name: workspace/wk-plan
+  version: 0.3.0
+  source: default
+- name: workspace/wk-review
+  version: 0.3.0
+  source: default
+- name: workspace/wk-spec
+  version: 0.3.0
+  source: default
+- name: workspace/write-spec
+  version: 0.4.0
+  source: default
+outputs:
+- path: .agents/skills/address-review-feedback
+  skill: workspace/address-review-feedback
+  agents:
+  - codex
+- path: .agents/skills/adopt-workspace-structure
+  skill: workspace/adopt-workspace-structure
+  agents:
+  - codex
+- path: .agents/skills/analyze-repository
+  skill: workspace/analyze-repository
+  agents:
+  - codex
+- path: .agents/skills/coordinate-multi-agent-development
+  skill: workspace/coordinate-multi-agent-development
+  agents:
+  - codex
+- path: .agents/skills/fix-bug
+  skill: workspace/fix-bug
+  agents:
+  - codex
+- path: .agents/skills/fix-ci
+  skill: workspace/fix-ci
+  agents:
+  - codex
+- path: .agents/skills/implement-spec
+  skill: workspace/implement-spec
+  agents:
+  - codex
+- path: .agents/skills/maintain-project-docs
+  skill: workspace/maintain-project-docs
+  agents:
+  - codex
+- path: .agents/skills/monitor-ci
+  skill: workspace/monitor-ci
+  agents:
+  - codex
+- path: .agents/skills/plan-implementation
+  skill: workspace/plan-implementation
+  agents:
+  - codex
+- path: .agents/skills/review-changes
+  skill: workspace/review-changes
+  agents:
+  - codex
+- path: .agents/skills/review-security
+  skill: workspace/review-security
+  agents:
+  - codex
+- path: .agents/skills/wk-adopt
+  skill: workspace/wk-adopt
+  agents:
+  - codex
+- path: .agents/skills/wk-analyze
+  skill: workspace/wk-analyze
+  agents:
+  - codex
+- path: .agents/skills/wk-deliver
+  skill: workspace/wk-deliver
+  agents:
+  - codex
+- path: .agents/skills/wk-document
+  skill: workspace/wk-document
+  agents:
+  - codex
+- path: .agents/skills/wk-plan
+  skill: workspace/wk-plan
+  agents:
+  - codex
+- path: .agents/skills/wk-review
+  skill: workspace/wk-review
+  agents:
+  - codex
+- path: .agents/skills/wk-spec
+  skill: workspace/wk-spec
+  agents:
+  - codex
+- path: .agents/skills/write-spec
+  skill: workspace/write-spec
+  agents:
+  - codex
+- path: .claude/skills/address-review-feedback
+  skill: workspace/address-review-feedback
+  agents:
+  - claude
+- path: .claude/skills/adopt-workspace-structure
+  skill: workspace/adopt-workspace-structure
+  agents:
+  - claude
+- path: .claude/skills/analyze-repository
+  skill: workspace/analyze-repository
+  agents:
+  - claude
+- path: .claude/skills/coordinate-multi-agent-development
+  skill: workspace/coordinate-multi-agent-development
+  agents:
+  - claude
+- path: .claude/skills/fix-bug
+  skill: workspace/fix-bug
+  agents:
+  - claude
+- path: .claude/skills/fix-ci
+  skill: workspace/fix-ci
+  agents:
+  - claude
+- path: .claude/skills/implement-spec
+  skill: workspace/implement-spec
+  agents:
+  - claude
+- path: .claude/skills/maintain-project-docs
+  skill: workspace/maintain-project-docs
+  agents:
+  - claude
+- path: .claude/skills/monitor-ci
+  skill: workspace/monitor-ci
+  agents:
+  - claude
+- path: .claude/skills/plan-implementation
+  skill: workspace/plan-implementation
+  agents:
+  - claude
+- path: .claude/skills/review-changes
+  skill: workspace/review-changes
+  agents:
+  - claude
+- path: .claude/skills/review-security
+  skill: workspace/review-security
+  agents:
+  - claude
+- path: .claude/skills/wk-adopt
+  skill: workspace/wk-adopt
+  agents:
+  - claude
+- path: .claude/skills/wk-analyze
+  skill: workspace/wk-analyze
+  agents:
+  - claude
+- path: .claude/skills/wk-deliver
+  skill: workspace/wk-deliver
+  agents:
+  - claude
+- path: .claude/skills/wk-document
+  skill: workspace/wk-document
+  agents:
+  - claude
+- path: .claude/skills/wk-plan
+  skill: workspace/wk-plan
+  agents:
+  - claude
+- path: .claude/skills/wk-review
+  skill: workspace/wk-review
+  agents:
+  - claude
+- path: .claude/skills/wk-spec
+  skill: workspace/wk-spec
+  agents:
+  - claude
+- path: .claude/skills/write-spec
+  skill: workspace/write-spec
+  agents:
+  - claude
+- path: .cursor/skills/address-review-feedback
+  skill: workspace/address-review-feedback
+  agents:
+  - cursor
+- path: .cursor/skills/adopt-workspace-structure
+  skill: workspace/adopt-workspace-structure
+  agents:
+  - cursor
+- path: .cursor/skills/analyze-repository
+  skill: workspace/analyze-repository
+  agents:
+  - cursor
+- path: .cursor/skills/coordinate-multi-agent-development
+  skill: workspace/coordinate-multi-agent-development
+  agents:
+  - cursor
+- path: .cursor/skills/fix-bug
+  skill: workspace/fix-bug
+  agents:
+  - cursor
+- path: .cursor/skills/fix-ci
+  skill: workspace/fix-ci
+  agents:
+  - cursor
+- path: .cursor/skills/implement-spec
+  skill: workspace/implement-spec
+  agents:
+  - cursor
+- path: .cursor/skills/maintain-project-docs
+  skill: workspace/maintain-project-docs
+  agents:
+  - cursor
+- path: .cursor/skills/monitor-ci
+  skill: workspace/monitor-ci
+  agents:
+  - cursor
+- path: .cursor/skills/plan-implementation
+  skill: workspace/plan-implementation
+  agents:
+  - cursor
+- path: .cursor/skills/review-changes
+  skill: workspace/review-changes
+  agents:
+  - cursor
+- path: .cursor/skills/review-security
+  skill: workspace/review-security
+  agents:
+  - cursor
+- path: .cursor/skills/wk-adopt
+  skill: workspace/wk-adopt
+  agents:
+  - cursor
+- path: .cursor/skills/wk-analyze
+  skill: workspace/wk-analyze
+  agents:
+  - cursor
+- path: .cursor/skills/wk-deliver
+  skill: workspace/wk-deliver
+  agents:
+  - cursor
+- path: .cursor/skills/wk-document
+  skill: workspace/wk-document
+  agents:
+  - cursor
+- path: .cursor/skills/wk-plan
+  skill: workspace/wk-plan
+  agents:
+  - cursor
+- path: .cursor/skills/wk-review
+  skill: workspace/wk-review
+  agents:
+  - cursor
+- path: .cursor/skills/wk-spec
+  skill: workspace/wk-spec
+  agents:
+  - cursor
+- path: .cursor/skills/write-spec
+  skill: workspace/write-spec
+  agents:
+  - cursor
+- path: .grok/skills/address-review-feedback
+  skill: workspace/address-review-feedback
+  agents:
+  - grok
+- path: .grok/skills/adopt-workspace-structure
+  skill: workspace/adopt-workspace-structure
+  agents:
+  - grok
+- path: .grok/skills/analyze-repository
+  skill: workspace/analyze-repository
+  agents:
+  - grok
+- path: .grok/skills/coordinate-multi-agent-development
+  skill: workspace/coordinate-multi-agent-development
+  agents:
+  - grok
+- path: .grok/skills/fix-bug
+  skill: workspace/fix-bug
+  agents:
+  - grok
+- path: .grok/skills/fix-ci
+  skill: workspace/fix-ci
+  agents:
+  - grok
+- path: .grok/skills/implement-spec
+  skill: workspace/implement-spec
+  agents:
+  - grok
+- path: .grok/skills/maintain-project-docs
+  skill: workspace/maintain-project-docs
+  agents:
+  - grok
+- path: .grok/skills/monitor-ci
+  skill: workspace/monitor-ci
+  agents:
+  - grok
+- path: .grok/skills/plan-implementation
+  skill: workspace/plan-implementation
+  agents:
+  - grok
+- path: .grok/skills/review-changes
+  skill: workspace/review-changes
+  agents:
+  - grok
+- path: .grok/skills/review-security
+  skill: workspace/review-security
+  agents:
+  - grok
+- path: .grok/skills/wk-adopt
+  skill: workspace/wk-adopt
+  agents:
+  - grok
+- path: .grok/skills/wk-analyze
+  skill: workspace/wk-analyze
+  agents:
+  - grok
+- path: .grok/skills/wk-deliver
+  skill: workspace/wk-deliver
+  agents:
+  - grok
+- path: .grok/skills/wk-document
+  skill: workspace/wk-document
+  agents:
+  - grok
+- path: .grok/skills/wk-plan
+  skill: workspace/wk-plan
+  agents:
+  - grok
+- path: .grok/skills/wk-review
+  skill: workspace/wk-review
+  agents:
+  - grok
+- path: .grok/skills/wk-spec
+  skill: workspace/wk-spec
+  agents:
+  - grok
+- path: .grok/skills/write-spec
+  skill: workspace/write-spec
+  agents:
+  - grok

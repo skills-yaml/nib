@@ -750,7 +750,7 @@ impl McpServerClient {
                 .map_err(|_| "MCP request limiter closed".to_string())?;
         let id = self
             .next_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
             .map_err(|_| "MCP request id space exhausted".to_string())?;
         let frame = encode_json_line(
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),

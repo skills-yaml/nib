@@ -2050,3 +2050,36 @@ fn path_attachments_are_structured_and_stay_inside_the_project() {
         .expect_err("dotfile")
         .contains("outside"));
 }
+
+#[test]
+fn terminal_scope_recovery_is_consistent_live_and_reloaded() {
+    let cached = project_session_event(
+        &SessionEvent {
+            index: 0,
+            kind: "reconciliation".to_string(),
+            details: serde_json::json!({"outcome": "tool_scope_required"}),
+            timestamp: None,
+        },
+        &[],
+    )
+    .expect("scope failure remains visible");
+    assert_eq!(cached.kind, ActivityKind::Failure);
+    assert!(cached.body.contains("affected_paths"));
+    let mut live = Vec::new();
+    apply_stream_event(
+        &mut live,
+        StreamEvent::Reconciled {
+            outcome: "tool_scope_required".to_string(),
+        },
+        &mut None,
+        &[],
+    );
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].kind, ActivityKind::Failure);
+    assert_eq!(live[0].title, cached.title);
+    assert_eq!(live[0].body, cached.body);
+    let status = display_reconciliation_status("tool_scope_required");
+    assert!(
+        matches!(status, StreamDisplay::Status(text) if text.contains("affected_paths") && !text.contains("context_length"))
+    );
+}

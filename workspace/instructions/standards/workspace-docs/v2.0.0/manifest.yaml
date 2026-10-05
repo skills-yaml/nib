@@ -1,0 +1,55 @@
+id: workspace-docs
+version: 2.0.0
+status: stable
+released: 2026-08-12
+owner: workspace
+
+required_root_docs:
+  - AGENTS.md
+  - DESIGN.md
+  - README.md
+
+required_tech_docs:
+  - instructions/tech/task.md
+  - instructions/tech/sdlc.md
+  - instructions/tech/project_structure.md
+
+conditional_tech_docs:
+  backend_python: instructions/tech/backend_python.md
+  backend_rust: instructions/tech/backend_rust.md
+  ci: instructions/tech/ci.md
+  frontend_nextjs: instructions/tech/frontend_nextjs.md
+  frontend_flutter: instructions/tech/frontend_flutter.md
+  infrastructure: instructions/tech/infrastructure.md
+
+spec_locations:
+  canonical: specs
+  legacy_allowed:
+    - docs/specs
+    - .kiro/specs
+
+spec_states:
+  - backlog
+  - development
+  - done
+
+memory:
+  canonical_root: agents/memory
+  files:
+    - README.md
+    - decisions.md
+    - facts.md
+    - preferences.md
+    - open-questions.md
+    - changelog.md
+
+generated_blocks:
+  start_marker: "<!-- AGENT-CONTEXT:START workspace-docs@2.0.0 -->"
+  end_marker: "<!-- AGENT-CONTEXT:END -->"
+
+completion_gates:
+  - relevant spec is in the correct state
+  - implementation matches acceptance criteria
+  - project quality gates pass or skipped gates are justified
+  - static docs remain untouched unless explicitly requested
+  - durable new facts are recorded in memory

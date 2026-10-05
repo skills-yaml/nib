@@ -1,0 +1,82 @@
+id: workspace-docs
+version: "7.0.0"
+status: "default"
+released: "2026-10-01"
+last_updated: "2026-10-01"
+owner: workspace
+container_directory: "workspace"
+required_root_files:
+  - AGENTS.md
+  - DESIGN.md
+  - README.md
+required_workspace_directories:
+  - workspace/agents/memory
+  - workspace/instructions/tech
+  - workspace/instructions/standards
+  - workspace/instructions/agents
+  - workspace/instructions/skills
+  - workspace/specs/backlog
+  - workspace/specs/development
+  - workspace/specs/test
+  - workspace/specs/done
+  - workspace/specs/blocked
+  - workspace/specs/legacy
+  - workspace/docs/architecture
+  - workspace/docs/work
+  - workspace/docs/work/multi-agent
+  - workspace/company/documents
+  - workspace/company/design
+  - workspace/company/domain
+  - workspace/company/strategy
+required_spec_files:
+  - workspace/specs/README.md
+  - workspace/releases.json
+required_memory_files:
+  - workspace/agents/memory/README.md
+  - workspace/agents/memory/decisions.md
+  - workspace/agents/memory/facts.md
+  - workspace/agents/memory/preferences.md
+  - workspace/agents/memory/open-questions.md
+  - workspace/agents/memory/changelog.md
+spec_states:
+  - backlog
+  - development
+  - test
+  - done
+  - blocked
+default_branch_conventions:
+  test: develop
+  completion: main
+  production: main
+done_requires_release: false
+memory_impact_statuses:
+  - pending
+  - updated
+  - none
+completion_gates:
+  - every non-legacy spec is grouped by one primary feature inside its state
+  - every non-legacy spec has one matching root catalog row
+  - every catalog row includes current state and a status rationale
+  - test state requires confirmed integration into the configured test branch or environment
+  - done state requires verified main merge and reconciled acceptance, documentation, catalog, version records, and memory
+  - concurrent mutating agents use exclusive linked worktrees
+  - every concurrent mutating agent maintains a valid repository WIP record
+  - shared file scopes are allowed and conflicts resolve during peer integration
+  - ordinary task branches are authorized by the task request subject to protections
+  - every completed task classifies memory impact as updated or none
+  - every classification includes a rationale
+  - updated specs reference a category file and changelog.md
+  - done specs must not retain pending memory impact
+  - every non-legacy spec declares version impact and rationale
+  - release reservations have one owner and collision-free component targets
+  - version bumps are applied once at the declared development-start or merge boundary
+  - peers self-claim tasks and worktrees without a required coordinator agent
+  - blocked specs record previous state, kind, reason, and resume condition
+  - every non-trivial change receives independent exact-candidate review except documented small low-risk changes
+  - sensitive changes always require independent review
+  - every review finding is resolved by implementation or reviewer-agreed rejection
+  - iteration runs affected gate modules and transitive consumers
+  - final verification covers all required gates on the stable candidate
+  - reused evidence has proven freshness
+  - acceptance criteria have supporting evidence
+  - deployment and publication are tracked separately from done

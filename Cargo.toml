@@ -1,6 +1,6 @@
 [package]
 name = "nib"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Local-first AI agent with persistent plans, gated tools, and auditable execution."
 license = "MIT"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 aho-corasick = "1"
-async-trait = "0.1"
+async-trait = "0.1.92"
 cap-std = "4.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
