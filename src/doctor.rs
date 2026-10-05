@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +21,7 @@ use nib::sandbox;
 use nib::tools::executor::ApprovalHandler;
 use nib::tools::models::ApprovalDecision;
 use nib::tools::{PermissionLevel, ToolCall, ToolExecutor};
-use serde_json::json;
+use serde_json::{json, Value};
 
 struct DoctorDenyApproval {
     called: Arc<AtomicBool>,
@@ -179,6 +181,14 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         }
         _ => {
             println!("FAILED (project is not inside a git worktree)");
+            all_passed = false;
+        }
+    }
+    print!("Checking managed session worktrees... ");
+    match check_managed_session_worktrees(project) {
+        Ok(checked) => println!("OK ({checked} owned receipts)"),
+        Err(error) => {
+            println!("FAILED ({error})");
             all_passed = false;
         }
     }
@@ -477,6 +487,160 @@ fn openai_transport_repair_needed(config: &NibConfig) -> bool {
         && canonical_openai_base(entry).is_some()
 }
 
+fn check_managed_session_worktrees(project: &Path) -> Result<usize, String> {
+    let directory = project.join(".nib/worktree-ownership");
+    match fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return Err("ownership receipt directory is not a real directory".to_string()),
+    }
+    let git_common = Command::new("git")
+        .current_dir(project)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .map_err(|_| "could not inspect the common Git directory".to_string())?;
+    if !git_common.status.success() {
+        return Err("could not inspect the common Git directory".to_string());
+    }
+    let git_common = String::from_utf8_lossy(&git_common.stdout);
+    let git_common = project
+        .join(git_common.trim())
+        .canonicalize()
+        .map_err(|_| "could not resolve the common Git directory".to_string())?;
+    let mut scanned = 0usize;
+    let mut checked = 0usize;
+    for entry in fs::read_dir(directory).map_err(|_| "could not list ownership receipts")? {
+        scanned += 1;
+        if scanned > 512 {
+            return Err("ownership receipt inventory exceeds the doctor limit".to_string());
+        }
+        let entry = entry.map_err(|_| "could not read an ownership receipt entry")?;
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "json")
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|_| "could not inspect an ownership receipt")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err("ownership receipt is not a regular file".to_string());
+        }
+        let mut data = Vec::new();
+        fs::File::open(entry.path())
+            .map_err(|_| "could not read an ownership receipt")?
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut data)
+            .map_err(|_| "could not read an ownership receipt")?;
+        if data.len() > 64 * 1024 {
+            return Err("ownership receipt exceeds the doctor limit".to_string());
+        }
+        let receipt: Value = serde_json::from_slice(&data)
+            .map_err(|_| "ownership receipt contains invalid JSON".to_string())?;
+        if receipt["kind"] == "session" && receipt["phase"] == "owned" {
+            check_owned_session_receipt(project, &git_common, &receipt)?;
+            checked += 1;
+        }
+    }
+    Ok(checked)
+}
+
+fn check_owned_session_receipt(
+    project: &Path,
+    git_common: &Path,
+    receipt: &Value,
+) -> Result<(), String> {
+    let session = receipt["logical_id"]
+        .as_str()
+        .filter(|id| {
+            id.len() <= 128
+                && id
+                    .chars()
+                    .all(|char| char.is_ascii_alphanumeric() || char == '-')
+        })
+        .ok_or("owned session receipt has an invalid identifier")?;
+    let paths = [
+        (
+            "worktree",
+            "worktree_path",
+            "worktree_identity",
+            project.join(".nib/worktrees/sessions"),
+            true,
+        ),
+        (
+            "Git registration",
+            "registration_path",
+            "registration_identity",
+            git_common.join("worktrees"),
+            true,
+        ),
+    ];
+    for (label, path_key, identity_key, parent, directory) in paths {
+        let path = receipt[path_key]
+            .as_str()
+            .ok_or_else(|| format!("session {session}: {label} path is missing"))?;
+        let path = Path::new(path);
+        if !path.starts_with(&parent)
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "session {session}: {label} path is outside its expected directory"
+            ));
+        }
+        check_receipt_artifact(session, label, path, &receipt[identity_key], directory)?;
+    }
+    let reference = receipt["branch_reference"]
+        .as_str()
+        .ok_or("owned session receipt has no branch reference")?;
+    let relative = reference
+        .strip_prefix("refs/heads/nib/session/")
+        .ok_or("owned session receipt has an unexpected branch")?;
+    let relative = Path::new(relative);
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(format!("session {session}: branch reference is unsafe"));
+    }
+    check_receipt_artifact(
+        session,
+        "branch",
+        &git_common.join("refs/heads/nib/session").join(relative),
+        &receipt["branch_identity"],
+        false,
+    )
+}
+
+fn check_receipt_artifact(
+    session: &str,
+    label: &str,
+    path: &Path,
+    identity: &Value,
+    directory: bool,
+) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| format!("session {session}: {label} is missing"))?;
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(format!("session {session}: {label} has an unexpected type"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if identity["device"].as_u64() != Some(metadata.dev())
+            || identity["inode"].as_u64() != Some(metadata.ino())
+        {
+            return Err(format!("session {session}: {label} identity changed"));
+        }
+    }
+    Ok(())
+}
+
 fn repair_openai_transport(project: &Path) -> Result<bool, String> {
     update_nib_config_conditionally(project, |config| {
         if !openai_transport_repair_needed(config) {
@@ -747,6 +911,31 @@ mod tests {
             session.tool_calls[1].result.as_ref().unwrap()["approval"]["source"],
             "denied"
         );
+    }
+
+    #[test]
+    fn doctor_reports_missing_owned_session_worktree_without_repairing_it() {
+        let dir = tempdir().expect("tempdir");
+        initialize_git(dir.path());
+        let receipts = dir.path().join(".nib/worktree-ownership");
+        std::fs::create_dir_all(&receipts).expect("receipt directory");
+        let receipt = json!({
+            "kind": "session",
+            "phase": "owned",
+            "logical_id": "stale-session",
+            "worktree_path": dir.path().join(".nib/worktrees/sessions/stale-session"),
+            "worktree_identity": {"device": 1, "inode": 1},
+        });
+        let path = receipts.join("stale.json");
+        let bytes = serde_json::to_vec(&receipt).expect("receipt JSON");
+        std::fs::write(&path, &bytes).expect("receipt");
+
+        let error = check_managed_session_worktrees(dir.path()).expect_err("stale receipt");
+        assert!(
+            error.contains("stale-session: worktree is missing"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(path).expect("receipt preserved"), bytes);
     }
 
     #[test]

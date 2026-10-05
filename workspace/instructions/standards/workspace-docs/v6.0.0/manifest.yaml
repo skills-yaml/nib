@@ -1,0 +1,69 @@
+id: workspace-docs
+version: "6.0.0"
+status: "draft"
+released: "unreleased"
+last_updated: "2026-09-21"
+owner: workspace
+container_directory: "workspace"
+required_root_files:
+  - AGENTS.md
+  - DESIGN.md
+  - README.md
+required_workspace_directories:
+  - workspace/agents/memory
+  - workspace/instructions/tech
+  - workspace/instructions/standards
+  - workspace/instructions/agents
+  - workspace/instructions/skills
+  - workspace/specs/backlog
+  - workspace/specs/development
+  - workspace/specs/test
+  - workspace/specs/done
+  - workspace/specs/legacy
+  - workspace/docs/architecture
+  - workspace/docs/work
+  - workspace/docs/work/multi-agent
+  - workspace/company/documents
+  - workspace/company/design
+  - workspace/company/domain
+  - workspace/company/strategy
+required_spec_files:
+  - workspace/specs/README.md
+  - workspace/releases.json
+required_memory_files:
+  - workspace/agents/memory/README.md
+  - workspace/agents/memory/decisions.md
+  - workspace/agents/memory/facts.md
+  - workspace/agents/memory/preferences.md
+  - workspace/agents/memory/open-questions.md
+  - workspace/agents/memory/changelog.md
+spec_states:
+  - backlog
+  - development
+  - test
+  - done
+default_branch_conventions:
+  test: develop
+  production: main
+memory_impact_statuses:
+  - pending
+  - updated
+  - none
+completion_gates:
+  - every non-legacy spec is grouped by one primary feature inside its state
+  - every non-legacy spec has one matching root catalog row
+  - every catalog row includes current state and a status rationale
+  - test state requires confirmed integration into the configured test branch or environment
+  - done state requires confirmed release through the configured production branch or environment
+  - concurrent mutating agents use exclusive linked worktrees
+  - every concurrent mutating agent maintains a valid repository WIP record
+  - shared file scopes are allowed and conflicts resolve during peer integration
+  - task or delivery branches require a recorded direct user request
+  - every completed task classifies memory impact as updated or none
+  - every classification includes a rationale
+  - updated specs reference a category file and changelog.md
+  - done specs must not retain pending memory impact
+  - every non-legacy spec declares version impact and rationale
+  - release reservations have one owner and collision-free component targets
+  - version bumps are applied once at the declared development-start or merge boundary
+  - peers self-claim tasks and worktrees without a required coordinator agent

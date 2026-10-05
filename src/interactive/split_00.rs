@@ -1425,6 +1425,8 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
         "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /plan and run or repair the exact check."),
         "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /plan and /status before requesting more work."),
         "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the same plan."),
+        "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the same plan."),
+        "tool_scope_outside_worktree" => ("Tool path outside project", "A proposed tool targeted a path outside the active worktree. Choose a project path and retry."),
         "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning. Finish or resolve the current plan, or start a new session."),
         "planning_required_active_run" => ("Run is still active", "Wait for reconciliation or cancel the active run before starting another request."),
         "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /plan before continuing."),

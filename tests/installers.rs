@@ -106,9 +106,12 @@ fn task_contract_keeps_fast_feedback_separate_from_full_verification() {
         .collect::<Vec<_>>();
     assert_eq!(
         nested_check_tasks,
-        vec!["installers:check"],
+        vec!["installers:check", "workspace:check"],
         "fast check must not acquire tests through another nested task"
     );
+    let workspace = task_section(&taskfile, "workspace:check");
+    assert!(workspace.contains("task: versions:check"));
+    assert!(!workspace.contains("cargo test"));
 
     assert!(test.contains("cargo test -- --test-threads=1"));
     assert_eq!(verify.matches("task: check").count(), 1);
@@ -557,6 +560,15 @@ fn release_update_qualification_is_read_only_and_native() {
     assert!(workflow.contains("  verify:\n    name: Confirm production remains held\n"));
     assert!(release_workflow
         .contains("    paths-ignore:\n      - 'docs/**'\n      - 'agents/memory/**'\n"));
+    for excluded in [
+        "workspace/specs/**",
+        "workspace/instructions/**",
+        "workspace/docs/**",
+        "workspace/agents/memory/**",
+    ] {
+        assert!(release_workflow.contains(&format!("      - '{excluded}'\n")));
+    }
+    assert!(!release_workflow.contains("      - 'workspace/**'"));
 
     for runner in [
         "ubuntu-latest",

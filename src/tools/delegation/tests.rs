@@ -1,5 +1,67 @@
 use super::*;
 
+pub(crate) struct SpawnFailureInjectionGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> SpawnFailureInjectionGuard<'a> {
+    pub(crate) fn arm(counter: &'a std::sync::atomic::AtomicUsize) -> Self {
+        counter
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .unwrap_or_else(|remaining| panic!("failure fixture already armed: {remaining}"));
+        Self { counter }
+    }
+}
+
+impl Drop for SpawnFailureInjectionGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.store(0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[test]
+fn failure_injection_scope_cleans_consumed_and_unconsumed_slots() {
+    let counter = std::sync::atomic::AtomicUsize::new(0);
+    for consume in [false, true] {
+        let guard = SpawnFailureInjectionGuard::arm(&counter);
+        if consume {
+            assert!(consume_spawn_failure(&counter));
+            assert!(!consume_spawn_failure(&counter));
+        }
+        drop(guard);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+}
+
+#[test]
+fn failure_injection_scope_cleans_after_unwind_and_can_rearm() {
+    let counter = std::sync::atomic::AtomicUsize::new(0);
+    let result = std::panic::catch_unwind(|| {
+        let _guard = SpawnFailureInjectionGuard::arm(&counter);
+        panic!("simulate a fixture abort before injection is consumed");
+    });
+    assert!(result.is_err());
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    let _guard = SpawnFailureInjectionGuard::arm(&counter);
+    assert!(consume_spawn_failure(&counter));
+    assert!(!consume_spawn_failure(&counter));
+}
+
+#[test]
+fn failure_injection_scope_rejects_an_already_armed_slot() {
+    let counter = std::sync::atomic::AtomicUsize::new(0);
+    let owner = SpawnFailureInjectionGuard::arm(&counter);
+    assert!(std::panic::catch_unwind(|| SpawnFailureInjectionGuard::arm(&counter)).is_err());
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    drop(owner);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
 // Expiry tests first pause at an observed mutation boundary. Give setup enough
 // time to reach that boundary on loaded native runners, then deliberately let
 // the deadline expire while the worker is paused.
@@ -285,7 +347,8 @@ pub(crate) fn prime_fixed_subagent_record_lock_namespace(project_root: &Path) {
     let records = ensure_records_directory_capability_until(project_root, None)
         .expect("authorized records for fixed lock priming");
     let timeout = if cfg!(windows) {
-        Duration::from_secs(15)
+        // Priming all 64 durable lock files can exceed 15 seconds on loaded CI disks.
+        Duration::from_secs(60)
     } else {
         SUBAGENT_RECORD_LOCK_TIMEOUT
     };

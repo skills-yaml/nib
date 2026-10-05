@@ -83,6 +83,14 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
             }),
         ),
         metadata(
+            "git_status",
+            "Read the active repository's bounded Git status without creating a session worktree.",
+            PermissionLevel::ReadOnly,
+            false,
+            false,
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        ),
+        metadata(
             "apply_patch",
             "Validate or apply a unified diff in the session worktree.",
             PermissionLevel::Safe,
@@ -115,7 +123,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                         "items": {"type": "string", "minLength": 1, "maxLength": 4096},
                         "minItems": 1,
                         "maxItems": 32,
-                        "description": "Explicit worktree-relative paths affected by an opaque mutating command."
+                        "description": "Non-empty worktree-relative instruction scopes. Required for commands not classified Safe or ReadOnly, including arbitrary Task targets."
                     },
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Overrides the configured terminal timeout."},
                     "background": {"type": "boolean", "default": false},

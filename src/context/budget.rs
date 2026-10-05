@@ -244,7 +244,17 @@ pub fn build_bounded_runtime_input(
     };
     let mut history_budget = crate::context::runtime_history_budget(cap);
     let help_context = if request.mode == "answer_only" {
-        super::help::conversational_help_context(request.project_root)
+        let goal = request.context.task.to_ascii_lowercase();
+        if goal.contains("skill")
+            && ["create", "make", "write", "author"]
+                .iter()
+                .any(|verb| goal.contains(verb))
+        {
+            super::help::skill_creation_context(request.project_root)
+                .unwrap_or_else(|| super::help::conversational_help_context(request.project_root))
+        } else {
+            super::help::conversational_help_context(request.project_root)
+        }
     } else {
         String::new()
     };

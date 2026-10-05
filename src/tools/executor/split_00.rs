@@ -804,6 +804,8 @@ pub struct ToolExecutor {
     pub terminal_timeout_secs: u64,
     pub approval_handler: Arc<dyn ApprovalHandler>,
     pub(crate) worktree_manager: Option<WorktreeManager>,
+    pub(crate) project_read_fallback: bool,
+    pub(crate) prepared_worktree_for_batch: bool,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub(crate) policy_rules: Vec<PolicyRule>,
     pub(crate) policy_hooks: Vec<Arc<dyn ToolPolicyHook>>,

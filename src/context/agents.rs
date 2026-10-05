@@ -9,6 +9,11 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+pub(crate) const TERMINAL_SCOPE_REQUIRED_ERROR: &str =
+    "opaque run_terminal mutation requires explicit affected_paths for repository-wide instruction coverage";
+pub(crate) const TERMINAL_SCOPE_EMPTY_ERROR: &str =
+    "run_terminal affected_paths cannot be empty for bounded instruction coverage";
+
 const MAX_INSTRUCTION_FILE_BYTES: u64 = 64 * 1024;
 const MAX_INSTRUCTION_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_INSTRUCTION_SCOPES: usize = 32;
@@ -575,10 +580,7 @@ pub fn tool_instruction_scopes(
             let affected = arguments.get("affected_paths").and_then(Value::as_array);
             if let Some(affected) = affected {
                 if affected.is_empty() {
-                    return Err(
-                        "run_terminal affected_paths cannot be empty for bounded instruction coverage"
-                            .to_string(),
-                    );
+                    return Err(TERMINAL_SCOPE_EMPTY_ERROR.to_string());
                 }
                 paths.extend(
                     affected
@@ -592,11 +594,8 @@ pub fn tool_instruction_scopes(
                     .and_then(Value::as_str)
                     .map(classify_command)
                     .unwrap_or(ToolRisk::RequiresApproval);
-                if risk != ToolRisk::Safe {
-                    return Err(
-                        "opaque run_terminal mutation requires explicit affected_paths for repository-wide instruction coverage"
-                            .to_string(),
-                    );
+                if !matches!(risk, ToolRisk::Safe | ToolRisk::ReadOnly) {
+                    return Err(TERMINAL_SCOPE_REQUIRED_ERROR.to_string());
                 }
             }
             paths
@@ -891,6 +890,37 @@ mod tests {
                 .resolve_for_scopes([project.path()])
                 .expect_err("linked instructions fail");
             assert!(error.contains("regular local file"));
+        }
+    }
+
+    #[test]
+    fn terminal_listing_and_read_only_commands_use_their_cwd_scope() {
+        let project = Path::new("/project");
+        for command in [
+            "task --list",
+            "task -l",
+            "task --list-all",
+            "task -a",
+            "pwd",
+            "ls .",
+            "git status --short",
+        ] {
+            let scopes = tool_instruction_scopes(
+                project,
+                "run_terminal",
+                &serde_json::json!({"command": command, "cwd": "src"}),
+            )
+            .expect("bounded listing scope");
+            assert_eq!(scopes, vec![project.join("src")], "{command}");
+        }
+        for command in ["task verify", "task --list deploy", "cat note.txt"] {
+            assert!(tool_instruction_scopes(
+                project,
+                "run_terminal",
+                &serde_json::json!({"command": command}),
+            )
+            .unwrap_err()
+            .contains("requires explicit affected_paths"));
         }
     }
 

@@ -1,5 +1,8 @@
 match state {
             AgentState::UserApproval => {
+                preflight_failures.clear();
+                executor.project_read_fallback = false;
+                executor.prepared_worktree_for_batch = false;
                 if !verify_bound_plan(
                     &store,
                     session_id,
@@ -93,30 +96,35 @@ match state {
                 let mut instruction_root_rebound = false;
                 if batch_requires_worktree {
                     let managed_root = match executor.prepare_session_worktree(session_id).await {
-                        Ok(root) => root,
-                        Err(_) => {
+                        Ok(root) => {
+                            executor.prepared_worktree_for_batch = true;
+                            root
+                        },
+                        Err(error) => {
+                            executor.project_read_fallback = true;
                             store
                                 .record_event(
                                     session_id,
                                     "local_preflight_failed",
-                                    json!({"stage": "managed_worktree", "run_id": run_id}),
+                                    json!({
+                                        "stage": "managed_worktree",
+                                        "category": worktree_preflight_category(&error),
+                                        "project_read_fallback": true,
+                                        "run_id": run_id,
+                                    }),
                                 )
                                 .map_err(|error| error.to_string())?;
-                            tool_calls.clear();
-                            response_content = None;
-                            reconciliation_reason =
-                                Some("worktree_preparation_failed".to_string());
-                            state = transition_state(
-                                &store,
-                                session_id,
-                                state,
-                                AgentState::Reconciliation,
-                                &mut trace,
-                                &mut transition_count,
-                                &cfg.stream_tx,
-                            )
-                            .await?;
-                            continue;
+                            for call in &tool_calls {
+                                if crate::tools::registry::get_tool_metadata(&call.name)
+                                    .is_some_and(|metadata| metadata.requires_worktree)
+                                {
+                                    preflight_failures.insert(
+                                        call.invocation_id,
+                                        WORKTREE_PREFLIGHT_MESSAGE,
+                                    );
+                                }
+                            }
+                            instruction_root.clone()
                         }
                     };
                     if managed_root != instruction_root {
@@ -171,18 +179,39 @@ match state {
                     }
                 }
                 let mut proposed_scopes = instruction_scopes.clone();
-                let scoped_resolution = (|| {
-                    for call in &tool_calls {
-                        proposed_scopes.extend(tool_instruction_scopes(
-                            &instruction_root,
-                            &call.name,
-                            &call.arguments,
-                        )?);
+                for call in &tool_calls {
+                    if preflight_failures.contains_key(&call.invocation_id) {
+                        continue;
                     }
-                    proposed_scopes.sort();
-                    proposed_scopes.dedup();
-                    instruction_resolver.resolve_for_scopes(proposed_scopes.iter())
-                })();
+                    let call_scopes = match tool_instruction_scopes(
+                        &instruction_root,
+                        &call.name,
+                        &call.arguments,
+                    ) {
+                        Ok(scopes) => scopes,
+                        Err(error) => {
+                            preflight_failures.insert(
+                                call.invocation_id,
+                                tool_scope_preflight_message(&error),
+                            );
+                            continue;
+                        }
+                    };
+                    let mut candidate_scopes = proposed_scopes.clone();
+                    candidate_scopes.extend(call_scopes);
+                    candidate_scopes.sort();
+                    candidate_scopes.dedup();
+                    match instruction_resolver.resolve_for_scopes(candidate_scopes.iter()) {
+                        Ok(_) => proposed_scopes = candidate_scopes,
+                        Err(error) => {
+                            preflight_failures.insert(
+                                call.invocation_id,
+                                tool_scope_preflight_message(&error),
+                            );
+                        }
+                    }
+                }
+                let scoped_resolution = instruction_resolver.resolve_for_scopes(proposed_scopes.iter());
                 let resolved = match scoped_resolution {
                     Ok(resolved) => resolved,
                     Err(error) => {
@@ -504,6 +533,75 @@ match state {
                 let mut batch_denied = false;
                 let mut prepared_tasks = PreparedTaskBatch::default();
                 for request in &tool_calls {
+                    if let Some(message) = preflight_failures.get(&request.invocation_id) {
+                        let category = if *message == WORKTREE_PREFLIGHT_MESSAGE {
+                            "managed_worktree"
+                        } else if *message == OUTSIDE_WORKTREE_MESSAGE {
+                            "outside_worktree"
+                        } else if *message == TERMINAL_SCOPE_REQUIRED_MESSAGE {
+                            "scope_required"
+                        } else {
+                            "instruction_scope"
+                        };
+                        store
+                            .record_event(
+                                session_id,
+                                "tool_preflight_rejected",
+                                json!({
+                                    "invocation_id": request.invocation_id,
+                                    "tool_name": request.name,
+                                    "category": category,
+                                }),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        if category == "instruction_scope" {
+                            store
+                                .record_event(
+                                    session_id,
+                                    "instruction_context_missing",
+                                    json!({
+                                        "stage": "tool_scope",
+                                        "invocation_id": request.invocation_id,
+                                        "category": category,
+                                    }),
+                                )
+                                .map_err(|error| error.to_string())?;
+                        }
+                        emit(
+                            &cfg.stream_tx,
+                            StreamEvent::ToolCompleted {
+                                invocation_id: request.invocation_id,
+                                tool_name: request.name.clone(),
+                                success: false,
+                                output: None,
+                                error: Some((*message).to_string()),
+                            },
+                        )
+                        .await;
+                        store
+                            .record_event(
+                                session_id,
+                                "tool_completed",
+                                json!({
+                                    "invocation_id": request.invocation_id,
+                                    "tool_name": request.name,
+                                    "success": false,
+                                    "output": Value::Null,
+                                    "error": message,
+                                }),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        observations.push(json!({
+                            "invocation_id": request.invocation_id,
+                            "tool": request.name,
+                            "success": false,
+                            "output": Value::Null,
+                            "error": message,
+                        }));
+                        classifications.push(ToolResultClass::Error);
+                        batch_success = false;
+                        continue;
+                    }
                     if request.name != "ask_question" {
                         record_tool_started_and_open_steering(
                             &store,
@@ -778,8 +876,21 @@ match state {
                             .map_err(|error| error.to_string())?;
                         batch_success = false;
                     }
+                    let all_instruction_scopes_unavailable = !tool_calls.is_empty()
+                        && preflight_failures.len() == tool_calls.len()
+                        && preflight_failures
+                            .values()
+                            .all(|message| *message == INSTRUCTION_SCOPE_MESSAGE);
+                    let all_terminal_scopes_required = !tool_calls.is_empty()
+                        && preflight_failures.len() == tool_calls.len()
+                        && preflight_failures.values()
+                            .all(|message| *message == TERMINAL_SCOPE_REQUIRED_MESSAGE);
                     let tool_outcome = if batch_success {
                         "tool batch succeeded"
+                    } else if all_terminal_scopes_required {
+                        TERMINAL_SCOPE_REQUIRED_MESSAGE
+                    } else if all_instruction_scopes_unavailable {
+                        "required project instructions are unavailable for the proposed tool scope"
                     } else {
                         "one or more tools failed"
                     };
@@ -793,10 +904,43 @@ match state {
                     )?;
                     let stalled =
                         failed_tool_batches.observe(&tool_calls, &observations, batch_success);
+                    let preflight_outcome = if !tool_calls.is_empty()
+                        && preflight_failures.len() == tool_calls.len()
+                    {
+                        Some(if preflight_failures
+                            .values()
+                            .any(|message| *message == WORKTREE_PREFLIGHT_MESSAGE)
+                        {
+                            "worktree_preparation_failed"
+                        } else if preflight_failures
+                            .values()
+                            .any(|message| *message == OUTSIDE_WORKTREE_MESSAGE)
+                        {
+                            "tool_scope_outside_worktree"
+                        } else if all_terminal_scopes_required {
+                            "tool_scope_required"
+                        } else {
+                            "instruction_context_missing"
+                        })
+                    } else {
+                        None
+                    };
                     tool_calls.clear();
                     response_content = None;
                     if !plan_updated {
                         reconciliation_reason = Some("plan_binding_changed".to_string());
+                        transition_state(
+                            &store,
+                            session_id,
+                            state,
+                            AgentState::Reconciliation,
+                            &mut trace,
+                            &mut transition_count,
+                            &cfg.stream_tx,
+                        )
+                        .await?
+                    } else if let Some(preflight_outcome) = preflight_outcome {
+                        reconciliation_reason = Some(preflight_outcome.to_string());
                         transition_state(
                             &store,
                             session_id,
@@ -1331,6 +1475,8 @@ match state {
                                         "required project instructions are unavailable",
                                     )
                                 })
+                            } else if other == "tool_scope_required" {
+                                TERMINAL_SCOPE_REQUIRED_MESSAGE.to_string()
                             } else {
                                 format!("Run reconciled with outcome: {other}")
                             };

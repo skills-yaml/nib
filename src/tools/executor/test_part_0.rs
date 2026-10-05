@@ -530,7 +530,7 @@ fn elevated_permissions_tighten_an_internal_execution_envelope() {
 }
 
 #[test]
-fn classifier_requires_available_isolation_for_cargo_and_git_commands() {
+fn classifier_requires_available_isolation_for_cargo_git_and_task_commands() {
     let root = tempfile::tempdir().expect("root");
     let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default());
     let terminal_call = |command: &str| ToolCall {
@@ -541,7 +541,7 @@ fn classifier_requires_available_isolation_for_cargo_and_git_commands() {
         project_root: Some(root.path().to_path_buf()),
     };
 
-    for command in ["cargo check", "git status --short"] {
+    for command in ["cargo check", "git status --short", "task --list"] {
         assert!(!executor.classifier_auto_approval_allowed_with_bwrap(
             &terminal_call(command),
             PermissionLevel::Destructive,

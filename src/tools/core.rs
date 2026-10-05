@@ -61,6 +61,7 @@ pub async fn dispatch(
         "read_file" => read_file(args, cwd).await,
         "list_directory" => list_directory(args, cwd).await,
         "grep" => grep(args, cwd).await,
+        "git_status" => git_status(cwd).await,
         "apply_patch" => apply_patch(args, cwd).await,
         "run_terminal" => {
             run_terminal(
@@ -95,6 +96,45 @@ pub async fn dispatch(
         "ask_question" => ask_question(args, cwd).await,
         other => Err(format!("No implementation for tool: {other}")),
     }
+}
+
+async fn git_status(cwd: &Path) -> Result<Value, String> {
+    let mut command = crate::sandbox::read_only_git_status_command(cwd)?;
+    let output = timeout(Duration::from_secs(15), async {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = crate::sandbox::spawn_managed_child(&mut command)
+            .map_err(|_| "Git status could not start".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Git status output is unavailable")?;
+        let mut bytes = Vec::new();
+        stdout
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| "Git status output could not be read")?;
+        if bytes.len() > 64 * 1024 {
+            child.terminate_and_reap().await;
+            return Err("Git status output exceeds the 65536-byte limit".to_string());
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| "Git status could not finish")?;
+        if !status.success() {
+            return Err("Git status failed for the active repository".to_string());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|_| "Git status timed out".to_string())??;
+    let status =
+        String::from_utf8(output).map_err(|_| "Git status output is not UTF-8".to_string())?;
+    Ok(json!({"status": status}))
 }
 
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
@@ -1424,3 +1464,7 @@ use core_http::*;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "git_status_tests.rs"]
+mod git_status_tests;

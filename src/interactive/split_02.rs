@@ -849,6 +849,12 @@ pub(crate) fn display_reconciliation_status(outcome: &str) -> StreamDisplay {
             "[failed] Project instructions could not be loaded. Restore readable project instructions within the size limit, or increase llm.context_length, then retry the same plan.".to_string(),
         );
     }
+    if outcome == "tool_scope_outside_worktree" {
+        return StreamDisplay::Status(
+            "[failed] A proposed tool path is outside this project. Choose a project path and retry."
+                .to_string(),
+        );
+    }
     let reduction = reduce_interaction(
         &InteractionState::default(),
         InteractionInput::ReconciledOutcome {
