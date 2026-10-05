@@ -100,3 +100,32 @@ Updated candidate d5da608 passed task test:workspace (eight cases), task
 docs:check (all native modules and five documentation cases) and
 task test:task-contract (two cases). Static check passed during iteration;
 frozen full native and hosted Windows acceptance remain required.
+
+## Shallow CI Fixture Repair Plan
+
+Main CI 37354295208 and development CI 37354351025 passed current-root
+Workspace governance but failed the forced-CRLF fixture. A local fetch from
+a depth-one source exits zero while rejecting shallow root updates, leaving
+FETCH_HEAD empty; checkout then reports that --detach cannot take FETCH_HEAD
+as a path. Root and reviewer independently reproduced the exact behavior.
+The local full-history fixture had missed this CI checkout condition.
+
+Strengthen AC-2 by deterministically creating and asserting a shallow source
+on every fixture run. Explicitly allow shallow updates during the destination
+fetch, checkout the pinned exact revision and verify destination HEAD identity.
+Retain every full-governance, ordinary-conversion and negative raw-byte control.
+Reviewer t062-review approved this bounded plan; source review and fresh
+native/all-platform gates renew for the changed test. Version impact remains
+none and the durable checkout policy remains unchanged.
+
+Shallow-aware candidate 7a59147 passed task test:workspace (eight cases,
+including asserted shallow source/destination and exact commit identity) and
+task docs:check (five documentation cases and all native modules). Git output
+identity checks trim platform line endings. The source and raw SHA-256 validator
+remain unchanged; fresh frozen native and hosted acceptance are still pending.
+
+Final bounded-helper candidate 4118451 passed task check (all native governance,
+format and strict all-target/all-feature Clippy) and task test:workspace (eight
+cases). Git invocation and shallow-source setup use focused helpers within the
+unchanged function-length limit; no lint suppression or assertion is added or
+removed. Native full verification and renewed hosted acceptance remain pending.
