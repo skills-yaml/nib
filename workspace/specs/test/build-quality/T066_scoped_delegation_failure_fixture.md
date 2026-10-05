@@ -1,8 +1,8 @@
 # T066: Scoped Delegation Failure Fixture
 
-**Status:** Development
+**Status:** Test
 
-State: development
+State: test
 Primary Feature: build-quality
 
 ## Scope
@@ -95,3 +95,18 @@ These commands exactly compose task verify; the internal integration ref
 advanced only after both succeeded. Full native tests execute all new guard
 cases and the changed owner-boundary fixture; selected delegation evidence
 is not substituted. Hosted Windows and actual delivery remain pending.
+
+## Integration Evidence
+
+Revision: 30e9ecf8151768ca236367ed4984e1a06bc96380
+Outcome: passed
+
+PR45 and the actual remote ref confirm verified development integration
+on 2026-10-05T19:51:41Z. Independently reviewed source ddff42a781ff1566ce6bc3cd4cc1a45e2f632607 and
+exact merge previews passed CI 37361857527 (development Linux/macOS)
+Main all-platform qualification remains required before done. Full development suites, strict native
+containment, exact binary identities, coverage and native smokes passed.
+Frozen native stage 42550166c79df8d7acf4d0c405f65ce04d5947e8 passed fresh ordered task check
+and task test, exactly composing task verify. The new T066 guard/owner cases
+executed in the full native suites; earlier selected-test evidence is not substituted.
+Publication is tracked separately. Main reconciliation and final frozen lifecycle verification remain pending.

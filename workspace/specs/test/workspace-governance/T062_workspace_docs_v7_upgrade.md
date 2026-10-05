@@ -287,7 +287,7 @@ runtime and other integration suites, exact release qualification and native
 smokes. The prior tool-start readiness timeout did not repeat; its root cause
 remains unconfirmed. The final Workspace positive fixture failed raw upstream
 SHA-256 integrity on AGENT_MIGRATION.md after checkout conversion. Linked
-[T065](../../development/workspace-governance/T065_preserve_workspace_checkout_bytes.md)
+[T065](T065_preserve_workspace_checkout_bytes.md)
 preserves generated-context/Workspace LF and exact upstream package bytes,
 with a real forced-CRLF full-governance fixture and unchanged raw integrity
 validator. Independent review approved exact source bcbd8ab and combined
@@ -307,7 +307,7 @@ Superseded main CI 37354295208 Windows failed the owner boundary fixture and
 then a later deadline fixture received its unconsumed global injection (1164
 library cases passed, two failed). The first actual error was not reported, so
 its cause is unconfirmed. Linked
-[T066](../../development/build-quality/T066_scoped_delegation_failure_fixture.md)
+[T066](../build-quality/T066_scoped_delegation_failure_fixture.md)
 adds test-only scoped cleanup, observable guard tests, consumption/error
 diagnostics and the existing fixture setup guard, preserving production and
 deadline-specific budgets/assertions. New full native and hosted qualification
