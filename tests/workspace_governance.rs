@@ -45,6 +45,7 @@ fn current_repository_satisfies_every_workspace_module() {
 fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
     let checkout = tempfile::tempdir().expect("checkout fixture");
+    let shallow_source = tempfile::tempdir().expect("shallow source fixture");
     let git = |root: &Path, args: &[&str]| {
         let output = Command::new("git")
             .arg("-C")
@@ -78,6 +79,30 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
         output.stdout
     };
     let revision = String::from_utf8(git(source, &["rev-parse", "HEAD"])).expect("source revision");
+    git(shallow_source.path(), &["init", "--quiet"]);
+    git(
+        shallow_source.path(),
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--depth=1",
+            "--update-shallow",
+            source.to_str().expect("source path"),
+            revision.trim(),
+        ],
+    );
+    git(
+        shallow_source.path(),
+        &["checkout", "--quiet", "--detach", revision.trim()],
+    );
+    assert_eq!(
+        git(
+            shallow_source.path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ),
+        b"true\n"
+    );
     git(checkout.path(), &["init", "--quiet"]);
     git(checkout.path(), &["config", "core.autocrlf", "true"]);
     git(checkout.path(), &["config", "core.eol", "crlf"]);
@@ -95,13 +120,18 @@ fn forced_crlf_checkout_preserves_full_governance_and_raw_integrity() {
             "fetch",
             "--quiet",
             "--no-tags",
-            source.to_str().expect("source path"),
+            "--update-shallow",
+            shallow_source.path().to_str().expect("shallow source path"),
             revision.trim(),
         ],
     );
     git(
         checkout.path(),
-        &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
+        &["checkout", "--quiet", "--detach", revision.trim()],
+    );
+    assert_eq!(
+        git(checkout.path(), &["rev-parse", "HEAD"]),
+        revision.as_bytes()
     );
 
     let control = std::fs::read(checkout.path().join("README.md")).expect("ordinary text");
