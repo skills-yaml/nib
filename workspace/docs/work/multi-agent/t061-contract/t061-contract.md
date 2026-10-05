@@ -7,7 +7,7 @@ status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T22:45:00Z
+updated_at: 2026-10-05T22:46:00Z
 scope:
   - src/agent
   - src/chat/test_part_0.rs
@@ -59,9 +59,11 @@ Clippy across all targets and features. Record-only reconciliation is validated
 with task workspace:check before publication.
 
 Self-review maps schema, display bounds and legacy adapters to AC-1 and AC-2;
-exact reuse and source provenance to AC-3; discussion, dependency and completion
-behavior to AC-4; indexed obligations, lease admission and explicit revision links
-to AC-6 and AC-8; deterministic source/validation evidence to AC-9.
+discussion, interruption, dependency and completion behavior to AC-3;
+displayed-proposal approval and source validation to AC-4; exact reuse, indexed
+obligations, lease admission and explicit revision recovery links to AC-6;
+human-input authority boundaries and malformed-call rejection to AC-8;
+deterministic source/validation evidence to AC-9.
 
 ## Blockers and Dependencies
 
