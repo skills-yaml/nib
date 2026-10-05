@@ -12,18 +12,25 @@ async fn git_status_reads_repository_without_creating_a_session_worktree() {
     assert!(status.success());
     std::fs::write(directory.path().join("untracked.txt"), "content\n").expect("fixture");
 
-    let output = git_status(directory.path()).await.expect("Git status");
-    assert!(output["status"].as_str().unwrap().contains("untracked.txt"));
+    if cfg!(target_os = "linux") && crate::sandbox::detect_capabilities().bwrap_available {
+        let output = git_status(directory.path()).await.expect("Git status");
+        assert!(output["status"].as_str().unwrap().contains("untracked.txt"));
+    } else {
+        assert!(git_status(directory.path())
+            .await
+            .expect_err("strict isolation is required")
+            .contains("strict Linux bwrap isolation"));
+    }
     assert!(!directory.path().join(".nib/worktrees").exists());
 }
 
-struct EnvironmentGuard {
+pub(super) struct EnvironmentGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
 impl EnvironmentGuard {
-    fn set(key: &'static str, value: &str) -> Self {
+    pub(super) fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, previous }

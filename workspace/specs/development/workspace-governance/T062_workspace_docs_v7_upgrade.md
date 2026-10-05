@@ -214,3 +214,11 @@ iterative task check passed all native governance checks, formatting and
 warning-denying all-target/all-feature Clippy. The final handoff records
 are reviewed before freezing; task verify then runs on that frozen revision.
 No shared integration, main merge or paid provider qualification is yet claimed.
+
+## Main-Promotion Security Follow-up
+
+Independent combined-main review found a T058 read-only Git-status helper
+execution path outside isolation. Linked [T063](../tools-sandbox/T063_isolated_read_only_git_status.md)
+resolves that finding before promotion, preserving T058 history and the applied
+shared version. Final verification is renewed after this repair; the interrupted
+6a2e593 run is not completion evidence.

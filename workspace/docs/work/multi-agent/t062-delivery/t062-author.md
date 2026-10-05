@@ -40,12 +40,21 @@ Independent review approved source candidate 332c678d30d3a8700e840b39d5668393098
 
 ## Blockers and Dependencies
 
-None.
+Main promotion requires linked T063 isolation repair review and fresh final gates.
 
 ## Next Step
 
-Freeze the reviewed handoff, pass task verify, and integrate through the configured development and main targets. Record lifecycle events only after actual verified merges.
+Renew exact review after T063, freeze the reviewed handoff, pass task verify, and integrate through the configured development and main targets. Record lifecycle events only after actual verified merges.
 
 ## Handoff
 
 Version reservation: nib-next, nib 0.2.0, checked against shared ledger and public manifests on base revision 332c678d30d3a8700e840b39d5668393098a25dc. No publication claimed.
+
+
+## Main-Promotion Repair
+
+Independent review found a pre-existing ReadOnly Git-status host-helper execution
+path. T063 records its scoped repair before implementation, preserves T058 done
+history, and shares the already-applied nib-next 0.2.0 reservation. Native strict
+Git-status fixtures passed all eight cases; renewed review and final gates remain.
+The superseded 6a2e593 verification was interrupted and is not final evidence.

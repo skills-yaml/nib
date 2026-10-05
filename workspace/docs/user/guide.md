@@ -459,6 +459,13 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   run from the main checkout. If every tool needs the worktree, the run stops and
   advises running `nib doctor`. Doctor checks owned session receipt paths, Git
   registrations, and branches without repairing uncertain state.
+  The `git_status` tool uses strict Linux bwrap isolation with a read-only repository,
+  private home masking, no network, and no inherited global/system Git configuration.
+  Repository filters and submodules run within that boundary; fsmonitor hooks are
+  disabled. If strict isolation is unavailable (including macOS and Windows), it
+  returns an explicit error advising file inspection or an approved isolated terminal
+  command. Global-only Git filters/autocrlf and linked worktrees with masked metadata
+  may require that alternative inspection.
   A tool path outside the active worktree receives a path-scope failure rather
   than context-length advice; eligible project reads in the same batch may run.
 - `/context` shows the compact occupancy indicator (`ctx ~18k/64k`). `/context details`

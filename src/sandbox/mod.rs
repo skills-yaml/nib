@@ -914,6 +914,62 @@ fn is_valid_environment_name(name: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
+pub(crate) fn read_only_git_status_command(cwd: &Path) -> Result<tokio::process::Command, String> {
+    read_only_git_status_command_with_capabilities(cwd, &detect_capabilities())
+}
+
+fn read_only_git_status_command_with_capabilities(
+    cwd: &Path,
+    capabilities: &SandboxCapabilities,
+) -> Result<tokio::process::Command, String> {
+    if !cfg!(target_os = "linux") || !capabilities.bwrap_available {
+        return Err("Read-only Git status requires usable strict Linux bwrap isolation. Inspect files or use an approved isolated terminal command.".to_string());
+    }
+    let cwd = canonical_directory(cwd)?;
+    let args = read_only_git_status_args(&cwd)?;
+    let mut command = tokio::process::Command::new("bwrap");
+    command.args(args).current_dir(cwd);
+    apply_child_environment(&mut command, &HashMap::new());
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1");
+    Ok(command)
+}
+
+fn read_only_git_status_args(cwd: &Path) -> Result<Vec<String>, String> {
+    if std::env::var_os("HOME")
+        .and_then(|home| PathBuf::from(home).canonicalize().ok())
+        .is_some_and(|home| home == cwd || home.starts_with(cwd))
+    {
+        return Err(
+            "Read-only Git status requires a repository outside the private home root.".to_string(),
+        );
+    }
+    let boundaries = BoundaryConfig {
+        allow_write: Vec::new(),
+        network: "disabled".to_string(),
+    };
+    let mut args = build_bwrap_args(
+        "exec git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short --branch",
+        cwd,
+        &boundaries,
+        "restricted",
+    )?;
+    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
+    let binding = args
+        .windows(3)
+        .position(|triple| triple == ["--bind", cwd_str, cwd_str])
+        .ok_or("Read-only Git status has no exact repository binding")?;
+    args[binding] = "--ro-bind".to_string();
+    if args.iter().any(|argument| argument == "--bind") {
+        return Err("Read-only Git status cannot include writable bindings".to_string());
+    }
+    Ok(args)
+}
+
 fn build_bwrap_args(
     command: &str,
     cwd: &Path,
@@ -1295,6 +1351,37 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn git_status_unavailable_capabilities_never_construct_a_direct_command() {
+        let capabilities = SandboxCapabilities {
+            bwrap_installed: false,
+            bwrap_available: false,
+            bwrap_error: Some("fixture unavailable".to_string()),
+            managed_process_available: false,
+            managed_process_error: None,
+            git_available: true,
+        };
+        let root = tempdir().unwrap();
+        let error = read_only_git_status_command_with_capabilities(root.path(), &capabilities)
+            .expect_err("no direct fallback");
+        assert!(error.contains("strict Linux bwrap isolation"));
+    }
+
+    #[test]
+    fn git_status_has_only_read_only_repository_bindings_and_no_network() {
+        let root = tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let args = read_only_git_status_args(&cwd).unwrap();
+        let path = cwd.to_str().unwrap();
+        assert!(args
+            .windows(3)
+            .any(|triple| triple == ["--ro-bind", path, path]));
+        assert!(!args.iter().any(|argument| argument == "--bind"));
+        assert!(args.iter().any(|argument| argument == "--unshare-net"));
+        assert!(args.iter().any(|argument| argument == "--unshare-pid"));
+        assert!(args.last().unwrap().contains("core.fsmonitor=false"));
+    }
 
     #[test]
     fn sandbox_route_resolution_matches_fallback_and_fail_closed_rules() {

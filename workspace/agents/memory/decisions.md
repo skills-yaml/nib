@@ -544,3 +544,23 @@ The user authorized necessary manual policy, runtime discovery, native validatio
 and release-filter path reconciliation. Skill manifest and lockfile are versioned;
 generated agent skill adapters remain ignored. Runtime context supports both the
 Workspace and legacy documentation layouts with existing bounds and no-link rules.
+
+
+## 2026-10-05 - Isolate executable Git status helpers
+
+- Type: decision
+- Source: T063 + independent main-promotion review
+- Confidence: high
+- Review: exact-candidate review required before delivery
+- Supersedes: none
+
+Content:
+
+A ReadOnly Git status tool must treat repository hooks, filters and populated
+submodule inspection as executable input. nib uses strict Linux bwrap isolation
+with a read-only repository, no network, masked private home, an allowlisted
+child environment, disabled fsmonitor and optional locks, and managed process-tree
+cleanup. Global/system Git configuration is excluded. Unsupported or unavailable
+isolation returns an actionable error without executing Git directly. Repositories
+requiring global-only configuration or masked linked-worktree metadata may need
+an approved isolated terminal inspection.

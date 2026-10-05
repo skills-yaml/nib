@@ -293,6 +293,11 @@ tasks:
     cmds:
       - cargo test --test installers -- --test-threads=1
 
+  test:git-status:
+    desc: Verify strict read-only Git status isolation and executable-helper boundaries
+    cmds:
+      - 'cargo test --lib git_status -- --test-threads=1'
+
   test:task-contract:
     desc: Validate Task composition and strict Rust lint policy
     cmds:

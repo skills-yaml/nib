@@ -85,9 +85,10 @@
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/development/interactive/T061_question_form.md",
-        "workspace/specs/development/workspace-governance/T062_workspace_docs_v7_upgrade.md"
+        "workspace/specs/development/workspace-governance/T062_workspace_docs_v7_upgrade.md",
+        "workspace/specs/development/tools-sandbox/T063_isolated_read_only_git_status.md"
       ],
-      "evidence": "The intentionally shared nib-next reservation is 0.2.0 from released baseline 0.1.0. Production and development nib-release.json manifests were checked on 2026-10-05 at 15123a3ef275458efc87200400219aeacc3e9ea9 and 79a80c0759a7667b58bb1822bb9d2631df624c4b; both report 0.1.0. The atomic peer reservation reused nib-next at minor impact. T062 delivery applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before shared integration artifacts. T061 remains an accepted contract awaiting implementation; no question-form implementation or publication is claimed by this record."
+      "evidence": "The intentionally shared nib-next reservation is 0.2.0 from released baseline 0.1.0. Production and development nib-release.json manifests were checked on 2026-10-05 at 15123a3ef275458efc87200400219aeacc3e9ea9 and 79a80c0759a7667b58bb1822bb9d2631df624c4b; both report 0.1.0. The atomic peer reservation reused nib-next at minor impact. T062 delivery applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before shared integration artifacts. T061 remains an accepted contract awaiting implementation; no question-form implementation or publication is claimed by this record. T063 is a compatible security follow-up sharing the already-applied target; no second bump is applied."
     }
   ]
 }

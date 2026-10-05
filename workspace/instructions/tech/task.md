@@ -39,6 +39,8 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   adapter creates an interactive child terminal, accepts bounded delayed input,
   preserves output and exit status, restores console modes, and reaps timed-out trees
 - `task test:installers` — run installer and release-transaction integration tests
+- `task test:git-status` — verify strict read-only Git status, executable filters,
+  submodules, private context, output bounds, and unavailable isolation
 - `task test:task-contract` — validate fast-check and full-verification Task composition
 - `task test:interactive` — run deterministic plain/TUI reducer, composer, history,
   transcript, dock, and redirected-CLI tests without a pseudo-terminal or network
