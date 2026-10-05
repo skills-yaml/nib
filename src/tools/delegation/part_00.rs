@@ -501,7 +501,7 @@ pub(crate) static SPAWN_POST_AUDIT_CANCELLATIONS: std::sync::atomic::AtomicUsize
 #[cfg(test)]
 pub(crate) fn consume_spawn_failure(counter: &std::sync::atomic::AtomicUsize) -> bool {
     counter
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |remaining| remaining.checked_sub(1),

@@ -22,6 +22,13 @@ tasks:
     cmds:
       - cargo check --all-targets --all-features {{if .TARGET}}--target {{.TARGET}}{{end}}
 
+  deps:update:
+    desc: Update one locked dependency to a reviewed exact version
+    requires:
+      vars: [PACKAGE, VERSION]
+    cmds:
+      - cargo update -p "{{.PACKAGE}}" --precise "{{.VERSION}}"
+
   fmt:
     desc: Format Rust source
     cmds:

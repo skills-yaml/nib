@@ -15,6 +15,7 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task check` — fast installer, Workspace governance, and formatting checks plus warning-denying Clippy
   across every local target and feature
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
+- `task deps:update PACKAGE=<crate> VERSION=<version>` — update one locked dependency to a reviewed exact version
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
 - `task test:integration` — run all integration test targets serially

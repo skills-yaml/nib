@@ -56,7 +56,9 @@ The full per-file map is recorded in [migration map](../../../docs/work/workspac
 AGENTS.md, DESIGN.md, README.md, workspace documentation/instructions/specs/memory,
 Taskfile.yml, tests/docs_integrity.rs and native governance validators/tests,
 src/context/{project_docs,help}.rs and regression tests, .github/workflows/release.yml,
-and its installer contract test. Pending T059/T060 runtime changes are preserved.
+and its installer contract test. Pending T059/T060 runtime changes are preserved. Current-stable gate repairs
+are bounded to the existing async-trait 0.1 dependency, equivalent atomic update
+method names, and a Task entry for the pinned dependency update.
 
 ## Implementation Plan
 
@@ -186,3 +188,19 @@ once to the native manifest, lockfile and project skill manifest before
 integration artifacts, and reconciles the ledger to applied. Publication remains
 a separate event. Version, record and policy deltas require renewed review and
 fresh final gates. Shared integration and main merge are not yet claimed.
+
+## Current-Stable Gate Repair Scope (2026-10-05)
+
+Fresh task check on Rust 1.99 failed because fetch_update is deprecated in
+favor of try_update, and async-trait 0.1.89 generates redundant must_use
+attributes now rejected by Clippy. The compatibility repair updates the
+existing async-trait dependency to released 0.1.92, whose macro removes that
+redundant attribute, and renames five atomic calls without changing their
+closures or memory ordering. No lint is disabled and no runtime/public trait
+contract is redesigned. The Taskfile owns the reproducible locked dependency
+update. Independent review and task verify cover the repaired exact candidate.
+
+Focused migration modules passed before this repair: docs 5 tests, native
+fixtures 7, context 91, agent loop 79, build metadata 2, installers 42, and
+Task contracts 2. Those results are iteration evidence; dependency changes
+require fresh final static and full-suite verification.
