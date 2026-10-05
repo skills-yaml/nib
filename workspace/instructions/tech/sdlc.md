@@ -56,7 +56,8 @@ Reserve before implementation; apply once at development-start or merge before
 integration artifacts. At 0.y.z nib uses minor for incompatible changes and additions,
 patch for compatible fixes; major advances to a stable 1.0.0 contract. Historical
 specs are explicitly listed and do not receive retroactive bumps or invented tags.
-The current next release is reserved at merge; local development keeps 0.1.0.
+The nib-next reservation applies once at merge before integration artifacts;
+an applied native version does not establish publication.
 
 Each completed task classifies Memory Impact as updated or none with rationale.
 Updated references a category file and the changelog; pending is permitted only

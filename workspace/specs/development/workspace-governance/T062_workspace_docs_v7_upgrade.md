@@ -166,3 +166,23 @@ Task definitions, workflows and fixtures remain unchanged. Renew independent
 review and affected native governance/documentation verification for these
 tracked records before handoff; do not infer freshness from their filenames
 alone. Full verification evidence applies only to unchanged native inputs.
+
+## Delivery Resumption (2026-10-05)
+
+The original worktree was preserved in prerequisite commit
+`04aef37bc8a0774dcc35da0e2447274c9f7362f8` and migration commit
+`332c678d30d3a8700e840b39d5668393098a25dc`, based on development
+`79a80c0759a7667b58bb1822bb9d2631df624c4b`. The prerequisite captures
+already-completed local T059/T060 code so the migrated history, documentation
+and gate commands remain consistent; it does not implement T061.
+
+Independent reviewer t062-review approved that exact combined candidate for
+spec compliance and technical/security quality with no findings. The only
+difference from the previously reviewed source tree was migration result records.
+
+Current production and development release manifests both report 0.1.0. The
+shared atomic reservation confirms nib-next at 0.2.0. This delivery applies it
+once to the native manifest, lockfile and project skill manifest before
+integration artifacts, and reconciles the ledger to applied. Publication remains
+a separate event. Version, record and policy deltas require renewed review and
+fresh final gates. Shared integration and main merge are not yet claimed.
