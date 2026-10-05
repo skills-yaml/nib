@@ -15,6 +15,7 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
 - `task check` — fast installer, Workspace governance, and formatting checks plus warning-denying Clippy
   across every local target and feature
 - `task check:all-targets` — type-check every Rust target and feature (optionally for `TARGET`)
+- `task deps:update PACKAGE=<crate> VERSION=<version>` — update one locked dependency to a reviewed exact version
 - `task fmt` — format Rust source
 - `task test` — run the full Rust unit and integration suite serially
 - `task test:integration` — run all integration test targets serially
@@ -38,6 +39,8 @@ nib uses [Task](https://taskfile.dev/) as the standard interface for all local a
   adapter creates an interactive child terminal, accepts bounded delayed input,
   preserves output and exit status, restores console modes, and reaps timed-out trees
 - `task test:installers` — run installer and release-transaction integration tests
+- `task test:git-status` — verify strict read-only Git status, executable filters,
+  submodules, private context, output bounds, and unavailable isolation
 - `task test:task-contract` — validate fast-check and full-verification Task composition
 - `task test:interactive` — run deterministic plain/TUI reducer, composer, history,
   transcript, dock, and redirected-CLI tests without a pseudo-terminal or network

@@ -22,6 +22,13 @@ tasks:
     cmds:
       - cargo check --all-targets --all-features {{if .TARGET}}--target {{.TARGET}}{{end}}
 
+  deps:update:
+    desc: Update one locked dependency to a reviewed exact version
+    requires:
+      vars: [PACKAGE, VERSION]
+    cmds:
+      - cargo update -p "{{.PACKAGE}}" --precise "{{.VERSION}}"
+
   fmt:
     desc: Format Rust source
     cmds:
@@ -285,6 +292,11 @@ tasks:
     desc: Run installer and release-transaction integration tests
     cmds:
       - cargo test --test installers -- --test-threads=1
+
+  test:git-status:
+    desc: Verify strict read-only Git status isolation and executable-helper boundaries
+    cmds:
+      - 'cargo test --lib git_status -- --test-threads=1'
 
   test:task-contract:
     desc: Validate Task composition and strict Rust lint policy

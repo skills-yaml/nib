@@ -56,7 +56,9 @@ The full per-file map is recorded in [migration map](../../../docs/work/workspac
 AGENTS.md, DESIGN.md, README.md, workspace documentation/instructions/specs/memory,
 Taskfile.yml, tests/docs_integrity.rs and native governance validators/tests,
 src/context/{project_docs,help}.rs and regression tests, .github/workflows/release.yml,
-and its installer contract test. Pending T059/T060 runtime changes are preserved.
+and its installer contract test. Pending T059/T060 runtime changes are preserved. Current-stable gate repairs
+are bounded to the existing async-trait 0.1 dependency, equivalent atomic update
+method names, and a Task entry for the pinned dependency update.
 
 ## Implementation Plan
 
@@ -166,3 +168,57 @@ Task definitions, workflows and fixtures remain unchanged. Renew independent
 review and affected native governance/documentation verification for these
 tracked records before handoff; do not infer freshness from their filenames
 alone. Full verification evidence applies only to unchanged native inputs.
+
+## Delivery Resumption (2026-10-05)
+
+The original worktree was preserved in prerequisite commit
+`04aef37bc8a0774dcc35da0e2447274c9f7362f8` and migration commit
+`332c678d30d3a8700e840b39d5668393098a25dc`, based on development
+`79a80c0759a7667b58bb1822bb9d2631df624c4b`. The prerequisite captures
+already-completed local T059/T060 code so the migrated history, documentation
+and gate commands remain consistent; it does not implement T061.
+
+Independent reviewer t062-review approved that exact combined candidate for
+spec compliance and technical/security quality with no findings. The only
+difference from the previously reviewed source tree was migration result records.
+
+Current production and development release manifests both report 0.1.0. The
+shared atomic reservation confirms nib-next at 0.2.0. This delivery applies it
+once to the native manifest, lockfile and project skill manifest before
+integration artifacts, and reconciles the ledger to applied. Publication remains
+a separate event. Version, record and policy deltas require renewed review and
+fresh final gates. Shared integration and main merge are not yet claimed.
+
+## Current-Stable Gate Repair Scope (2026-10-05)
+
+Fresh task check on Rust 1.99 failed because fetch_update is deprecated in
+favor of try_update, and async-trait 0.1.89 generates redundant must_use
+attributes now rejected by Clippy. The compatibility repair updates the
+existing async-trait dependency to released 0.1.92, whose macro removes that
+redundant attribute, and renames five atomic calls without changing their
+closures or memory ordering. No lint is disabled and no runtime/public trait
+contract is redesigned. The Taskfile owns the reproducible locked dependency
+update. Independent review and task verify cover the repaired exact candidate.
+
+Focused migration modules passed before this repair: docs 5 tests, native
+fixtures 7, context 91, agent loop 79, build metadata 2, installers 42, and
+Task contracts 2. Those results are iteration evidence; dependency changes
+require fresh final static and full-suite verification.
+
+## Renewed Review and Frozen Handoff
+
+Independent reviewer t062-review approved version/record candidate
+`7abf4f6bf7bf1c75d2665e9b02add09440ae5088` and current-stable gate repair
+`8dde598a28f494f92a3f0625abf2357b2844c152`, with no findings. The repaired
+iterative task check passed all native governance checks, formatting and
+warning-denying all-target/all-feature Clippy. The final handoff records
+are reviewed before freezing; task verify then runs on that frozen revision.
+No shared integration, main merge or paid provider qualification is yet claimed.
+
+## Main-Promotion Security Follow-up
+
+Independent combined-main review found a T058 read-only Git-status helper
+execution path outside isolation. Linked [T063](../tools-sandbox/T063_isolated_read_only_git_status.md)
+resolves that finding before promotion, preserving T058 history and the applied
+shared version. Final verification is renewed after this repair; the interrupted
+6a2e593 run is not completion evidence.

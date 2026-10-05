@@ -99,15 +99,13 @@ pub async fn dispatch(
 }
 
 async fn git_status(cwd: &Path) -> Result<Value, String> {
+    let mut command = crate::sandbox::read_only_git_status_command(cwd)?;
     let output = timeout(Duration::from_secs(15), async {
-        let mut child = Command::new("git")
-            .args(["--no-optional-locks", "status", "--short", "--branch"])
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .current_dir(cwd)
+        command
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
+            .stderr(Stdio::null());
+        let mut child = crate::sandbox::spawn_managed_child(&mut command)
             .map_err(|_| "Git status could not start".to_string())?;
         let stdout = child
             .stdout
@@ -120,7 +118,7 @@ async fn git_status(cwd: &Path) -> Result<Value, String> {
             .await
             .map_err(|_| "Git status output could not be read")?;
         if bytes.len() > 64 * 1024 {
-            let _ = child.kill().await;
+            child.terminate_and_reap().await;
             return Err("Git status output exceeds the 65536-byte limit".to_string());
         }
         let status = child
@@ -1466,3 +1464,7 @@ use core_http::*;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "git_status_tests.rs"]
+mod git_status_tests;

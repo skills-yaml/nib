@@ -432,3 +432,18 @@ Content:
 Recorded the approved v7 layout, branch topology, historical-state preservation,
 native gates and versioned skill configuration in decisions.md. Local migration
 stays in development; integration, main merge and publication are not inferred.
+
+
+## 2026-10-05 - Read-only Git status security boundary
+
+- Type: decision update
+- Source: T063 + independent review
+- Confidence: high
+- Review: exact-candidate review required before delivery
+
+Content:
+
+Recorded the strict isolation requirement and isolated-repository configuration
+limit in decisions.md. This closes the host helper-execution finding discovered
+while reviewing T062's combined main promotion. Integration and main delivery
+remain separately verified lifecycle events.
