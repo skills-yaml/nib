@@ -180,6 +180,10 @@ impl QuestionFormState {
 
     fn submit_editor(&mut self) -> Option<QuestionFormOutcome> {
         let editor = self.editor.as_ref()?;
+        if editor.text.trim_start().starts_with(":command") {
+            self.error = Some(super::modal_command_unsupported_message().to_string());
+            return None;
+        }
         match parse_question_editor_input(&editor.text) {
             QuestionEditorInput::Interrupt => {
                 self.discard_drafts();
@@ -314,6 +318,17 @@ mod tests {
         assert!(state.apply(QuestionFormEvent::Choose).is_none());
         assert_eq!(state.drafts[0].as_ref().unwrap().answer, "Y");
         assert_eq!(state.drafts[0].as_ref().unwrap().source, QuestionAnswerSource::Text);
+    }
+
+    #[test]
+    fn typed_modal_commands_retry_until_explicitly_escaped_as_literal_answers() {
+        let mut state = state(1);
+        state.apply(QuestionFormEvent::Type(':'));
+        state.apply(QuestionFormEvent::ReplaceEditor(":command /status".to_string()));
+        assert!(state.apply(QuestionFormEvent::Choose).is_none());
+        assert!(state.error.is_some());
+        state.apply(QuestionFormEvent::ReplaceEditor("text: :command /status".to_string()));
+        assert_eq!(state.apply(QuestionFormEvent::Choose), Some(QuestionFormOutcome::Answered(vec![QuestionAnswer { answer: ":command /status".to_string(), source: QuestionAnswerSource::Text }])));
     }
 
 }

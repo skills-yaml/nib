@@ -36,42 +36,53 @@ pub(crate) fn question_tab_line(state: &crate::interactive::QuestionFormState, w
 
 pub(crate) fn question_form_lines(question: &PendingQuestion, width: u16) -> Vec<(String, bool)> {
     let state = &question.state;
-    if state.is_submit() {
-        let mut lines = Vec::new();
-        for (index, question) in state.form.questions.iter().enumerate() {
-            let answer = state.drafts[index].as_ref().map(|answer| answer.answer.as_str()).unwrap_or("Unanswered");
-            lines.extend(wrapped_display_rows(&format!("{}: {answer}", question.title.as_deref().unwrap_or("Question")), width).into_iter().map(|line| (line, false)));
-        }
-        lines.push(("› Submit these answers".to_string(), true));
-        return lines;
-    }
+    if state.is_submit() { return question_submission_lines(state, width); }
     let Some(current) = state.current_question() else { return Vec::new(); };
-    let choices = if current.proposed_answer.is_some() {
-        vec![("Approve proposed answer", None), ("Reject and leave unanswered", None), ("Instruct otherwise", None)]
-    } else {
-        let mut choices = current.options.iter().map(|option| (option.label.as_str(), option.description.as_deref())).collect::<Vec<_>>();
-        choices.push(("Type something.", None));
-        choices
-    };
+    let choices = question_row_labels(current);
     let mut lines = Vec::new();
-    for (index, (label, description)) in choices.iter().enumerate() {
-        let selected = state.selected_row == index && state.editor.is_none();
-        let marker = if selected { "› " } else { "  " };
-        let prefix = format!("{marker}{}. ", index + 1);
-        let indent_width = unicode_display_width(&prefix);
-        let label_rows = wrapped_display_rows(label, width.saturating_sub(indent_width as u16).max(1));
-        for (offset, line) in label_rows.into_iter().enumerate() {
-            lines.push((format!("{}{line}", if offset == 0 { prefix.clone() } else { " ".repeat(indent_width) }), selected && offset == 0));
-        }
-        if let Some(description) = description {
-            let indent = " ".repeat(format!("  {}. ", index + 1).len());
-            lines.extend(wrapped_display_rows(description, width.saturating_sub(indent.len() as u16).max(1)).into_iter().map(|line| (format!("{indent}{line}"), false)));
-        }
+    for (index, choice) in choices.iter().enumerate() {
+        append_question_choice_lines(&mut lines, index, *choice, state.selected_row == index && state.editor.is_none(), width);
     }
     lines.push(("─".repeat(usize::from(width)), false));
     let selected = state.selected_row == choices.len() && state.editor.is_none();
     lines.push((format!("{}{}. Chat about this", if selected { "› " } else { "  " }, choices.len() + 1), selected));
     lines
+}
+
+fn question_submission_lines(state: &crate::interactive::QuestionFormState, width: u16) -> Vec<(String, bool)> {
+    let mut lines = Vec::new();
+    for (index, question) in state.form.questions.iter().enumerate() {
+        let answer = state.drafts[index].as_ref().map(|answer| answer.answer.as_str()).unwrap_or("Unanswered");
+        lines.extend(wrapped_display_rows(&format!("{}: {answer}", question.title.as_deref().unwrap_or("Question")), width).into_iter().map(|line| (line, false)));
+    }
+    lines.push(("› Submit these answers".to_string(), true));
+    lines
+}
+
+fn question_row_labels(question: &crate::interactive::FormQuestion) -> Vec<(&str, Option<&str>)> {
+    if question.proposed_answer.is_some() {
+        return vec![("Approve proposed answer", None), ("Reject and leave unanswered", None), ("Instruct otherwise", None)];
+    }
+    let mut choices = question.options.iter().map(|option| (option.label.as_str(), option.description.as_deref())).collect::<Vec<_>>();
+    choices.push(("Type something.", None));
+    choices
+}
+
+fn append_question_choice_lines(lines: &mut Vec<(String, bool)>, index: usize, choice: (&str, Option<&str>), selected: bool, width: u16) {
+    let (label, description) = choice;
+    let marker = if selected { "› " } else { "  " };
+    let prefix = format!("{marker}{}. ", index + 1);
+    let indent_width = unicode_display_width(&prefix);
+    let label_rows = wrapped_display_rows(label, width.saturating_sub(indent_width as u16).max(1));
+    for (offset, line) in label_rows.into_iter().enumerate() {
+        lines.push((format!("{}{line}", if offset == 0 { prefix.clone() } else { " ".repeat(indent_width) }), selected && offset == 0));
+    }
+    if let Some(description) = description {
+        let indent = " ".repeat(indent_width);
+        let mut description_rows = wrapped_display_rows(description, width.saturating_sub(indent.len() as u16).max(1));
+        while description_rows.last().is_some_and(|line| line.trim().is_empty()) { description_rows.pop(); }
+        lines.extend(description_rows.into_iter().map(|line| (format!("{indent}{line}"), false)));
+    }
 }
 
 pub(crate) fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, question: &PendingQuestion) {
@@ -81,12 +92,15 @@ pub(crate) fn render_question_band(frame: &mut ratatui::Frame<'_>, area: Rect, q
     if tabs > 0 {
         frame.render_widget(Paragraph::new(question_tab_line(&question.state, inner.width)), Rect { height: 1, ..inner });
     }
-    let rows = question_form_lines(question, inner.width);
+    let mut rows = question_form_lines(question, inner.width);
     let capacity = usize::from(inner.height.saturating_sub(tabs));
     let selected = rows.iter().position(|(_, selected)| *selected).unwrap_or(0);
-    let selected_end = rows.iter().enumerate().skip(selected + 1)
-        .find(|(_, (line, _))| line.starts_with("  ") && line.trim_start().chars().next().is_some_and(|character| character.is_ascii_digit()) || line.starts_with('─'))
+    let mut selected_end = rows.iter().enumerate().skip(selected + 1)
+        .find(|(_, (line, _))| line.strip_prefix("  ").is_some_and(|rest| rest.chars().next().is_some_and(|character| character.is_ascii_digit())) || line.starts_with('─'))
         .map_or(rows.len(), |(index, _)| index);
+    let omit = question.description_scroll.min(selected_end.saturating_sub(selected + 2));
+    if omit > 0 { rows.drain(selected + 1..selected + 1 + omit); }
+    selected_end -= omit;
     let start = selected_end.saturating_sub(capacity).min(selected)
         .min(rows.len().saturating_sub(capacity));
     let no_color = std::env::var_os("NO_COLOR").is_some();

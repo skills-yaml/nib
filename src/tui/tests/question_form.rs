@@ -154,3 +154,17 @@ fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
     assert_eq!(pending.as_ref().unwrap().recovery.as_ref().unwrap().invocation_id, invocation_id);
     assert!(store.load(&session_id).unwrap().clarifications[0].answer.is_none());
 }
+
+#[test]
+fn long_description_scroll_keeps_question_and_selected_label_visible() {
+    let (reply, _response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions.truncate(1);
+    request.form.questions[0].options[0].description = Some((0..40).map(|index| format!("Description line {index}\n")).collect());
+    let mut pending = PendingQuestion::new(request);
+    let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
+    for _ in 0..12 { question_action_for_key(&mut pending, KeyCode::PageDown); }
+    terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you  context", &Composer::default(), None, Some(&pending))).unwrap();
+    let rendered = buffer_text(terminal.backend().buffer());
+    for expected in ["Are prices final?", "› 1. Final", "Description line 39"] { assert!(rendered.contains(expected), "{rendered}"); }
+}
