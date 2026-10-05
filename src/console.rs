@@ -465,7 +465,11 @@ impl QuestionHandler for ConsoleQuestionHandler {
         if context.form.questions.is_empty() {
             return QuestionFormOutcome::InputUnavailable("question form is empty".into());
         }
-        let mut form = LineQuestionForm::new(context.form.clone(), context.initial_answers.to_vec());
+        let displayed = match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
+            Ok(form) => form,
+            Err(error) => return QuestionFormOutcome::InputUnavailable(error),
+        };
+        let mut form = LineQuestionForm::new(displayed, context.initial_answers.to_vec());
         loop {
             print!("{}", form.render(&self.sensitive_values));
             if io::stdout().flush().is_err() {
@@ -799,6 +803,32 @@ mod tests {
         assert!(!rendered.contains("private-key"));
         assert!(rendered.contains("Approve proposed answer"));
         assert!(!rendered.contains("First target"));
+    }
+
+
+    #[tokio::test]
+    async fn native_proposal_approval_returns_exact_publicly_displayed_value() {
+        let form = QuestionForm { header: None, questions: vec![form_question("Target", Some("proposal with private-secret"))] };
+        let sensitive = vec!["private-secret".to_string()];
+        let displayed = nib::interactive::public_question_form(&form, &sensitive).expect("public form");
+        let input = ConsoleInput::new(Cursor::new(b"1\n".to_vec()));
+        let outcome = ConsoleQuestionHandler::with_sensitive_values(input, sensitive)
+            .ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form: &form, initial_answers: &[] }).await;
+        let answer = displayed.questions[0].proposed_answer.clone().expect("displayed proposal");
+        assert!(!answer.contains("private-secret"));
+        assert_eq!(outcome, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer, source: QuestionAnswerSource::ApprovedProposal }]));
+    }
+
+    #[tokio::test]
+    async fn native_form_rejects_redacted_label_collisions_before_reading_input() {
+        let mut question = form_question("Target", None);
+        question.options[0].label = "private-first".into();
+        question.options[1].label = "private-second".into();
+        let form = QuestionForm { header: None, questions: vec![question] };
+        let input = ConsoleInput::new(Cursor::new(b"1\n".to_vec()));
+        let handler = ConsoleQuestionHandler::with_sensitive_values(input.clone(), vec!["private-first".into(), "private-second".into()]);
+        assert!(matches!(handler.ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form: &form, initial_answers: &[] }).await, QuestionFormOutcome::InputUnavailable(_)));
+        assert!(!input.broker_started(), "ambiguous displayed options were rejected before input consumption");
     }
 
 }

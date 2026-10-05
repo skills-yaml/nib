@@ -223,6 +223,10 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         if context.form.questions.is_empty() {
             return QuestionFormOutcome::InputUnavailable("question form is empty".into());
         }
+        let displayed = match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
+            Ok(form) => form,
+            Err(error) => return QuestionFormOutcome::InputUnavailable(error),
+        };
         if !self.modal_state.claim(PLAIN_MODAL_QUESTION) {
             return QuestionFormOutcome::InputUnavailable(
                 "another interactive prompt already owns plain input".to_string(),
@@ -230,7 +234,7 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         }
         let (reply, response) = tokio::sync::oneshot::channel();
         if self.tx.send(PlainQuestionPrompt {
-            form: crate::console::LineQuestionForm::new(context.form.clone(), context.initial_answers.to_vec()),
+            form: crate::console::LineQuestionForm::new(displayed, context.initial_answers.to_vec()),
             sensitive_values: self.sensitive_values.clone(), reply,
         }).is_err() {
             self.modal_state.clear();
