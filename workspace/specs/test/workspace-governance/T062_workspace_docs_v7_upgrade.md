@@ -234,7 +234,7 @@ exact CI-qualified merge revision above; their complete trees are identical.
 Frozen task verify passed with required native bwrap: all 1265 library tests,
 93 CLI tests, every integration suite and doctests. Serialized peer integration
 ac8083b768315de65f764dc80a5e3af5170b8471 also passed every registered native gate.
-Hosted CI37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
+Hosted CI 37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
 exact-source release-binary qualification, native interaction and managed-process
 smokes. Both qualified binaries identify this exact development revision.
 
@@ -245,16 +245,16 @@ and all independent findings are resolved. Historical done records are unchanged
 
 ## Qualification Gate Repair
 
-The development push CI37338656478 first attempt failed macOS interruption
+The development push CI 37338656478 first attempt failed macOS interruption
 smoke: Ctrl+C followed by feeder EOF was observed as Ctrl+D, and the child
 reported waiting_for_user_input/status 1 instead of cancellation/status 130.
 Independent review confirmed the offline feeder ownership race. Linked
-[T064](../../development/release-delivery/T064_interrupt_smoke_input_lifetime.md)
+[T064](../release-delivery/T064_interrupt_smoke_input_lifetime.md)
 adds bounded waits for child cancellation before closing stdin; all existing
 assertions remain. A superseded diagnostic rerun was canceled after retaining
 the original failure, without treating an intermittent pass as a repair.
 
-Main CI37339187764 passed Linux/macOS but Windows timed out at the existing
+Main CI 37339187764 passed Linux/macOS but Windows timed out at the existing
 15-second final-turn tool-start readiness bound (1165 library tests passed).
 This establishes a readiness timeout, not a confirmed runtime root cause.
 The unchanged fixture reruns on the repaired candidate; promotion remains
@@ -269,3 +269,13 @@ Production still reports 0.1.0 at 15123a3ef275458efc87200400219aeacc3e9ea9.
 The ledger records the released development event separately from main delivery.
 T061 membership is accepted-contract documentation only; runtime implementation
 and acceptance delivery remain pending and require a fresh atomic reservation.
+
+## Repaired Qualification Development Integration
+
+PR44 merged exact CI-qualified development revision
+`3cc4550b7d807f39a5fecf07196ee2b703503b24` on 2026-10-05T17:35:20Z.
+CI 37344993093 passed Linux/macOS full suites, exact binary qualification,
+84.26 percent coverage and repaired native interruption smokes. Frozen
+combined task verify passed at 9528c7ce80d68480914acea842b17a9521b38e30;
+all 1265 library and 93 CLI tests, integration suites and doctests passed with
+native bwrap required. Main qualification and completion remain pending.
