@@ -399,9 +399,20 @@ no acceptance checkbox is promoted by this documentation update.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | minor | nib-next | Adds the accepted question-form contract in the next pre-1.0 development release. |
+| nib | minor | nib-next | Records the accepted question-form contract documentation published in 0.2.0; excludes all pending runtime implementation and acceptance delivery. |
 
 ## Memory Impact
 
 Status: updated
 Rationale: Accepted contract for question-form interaction recorded in workspace/agents/memory/decisions.md and workspace/agents/memory/changelog.md; implementation delivery evidence remains separate.
+
+## Published Contract Version Boundary (2026-10-05)
+
+The development 0.2.0 publication at
+`8bc243d00ec3ec82e7287c704fcdd897ff78204a` includes this accepted-contract
+documentation only. This spec remains in development, implementation has not
+started, and every implementation acceptance criterion remains unchecked.
+The released nib-next membership is publication history and cannot authorize
+future question-form code. Before implementation begins, obtain a fresh atomic
+reservation from the latest published baseline and reconcile membership or
+create a linked implementation spec. No new target is chosen by T062 delivery.

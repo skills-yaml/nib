@@ -35,7 +35,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | --- | --- | --- | --- |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
-| [T061](development/interactive/T061_question_form.md) | interactive | development | Accepted question-form contract; implementation pending. |
+| [T061](development/interactive/T061_question_form.md) | interactive | development | Published accepted-contract documentation only; runtime implementation pending and requires a fresh atomic reservation before starting. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
 | [T062](test/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | test | Confirmed development integration at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; exact reviewed native/hosted gates passed; main promotion pending. |
 | [T063](test/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | test | Strict Git-status isolation integrated at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; independent review and native/hosted gates passed; main promotion pending. |

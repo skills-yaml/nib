@@ -80,7 +80,7 @@
       "target": "0.2.0",
       "impact": "minor",
       "timing": "merge",
-      "status": "applied",
+      "status": "released",
       "owner": "nib-release",
       "version_source": "Cargo.toml",
       "specs": [
@@ -88,7 +88,7 @@
         "workspace/specs/test/workspace-governance/T062_workspace_docs_v7_upgrade.md",
         "workspace/specs/test/tools-sandbox/T063_isolated_read_only_git_status.md"
       ],
-      "evidence": "The intentionally shared nib-next reservation is 0.2.0 from released baseline 0.1.0. Production and development nib-release.json manifests were checked on 2026-10-05 at 15123a3ef275458efc87200400219aeacc3e9ea9 and 79a80c0759a7667b58bb1822bb9d2631df624c4b; both report 0.1.0. The atomic peer reservation reused nib-next at minor impact. T062 delivery applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before shared integration artifacts. T061 remains an accepted contract awaiting implementation; no question-form implementation or publication is claimed by this record. T063 is a compatible security follow-up sharing the already-applied target; no second bump is applied. Shared development integration is confirmed at 8bc243d00ec3ec82e7287c704fcdd897ff78204a via PR42, using the exact independently reviewed and Linux/macOS CI-qualified merge commit. Main and publication are not inferred."
+      "evidence": "The intentionally shared nib-next reservation is 0.2.0 from released baseline 0.1.0. Production and development nib-release.json manifests were checked on 2026-10-05 at 15123a3ef275458efc87200400219aeacc3e9ea9 and 79a80c0759a7667b58bb1822bb9d2631df624c4b; both report 0.1.0. The atomic peer reservation reused nib-next at minor impact. T062 delivery applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before shared integration artifacts. T061 remains an accepted contract awaiting implementation; no question-form implementation or publication is claimed by this record. T063 is a compatible security follow-up sharing the already-applied target; no second bump is applied. Shared development integration is confirmed at 8bc243d00ec3ec82e7287c704fcdd897ff78204a via PR42, using the exact independently reviewed and Linux/macOS CI-qualified merge commit. Main and publication are not inferred. Development publication was independently inspected on 2026-10-05: Release Artifacts 37338656596 succeeded all four native archives and publication; the public development-latest nib-release.json binds version 0.2.0 to exact commit 8bc243d00ec3ec82e7287c704fcdd897ff78204a (published 2026-10-05T16:26:43Z). Production remains 0.1.0 at 15123a3ef275458efc87200400219aeacc3e9ea9. Released membership retains T061 accepted-contract documentation only: no question-form runtime implementation or acceptance delivery shipped. Before that implementation begins, obtain a fresh atomic reservation from the latest published baseline and reconcile its membership (or create a linked implementation spec); published 0.2.0 cannot be reused."
     }
   ]
 }
