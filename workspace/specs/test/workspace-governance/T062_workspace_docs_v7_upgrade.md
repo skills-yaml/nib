@@ -300,3 +300,15 @@ Release Artifacts 37349551414 also passed all builds/publication for repaired
 development revision 3cc4550b7d807f39a5fecf07196ee2b703503b24. The public
 manifest independently confirms version 0.2.0 at that commit, published
 2026-10-05T17:46:17Z. This updates development publication only.
+
+## Delegation Fixture Isolation Follow-up
+
+Superseded main CI 37354295208 Windows failed the owner boundary fixture and
+then a later deadline fixture received its unconsumed global injection (1164
+library cases passed, two failed). The first actual error was not reported, so
+its cause is unconfirmed. Linked
+[T066](../../development/build-quality/T066_scoped_delegation_failure_fixture.md)
+adds test-only scoped cleanup, observable guard tests, consumption/error
+diagnostics and the existing fixture setup guard, preserving production and
+deadline-specific budgets/assertions. New full native and hosted qualification
+are required; earlier green subsets do not establish final completion.
