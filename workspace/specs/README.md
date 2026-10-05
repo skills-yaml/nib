@@ -111,6 +111,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [FT-017](done/tools-sandbox/ft_017_managed_process_supervisor.md) | tools-sandbox | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T065](development/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | development | Active checkout-byte repair after Windows SHA-256 failure; full forced-CRLF governance and revised Windows qualification required. |
+| [T066](development/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | development | Active confirmed failure-injection cleanup repair; native Windows requalification and verified delivery required. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact
