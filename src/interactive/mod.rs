@@ -18,7 +18,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
+mod question_form;
 mod question_recovery;
+pub use question_form::*;
 mod split_00;
 mod split_01;
 mod split_02;

@@ -1422,38 +1422,50 @@ fn record_schedule_failure(
 }
 
 async fn ask_question(args: &Value, _cwd: &Path) -> Result<Value, String> {
-    let question = required_nonempty_string(args, "question")?;
-    let options = match args.get("options") {
-        None => Vec::new(),
-        Some(Value::Array(options)) if options.len() <= 20 => options
-            .iter()
-            .map(|option| {
-                option
-                    .as_str()
-                    .filter(|option| !option.trim().is_empty())
-                    .map(str::to_string)
-                    .ok_or_else(|| "ask_question options must be non-empty strings".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        Some(Value::Array(_)) => return Err("ask_question accepts at most 20 options".to_string()),
-        Some(_) => return Err("ask_question options must be an array".to_string()),
-    };
+    let mut public = args.clone();
+    if let Some(object) = public.as_object_mut() {
+        for key in ["answer", "answer_error", "_question_outcome"] {
+            object.remove(key);
+        }
+    }
+    let form = crate::interactive::parse_question_form(&public)?;
+    if let Some(outcome) = args.get("_question_outcome") {
+        let outcome =
+            serde_json::from_value::<crate::interactive::QuestionFormOutcome>(outcome.clone())
+                .map_err(|_| "invalid internal question outcome".to_string())?;
+        return form.observation(&outcome);
+    }
     if let Some(error) = args.get("answer_error").and_then(Value::as_str) {
         return Err(format!("question could not be answered: {error}"));
     }
     match args.get("answer") {
-        Some(Value::String(answer)) if !answer.trim().is_empty() => Ok(json!({
-            "status": "answered",
-            "question": question,
-            "options": options,
-            "answer": answer,
-        })),
-        Some(_) => Err("ask_question answer must be a non-empty string".to_string()),
-        None => Ok(json!({
-            "status": "pending_ui",
-            "question": question,
-            "options": options,
-        })),
+        Some(Value::String(answer)) if !answer.trim().is_empty() && form.questions.len() == 1 => {
+            let question = &form.questions[0];
+            let source = if question.proposed_answer.is_none()
+                && question
+                    .options
+                    .iter()
+                    .any(|option| option.label == *answer)
+            {
+                crate::interactive::QuestionAnswerSource::Option
+            } else {
+                crate::interactive::QuestionAnswerSource::Text
+            };
+            form.observation(&crate::interactive::QuestionFormOutcome::Answered(vec![
+                crate::interactive::QuestionAnswer {
+                    answer: answer.clone(),
+                    source,
+                },
+            ]))
+        }
+        Some(_) => {
+            Err("ask_question answer must be a non-empty string for one question".to_string())
+        }
+        None => {
+            let mut value = form.tool_arguments();
+            value["status"] = json!("pending_ui");
+            Ok(value)
+        }
     }
 }
 

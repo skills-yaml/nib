@@ -34,10 +34,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, mpsc::Sender, Notify};
 
+mod discussion;
 mod entry;
 mod finish;
 mod inner;
+mod question_forms;
 mod support;
+pub(crate) use discussion::*;
+pub(crate) use question_forms::*;
 mod verify;
 
 pub(crate) use entry::*;
@@ -49,8 +53,8 @@ pub(crate) use verify::*;
 pub use entry::{run_agent_loop, run_agent_loop_for_profile};
 pub use support::{
     exact_run_steering_channel, AgentLoopConfig, AgentRunSummary, CancellationSignal,
-    ExactRunSteeringHandle, ExactRunSteeringReceiver, QuestionHandler, QuestionOutcome,
-    QuestionRequestContext, MAX_STEERING_INPUT_BYTES,
+    ExactRunSteeringHandle, ExactRunSteeringReceiver, QuestionFormRequestContext, QuestionHandler,
+    QuestionOutcome, QuestionRequestContext, MAX_STEERING_INPUT_BYTES,
 };
 
 #[cfg(test)]
