@@ -57,7 +57,18 @@ pub(crate) async fn run_agent_loop_inner(
         );
     }
     if let Some(plan_id) = cfg.continuation_plan_id.as_deref() {
-        prepare_continue_turn(&store, session_id, plan_id, &normalized_goal, &run_id)?;
+        if let Some(invocation_id) = cfg.discussion_invocation_id {
+            prepare_discussion_turn(
+                &store,
+                session_id,
+                plan_id,
+                &normalized_goal,
+                &run_id,
+                invocation_id,
+            )?;
+        } else {
+            prepare_continue_turn(&store, session_id, plan_id, &normalized_goal, &run_id)?;
+        }
     }
     let answer_only_candidate = nib_cfg.agent.answer_only
         && cfg.interactive_request

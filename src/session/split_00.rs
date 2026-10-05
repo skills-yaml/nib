@@ -1357,20 +1357,38 @@ pub struct HumanIntentRecord {
     pub source_event_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClarificationStatus {
+    #[default]
     Pending,
     Answered,
     Unresolved,
     Cancelled,
+    Discussed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ClarificationRecord {
     pub invocation_id: crate::tools::ToolInvocationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub question_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_details: Vec<crate::interactive::QuestionOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_source: Option<crate::interactive::QuestionAnswerSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_invocation_id: Option<crate::tools::ToolInvocationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_question_index: Option<usize>,
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_answer: Option<String>,

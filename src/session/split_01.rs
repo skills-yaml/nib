@@ -700,7 +700,10 @@ impl Session {
             if let Some(index) = intent.source_event_index {
                 if !matches!(
                     self.events[index].kind.as_str(),
-                    "steering_input" | "human_question_answer_received" | "plan_continue_requested"
+                    "steering_input"
+                        | "human_question_answer_received"
+                        | "human_question_discussion_received"
+                        | "plan_continue_requested"
                 ) {
                     return Err(SessionError::InvalidMutation(
                         "human intent event source is not a trusted human-input boundary"
@@ -709,6 +712,7 @@ impl Session {
                 }
             }
         }
+        super::question_forms::validate_form_records(self)?;
         for clarification in &self.clarifications {
             let answer_source_is_human = clarification
                 .answer_message_index
@@ -758,6 +762,7 @@ impl Session {
                 ClarificationStatus::Pending
                     | ClarificationStatus::Unresolved
                     | ClarificationStatus::Cancelled
+                    | ClarificationStatus::Discussed
             ) && clarification.plan_id.as_deref() == plan_id
         })
     }
