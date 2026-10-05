@@ -95,3 +95,8 @@ bytes, while AGENTS.md is explicitly text. The fixture excludes ambient Git
 repository, object, config and attribute overrides and disables system/global
 configuration and system attributes. The upstream -text override and raw hash
 validator remain unchanged.
+
+Updated candidate d5da608 passed task test:workspace (eight cases), task
+docs:check (all native modules and five documentation cases) and
+task test:task-contract (two cases). Static check passed during iteration;
+frozen full native and hosted Windows acceptance remain required.

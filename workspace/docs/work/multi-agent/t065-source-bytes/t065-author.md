@@ -27,7 +27,12 @@ Created an isolated worktree through an atomic peer claim. Recorded scope, accep
 
 ## Validation
 
-task test:workspace passed all eight cases on 2a7cfe7, including positive full governance and both negative checkout/integrity controls. Full native gates and hosted qualification remain required.
+task test:workspace passed all eight cases on d5da608, including positive full
+governance, ordinary CRLF conversion, raw-byte tamper rejection and fresh
+unprotected checkout rejection. task docs:check passed all five checks and
+native governance; task test:task-contract passed both contracts. task check
+passed during iteration; frozen native check/test and hosted Windows
+qualification remain required. git diff --check passed.
 
 ## Blockers and Dependencies
 
@@ -39,4 +44,4 @@ Complete affected gates, exact-candidate review and transactional integration; r
 
 ## Handoff
 
-Pending.
+Committed bounded T065 checkout/CI/fixture and reconciled durable memory; requesting independent exact-candidate review before serialized native integration. No imported instruction bytes or native product behavior changed.
