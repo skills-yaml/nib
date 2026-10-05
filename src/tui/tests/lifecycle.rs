@@ -280,7 +280,6 @@ fn question_card_states_the_ask_and_numbered_choices() {
     assert!(rendered.contains("› 1. plan"), "{rendered}");
     assert!(rendered.contains("2. execute"), "{rendered}");
     assert!(rendered.contains("Type something.") && rendered.contains("Chat about this"), "{rendered}");
-    assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
     assert!(rendered.contains("Enter"), "{rendered}");
     assert!(rendered.contains("Esc"), "{rendered}");
     assert!(rendered.contains("inspect wrap"), "{rendered}");

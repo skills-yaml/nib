@@ -622,10 +622,10 @@ pub(crate) fn footer_line(
     band_hint: Option<&str>,
     selecting: bool,
 ) -> String {
+    if waiting == WaitingKind::Question { return band_hint.unwrap_or_else(|| waiting_keys(waiting)).to_string(); }
     let mut hint = format!("approval {} · {}", chrome.approval, chrome.agent_mode);
     if waiting != WaitingKind::None {
-        let keys = if waiting == WaitingKind::Question { band_hint.unwrap_or_else(|| waiting_keys(waiting)) } else { waiting_keys(waiting) };
-        hint = format!("{hint} · {keys}");
+        hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {
         hint = format!("{hint} · Ctrl+Y copy · Esc clear");
     } else if let Some(band) = band_hint {

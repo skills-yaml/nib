@@ -467,7 +467,7 @@ pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyC
         KeyCode::Down => Input::NextRow,
         KeyCode::Enter => Input::Choose,
         KeyCode::Backspace => Input::Backspace,
-        KeyCode::Char(digit @ '1'..='9') if question.state.editor.is_none() => Input::SelectRow(usize::from(digit as u8 - b'1')),
+        KeyCode::Char(digit @ '0'..='9') if question.state.editor.is_none() => Input::SelectRow(digit.to_digit(10).and_then(|digit| digit.checked_sub(1)).map_or(usize::MAX, |digit| digit as usize)),
         KeyCode::Char(character) => Input::Type(character),
         _ => return None,
     };
@@ -475,6 +475,7 @@ pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyC
 }
 
 pub(crate) fn paste_question_answer(question: &mut PendingQuestion, pasted: &str) {
+    if question.state.editor.is_none() && question.state.current_question().is_some() { question.state.open_editor(crate::interactive::QuestionEditorKind::Answer); }
     let Some(draft) = question.state.editor.as_mut() else { return; };
     let input = std::mem::take(&mut draft.text);
     let mut editor = Composer { cursor: input.len(), input, ..Composer::default() };

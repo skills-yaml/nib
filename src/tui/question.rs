@@ -102,12 +102,16 @@ pub(crate) fn question_composer_rows(question: &PendingQuestion, width: u16) -> 
         text.push_str(&current.question);
         if let Some(proposal) = &current.proposed_answer { text.push_str(&format!("\nProposed answer: {proposal}")); }
     } else { text.push_str("Submit all question answers"); }
+    let mut rows = wrapped_display_rows(&format!("> {text}"), width.max(1));
+    let fixed_limit = if state.editor.is_some() { 3 } else { 5 };
+    if rows.len() > fixed_limit { rows.truncate(fixed_limit); rows.last_mut().unwrap().push('…'); }
     if let Some(editor) = &state.editor {
         let name = if editor.kind == crate::interactive::QuestionEditorKind::Discussion { "Chat about this" } else { "Your answer" };
-        text.push_str(&format!("\n{name}: {}", editor.text));
+        let editor_rows = wrapped_display_rows(&format!("{name}: {}", editor.text), width.max(1));
+        rows.extend(editor_rows.into_iter().rev().take(2).collect::<Vec<_>>().into_iter().rev());
     }
-    if let Some(error) = &state.error { text.push_str(&format!("\nInput error: {error}")); }
-    (wrapped_display_rows(&format!("> {text}"), width.max(1)), state.editor.is_some())
+    if let Some(error) = &state.error { rows.push(truncate_display_cells(&format!("Input error: {error}"), usize::from(width))); }
+    (rows, state.editor.is_some())
 }
 
 #[allow(clippy::too_many_arguments)]

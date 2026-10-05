@@ -300,4 +300,20 @@ mod tests {
         assert_eq!(state.drafts[0].as_ref().unwrap().answer, "Second");
         assert_eq!(state.tab, 1);
     }
+    #[test]
+    fn unsaved_editor_text_survives_tab_navigation_and_y_never_approves() {
+        let mut state = state(2);
+        state.form.questions[0].proposed_answer = Some("Proposal".to_string());
+        state.apply(QuestionFormEvent::Type('Y'));
+        assert_eq!(state.editor.as_ref().unwrap().text, "Y");
+        assert!(state.drafts[0].is_none());
+        state.apply(QuestionFormEvent::NextTab);
+        assert!(state.editor.is_none());
+        state.apply(QuestionFormEvent::PreviousTab);
+        assert_eq!(state.editor.as_ref().unwrap().text, "Y");
+        assert!(state.apply(QuestionFormEvent::Choose).is_none());
+        assert_eq!(state.drafts[0].as_ref().unwrap().answer, "Y");
+        assert_eq!(state.drafts[0].as_ref().unwrap().source, QuestionAnswerSource::Text);
+    }
+
 }
