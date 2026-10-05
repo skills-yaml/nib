@@ -3,11 +3,11 @@ schema_version: 1
 coordination_id: t065-shallow-fixture
 agent_id: t065-shallow
 role: implementer
-status: active
+status: complete
 base_revision: af591da8fa7904cf882f619b6463f8f52d106e71
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T18:31:01Z
+updated_at: 2026-10-05T18:39:55Z
 scope:
   - tests
   - workspace
@@ -38,3 +38,5 @@ Create deterministic shallow-source coverage, repair explicit fetch handling and
 ## Handoff
 
 Memory impact: none for this bounded fixture correction; it restores the existing T065 checkout-byte validation contract without a new durable product decision. The overall T065 Memory Impact remains updated through its documented checkout policy. Request exact-candidate review and serialized native integration.
+
+Peer integration contains reviewed source revision `a765745dd0fb39eecc598858fdd1385fe392a955`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.

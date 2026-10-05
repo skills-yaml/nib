@@ -1,9 +1,9 @@
 ---
 schema_version: 1
 coordination_id: t065-shallow-fixture
-status: active
+status: complete
 base_revision: af591da8fa7904cf882f619b6463f8f52d106e71
-updated_at: 2026-10-05T18:31:01Z
+updated_at: 2026-10-05T18:39:55Z
 ---
 
 # Peer Task
@@ -19,3 +19,5 @@ t065-source-bytes.
 ## Integration
 
 Independent peer review and transactional integration are required.
+
+Peer integration contains reviewed source revision `a765745dd0fb39eecc598858fdd1385fe392a955`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.
