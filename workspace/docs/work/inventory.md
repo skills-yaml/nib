@@ -31,7 +31,7 @@ Metadata:
 ## Current V7 Inventory
 
 The current catalog contains 75 done specs (including 70 preserved historical
-records), two development specs (T023 and T061), and two backlog proposals.
+records), three development specs (T023, T061 and linked T067), and two backlog proposals.
 T062 and linked T063/T064/T065/T066 are complete after verified main delivery. The complete standard,
 DESIGN.md, blocked/test directories, feature catalog and native gates are adopted.
 Older inventory counts below are historical snapshots, superseded by this section.
@@ -44,10 +44,10 @@ Older inventory counts below are historical snapshots, superseded by this sectio
   selected/full qualification has not passed. The 2026-10-01 decision retains the
   current Anthropic default and fixes continuation. Further paid runs require
   protected approvals, budgets and reviewed evidence.
-- T061 remains in `development/` with an accepted question-form contract; runtime
-  implementation has not started. Its released 0.2.0 membership records contract
-  documentation only. Implementation needs a fresh atomic version reservation
-  from the latest published baseline and reconciled membership or a linked spec.
+- T061 remains in `development/` with its approved question-form contract.
+  Runtime implementation is active through linked T067 at the fresh atomic
+  nib-question-form0.3.0 reservation from published0.2.0. T061 retains released
+  accepted-contract-only0.2.0 membership; T067 owns all new runtime scope.
 - FT-020 is in `done/`. Protected Windows Job owner/DACL and macOS reaper preflight
   shipped; `production()` stays fail-closed on Windows and macOS. Current v1
   production delegation remains Linux+bwrap only until a later native qualification
@@ -128,7 +128,7 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 75 specs are in `done/`, T023/T061 are in `development/`, and
+- Lifecycle: 75 specs are in `done/`, T023/T061/T067 are in `development/`, and
   FT-021/FT-022 remain in `backlog/`. `workspace/specs/README.md` is the authoritative per-spec
   index.
 - Project documentation: fixed local standards/library roots are loaded read-only with
