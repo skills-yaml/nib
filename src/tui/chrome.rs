@@ -151,35 +151,7 @@ pub(crate) fn waiting_composer_rows(
             }
             Some((overlay_visual_rows(&prompt.statement, &extra, width), false))
         }
-        WaitingKind::Question => {
-            let question = pending_question?;
-            if let Some(proposal) = question.request.proposed_answer.as_deref() {
-                let mut extra = vec![format!("Proposed answer: {proposal}")];
-                if question.focus == QuestionFocus::Editor {
-                    extra.push(format!("Your answer: {}", question.response));
-                }
-                if let Some(error) = question.error.as_deref() {
-                    extra.push(format!("Input error: {error}"));
-                }
-                return Some((
-                    overlay_visual_rows(&question.request.question, &extra, width),
-                    false,
-                ));
-            }
-            if question.request.options.is_empty() {
-                let first = if question.response.is_empty() {
-                    question.request.question.as_str()
-                } else {
-                    question.response.as_str()
-                };
-                Some((overlay_visual_rows(first, &[], width), true))
-            } else {
-                Some((
-                    overlay_visual_rows(&question.request.question, &[], width),
-                    false,
-                ))
-            }
-        }
+        WaitingKind::Question => Some(question_composer_rows(pending_question?, width)),
         WaitingKind::Workspace => {
             let directory = consent_directory?;
             Some((
@@ -568,7 +540,7 @@ pub(crate) fn waiting_keys(waiting: WaitingKind) -> &'static str {
     match waiting {
         WaitingKind::Approval => "Enter deny · select Approve once then Enter · Esc deny",
         WaitingKind::Workspace => "Enter decline · select Allow then Enter · Esc decline",
-        WaitingKind::Question => "Type answer · Enter submit · Esc leave unanswered",
+        WaitingKind::Question => "Up/Down select · Enter choose · Esc interrupt operation",
         WaitingKind::None => "",
     }
 }
@@ -652,7 +624,8 @@ pub(crate) fn footer_line(
 ) -> String {
     let mut hint = format!("approval {} · {}", chrome.approval, chrome.agent_mode);
     if waiting != WaitingKind::None {
-        hint = format!("{hint} · {}", waiting_keys(waiting));
+        let keys = if waiting == WaitingKind::Question { band_hint.unwrap_or_else(|| waiting_keys(waiting)) } else { waiting_keys(waiting) };
+        hint = format!("{hint} · {keys}");
     } else if selecting {
         hint = format!("{hint} · Ctrl+Y copy · Esc clear");
     } else if let Some(band) = band_hint {

@@ -22,6 +22,7 @@ pub(crate) fn draw_loop(
     };
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
+    let (recovery_tx, recovery_rx) = mpsc::channel::<crate::interactive::QuestionRecoveryEffect>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
     let (mut timeline, initial_session) =
         ActiveTimeline::load_with_session(&store, &active_session_id)?;
@@ -75,6 +76,11 @@ pub(crate) fn draw_loop(
     let mut exit_requested_with_active_run = false;
 
     let loop_result = loop {
+        while let Ok(effect) = recovery_rx.try_recv() {
+            apply_question_recovery_effect(effect, &agent_profile_scope, &store, &active_session_id,
+                &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx)?;
+        }
+
         drain_stream_events_bounded(&mut stream_rx, &mut timeline, 64);
         let worker_finished = worker.as_ref().is_some_and(TuiAgentWorker::is_finished);
         if let Err(error) = reap_finished_worker(
@@ -523,8 +529,8 @@ pub(crate) fn draw_loop(
                     completion.sync_for(&composer.input, Some(project_root));
                     quit_arm = None;
                     if let Some(question) = pending_question.as_mut() {
-                        question.response.clear();
-                        question.error = None;
+                        if let Some(editor) = question.state.editor.as_mut() { editor.text.clear(); }
+                        question.state.error = None;
                     }
                     timeline.push_status("Draft cleared.".to_string());
                     continue;
@@ -1114,29 +1120,16 @@ pub(crate) fn draw_loop(
                                             worker.as_ref().map(|worker| worker.run_id.clone()),
                                         );
                                     }
-                                    Ok(InteractiveEffect::OpenQuestion {
-                                        invocation_id,
-                                        question,
-                                        proposed_answer,
-                                        options,
-                                    }) => {
+                                    Ok(InteractiveEffect::OpenQuestion { invocation_id, question, proposed_answer, options }) => {
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         drop(reply_rx);
                                         pending_question = Some(PendingQuestion::recovered(
-                                            TuiQuestionRequest {
-                                                question,
-                                                proposed_answer,
-                                                options,
-                                                reply: reply_tx,
-                                            },
+                                            TuiQuestionRequest::single(question, proposed_answer, options, reply_tx),
                                             RecoveredQuestionTarget {
-                                                store: store.clone(),
-                                                session_id: active_session_id.clone(),
-                                                invocation_id: invocation_id.clone(),
+                                                store: store.clone(), session_id: active_session_id.clone(),
+                                                invocation_id: serde_json::from_value(serde_json::Value::String(invocation_id)).map_err(io::Error::other)?,
+                                                completion: recovery_tx.clone(),
                                             },
-                                        ));
-                                        timeline.push_status(format!(
-                                            "Answer recovered question {invocation_id}"
                                         ));
                                     }
                                     Ok(InteractiveEffect::RunAgent { goal, mode }) => {
@@ -1170,6 +1163,16 @@ pub(crate) fn draw_loop(
                                 }
                             }
                             InteractionReduction::IdleTurn(goal) => {
+                                match crate::interactive::recover_question_conversation(&store, &active_session_id, &goal) {
+                                    Ok(Some(effect)) => {
+                                        apply_question_recovery_effect(effect, &agent_profile_scope, &store, &active_session_id,
+                                            &mut pending_question, &mut worker, &mut timeline, &approval_tx, &question_tx, &stream_tx, &recovery_tx)?;
+                                        continue;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => { timeline.push_status(format!("[recovery error] {error}")); continue; }
+                                }
+
                                 assign_session_title_from_goal(
                                     &store,
                                     &active_session_id,
