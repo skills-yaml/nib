@@ -124,24 +124,11 @@ impl QuestionFormState {
 
     fn choose(&mut self) -> Option<QuestionFormOutcome> {
         self.error = None;
-        if self.is_submit() {
-            if !self.complete() {
-                self.focus_tab(self.drafts.iter().position(Option::is_none).unwrap_or(0));
-                self.error = Some("Answer every question before Submit.".to_string());
-                return None;
-            }
-            return Some(QuestionFormOutcome::Answered(
-                self.drafts.iter().filter_map(Clone::clone).collect(),
-            ));
-        }
+        if self.is_submit() { return self.submit_form(); }
         let question = self.current_question()?;
         if let Some(proposal) = &question.proposed_answer {
-            return match self.selected_row {
-                0 => self.answer(QuestionAnswer { answer: proposal.clone(), source: QuestionAnswerSource::ApprovedProposal }),
-                1 => { self.discard_drafts(); Some(QuestionFormOutcome::LeftUnanswered) }
-                2 => { self.open_editor(QuestionEditorKind::Answer); None }
-                _ => { self.open_editor(QuestionEditorKind::Discussion); None }
-            };
+            let proposal = proposal.clone();
+            return self.choose_proposal(proposal);
         }
         let count = question.options.len();
         if self.selected_row < count {
@@ -152,6 +139,24 @@ impl QuestionFormState {
         }
         self.open_editor(if self.selected_row == count { QuestionEditorKind::Answer } else { QuestionEditorKind::Discussion });
         None
+    }
+
+    fn submit_form(&mut self) -> Option<QuestionFormOutcome> {
+        if !self.complete() {
+            self.focus_tab(self.drafts.iter().position(Option::is_none).unwrap_or(0));
+            self.error = Some("Answer every question before Submit.".to_string());
+            return None;
+        }
+        Some(QuestionFormOutcome::Answered(self.drafts.iter().filter_map(Clone::clone).collect()))
+    }
+
+    fn choose_proposal(&mut self, proposal: String) -> Option<QuestionFormOutcome> {
+        match self.selected_row {
+            0 => self.answer(QuestionAnswer { answer: proposal, source: QuestionAnswerSource::ApprovedProposal }),
+            1 => { self.discard_drafts(); Some(QuestionFormOutcome::LeftUnanswered) }
+            2 => { self.open_editor(QuestionEditorKind::Answer); None }
+            _ => { self.open_editor(QuestionEditorKind::Discussion); None }
+        }
     }
 
     pub fn open_editor(&mut self, kind: QuestionEditorKind) {
