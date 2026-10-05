@@ -17,7 +17,7 @@ pub mod memory;
 pub(crate) mod question_forms;
 pub(crate) use question_forms::{
     append_question_event, apply_form_outcome, normalized_record_options, public_form_outcome,
-    record_answer, recovery_eligible,
+    record_answer, recovery_eligible_for_discussion,
 };
 pub use question_forms::{
     pending_question_forms, persist_recovered_form_answer, persist_recovered_form_answers,

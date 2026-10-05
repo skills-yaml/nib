@@ -15,7 +15,6 @@ fn discussion_evidence(
         .ok_or_else(|| {
             "discussion continuation has no exact unanswered discussed call".to_string()
         })?;
-    crate::session::recovery_eligible(session, record).map_err(|error| error.to_string())?;
     let event = session
         .events
         .iter()
@@ -26,19 +25,8 @@ fn discussion_evidence(
                 && event.details["recovered"] == true
         })
         .ok_or_else(|| "discussion continuation has no recovered human message".to_string())?;
-    if event.details["plan_id"].as_str() != record.plan_id.as_deref()
-        || event.details["run_id"].as_str() != record.run_id.as_deref()
-        || !session.human_intent.iter().any(|intent| {
-            intent.kind == HumanIntentKind::Steering
-                && intent.source_event_index == Some(event.index)
-                && event.details["message"].as_str() == Some(intent.text.as_str())
-        })
-    {
-        return Err(
-            "discussion continuation evidence is not trusted or bound to this operation"
-                .to_string(),
-        );
-    }
+    crate::session::recovery_eligible_for_discussion(session, record, current_run_id, event.index)
+        .map_err(|error| error.to_string())?;
     if session.events.iter().any(|candidate| {
         candidate.kind == "question_discussion_continuation_started"
             && candidate.details["source_event_index"] == json!(event.index)
@@ -97,7 +85,19 @@ pub(crate) fn prepare_discussion_turn(
     store.update_session(session_id,|session| {
         if let Some(error)=discussion_admission_error(session,plan_id,goal,run_id,invocation_id) {return Err(crate::session::SessionError::InvalidMutation(error));}
         let source=discussion_evidence(session,invocation_id,run_id).map_err(crate::session::SessionError::InvalidMutation)?;
-        append_session_event(session,"question_discussion_continuation_started",json!({"source_event_index":source,"invocation_id":invocation_id,"plan_id":plan_id,"run_id":run_id}));
+        let legacy_run_binding = session.clarifications.iter().any(|record| {
+            record.invocation_id == invocation_id
+                && record.run_id.is_none()
+                && crate::session::question_forms::record_run_id(session, record).is_none()
+        });
+        if legacy_run_binding {
+            for record in session.clarifications.iter_mut().filter(|record| {
+                record.invocation_id == invocation_id && record.run_id.is_none()
+            }) {
+                record.run_id = Some(run_id.to_string());
+            }
+        }
+        append_session_event(session,"question_discussion_continuation_started",json!({"source_event_index":source,"invocation_id":invocation_id,"plan_id":plan_id,"run_id":run_id,"legacy_run_binding":legacy_run_binding}));
         let message_index=session.messages.len();
         session.messages.push(SessionMessage {index:message_index,role:"user".to_string(),content:"Continue discussing the pending questions for this exact plan. Answers remain required before dependent work or completion.".to_string(),timestamp:Some(Utc::now()),attachments:Vec::new()});
         session.message_provenance.push(MessageProvenance {message_index,origin:MessageOrigin::RuntimeContinuation});

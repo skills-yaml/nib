@@ -7,7 +7,7 @@ status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T22:46:00Z
+updated_at: 2026-10-05T23:16:00Z
 scope:
   - src/agent
   - src/chat/test_part_0.rs
@@ -39,6 +39,14 @@ successful discussion, disjoint inspection, dependent-tool rejection and
 premature completion rejection. Hardened public executor rejection of both
 legacy and native forged human outcome fields. Recovery checks every indexed
 sibling under the run lease and preserves explicit revision chains across reload.
+Late independent review found that unidentified legacy records could be recovered
+despite later run metadata. Tightened public recovery to truly run-free legacy
+sessions. The private discussion exception requires exact recovered human
+provenance and the single freshly admitted current run. Preparation audits the
+binding of an unbound legacy obligation to that run, preserving old events;
+repeated checks require that exact audit, and identified bindings stay unchanged.
+Added direct-helper atomic rejection, legacy compatibility, inferred terminal,
+audited admission and actual agent-entry/reload/recovery regressions.
 
 ## Validation
 
@@ -58,6 +66,22 @@ structure/catalog/memory/version/coordination validation, formatting and
 Clippy across all targets and features. Record-only reconciliation is validated
 with task workspace:check before publication.
 
+That candidate was subsequently rejected for the late legacy admission finding.
+Its combined native integration gate was interrupted before the internal
+integration advanced. The staging source and logs were preserved in the runtime
+archive; no successful combined gate or delivery is claimed.
+The corrected task test:agent-context passed all 195 tests: 91 context,
+102 agent and 2 metadata. Its first attempt exposed a fixture-only optimistic
+snapshot error from copying a persisted revision into an empty store. The fixture
+now retains the original project lifetime and reopens its actual durable store;
+the corrected actual-entry/reload/recovery regression passes. Corrected-source
+task check passed installer syntax, workspace, catalog, memory, version and
+coordination validation, formatting and Clippy across all targets and features.
+Corrected-source task test:interactive passed all 249 tests: 16 steering,
+74 shared interaction, 115 TUI, 6 console, 27 plain, 10 CLI and 1 installer
+smoke-contract fixture. Record-only reconciliation is validated with
+task workspace:check before renewed publication.
+
 Self-review maps schema, display bounds and legacy adapters to AC-1 and AC-2;
 discussion, interruption, dependency and completion behavior to AC-3;
 displayed-proposal approval and source validation to AC-4; exact reuse, indexed
@@ -75,7 +99,9 @@ Independent exact review, then serialized integration with full native gates.
 
 ## Handoff
 
-Core source and focused validation are ready for independent exact review.
+The previous handoff is superseded by the legacy admission correction. Fresh
+affected author gates passed; the corrected candidate requires renewed
+independent exact review and combined native integration validation.
 The shared form/parser exports, native handler request and lease-fenced session
 recovery APIs are available for the frontend and recovery lanes. Legacy trait
 outcomes remain unchanged, and default callbacks reject grouped forms requiring

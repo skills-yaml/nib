@@ -20,6 +20,13 @@ fn option(value: &str) -> QuestionAnswer {
         source: QuestionAnswerSource::Option,
     }
 }
+fn form_event<'a>(session: &'a Session, kind: &str) -> &'a SessionEvent {
+    session
+        .events
+        .iter()
+        .find(|event| event.kind == kind)
+        .unwrap()
+}
 fn form_store() -> (tempfile::TempDir, SessionStore, String, String) {
     let dir = tempdir().expect("form store");
     let store = SessionStore::at_dir(dir.path().join("sessions"));
@@ -30,6 +37,29 @@ fn form_store() -> (tempfile::TempDir, SessionStore, String, String) {
     session.plan = Some(plan);
     store.save(&mut session).expect("plan");
     (dir, store, session.id, plan_id)
+}
+fn legacy_question(store: &SessionStore, id: &str, plan: &str) -> ToolInvocationId {
+    let invocation = ToolInvocationId::new();
+    store
+        .update_session(id, |session| {
+            let question_event_index = crate::session::append_question_event(
+                session,
+                "question_required",
+                json!({"invocation_id":invocation,"question":"where?","options":["src"]}),
+            );
+            session.clarifications.push(ClarificationRecord {
+                invocation_id: invocation,
+                plan_id: Some(plan.to_string()),
+                question: "where?".to_string(),
+                options: vec!["src".to_string()],
+                status: ClarificationStatus::Unresolved,
+                question_event_index,
+                ..Default::default()
+            });
+            Ok(())
+        })
+        .unwrap();
+    invocation
 }
 fn register(
     store: &SessionStore,
@@ -485,6 +515,215 @@ fn guarded_discussion_continuation_requires_fresh_single_use_human_evidence() {
             .is_err()
     );
 }
+
+#[test]
+fn unidentified_legacy_recovery_rejects_later_runs_without_mutating_provenance() {
+    for terminal in [
+        None,
+        Some("waiting_for_user_input"),
+        Some("completed"),
+        Some("cancelled_by_user"),
+    ] {
+        let (_dir, store, id, plan) = form_store();
+        let invocation = legacy_question(&store, &id, &plan);
+        store
+            .record_event(&id, "run_started", json!({"run_id":"later-run"}))
+            .unwrap();
+        if let Some(outcome) = terminal {
+            runtime_terminal_event(&store, &id, "later-run", outcome).unwrap();
+        }
+        let original = serde_json::to_value(store.load(&id).unwrap()).unwrap();
+        for outcome in [
+            QuestionFormOutcome::Answered(vec![text("src")]),
+            QuestionFormOutcome::Discussed("explain".to_string()),
+        ] {
+            assert!(
+                crate::session::persist_recovered_form_outcome(&store, &id, invocation, &outcome)
+                    .is_err(),
+                "{terminal:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(store.load(&id).unwrap()).unwrap(),
+                original
+            );
+        }
+        assert!(crate::session::persist_recovered_form_answers(
+            &store,
+            &id,
+            invocation,
+            &[text("src")]
+        )
+        .is_err());
+        assert!(crate::session::persist_recovered_form_answer(
+            &store,
+            &id,
+            invocation,
+            0,
+            &text("src")
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(store.load(&id).unwrap()).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
+fn run_free_legacy_answers_and_discussion_retain_public_recovery_compatibility() {
+    for outcome in [
+        QuestionFormOutcome::Answered(vec![text("src")]),
+        QuestionFormOutcome::Discussed("explain".to_string()),
+    ] {
+        let (_dir, store, id, plan) = form_store();
+        let invocation = legacy_question(&store, &id, &plan);
+        assert_eq!(
+            crate::session::persist_recovered_form_outcome(&store, &id, invocation, &outcome)
+                .unwrap(),
+            plan
+        );
+        let session = store.load(&id).unwrap();
+        session.validate_message_sequence().unwrap();
+        assert_eq!(
+            session.clarifications[0].status,
+            if matches!(outcome, QuestionFormOutcome::Answered(_)) {
+                ClarificationStatus::Answered
+            } else {
+                ClarificationStatus::Discussed
+            }
+        );
+        assert!(session.events.last().unwrap().details["recovered"] == true);
+    }
+    let (_dir, store, id, plan) = form_store();
+    let invocation = legacy_question(&store, &id, &plan);
+    assert_eq!(
+        crate::session::persist_recovered_form_answer(&store, &id, invocation, 0, &text("src"))
+            .unwrap(),
+        plan
+    );
+    assert_eq!(
+        store.load(&id).unwrap().clarifications[0].answer.as_deref(),
+        Some("src")
+    );
+}
+
+#[test]
+fn legacy_recovery_infers_only_an_earlier_exact_waiting_run() {
+    for outcome in [
+        "waiting_for_user_input",
+        "unresolved_clarification",
+        "cancelled_by_user",
+        "completed",
+    ] {
+        let (_dir, store, id, plan) = form_store();
+        store
+            .record_event(&id, "run_started", json!({"run_id":"origin-run"}))
+            .unwrap();
+        let invocation = legacy_question(&store, &id, &plan);
+        runtime_terminal_event(&store, &id, "origin-run", outcome).unwrap();
+        let result =
+            crate::session::persist_recovered_form_answers(&store, &id, invocation, &[text("src")]);
+        assert_eq!(
+            result.is_ok(),
+            matches!(
+                outcome,
+                "waiting_for_user_input" | "unresolved_clarification"
+            ),
+            "{outcome}"
+        );
+    }
+}
+
+#[test]
+fn legacy_discussion_exception_requires_exact_fresh_run_and_audited_binding() {
+    let (_dir, store, id, plan) = form_store();
+    let invocation = legacy_question(&store, &id, &plan);
+    crate::session::persist_recovered_form_outcome(
+        &store,
+        &id,
+        invocation,
+        &QuestionFormOutcome::Discussed("explain".to_string()),
+    )
+    .unwrap();
+    let legacy = store.load(&id).unwrap();
+    let source = legacy.events.last().unwrap().index;
+    assert!(validate_discussion_admission(
+        &store,
+        &id,
+        &plan,
+        "finish work",
+        "current-run",
+        invocation
+    )
+    .is_err());
+    store
+        .record_event(&id, "run_started", json!({"run_id":"current-run"}))
+        .unwrap();
+    validate_discussion_admission(&store, &id, &plan, "finish work", "current-run", invocation)
+        .unwrap();
+    prepare_discussion_turn(&store, &id, &plan, "finish work", "current-run", invocation).unwrap();
+    validate_discussion_admission(&store, &id, &plan, "finish work", "current-run", invocation)
+        .unwrap();
+    let bound = store.load(&id).unwrap();
+    assert_eq!(
+        bound.clarifications[0].run_id.as_deref(),
+        Some("current-run")
+    );
+    assert_eq!(
+        &bound.events[..legacy.events.len()],
+        legacy.events.as_slice(),
+        "old question/human events are immutable"
+    );
+    assert!(bound.events.iter().any(|event| event.kind
+        == "question_discussion_continuation_started"
+        && event.details["legacy_run_binding"] == true
+        && event.details["source_event_index"] == source));
+    assert!(bound.has_unresolved_clarification(Some(&plan)));
+    assert!(crate::session::persist_recovered_form_answer(
+        &store,
+        &id,
+        invocation,
+        0,
+        &text("src")
+    )
+    .is_err());
+    let rejected = |session: &Session, run: &str| {
+        discussion_admission_error(session, &plan, "finish work", run, invocation).is_some()
+    };
+    assert!(rejected(&bound, "other-run"));
+    assert!(rejected(&bound, ""));
+    let mut unaudited = bound.clone();
+    for event in &mut unaudited.events {
+        if event.kind == "question_discussion_continuation_started" {
+            event.details["legacy_run_binding"] = json!(false);
+        }
+    }
+    assert!(rejected(&unaudited, "current-run"));
+    let mut unrelated = bound.clone();
+    append_session_event(
+        &mut unrelated,
+        "run_started",
+        json!({"run_id":"unrelated-run"}),
+    );
+    append_session_event(
+        &mut unrelated,
+        "run_terminal",
+        json!({"run_id":"unrelated-run","outcome":"completed"}),
+    );
+    assert!(rejected(&unrelated, "current-run"));
+    runtime_terminal_event(&store, &id, "current-run", "waiting_for_user_input").unwrap();
+    assert!(validate_discussion_admission(
+        &store,
+        &id,
+        &plan,
+        "finish work",
+        "current-run",
+        invocation
+    )
+    .is_err());
+    crate::session::persist_recovered_form_answers(&store, &id, invocation, &[text("src")])
+        .unwrap();
+}
 #[test]
 fn legacy_records_load_with_optional_form_fields_and_string_option_results() {
     let record:ClarificationRecord=serde_json::from_value(json!({"invocation_id":ToolInvocationId::new(),"question":"which?","options":["fast"],"status":"unresolved","question_event_index":0})).unwrap();
@@ -671,6 +910,21 @@ async fn run_scripted_form(
     responses: Vec<Value>,
     outcome: QuestionFormOutcome,
 ) -> (AgentRunSummary, Session, Vec<Value>, usize) {
+    let (summary, session, requests, calls, _root) =
+        run_scripted_form_with_legacy_discussion(responses, outcome, false).await;
+    (summary, session, requests, calls)
+}
+async fn run_scripted_form_with_legacy_discussion(
+    responses: Vec<Value>,
+    outcome: QuestionFormOutcome,
+    legacy_discussion: bool,
+) -> (
+    AgentRunSummary,
+    Session,
+    Vec<Value>,
+    usize,
+    tempfile::TempDir,
+) {
     let root = tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
     std::fs::write(root.path().join("src/lib.rs"), "content").unwrap();
@@ -699,24 +953,38 @@ async fn run_scripted_form(
     let mut session = store.create_session();
     let mut plan = pending_plan("finish work", "finish the approved step");
     plan.approve();
+    let plan_id = plan.id.clone();
     session.plan = Some(plan);
     store.save(&mut session).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
+    let mut loop_cfg = AgentLoopConfig {
+        max_steps: 8,
+        auto_approve: true,
+        question_handler: Some(Arc::new(NativeFormHandler {
+            outcome,
+            calls: calls.clone(),
+        })),
+        ..Default::default()
+    };
+    if legacy_discussion {
+        let invocation = legacy_question(&store, &session.id, &plan_id);
+        crate::session::persist_recovered_form_outcome(
+            &store,
+            &session.id,
+            invocation,
+            &QuestionFormOutcome::Discussed("explain the original question".to_string()),
+        )
+        .unwrap();
+        loop_cfg.continuation_plan_id = Some(plan_id);
+        loop_cfg.discussion_invocation_id = Some(invocation);
+    }
     let summary = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         run_agent_loop(
             root.path().to_path_buf(),
             &session.id,
             "finish work",
-            AgentLoopConfig {
-                max_steps: 8,
-                auto_approve: true,
-                question_handler: Some(Arc::new(NativeFormHandler {
-                    outcome,
-                    calls: calls.clone(),
-                })),
-                ..Default::default()
-            },
+            loop_cfg,
         ),
     )
     .await
@@ -729,7 +997,98 @@ async fn run_scripted_form(
         persisted,
         requests.try_iter().collect(),
         calls.load(Ordering::SeqCst),
+        root,
     )
+}
+#[tokio::test]
+async fn actual_legacy_discussion_entry_remains_recoverable_after_terminal_and_reload() {
+    let (summary, session, requests, calls, root) = run_scripted_form_with_legacy_discussion(
+        vec![scripted_final()],
+        QuestionFormOutcome::InputClosed,
+        true,
+    )
+    .await;
+    assert_eq!(summary.outcome, "unresolved_clarification");
+    assert_eq!(calls, 0, "the model did not ask any revised question");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(session.clarifications.len(), 1);
+    let record = &session.clarifications[0];
+    let invocation = record.invocation_id;
+    let origin_run = record
+        .run_id
+        .clone()
+        .expect("legacy obligation bound to admitted run");
+    let plan = record.plan_id.clone().unwrap();
+    let source = form_event(&session, "human_question_discussion_received");
+    assert!(
+        source.details["run_id"].is_null(),
+        "old human provenance stays immutable"
+    );
+    let started = form_event(&session, "run_started");
+    let binding = form_event(&session, "question_discussion_continuation_started");
+    assert!(source.index < started.index && started.index < binding.index);
+    assert_eq!(binding.details["legacy_run_binding"], true);
+    assert!(session
+        .events
+        .iter()
+        .any(|event| event.kind == "run_terminal"
+            && event.details["run_id"] == origin_run
+            && event.details["outcome"] == "unresolved_clarification"));
+    let store = SessionStore::for_project(root.path()).unwrap();
+    let pending = crate::session::pending_question_forms(&store.load(&session.id).unwrap());
+    assert_eq!(pending[0].run_id.as_deref(), Some(origin_run.as_str()));
+    crate::session::persist_recovered_form_outcome(
+        &store,
+        &session.id,
+        invocation,
+        &QuestionFormOutcome::Discussed("another recovered message".to_string()),
+    )
+    .unwrap();
+    store
+        .record_event(
+            &session.id,
+            "run_started",
+            json!({"run_id":"second-discussion-run"}),
+        )
+        .unwrap();
+    validate_discussion_admission(
+        &store,
+        &session.id,
+        &plan,
+        "finish work",
+        "second-discussion-run",
+        invocation,
+    )
+    .unwrap();
+    prepare_discussion_turn(
+        &store,
+        &session.id,
+        &plan,
+        "finish work",
+        "second-discussion-run",
+        invocation,
+    )
+    .unwrap();
+    assert_eq!(
+        store.load(&session.id).unwrap().clarifications[0]
+            .run_id
+            .as_deref(),
+        Some(origin_run.as_str()),
+        "identified operation binding stays unchanged"
+    );
+    runtime_terminal_event(
+        &store,
+        &session.id,
+        "second-discussion-run",
+        "waiting_for_user_input",
+    )
+    .unwrap();
+    crate::session::persist_recovered_form_answers(&store, &session.id, invocation, &[text("src")])
+        .unwrap();
+    assert!(!store
+        .load(&session.id)
+        .unwrap()
+        .has_unresolved_clarification(Some(&plan)));
 }
 #[tokio::test]
 async fn native_grouped_form_flows_through_tool_execution_and_atomic_persistence() {

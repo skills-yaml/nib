@@ -138,6 +138,77 @@ pub(crate) fn recovery_eligible(
     session: &Session,
     record: &ClarificationRecord,
 ) -> Result<String, SessionError> {
+    recovery_eligible_with_legacy_discussion(session, record, None)
+}
+
+/// The only exception to run-free legacy recovery is the exact new discussion
+/// run, started after a trusted recovered human message in a run-free session.
+pub(crate) fn recovery_eligible_for_discussion(
+    session: &Session,
+    record: &ClarificationRecord,
+    current_run_id: &str,
+    source_event_index: usize,
+) -> Result<String, SessionError> {
+    let invalid = || {
+        SessionError::InvalidMutation(
+            "discussion continuation evidence is not trusted or bound to this operation"
+                .to_string(),
+        )
+    };
+    let event = session.events.get(source_event_index).ok_or_else(invalid)?;
+    let legacy_binding = record.run_id.as_deref() == Some(current_run_id)
+        && event.details["run_id"].is_null()
+        && session.events.iter().any(|binding| {
+            binding.kind == "question_discussion_continuation_started"
+                && binding.details["legacy_run_binding"] == true
+                && binding.details["source_event_index"] == json!(source_event_index)
+                && binding.details["invocation_id"] == json!(record.invocation_id)
+                && binding.details["plan_id"].as_str() == record.plan_id.as_deref()
+                && binding.details["run_id"].as_str() == Some(current_run_id)
+                && session.events.iter().any(|start| {
+                    start.kind == "run_started"
+                        && start.details["run_id"].as_str() == Some(current_run_id)
+                        && start.index > source_event_index
+                        && start.index < binding.index
+                })
+        });
+    if record.status != ClarificationStatus::Discussed
+        || event.index != source_event_index
+        || event.index <= record.question_event_index
+        || event.kind != "human_question_discussion_received"
+        || event.details["invocation_id"] != json!(record.invocation_id)
+        || event.details["recovered"] != true
+        || event.details["plan_id"].as_str() != record.plan_id.as_deref()
+        || (event.details["run_id"].as_str() != record.run_id.as_deref() && !legacy_binding)
+        || !session.human_intent.iter().any(|intent| {
+            intent.kind == HumanIntentKind::Steering
+                && intent.source_event_index == Some(event.index)
+                && event.details["message"].as_str() == Some(intent.text.as_str())
+        })
+    {
+        return Err(invalid());
+    }
+    // Repeated checks in the same newly bound run use its immutable legacy
+    // source identity only when the exact binding audit proves that transition.
+    let mut origin = record.clone();
+    if legacy_binding {
+        origin.run_id = None;
+        if record_run_id(session, &origin).is_some() {
+            return Err(invalid());
+        }
+    }
+    recovery_eligible_with_legacy_discussion(
+        session,
+        &origin,
+        Some((current_run_id, source_event_index)),
+    )
+}
+
+fn recovery_eligible_with_legacy_discussion(
+    session: &Session,
+    record: &ClarificationRecord,
+    admitted_discussion: Option<(&str, usize)>,
+) -> Result<String, SessionError> {
     let invalid = |message: &str| SessionError::InvalidMutation(message.to_string());
     let plan = session
         .plan
@@ -184,6 +255,28 @@ pub(crate) fn recovery_eligible(
             return Err(invalid(
                 "question operation is still active or unreconciled",
             ));
+        }
+    } else {
+        let starts = session
+            .events
+            .iter()
+            .filter(|event| event.kind == "run_started")
+            .collect::<Vec<_>>();
+        match admitted_discussion {
+            None if starts.is_empty() => {}
+            Some((current_run_id, source_event_index))
+                if starts.len() == 1
+                    && starts[0].index > source_event_index
+                    && starts[0].details["run_id"].as_str() == Some(current_run_id)
+                    && !session.events.iter().any(|event| {
+                        event.kind == "run_terminal"
+                            && event.details["run_id"].as_str() == Some(current_run_id)
+                    }) => {}
+            _ => {
+                return Err(invalid(
+                    "question operation cannot be identified from recorded runs",
+                ));
+            }
         }
     }
     Ok(plan.id.clone())
