@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "commands": [
+    [
+      "task",
+      "check"
+    ],
+    [
+      "task",
+      "test"
+    ]
+  ]
+}
