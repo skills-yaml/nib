@@ -312,6 +312,9 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("script -q /dev/null /bin/sh -c"));
     assert!(script.contains("terminate_process_tree"));
     assert!(script.contains("printf '/status\\n/quit\\n'"));
+    assert!(script.contains("wait_for_pty_output \"$fixture/$current_case.txt\" 'Answer (number'"));
+    assert!(script.contains("wait_for_pty_output \"$question_output\" 'Answer (number'"));
+    assert!(script.contains("grep -Fq 'Answer (number' \"$fixture/plain-question.txt\""));
     assert!(script.contains("printf '/copy\\n'"));
     assert!(script.contains("wait_for_pty_output \"$output\" 'Goodbye.'"));
     assert!(script.contains("PTY clipboard command did not report delivery"));
@@ -352,6 +355,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "WaitForOutput = \"Allowed work\"",
         "WaitForOutput = \"again\"",
         "WaitForOutput = \"You> \"",
+        "WaitForOutput = \"Answer (number\"",
         "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
         "Windows redirected TERM=dumb/NO_COLOR output emitted an ANSI escape",

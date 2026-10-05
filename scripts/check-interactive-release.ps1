@@ -241,8 +241,9 @@ curator_enabled = false
             # controls. Status output is the stable proof that F2 owned this input.
             [pscustomobject]@{ Text = "/status`r"; DelayMilliseconds = 300 },
             # The status row can become visible before command-overlay input
-            # ownership has returned to the question editor. Settle after the
+            # ownership has returned to the question rows. Settle after the
             # marker so option 2 cannot be consumed by the closing overlay.
+            # Number keys select a row; Enter answers with option 2 (full).
             [pscustomobject]@{ Text = "2`r"; WaitForOutput = "Verification:"; DelayMilliseconds = 300 },
             # Differential TUI redraws can split the longer final-answer text
             # with cursor controls. The terminal lifecycle label is shorter and
@@ -275,7 +276,7 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainQuestionCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = ":command /status`r`n"; WaitForOutput = "Answer (number or text):" },
+            [pscustomobject]@{ Text = ":command /status`r`n"; WaitForOutput = "Answer (number" },
             [pscustomobject]@{ Text = "2`r`n`r`n"; WaitForOutput = "Configured approval preset:" },
             # ConPTY may divide the trailing prompt across incremental reads. The
             # lifecycle event is emitted only after the modal answer has been

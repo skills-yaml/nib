@@ -426,7 +426,7 @@ async fn conversational_help_uses_the_answer_route_and_current_project_context()
     let request = requests[0].to_string();
     assert!(request.contains("A repository for answer-route help"));
     assert!(request.contains("task check: Run the example check"));
-    assert!(request.contains("/plan [prompt]"));
+    assert!(request.contains("/status"));
 }
 
 #[tokio::test]
