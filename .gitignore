@@ -146,6 +146,12 @@ cython_debug/
 *~
 .DS_Store
 
+# Generated local agent skill adapters
+/.agents/skills/
+/.claude/skills/
+/.cursor/skills/
+/.grok/skills/
+
 # Node / frontend
 node_modules/
 npm-debug.log*

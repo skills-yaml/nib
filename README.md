@@ -150,6 +150,6 @@ for inspection; verify it and remove only that exact staging directory before re
 
 ## Documentation
 
-- **[End-User Guide](docs/user/guide.md)** — Detailed instructions on configuration and features.
-- **[Technical Docs](docs/tech/)** — Architecture, CI, and project structure references.
-- **[Specs](docs/specs/)** — Feature and product specifications.
+- **[End-User Guide](workspace/docs/user/guide.md)** — Detailed instructions on configuration and features.
+- **[Technical Docs](workspace/instructions/tech/)** — Architecture, CI, and project structure references.
+- **[Specs](workspace/specs/)** — Feature and product specifications.

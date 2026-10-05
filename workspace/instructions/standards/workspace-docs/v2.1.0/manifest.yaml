@@ -1,0 +1,27 @@
+id: workspace-docs
+version: "2.1.0"
+status: "default"
+released: "2026-08-12"
+last_updated: "2026-08-13"
+owner: workspace
+container_directory: "workspace"
+required_root_files:
+  - AGENTS.md
+  - DESIGN.md
+  - README.md
+required_workspace_directories:
+  - workspace/agents/memory
+  - workspace/instructions/tech
+  - workspace/instructions/standards
+  - workspace/instructions/agents
+  - workspace/instructions/skills
+  - workspace/specs/backlog
+  - workspace/specs/development
+  - workspace/specs/done
+  - workspace/specs/legacy
+  - workspace/docs/architecture
+  - workspace/docs/work
+  - workspace/company/documents
+  - workspace/company/design
+  - workspace/company/domain
+  - workspace/company/strategy

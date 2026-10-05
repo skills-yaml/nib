@@ -13,6 +13,7 @@ tasks:
     desc: Run fast installer and Rust static checks
     cmds:
       - task: installers:check
+      - task: workspace:check
       - cargo fmt -- --check
       - cargo clippy --all-targets --all-features -- -D warnings
 
@@ -29,7 +30,27 @@ tasks:
   docs:check:
     desc: Validate internal Markdown links and spec-state invariants
     cmds:
+      - task: workspace:check
       - cargo test --test docs_integrity -- --test-threads=1
+
+  workspace:check:
+    desc: Validate Workspace structure, catalog, memory, versions, and WIP records
+    cmds:
+      - cargo run --quiet --example workspace_check -- structure
+      - cargo run --quiet --example workspace_check -- catalog
+      - cargo run --quiet --example workspace_check -- memory
+      - task: versions:check
+      - cargo run --quiet --example workspace_check -- coordination
+
+  versions:check:
+    desc: Validate native Cargo versions and Workspace release reservations
+    cmds:
+      - cargo run --quiet --example workspace_check -- versions
+
+  test:workspace:
+    desc: Exercise Workspace validators with positive and negative fixtures
+    cmds:
+      - cargo test --test workspace_governance -- --test-threads=1
 
   installers:check:
     desc: Validate installer syntax and pinned release defaults

@@ -39,6 +39,8 @@ pub fn load_project_docs(project_root: &Path) -> Vec<RuntimeContextSection> {
     let mut candidates = Vec::new();
     let mut scanned = 0usize;
     for (relative_root, kind) in [
+        ("workspace/instructions/tech", DocumentKind::Standards),
+        ("workspace/docs/architecture", DocumentKind::Standards),
         ("docs/standards", DocumentKind::Standards),
         ("docs/tech", DocumentKind::Standards),
         ("docs/libs", DocumentKind::Libraries),
@@ -52,6 +54,7 @@ pub fn load_project_docs(project_root: &Path) -> Vec<RuntimeContextSection> {
             &mut candidates,
         );
     }
+    collect_workspace_standards(&project_root, &mut scanned, &mut candidates);
     for relative_root in ["backend/libs", "libs"] {
         collect_library_docs(
             &project_root,
@@ -86,6 +89,91 @@ pub fn load_project_docs(project_root: &Path) -> Vec<RuntimeContextSection> {
         });
     }
     sections
+}
+
+// Complete packages retain old releases and scaffolding templates. Load only
+// live policy from the pinned version so templates cannot crowd out project docs.
+fn collect_workspace_standards(
+    project_root: &Path,
+    scanned: &mut usize,
+    candidates: &mut Vec<Candidate>,
+) {
+    let standards = project_root.join("workspace/instructions/standards");
+    if !is_real_directory(project_root, &standards) {
+        return;
+    }
+    let guidelines =
+        read_bounded_regular_file(project_root, &project_root.join("AGENTS.md"), 64 * 1024)
+            .unwrap_or_default();
+    let version = guidelines
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("<!-- AGENT-CONTEXT:START workspace-docs@")?
+                .strip_suffix(" -->")
+        })
+        .filter(|value| {
+            value.split('.').count() == 3
+                && value
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        });
+    for path in sorted_directory_entries(&standards, MAX_DISCOVERY_ENTRIES.saturating_sub(*scanned))
+    {
+        if *scanned >= MAX_DISCOVERY_ENTRIES {
+            break;
+        }
+        *scanned += 1;
+        if has_hidden_or_non_utf8_name(&path) {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|name| name == "workspace-docs")
+        {
+            if let Some(version) = version {
+                collect_workspace_policy(
+                    project_root,
+                    &path.join(format!("v{version}")),
+                    scanned,
+                    candidates,
+                );
+            }
+        } else if is_real_directory(project_root, &path) {
+            collect_document_tree(
+                project_root,
+                &path,
+                DocumentKind::Standards,
+                0,
+                scanned,
+                candidates,
+            );
+        } else if is_document_file(&path) {
+            push_candidate(project_root, path, DocumentKind::Standards, candidates);
+        }
+    }
+}
+
+fn collect_workspace_policy(
+    project_root: &Path,
+    directory: &Path,
+    scanned: &mut usize,
+    candidates: &mut Vec<Candidate>,
+) {
+    if !is_real_directory(project_root, directory) {
+        return;
+    }
+    for name in ["sdlc.md", "process.md", "memory.md", "versioning.md"] {
+        if *scanned >= MAX_DISCOVERY_ENTRIES {
+            break;
+        }
+        *scanned += 1;
+        push_candidate(
+            project_root,
+            directory.join(name),
+            DocumentKind::Standards,
+            candidates,
+        );
+    }
 }
 
 fn collect_document_tree(
@@ -410,6 +498,115 @@ mod tests {
     fn write(path: &Path, content: impl AsRef<[u8]>) {
         fs::create_dir_all(path.parent().expect("parent")).expect("directory");
         fs::write(path, content).expect("document");
+    }
+
+    #[test]
+    fn workspace_roots_load_current_tech_and_only_the_pinned_standard() {
+        let root = tempdir().expect("project");
+        write(
+            &root.path().join("AGENTS.md"),
+            "<!-- AGENT-CONTEXT:START workspace-docs@7.0.0 -->\n",
+        );
+        write(
+            &root.path().join("workspace/instructions/tech/rust.md"),
+            "current rust",
+        );
+        write(
+            &root
+                .path()
+                .join("workspace/docs/architecture/architecture.md"),
+            "current architecture",
+        );
+        write(
+            &root
+                .path()
+                .join("workspace/instructions/standards/workspace-docs/v7.0.0/agents-template.md"),
+            "scaffolding template",
+        );
+        write(
+            &root
+                .path()
+                .join("workspace/instructions/standards/workspace-docs/v7.0.0/sdlc.md"),
+            "current lifecycle",
+        );
+        write(
+            &root
+                .path()
+                .join("workspace/instructions/standards/workspace-docs/v6.0.0/sdlc.md"),
+            "old lifecycle",
+        );
+        write(
+            &root.path().join("docs/tech/legacy.md"),
+            "legacy project support",
+        );
+        let sections = load_project_docs(root.path());
+        let content = sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(content.contains("current rust"));
+        assert!(content.contains("current architecture"));
+        assert!(content.contains("current lifecycle"));
+        assert!(content.contains("legacy project support"));
+        assert!(!content.contains("old lifecycle"));
+        assert!(!content.contains("scaffolding template"));
+    }
+
+    #[test]
+    fn migrated_architecture_and_task_guidance_fit_the_existing_context_limit() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sections = load_project_docs(root);
+        for source in [
+            "workspace/docs/architecture/architecture.md",
+            "workspace/instructions/tech/task.md",
+        ] {
+            let section = sections
+                .iter()
+                .find(|section| section.label == source)
+                .expect("migrated reference");
+            assert_eq!(
+                section.content,
+                fs::read_to_string(root.join(source)).expect("project reference")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_standard_does_not_follow_links_or_untrusted_version_paths() {
+        let root = tempdir().expect("project");
+        let outside = tempdir().expect("outside");
+        write(&outside.path().join("v7.0.0/private.md"), "private outside");
+        write(
+            &root.path().join("AGENTS.md"),
+            "<!-- AGENT-CONTEXT:START workspace-docs@7.0.0 -->\n",
+        );
+        std::fs::create_dir_all(root.path().join("workspace/instructions/standards"))
+            .expect("standards");
+        std::os::unix::fs::symlink(
+            outside.path(),
+            root.path()
+                .join("workspace/instructions/standards/workspace-docs"),
+        )
+        .expect("link");
+        assert!(load_project_docs(root.path()).is_empty());
+        std::fs::remove_file(
+            root.path()
+                .join("workspace/instructions/standards/workspace-docs"),
+        )
+        .expect("remove link");
+        write(
+            &root.path().join("AGENTS.md"),
+            "<!-- AGENT-CONTEXT:START workspace-docs@../../private -->\n",
+        );
+        write(
+            &root
+                .path()
+                .join("workspace/instructions/standards/workspace-docs/v7.0.0/private.md"),
+            "not pinned",
+        );
+        assert!(load_project_docs(root.path()).is_empty());
     }
 
     #[test]

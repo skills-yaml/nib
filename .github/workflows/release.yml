@@ -8,6 +8,10 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'agents/memory/**'
+      - 'workspace/specs/**'
+      - 'workspace/instructions/**'
+      - 'workspace/docs/**'
+      - 'workspace/agents/memory/**'
   workflow_dispatch:
     inputs:
       channel:

@@ -1,0 +1,43 @@
+id: workspace-docs
+version: "3.0.0"
+status: "default"
+released: "2026-08-14"
+last_updated: "2026-08-14"
+owner: workspace
+container_directory: "workspace"
+required_root_files:
+  - AGENTS.md
+  - DESIGN.md
+  - README.md
+required_workspace_directories:
+  - workspace/agents/memory
+  - workspace/instructions/tech
+  - workspace/instructions/standards
+  - workspace/instructions/agents
+  - workspace/instructions/skills
+  - workspace/specs/backlog
+  - workspace/specs/development
+  - workspace/specs/done
+  - workspace/specs/legacy
+  - workspace/docs/architecture
+  - workspace/docs/work
+  - workspace/company/documents
+  - workspace/company/design
+  - workspace/company/domain
+  - workspace/company/strategy
+required_memory_files:
+  - workspace/agents/memory/README.md
+  - workspace/agents/memory/decisions.md
+  - workspace/agents/memory/facts.md
+  - workspace/agents/memory/preferences.md
+  - workspace/agents/memory/open-questions.md
+  - workspace/agents/memory/changelog.md
+memory_impact_statuses:
+  - pending
+  - updated
+  - none
+completion_gates:
+  - every completed task classifies memory impact as updated or none
+  - every classification includes a rationale
+  - updated specs reference a category file and changelog.md
+  - done specs must not retain pending memory impact

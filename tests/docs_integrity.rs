@@ -11,7 +11,16 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
         for entry in fs::read_dir(dir).expect("read documentation directory") {
             let entry = entry.expect("read documentation entry");
             let path = entry.path();
-            if path.is_dir() {
+            let kind = entry.file_type().expect("documentation entry type");
+            if kind.is_symlink()
+                || entry.file_name().to_string_lossy().starts_with('.')
+                || entry.file_name() == "target"
+                || entry.file_name() == "node_modules"
+                || path.ends_with("workspace/instructions/standards/workspace-docs")
+            {
+                continue;
+            }
+            if kind.is_dir() {
                 pending.push(path);
             } else if path.extension().and_then(|value| value.to_str()) == Some("md") {
                 files.push(path);
@@ -44,7 +53,9 @@ fn internal_markdown_links_resolve() {
     let link_re = Regex::new(r#"\[[^\]]*\]\(([^)]+)\)"#).expect("valid link regex");
     let mut broken = Vec::new();
 
-    for source in markdown_files(&root) {
+    let mut sources = markdown_files(&root);
+    sources.push(root.join("workspace/instructions/standards/workspace-docs/ADOPTION.md"));
+    for source in sources {
         let content = fs::read_to_string(&source).expect("read markdown");
         for captures in link_re.captures_iter(&content) {
             let raw = captures.get(1).expect("link target").as_str();
@@ -72,12 +83,12 @@ fn internal_markdown_links_resolve() {
 
 #[test]
 fn spec_ids_are_unique_across_states() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/specs");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workspace/specs");
     let heading_re = Regex::new(r"(?m)^#\s+((?:FT|T|D)[-_]?\d+):").expect("valid ID regex");
     let mut ids: HashMap<String, PathBuf> = HashMap::new();
     let mut duplicates = Vec::new();
 
-    for state in ["backlog", "development", "done"] {
+    for state in ["backlog", "development", "test", "blocked", "done"] {
         for path in markdown_files(&root.join(state)) {
             let content = fs::read_to_string(&path).expect("read spec");
             let Some(captures) = heading_re.captures(&content) else {
@@ -103,7 +114,7 @@ fn spec_ids_are_unique_across_states() {
 
 #[test]
 fn done_specs_do_not_claim_open_acceptance_items() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/specs/done");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workspace/specs/done");
     let mut offenders = Vec::new();
 
     for path in markdown_files(&root) {
@@ -125,7 +136,7 @@ fn done_specs_do_not_claim_open_acceptance_items() {
 
 #[test]
 fn development_specs_have_required_execution_fields() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/specs/development");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workspace/specs/development");
     let required = [
         "scope",
         "acceptance criteria",
@@ -134,7 +145,10 @@ fn development_specs_have_required_execution_fields() {
     ];
     let mut offenders = Vec::new();
 
-    for path in markdown_files(&root) {
+    for path in markdown_files(&root)
+        .into_iter()
+        .filter(|path| path.file_name().is_none_or(|name| name != "README.md"))
+    {
         let content = fs::read_to_string(&path).expect("read development spec");
         let normalized = content.to_ascii_lowercase();
         let mut missing = required
@@ -172,7 +186,7 @@ fn development_specs_have_required_execution_fields() {
 
 #[test]
 fn explicit_spec_status_matches_state_directory() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/specs");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workspace/specs");
     let status_re = Regex::new(r"(?im)^\*\*status:\*\*\s*([^\r\n]+)").expect("valid status regex");
     let mut offenders = Vec::new();
 
@@ -196,7 +210,10 @@ fn explicit_spec_status_matches_state_directory() {
             }
         }
     }
-    for path in markdown_files(&root.join("done")) {
+    for path in markdown_files(&root.join("done"))
+        .into_iter()
+        .filter(|path| path.file_name().is_none_or(|name| name != "README.md"))
+    {
         let content = fs::read_to_string(&path).expect("read done spec");
         let status = status_re
             .captures(&content)
