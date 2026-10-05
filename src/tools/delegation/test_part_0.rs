@@ -660,6 +660,7 @@ async fn worktree_and_owner_failures_leave_no_fallback_audit_preparation() {
         "non-Git failure namespace",
     );
 
+    let _timeout = SpawnPreparationTimeoutGuard::set(Duration::from_secs(30));
     let root = tempfile::tempdir().expect("git project");
     initialize_spawn_test_repository(root.path());
     ensure_records_directory(root.path()).expect("prime authoritative records namespace");
@@ -669,10 +670,18 @@ async fn worktree_and_owner_failures_leave_no_fallback_audit_preparation() {
     crate::sandbox::worktree::Worktree::remove(root.path(), &primed.id)
         .expect("remove priming worktree");
     let before = subagent_namespace_snapshot(root.path());
-    SPAWN_OWNER_FAILURES.store(1, std::sync::atomic::Ordering::Release);
+    let _failure = SpawnFailureInjectionGuard::arm(&SPAWN_OWNER_FAILURES);
     let error = spawn_subagent(&json!({"prompt": "owner failure"}), root.path())
         .expect_err("injected owner creation must fail");
-    assert!(error.contains("injected subagent owner creation failure"));
+    assert_eq!(
+        SPAWN_OWNER_FAILURES.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "owner injection was not consumed: {error}"
+    );
+    assert!(
+        error.contains("injected subagent owner creation failure"),
+        "{error}"
+    );
     assert_subagent_namespace_unchanged(
         &before,
         &subagent_namespace_snapshot(root.path()),
