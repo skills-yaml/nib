@@ -129,3 +129,18 @@ format and strict all-target/all-feature Clippy) and task test:workspace (eight
 cases). Git invocation and shallow-source setup use focused helpers within the
 unchanged function-length limit; no lint suppression or assertion is added or
 removed. Native full verification and renewed hosted acceptance remain pending.
+
+## Frozen Native Correction Evidence
+
+Independent reviewer t062-review approved exact correction a765745 and combined
+source e65bf187, then confirmed projected stage
+af24b71dabf76f59182490d6a8c39796242c57fb changes only owning records to complete.
+That frozen stage passed fresh ordered task check and task test with
+NIB_REQUIRE_BWRAP_TESTS=1; these are exactly Taskfile task verify composition.
+The actual internal integration ref advanced only after both commands succeeded.
+No receipt is presented as verification of another revision. Native source,
+Task/workflow definitions, attributes, test bytes and imported package bytes
+are identical to reviewed main/development previews; event records are reviewed
+and receive renewed focused gates. Both current hosted Linux full suites passed
+on the corrected shallow-aware source; coverage and complete macOS/Windows
+qualification remain pending before actual integration/main delivery.

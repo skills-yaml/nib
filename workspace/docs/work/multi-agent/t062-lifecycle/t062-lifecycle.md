@@ -28,7 +28,7 @@ Independent source/combined-main review and frozen source task verify passed. De
 
 ## Blockers and Dependencies
 
-Native and hosted full qualification remain pending; no paid live calls are required or authorized.
+Fresh native ordered task check/test passed at af24b71 with strict bwrap. Hosted complete qualification remains pending; no paid live calls are required or authorized.
 
 ## Next Step
 
