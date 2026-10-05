@@ -92,7 +92,7 @@ required native bwrap: 1265 library tests, 93 CLI tests, all integration suites
 and doctests. Serialized T064 peer integration f5c38a1 also passed fresh task
 check and task test. Main all-platform qualification and completion remain pending.
 
-## Main Evidence
+## Main Merge Evidence
 
 Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
 Outcome: passed

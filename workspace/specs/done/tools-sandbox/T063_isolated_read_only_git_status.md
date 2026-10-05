@@ -137,7 +137,7 @@ Main promotion and Windows qualification remain required; publication is separat
 The repaired ten-case native Git-status suite passed before the frozen full run,
 and all independent findings are resolved. Historical done records are unchanged.
 
-## Main Evidence
+## Main Merge Evidence
 
 Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
 Outcome: passed

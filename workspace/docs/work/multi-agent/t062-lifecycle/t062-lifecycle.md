@@ -37,3 +37,5 @@ Review/freeze the reconciled candidate, run final canonical gates and deliver th
 ## Handoff
 
 Memory: updated for durable verified v7/security/checkout facts and current lifecycle. T064/T066: none because bounded fixture repairs restore existing contracts. Shared nib-next remains released at 0.2.0 with T061 documentation-only membership; production publication is separate. Captures and peer worktrees remain retained for recovery.
+
+Final staged versions validation rejected five incorrectly named completion sections. Their headings now use the native `Main Merge Evidence` contract. Renewed final verification uses a fresh Cargo target to bind every gate executable to the exact staged checkout; earlier focused cached results are not completion evidence. Post-merge development push CI/release jobs were never allocated hosted Ubuntu runners (no executed steps); exact merge-preview CI remains green.

@@ -315,7 +315,7 @@ diagnostics and the existing fixture setup guard, preserving production and
 deadline-specific budgets/assertions. New full native and hosted qualification
 are required; earlier green subsets do not establish final completion.
 
-## Main Evidence
+## Main Merge Evidence
 
 Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
 Outcome: passed

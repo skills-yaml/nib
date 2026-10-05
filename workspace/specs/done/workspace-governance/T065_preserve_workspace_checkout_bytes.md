@@ -160,7 +160,7 @@ and task test, exactly composing task verify. The new T066 guard/owner cases
 executed in the full native suites; earlier selected-test evidence is not substituted.
 Publication is tracked separately. Main reconciliation and final frozen lifecycle verification remain pending.
 
-## Main Evidence
+## Main Merge Evidence
 
 Revision: 4b0245b9890bb15a4c99ff46ec7296d42bf9401f
 Outcome: passed
