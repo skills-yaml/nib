@@ -37,8 +37,8 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
 | [T061](development/interactive/T061_question_form.md) | interactive | development | Accepted question-form contract; implementation pending. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
-| [T062](development/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | development | Local Workspace upgrade and verification; shared integration and main merge pending. |
-| [T063](development/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | development | Required security follow-up before T062 main promotion; isolated read-only Git status implementation active. |
+| [T062](test/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | test | Confirmed development integration at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; exact reviewed native/hosted gates passed; main promotion pending. |
+| [T063](test/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | test | Strict Git-status isolation integrated at 8bc243d00ec3ec82e7287c704fcdd897ff78204a; independent review and native/hosted gates passed; main promotion pending. |
 | [T001](done/agent-runtime/T001_implement_core_agent_tools.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T002](done/agent-runtime/T002_agent_framework_runtime_and_orchestration_engine.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T005](done/agent-runtime/T005_full_runtime_state_machine_and_lifecycle.md) | agent-runtime | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |

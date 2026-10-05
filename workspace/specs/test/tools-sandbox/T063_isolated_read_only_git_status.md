@@ -1,8 +1,8 @@
 # T063: Isolated Read-Only Git Status
 
-**Status:** Development
+**Status:** Test
 
-State: development
+State: test
 Primary Feature: tools-sandbox
 
 ## Scope
@@ -30,7 +30,7 @@ Related: [T058](../../done/tools-sandbox/T058_preflight_diagnostics_and_independ
   Managed child cleanup covers helper descendants on exit, cancellation and timeout.
 - [x] AC-3: Observable fixtures cover fsmonitor, executable filters, populated
   submodules, private environment/home, index preservation and unavailable isolation.
-- [ ] AC-4: Independent exact-candidate review, task test:git-status, task docs:check
+- [x] AC-4: Independent exact-candidate review, task test:git-status, task docs:check
   and task verify pass; guide, catalog, version and memory records are reconciled.
 
 ## Affected Areas
@@ -116,3 +116,23 @@ tmpfs mask, and pins that same canonical directory on the child environment.
 Missing, nonexistent, non-directory and unmaskable homes fail before spawning.
 Deterministic regression cases also prove the child cannot inherit a later HOME
 change. Renewed exact-candidate review and final verification remain required.
+
+## Integration Evidence
+
+Revision: 8bc243d00ec3ec82e7287c704fcdd897ff78204a
+Outcome: passed
+
+Confirmed shared development integration on 2026-10-05 through PR42. Independent
+review approved exact source 7b5b8e506daa2c61377c4632918d1ceed14b5bc1 and the
+exact CI-qualified merge revision above; their complete trees are identical.
+Frozen task verify passed with required native bwrap: all 1265 library tests,
+93 CLI tests, every integration suite and doctests. Serialized peer integration
+ac8083b768315de65f764dc80a5e3af5170b8471 also passed every registered native gate.
+Hosted CI37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
+exact-source release-binary qualification, native interaction and managed-process
+smokes. Both qualified binaries identify this exact development revision.
+
+The remote development ref and PR42 merged state confirm the actual event.
+Main promotion and Windows qualification remain required; publication is separate.
+The repaired ten-case native Git-status suite passed before the frozen full run,
+and all independent findings are resolved. Historical done records are unchanged.

@@ -1,8 +1,8 @@
 # T062: Workspace Docs 7 Upgrade
 
-**Status:** Development
+**Status:** Test
 
-State: development
+State: test
 Primary Feature: workspace-governance
 
 ## Scope
@@ -222,3 +222,23 @@ execution path outside isolation. Linked [T063](../tools-sandbox/T063_isolated_r
 resolves that finding before promotion, preserving T058 history and the applied
 shared version. Final verification is renewed after this repair; the interrupted
 6a2e593 run is not completion evidence.
+
+## Integration Evidence
+
+Revision: 8bc243d00ec3ec82e7287c704fcdd897ff78204a
+Outcome: passed
+
+Confirmed shared development integration on 2026-10-05 through PR42. Independent
+review approved exact source 7b5b8e506daa2c61377c4632918d1ceed14b5bc1 and the
+exact CI-qualified merge revision above; their complete trees are identical.
+Frozen task verify passed with required native bwrap: all 1265 library tests,
+93 CLI tests, every integration suite and doctests. Serialized peer integration
+ac8083b768315de65f764dc80a5e3af5170b8471 also passed every registered native gate.
+Hosted CI37333585002 passed Linux/macOS tests, 84.26% runtime line coverage,
+exact-source release-binary qualification, native interaction and managed-process
+smokes. Both qualified binaries identify this exact development revision.
+
+The remote development ref and PR42 merged state confirm the actual event.
+Main promotion and Windows qualification remain required; publication is separate.
+The repaired ten-case native Git-status suite passed before the frozen full run,
+and all independent findings are resolved. Historical done records are unchanged.
