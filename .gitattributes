@@ -1,0 +1,6 @@
+# Generated context and Workspace parsers consume canonical LF text.
+AGENTS.md text eol=lf
+workspace/** text eol=lf
+
+# The imported standard is verified against raw upstream SHA-256 hashes.
+workspace/instructions/standards/workspace-docs/** -text
