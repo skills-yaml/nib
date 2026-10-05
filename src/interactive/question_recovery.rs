@@ -225,7 +225,7 @@ fn question_response<'a>(
         || text.starts_with("text:")
         || text == "esc"
         || text == "chat"
-        || text.parse::<usize>().is_ok()
+        || (!text.is_empty() && text.chars().all(|character| character.is_ascii_digit()))
         || question.options.iter().any(|option| option.label == text)
         || (question.proposed_answer.is_some()
             && matches!(
@@ -240,6 +240,13 @@ fn conversational_input(
     text: &str,
     _addressed: bool,
 ) -> QuestionLineInput {
+    if text == "chat"
+        || text == "esc"
+        || text.starts_with("text:")
+        || (!text.is_empty() && text.chars().all(|character| character.is_ascii_digit()))
+    {
+        return parse_question_line(question, text);
+    }
     if question.proposed_answer.is_some() {
         match text.to_ascii_lowercase().as_str() {
             "yes" | "approve" | "approve proposed answer" => {
@@ -467,7 +474,13 @@ pub fn complete_question_recovery(
     };
     crate::session::persist_recovered_form_outcome(store, session_id, invocation_id, &outcome)?;
     match outcome {
-        QuestionFormOutcome::Answered(_) => continue_after_answers(store, session_id),
+        QuestionFormOutcome::Answered(_) => Ok(continue_after_answers(store, session_id)
+            .unwrap_or_else(|error| {
+                QuestionRecoveryEffect::Output(format!(
+                    "Your answers were saved. Dependent work remains paused: {}",
+                    bounded_public_text(&error, store.public_sensitive_values(), 1_000, false)
+                ))
+            })),
         QuestionFormOutcome::Discussed(_) => {
             let plan = session
                 .plan

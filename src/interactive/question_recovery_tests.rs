@@ -372,3 +372,113 @@ fn changed_current_plan_and_uncertain_provider_state_never_recover() {
             .is_none());
     }
 }
+
+#[test]
+fn reserved_choice_labels_do_not_override_the_line_protocol() {
+    for (input, expected_editor) in [("chat", Some(None)), ("3", Some(Some(0))), ("esc", None)] {
+        let (_directory, store, session_id, _, _) = recoverable_question_fixture();
+        store
+            .update_session(&session_id, |session| {
+                session.clarifications[0].options = vec!["esc".to_string(), "chat".to_string()];
+                Ok(())
+            })
+            .unwrap();
+        let effect = recover_question_conversation(&store, &session_id, input)
+            .unwrap()
+            .unwrap();
+        if let Some(expected) = expected_editor {
+            assert!(
+                matches!(effect, QuestionRecoveryEffect::OpenEditor {question_index, ..} if question_index == expected)
+            );
+        } else {
+            assert!(matches!(effect, QuestionRecoveryEffect::Output(_)));
+        }
+        assert!(store.load(&session_id).unwrap().clarifications[0]
+            .answer
+            .is_none());
+    }
+    let (_directory, store, session_id, _, _) = recoverable_question_fixture();
+    store
+        .update_session(&session_id, |session| {
+            session.clarifications[0].options = vec!["alpha".to_string(), "1".to_string()];
+            Ok(())
+        })
+        .unwrap();
+    recover_question_conversation(&store, &session_id, "1").unwrap();
+    assert_eq!(
+        store.load(&session_id).unwrap().clarifications[0]
+            .answer
+            .as_deref(),
+        Some("alpha")
+    );
+}
+
+#[test]
+fn addressed_set_chat_opens_discussion_and_leaves_drafts_unpersisted() {
+    let (_directory, store, session_id, invocation_id, _) = recoverable_question_fixture();
+    append_second_question(&store, &session_id, invocation_id, true);
+    store
+        .update_session(&session_id, |session| {
+            for record in &mut session.clarifications {
+                record.options = vec!["chat".to_string(), "esc".to_string()];
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        recover_question_conversation(&store, &session_id, "Target: chat").unwrap(),
+        Some(QuestionRecoveryEffect::OpenEditor {
+            question_index: None,
+            ..
+        })
+    ));
+    assert!(store
+        .load(&session_id)
+        .unwrap()
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()));
+}
+
+#[test]
+fn committed_answers_are_reported_saved_when_another_operation_blocks_resume() {
+    let (_directory, store, session_id, invocation_id, _) = recoverable_question_fixture();
+    let other = ToolInvocationId::new();
+    append_second_question(&store, &session_id, other, false);
+    store
+        .update_session(&session_id, |session| {
+            session.clarifications[1].run_id = Some("cancelled-other".to_string());
+            let index = session.events.len();
+            session.events.push(SessionEvent {
+                index,
+                kind: "run_terminal".to_string(),
+                details: json!({"run_id":"cancelled-other","outcome":"cancelled_by_user"}),
+                timestamp: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let effect = complete_question_recovery(
+        &store,
+        &session_id,
+        invocation_id,
+        QuestionFormOutcome::Answered(vec![QuestionAnswer {
+            answer: "beta".to_string(),
+            source: QuestionAnswerSource::Option,
+        }]),
+    )
+    .unwrap();
+    let QuestionRecoveryEffect::Output(text) = effect else {
+        panic!("saved answer must report blocked continuation");
+    };
+    assert!(text.contains("answers were saved"));
+    let session = store.load(&session_id).unwrap();
+    assert_eq!(
+        session.clarifications[0].status,
+        ClarificationStatus::Answered
+    );
+    assert_eq!(
+        session.clarifications[1].status,
+        ClarificationStatus::Unresolved
+    );
+}

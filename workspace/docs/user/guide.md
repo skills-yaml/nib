@@ -374,7 +374,8 @@ When the agent calls `ask_question`, nib displays one question or a related set 
 up to eight questions. Choices have short labels and optional descriptions; choosing
 one returns its label. A proposed answer offers Approve proposed answer, Reject and
 leave unanswered, and Instruct otherwise. Approve accepts only the displayed answer.
-Every question also has Type something. and a separate Chat about this row.
+Ordinary questions also have Type something.; proposed answers retain Instruct
+otherwise. Every call has a separate Chat about this row.
 
 A single answer returns immediately. Sets keep answer drafts until you choose Submit;
 in plain, console, and one-shot mode, Enter at the final answer summary submits all
