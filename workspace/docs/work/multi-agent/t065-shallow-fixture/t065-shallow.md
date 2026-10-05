@@ -25,7 +25,7 @@ Claimed a bounded supporting task after verified T065 integration. Recorded the 
 
 ## Validation
 
-Pending.
+task test:workspace passed eight cases and task docs:check passed all native modules and five documentation cases on 7a59147. New fixture explicitly exercises shallow source and destination metadata, pinned checkout identity and every original integrity control. Fresh static/full native and hosted acceptance remain required.
 
 ## Blockers and Dependencies
 
@@ -37,4 +37,4 @@ Create deterministic shallow-source coverage, repair explicit fetch handling and
 
 ## Handoff
 
-Pending.
+Memory impact: none for this bounded fixture correction; it restores the existing T065 checkout-byte validation contract without a new durable product decision. The overall T065 Memory Impact remains updated through its documented checkout policy. Request exact-candidate review and serialized native integration.

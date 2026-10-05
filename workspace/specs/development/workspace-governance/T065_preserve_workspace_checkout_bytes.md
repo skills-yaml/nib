@@ -117,3 +117,9 @@ Retain every full-governance, ordinary-conversion and negative raw-byte control.
 Reviewer t062-review approved this bounded plan; source review and fresh
 native/all-platform gates renew for the changed test. Version impact remains
 none and the durable checkout policy remains unchanged.
+
+Shallow-aware candidate 7a59147 passed task test:workspace (eight cases,
+including asserted shallow source/destination and exact commit identity) and
+task docs:check (five documentation cases and all native modules). Git output
+identity checks trim platform line endings. The source and raw SHA-256 validator
+remain unchanged; fresh frozen native and hosted acceptance are still pending.
