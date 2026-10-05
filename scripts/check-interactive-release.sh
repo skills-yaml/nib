@@ -464,11 +464,13 @@ fi
 interrupt_question_input() {
   wait_for_pty_output "$fixture/$current_case.txt" 'Question:'
   printf '\003'
+  wait_for_pty_output "$fixture/$current_case.txt" "$child_status_marker:130"
 }
 
 interrupt_approval_input() {
   wait_for_pty_output "$fixture/$current_case.txt" 'Would you like to run the following command?'
   printf '\003'
+  wait_for_pty_output "$fixture/$current_case.txt" "$child_status_marker:130"
 }
 
 interrupt_terminal_input() {
@@ -478,6 +480,7 @@ interrupt_terminal_input() {
   while [ "$attempts" -lt 100 ]; do
     if grep -Fq '"kind": "tool_started"' "$session_file" 2>/dev/null; then
       printf '\003'
+      wait_for_pty_output "$fixture/$current_case.txt" "$child_status_marker:130" || return 1
       return 0
     fi
     attempts=$((attempts + 1))
