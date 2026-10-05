@@ -107,3 +107,12 @@ and mount-layout fixtures run on all platforms. Hosted Linux requires the strict
 backend; unavailable native backends may not silently skip those fixtures there.
 
 Independent exact-candidate review and fresh complete verification are pending.
+
+## Review Repair
+
+Review of e7eca590 found missing/invalid HOME could leave private home unmasked.
+The repaired constructor requires a canonical HOME directory, verifies its exact
+tmpfs mask, and pins that same canonical directory on the child environment.
+Missing, nonexistent, non-directory and unmaskable homes fail before spawning.
+Deterministic regression cases also prove the child cannot inherit a later HOME
+change. Renewed exact-candidate review and final verification remain required.
