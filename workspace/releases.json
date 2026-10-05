@@ -89,6 +89,21 @@
         "workspace/specs/done/tools-sandbox/T063_isolated_read_only_git_status.md"
       ],
       "evidence": "The intentionally shared nib-next reservation is 0.2.0 from released baseline 0.1.0. Production and development nib-release.json manifests were checked on 2026-10-05 at 15123a3ef275458efc87200400219aeacc3e9ea9 and 79a80c0759a7667b58bb1822bb9d2631df624c4b; both report 0.1.0. The atomic peer reservation reused nib-next at minor impact. T062 delivery applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before shared integration artifacts. T061 remains an accepted contract awaiting implementation; no question-form implementation or publication is claimed by this record. T063 is a compatible security follow-up sharing the already-applied target; no second bump is applied. Shared development integration is confirmed at 8bc243d00ec3ec82e7287c704fcdd897ff78204a via PR42, using the exact independently reviewed and Linux/macOS CI-qualified merge commit. Main and publication are not inferred. Development publication was independently inspected on 2026-10-05: Release Artifacts 37338656596 succeeded all four native archives and publication; the public development-latest nib-release.json binds version 0.2.0 to exact commit 8bc243d00ec3ec82e7287c704fcdd897ff78204a (published 2026-10-05T16:26:43Z). Production remains 0.1.0 at 15123a3ef275458efc87200400219aeacc3e9ea9. Released membership retains T061 accepted-contract documentation only: no question-form runtime implementation or acceptance delivery shipped. Before that implementation begins, obtain a fresh atomic reservation from the latest published baseline and reconcile its membership (or create a linked implementation spec); published 0.2.0 cannot be reused. Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f via PR43 on 2026-10-05T20:20:23Z after independent exact review and all-platform CI 37361857315. Final lifecycle reconciliation preserves the already-released 0.2.0 target and T061 documentation-only membership; production publication is a separate event."
+    },
+    {
+      "id": "nib-question-form",
+      "component": "nib",
+      "baseline": "0.2.0",
+      "target": "0.3.0",
+      "impact": "minor",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t061-prep",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/interactive/T067_question_form_runtime_implementation.md"
+      ],
+      "evidence": "User-authorized T061 runtime implementation starts on 2026-10-05. The atomic shared reservation uses minor 0.3.0 from published development 0.2.0 (manifest commit 3cc4550b7d807f39a5fecf07196ee2b703503b24). The designated preparation owner applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before implementation/integration artifacts. Production remains 0.1.0; application of 0.3.0 is not publication. No independent target is occupied. Linked T067 owns the complete T061 runtime implementation while T061 preserves its published accepted-contract minor membership in nib-next."
     }
   ]
 }

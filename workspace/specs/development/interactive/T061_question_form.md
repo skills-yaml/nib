@@ -4,7 +4,7 @@
 
 State: development
 Primary Feature: interactive
-revised by the user on 2026-10-01; implementation has not started.
+revised by the user on 2026-10-01; implementation started by user request on 2026-10-05.
 
 **Related:**
 [T047: User Interaction Harmonization](../../done/interactive/T047_user_interaction_harmonization.md),
@@ -399,20 +399,42 @@ no acceptance checkbox is promoted by this documentation update.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | minor | nib-next | Records the accepted question-form contract documentation published in 0.2.0; excludes all pending runtime implementation and acceptance delivery. |
+| nib | minor | nib-next | Preserves the accepted question-form contract documentation published in 0.2.0; all new runtime implementation is versioned by the linked T067 spec at 0.3.0. |
 
 ## Memory Impact
 
-Status: updated
-Rationale: Accepted contract for question-form interaction recorded in workspace/agents/memory/decisions.md and workspace/agents/memory/changelog.md; implementation delivery evidence remains separate.
+Status: pending
+
+Rationale: The accepted user decisions remain recorded in memory. Resolve shipped form,
+linked clarification recovery, compatibility, and delivery facts after exact
+implementation/review evidence is available; update category and changelog then.
 
 ## Published Contract Version Boundary (2026-10-05)
 
 The development 0.2.0 publication at
 `8bc243d00ec3ec82e7287c704fcdd897ff78204a` includes this accepted-contract
-documentation only. This spec remains in development, implementation has not
-started, and every implementation acceptance criterion remains unchecked.
+documentation only. At that publication boundary implementation had not
+started, and every implementation acceptance criterion remained unchecked at that publication.
 The released nib-next membership is publication history and cannot authorize
 future question-form code. Before implementation begins, obtain a fresh atomic
 reservation from the latest published baseline and reconcile membership or
 create a linked implementation spec. No new target is chosen by T062 delivery.
+
+## Runtime Implementation Start (2026-10-05)
+
+The user's request to continue T061 authorizes the approved implementation scope.
+The atomic reservation is `nib-question-form`, minor 0.3.0 from 0.2.0. The
+public development manifest was checked at commit
+`3cc4550b7d807f39a5fecf07196ee2b703503b24`; it reports 0.2.0. The production
+rolling release remains 0.1.0. No versioned 0.3.0 tag is occupied. Prior released
+`nib-next` evidence preserves T061's documentation-only history; its active member
+path and minor impact remain frozen publication history. The linked
+[T067 runtime implementation](T067_question_form_runtime_implementation.md) owns the
+new 0.3.0 runtime membership without rewriting the released target, aggregate
+impact, or claiming question-form implementation in 0.2.0.
+
+Stable acceptance identifiers AC-1 through AC-9 refer in order to the nine
+acceptance criteria above. The adjacent plan orders foundation, surface adapters,
+conversational recovery, independent review, frozen gates, development integration,
+main delivery and final lifecycle reconciliation. Implementation remains in
+this development state until actual shared integration is verified.
