@@ -20,11 +20,11 @@ interface change, and no paid provider calls.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Forced-CRLF checkout preserves generated context, Workspace text
+- [x] AC-1: Forced-CRLF checkout preserves generated context, Workspace text
   and upstream package bytes; ordinary text still exercises CRLF conversion.
-- [ ] AC-2: A real Git checkout fixture passes every governance module and
+- [x] AC-2: A real Git checkout fixture passes every governance module and
   rejects removal of checkout protection or modified upstream bytes.
-- [ ] AC-3: Windows and macOS run task workspace:check immediately after Task
+- [x] AC-3: Windows and macOS run task workspace:check immediately after Task
   installation, retaining existing full tests, qualifiers and smoke assertions.
 - [ ] AC-4: Independent exact-candidate review, affected native gates, full
   native verification and revised hosted Windows qualification pass.
@@ -70,8 +70,8 @@ inside the SHA-256 validator or edit upstream files to match a checkout.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Resolve the durable checkout-byte policy after independent review.
+Status: updated
+Rationale: New durable checkout-byte policy recorded in workspace/agents/memory/decisions.md and workspace/agents/memory/changelog.md.
 
 ## Independent Plan Review
 
@@ -79,3 +79,11 @@ Reviewer t062-review identified that a vendored-only rule would leave generated
 context, spec sections and WIP frontmatter exposed to CRLF failures. Approved
 LF protection for AGENTS.md/workspace, exact vendored bytes, full forced-CRLF
 fixture, early native governance and justified none version impact.
+
+## Local Validation Evidence
+
+Committed candidate 2a7cfe7 passed task test:workspace: all eight cases, including
+real forced-CRLF full governance, ordinary-text conversion, raw-byte tamper
+rejection and protection-removal rejection. The initial negative fixture was
+corrected to remove files before fresh checkout and assert actual CRLF bytes;
+no pre-fix gate pass or final hosted acceptance is inferred.

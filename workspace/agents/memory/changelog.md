@@ -447,3 +447,18 @@ Recorded the strict isolation requirement and isolated-repository configuration
 limit in decisions.md. This closes the host helper-execution finding discovered
 while reviewing T062's combined main promotion. Integration and main delivery
 remain separately verified lifecycle events.
+
+## 2026-10-05 - Workspace checkout-byte policy
+
+- Type: decision update
+- Source: T065 + independent review
+- Confidence: high
+- Review: exact candidate and hosted Windows verification required before delivery
+
+Content:
+
+Recorded in decisions.md the LF generated-context/Workspace checkout policy and
+raw-byte preservation of the imported standard. A real Git forced-CRLF fixture
+passes full governance and rejects removed protection and source-byte changes;
+ordinary text proves conversion is active. Main delivery remains separately
+verified and no checksum gate is relaxed.

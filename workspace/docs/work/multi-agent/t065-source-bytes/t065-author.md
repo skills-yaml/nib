@@ -27,7 +27,7 @@ Created an isolated worktree through an atomic peer claim. Recorded scope, accep
 
 ## Validation
 
-Pending.
+task test:workspace passed all eight cases on 2a7cfe7, including positive full governance and both negative checkout/integrity controls. Full native gates and hosted qualification remain required.
 
 ## Blockers and Dependencies
 
@@ -35,7 +35,7 @@ None.
 
 ## Next Step
 
-Reproduce the committed checkout failure, implement protection and validate the exact candidate.
+Complete affected gates, exact-candidate review and transactional integration; requalify hosted Windows before main.
 
 ## Handoff
 
