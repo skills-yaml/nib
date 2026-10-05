@@ -15,6 +15,8 @@ pub(crate) const WORKTREE_PREFLIGHT_MESSAGE: &str =
     "Managed worktree preparation failed. Run nib doctor and inspect the session worktree.";
 pub(crate) const OUTSIDE_WORKTREE_MESSAGE: &str =
     "Tool path is outside the active worktree. Use a path inside this project.";
+pub(crate) const TERMINAL_SCOPE_REQUIRED_MESSAGE: &str =
+    "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the same plan.";
 pub(crate) const INSTRUCTION_SCOPE_MESSAGE: &str =
     "Tool instructions could not be validated for this path. Inspect the project instructions and retry.";
 
@@ -37,6 +39,12 @@ pub(crate) fn worktree_preflight_category(error: &str) -> &'static str {
 pub(crate) fn tool_scope_preflight_message(error: &str) -> &'static str {
     if error.contains("outside the active worktree") {
         OUTSIDE_WORKTREE_MESSAGE
+    } else if matches!(
+        error,
+        crate::context::agents::TERMINAL_SCOPE_REQUIRED_ERROR
+            | crate::context::agents::TERMINAL_SCOPE_EMPTY_ERROR
+    ) {
+        TERMINAL_SCOPE_REQUIRED_MESSAGE
     } else {
         INSTRUCTION_SCOPE_MESSAGE
     }

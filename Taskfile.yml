@@ -180,6 +180,19 @@ tasks:
     cmds:
       - cargo test --test test_runtime_e2e -- --test-threads=1
 
+  test:terminal-preflight:
+    desc: Verify terminal listing classification, scope recovery, and isolated execution
+    summary: Run offline T060 classifier, instruction, approval, display, and runtime regressions.
+    cmds:
+      - 'cargo test --lib tools::classifier::tests:: -- --test-threads=1'
+      - 'cargo test --lib context::agents::tests:: -- --test-threads=1'
+      - 'cargo test --lib classifier_requires_available_isolation_for_cargo_git_and_task_commands -- --test-threads=1'
+      - 'cargo test --lib terminal_scope_recovery_is_consistent_live_and_reloaded -- --test-threads=1'
+      - 'cargo test --lib task_executable_mount -- --test-threads=1'
+      - 'cargo test --lib bwrap_preserves_home_installed_task -- --test-threads=1'
+      - 'cargo test --test test_runtime_e2e task_listing_without_affected_paths -- --test-threads=1'
+      - 'cargo test --test test_runtime_e2e missing_terminal_scope -- --test-threads=1'
+
   test:agent-context:
     desc: Run offline agent loop, planner, context, and compression tests
     cmds:

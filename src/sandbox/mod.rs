@@ -1032,9 +1032,78 @@ fn append_home_isolation(args: &mut Vec<String>, cwd: &Path) -> Result<HomeIsola
                 append_read_only_toolchain_mount(args, toolchain)?;
             }
         }
+        append_task_executable_mount(args, &home, cwd)?;
     }
 
     Ok(HomeIsolation { hidden, cargo_home })
+}
+
+fn append_task_executable_mount(
+    args: &mut Vec<String>,
+    home: &Path,
+    cwd: &Path,
+) -> Result<(), String> {
+    let Some(search_path) = std::env::var_os("PATH") else {
+        return Ok(());
+    };
+    for directory in std::env::split_paths(&search_path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd.join(directory)
+        };
+        let candidate = directory.join("task");
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        let source = candidate
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve Task executable: {error}"))?;
+        let destination = directory
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve Task executable directory: {error}"))?
+            .join("task");
+        // The PATH entry or its symlink target may be hidden by the home tmpfs.
+        // Rebind only the selected executable, never its containing directory.
+        let destination = if destination.starts_with(home) && !destination.starts_with(cwd) {
+            destination
+        } else if source.starts_with(home) && !source.starts_with(cwd) {
+            source.clone()
+        } else {
+            return Ok(());
+        };
+        let parent = destination
+            .parent()
+            .ok_or("Task executable has no parent directory")?;
+        args.extend([
+            "--dir".to_string(),
+            parent
+                .to_str()
+                .ok_or("Task directory is not valid UTF-8")?
+                .to_string(),
+            "--ro-bind".to_string(),
+            source
+                .to_str()
+                .ok_or("Task executable is not valid UTF-8")?
+                .to_string(),
+            destination
+                .to_str()
+                .ok_or("Task executable destination is not valid UTF-8")?
+                .to_string(),
+        ]);
+        return Ok(());
+    }
+    Ok(())
 }
 
 fn resolve_toolchain_home(
@@ -1881,6 +1950,92 @@ mod tests {
             "toolchain stderr: {}",
             String::from_utf8_lossy(&toolchain_output.stderr)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn task_executable_mount_is_one_read_only_file_and_follows_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempdir().expect("mount fixture");
+        let home = root.path().join("home");
+        let bin = home.join(".local/bin");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = home.canonicalize().unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        let source = root.path().join("task-binary");
+        std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&source, bin.join("task")).unwrap();
+        let _path = EnvironmentVariableGuard::set("PATH", bin.as_os_str());
+        let mut args = Vec::new();
+        append_task_executable_mount(&mut args, &home, &cwd).expect("Task mount");
+        let source = source.canonicalize().unwrap();
+        let destination = bin.canonicalize().unwrap().join("task");
+        assert!(args.windows(3).any(|window| window[0] == "--ro-bind"
+            && window[1] == source.to_string_lossy()
+            && window[2] == destination.to_string_lossy()));
+        assert_eq!(args.iter().filter(|arg| *arg == "--ro-bind").count(), 1);
+        assert!(!args.iter().any(|arg| arg == "--bind"));
+        // A non-executable PATH entry must not shadow the selected executable.
+        std::fs::remove_file(bin.join("task")).unwrap();
+        std::fs::write(bin.join("task"), "not executable").unwrap();
+        let mut args = Vec::new();
+        append_task_executable_mount(&mut args, &home, &cwd).unwrap();
+        assert!(args.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn bwrap_preserves_home_installed_task_without_exposing_siblings() {
+        use std::os::unix::fs::PermissionsExt;
+        if !detect_capabilities().bwrap_available {
+            return;
+        }
+        let root = tempdir().expect("Task sandbox fixture");
+        let home = root.path().join("home");
+        let bin = home.join(".local/bin");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let executable = bin.join("task");
+        let original = "#!/bin/sh\nprintf 'Task listing fixture\\n'\n";
+        std::fs::write(&executable, original).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("private.txt"), "private sibling").unwrap();
+        std::fs::write(home.join("private.txt"), "private home").unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let search_path = std::env::join_paths(paths).unwrap();
+        let _path = EnvironmentVariableGuard::set("PATH", &search_path);
+        let _home = EnvironmentVariableGuard::set("HOME", home.as_os_str());
+        let command = r#"
+            task --list &&
+            test ! -e "$HOME/private.txt" &&
+            test ! -e "$HOME/.local/bin/private.txt" &&
+            ! printf changed > "$HOME/.local/bin/task"
+        "#;
+        let (output, _) = run_sandboxed_with_provider(
+            command,
+            &cwd,
+            "bwrap",
+            "restricted",
+            &BoundaryConfig::default(),
+        )
+        .await
+        .expect("strict Task execution");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Task listing fixture"));
+        assert_eq!(std::fs::read_to_string(executable).unwrap(), original);
     }
 
     #[test]

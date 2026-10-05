@@ -538,6 +538,8 @@ match state {
                             "managed_worktree"
                         } else if *message == OUTSIDE_WORKTREE_MESSAGE {
                             "outside_worktree"
+                        } else if *message == TERMINAL_SCOPE_REQUIRED_MESSAGE {
+                            "scope_required"
                         } else {
                             "instruction_scope"
                         };
@@ -879,8 +881,14 @@ match state {
                         && preflight_failures
                             .values()
                             .all(|message| *message == INSTRUCTION_SCOPE_MESSAGE);
+                    let all_terminal_scopes_required = !tool_calls.is_empty()
+                        && preflight_failures.len() == tool_calls.len()
+                        && preflight_failures.values()
+                            .all(|message| *message == TERMINAL_SCOPE_REQUIRED_MESSAGE);
                     let tool_outcome = if batch_success {
                         "tool batch succeeded"
+                    } else if all_terminal_scopes_required {
+                        TERMINAL_SCOPE_REQUIRED_MESSAGE
                     } else if all_instruction_scopes_unavailable {
                         "required project instructions are unavailable for the proposed tool scope"
                     } else {
@@ -909,6 +917,8 @@ match state {
                             .any(|message| *message == OUTSIDE_WORKTREE_MESSAGE)
                         {
                             "tool_scope_outside_worktree"
+                        } else if all_terminal_scopes_required {
+                            "tool_scope_required"
                         } else {
                             "instruction_context_missing"
                         })
@@ -1465,6 +1475,8 @@ match state {
                                         "required project instructions are unavailable",
                                     )
                                 })
+                            } else if other == "tool_scope_required" {
+                                TERMINAL_SCOPE_REQUIRED_MESSAGE.to_string()
                             } else {
                                 format!("Run reconciled with outcome: {other}")
                             };
