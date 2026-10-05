@@ -279,3 +279,24 @@ CI 37344993093 passed Linux/macOS full suites, exact binary qualification,
 combined task verify passed at 9528c7ce80d68480914acea842b17a9521b38e30;
 all 1265 library and 93 CLI tests, integration suites and doctests passed with
 native bwrap required. Main qualification and completion remain pending.
+
+## Windows Checkout Qualification Follow-up
+
+Main CI 37344943162 passed Linux/macOS, Windows library (1166), CLI (93),
+runtime and other integration suites, exact release qualification and native
+smokes. The prior tool-start readiness timeout did not repeat; its root cause
+remains unconfirmed. The final Workspace positive fixture failed raw upstream
+SHA-256 integrity on AGENT_MIGRATION.md after checkout conversion. Linked
+[T065](../../development/workspace-governance/T065_preserve_workspace_checkout_bytes.md)
+preserves generated-context/Workspace LF and exact upstream package bytes,
+with a real forced-CRLF full-governance fixture and unchanged raw integrity
+validator. Independent review approved exact source bcbd8ab and combined
+656099c; all eight native Workspace cases, five documentation cases and both
+Task contracts passed. Renewed main CI 37354295208 and development CI
+37354351025 exercise the reviewed source; Windows early canonical governance
+has passed, while remaining full acceptance and main delivery are pending.
+
+Release Artifacts 37349551414 also passed all builds/publication for repaired
+development revision 3cc4550b7d807f39a5fecf07196ee2b703503b24. The public
+manifest independently confirms version 0.2.0 at that commit, published
+2026-10-05T17:46:17Z. This updates development publication only.

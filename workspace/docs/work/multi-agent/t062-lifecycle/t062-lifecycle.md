@@ -16,11 +16,11 @@ scope:
 
 ## Assignment
 
-Reconcile T062 and linked T063 through confirmed development integration, reviewed main promotion and completion records. Preserve implementation and historical done evidence.
+Reconcile T062 and linked T063/T064/T065 through confirmed development integration, reviewed main promotion and completion records. Preserve implementation and historical done evidence.
 
 ## Actions
 
-Claimed isolated workspace scope after reviewed implementation integration. Confirmed exact CI-qualified development merge via PR42, moved both specs to test, and reconciled catalog and applied release membership.
+Claimed isolated workspace scope after reviewed implementation integration. Confirmed exact development events PR42/PR44, reconciled T062/T063/T064 test states, and verified separate 0.2.0 development publication. Combined independently reviewed T065 checkout repair while retaining its development state; renewed native and hosted qualification.
 
 ## Validation
 
@@ -28,7 +28,7 @@ Independent source/combined-main review and frozen source task verify passed. De
 
 ## Blockers and Dependencies
 
-None.
+Native and hosted full qualification remain pending; no paid live calls are required or authorized.
 
 ## Next Step
 
@@ -36,4 +36,4 @@ Review test-state records, freeze and verify, then promote the exact all-platfor
 
 ## Handoff
 
-Memory impact: updated through T062/T063 durable governance and security decisions. nib-next remains applied at 0.2.0; main completion and publication are separate pending events.
+Memory impact: updated through T062/T063 durable governance and security decisions. nib-next is released at 0.2.0 through separately verified development publication; main completion remains pending. T065 adds durable checkout-byte policy; T064 memory impact is none.
