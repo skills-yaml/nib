@@ -46,9 +46,9 @@ fn revision_origin(
                 && (record.run_id.as_deref() == Some(binding.run_id)
                     || binding.discussion_invocation_id == Some(record.invocation_id))
                 && match question.title.as_deref() {
-                    Some(title) => {
-                        record.title.as_deref() == Some(title) && record.question_index == index
-                    }
+                    // Titles identify questions across revised calls, whose order
+                    // and cardinality may change. Keep the original index in the link.
+                    Some(title) => record.title.as_deref() == Some(title),
                     None => {
                         record.title.is_none()
                             && record.question == question.question
