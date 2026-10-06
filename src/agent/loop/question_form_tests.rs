@@ -323,6 +323,227 @@ fn discussion_retains_dependencies_and_exact_revisions_resolve_only_linked_origi
         Some(first)
     );
 }
+fn form_blockers(session: &Session, plan: &str) -> Vec<ToolInvocationId> {
+    unresolved_clarification_dependencies(
+        session,
+        Some(plan),
+        Path::new("."),
+        &[ToolCallRequest::new(
+            "read_file",
+            json!({"path":"src/lib.rs"}),
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn discussed_set_question_reasked_alone_keeps_original_index_and_reused_sibling() {
+    for recovered in [false, true] {
+        let (_dir, store, id, plan) = form_store();
+        let choice = form(json!({"question":"which mode?","options":["fast"]}));
+        let (seed, _) = register(&store, &id, &plan, "run-a", &choice, None);
+        apply(
+            &store,
+            &id,
+            seed,
+            &QuestionFormOutcome::Answered(vec![option("fast")]),
+        );
+        let original = form(json!({"questions":[
+            {"title":"mode","question":"which mode?","options":["fast"]},
+            {"title":"target","question":"which target?"}
+        ]}));
+        let (first, initial) = register(&store, &id, &plan, "run-a", &original, None);
+        assert_eq!(initial, [Some(option("fast")), None]);
+        apply(
+            &store,
+            &id,
+            first,
+            &QuestionFormOutcome::Discussed("explain target".into()),
+        );
+        let discussed = store.load(&id).unwrap();
+        let sibling = discussed
+            .clarifications
+            .iter()
+            .find(|record| record.invocation_id == first && record.question_index == 0)
+            .unwrap()
+            .clone();
+        assert_eq!(form_blockers(&discussed, &plan), [first]);
+        let (run, discussion) = if recovered {
+            runtime_terminal_event(&store, &id, "run-a", "waiting_for_user_input").unwrap();
+            crate::session::persist_recovered_form_outcome(
+                &store,
+                &id,
+                first,
+                &QuestionFormOutcome::Discussed("clarify after reload".into()),
+            )
+            .unwrap();
+            validate_discussion_admission(&store, &id, &plan, "finish work", "run-b", first)
+                .unwrap();
+            prepare_discussion_turn(&store, &id, &plan, "finish work", "run-b", first).unwrap();
+            ("run-b", Some(first))
+        } else {
+            ("run-a", None)
+        };
+        let revised =
+            form(json!({"questions":[{"title":"target","question":"which revised target?"}]}));
+        let (second, _) = register(&store, &id, &plan, run, &revised, discussion);
+        let awaiting = store.load(&id).unwrap();
+        let linked = awaiting
+            .clarifications
+            .iter()
+            .find(|record| record.invocation_id == second)
+            .unwrap();
+        assert_eq!(linked.question_index, 0);
+        assert_eq!(
+            (linked.origin_invocation_id, linked.origin_question_index),
+            (Some(first), Some(1))
+        );
+        assert!(form_blockers(&awaiting, &plan).contains(&first));
+        let pending = crate::session::pending_question_forms(&awaiting);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].invocation_id, second);
+        apply(
+            &store,
+            &id,
+            second,
+            &QuestionFormOutcome::Answered(vec![text("src/lib.rs")]),
+        );
+        let reopened = SessionStore::at_dir(store.sessions_dir().to_path_buf());
+        let answered = reopened.load(&id).unwrap();
+        let original_target = answered
+            .clarifications
+            .iter()
+            .find(|record| record.invocation_id == first && record.question_index == 1)
+            .unwrap();
+        assert_eq!(original_target.status, ClarificationStatus::Answered);
+        assert_eq!(original_target.answer.as_deref(), Some("src/lib.rs"));
+        assert_eq!(
+            answered
+                .clarifications
+                .iter()
+                .find(|record| record.invocation_id == first && record.question_index == 0)
+                .unwrap(),
+            &sibling
+        );
+        assert!(form_blockers(&answered, &plan).is_empty());
+        assert!(!answered.has_unresolved_clarification(Some(&plan)));
+    }
+}
+
+#[test]
+fn reordered_discussed_set_preserves_each_original_index_and_answer() {
+    let (_dir, store, id, plan) = form_store();
+    let original = form(json!({"questions":[
+        {"title":"target","question":"which target?"},
+        {"title":"mode","question":"which mode?"}
+    ]}));
+    let (first, _) = register(&store, &id, &plan, "run-a", &original, None);
+    apply(
+        &store,
+        &id,
+        first,
+        &QuestionFormOutcome::Discussed("explain both".into()),
+    );
+    let reordered = form(json!({"questions":[
+        {"title":"mode","question":"which revised mode?"},
+        {"title":"target","question":"which revised target?"}
+    ]}));
+    let (second, _) = register(&store, &id, &plan, "run-a", &reordered, None);
+    let pending = store.load(&id).unwrap();
+    for record in pending
+        .clarifications
+        .iter()
+        .filter(|record| record.invocation_id == second)
+    {
+        assert_eq!(record.origin_invocation_id, Some(first));
+        assert_eq!(
+            record.origin_question_index,
+            Some(1 - record.question_index)
+        );
+    }
+    assert!(pending.has_unresolved_clarification(Some(&plan)));
+    apply(
+        &store,
+        &id,
+        second,
+        &QuestionFormOutcome::Answered(vec![text("carefully"), text("src/lib.rs")]),
+    );
+    let reopened = SessionStore::at_dir(store.sessions_dir().to_path_buf());
+    let answered = reopened.load(&id).unwrap();
+    let originals = answered
+        .clarifications
+        .iter()
+        .filter(|record| record.invocation_id == first)
+        .collect::<Vec<_>>();
+    assert_eq!(originals[0].answer.as_deref(), Some("src/lib.rs"));
+    assert_eq!(originals[1].answer.as_deref(), Some("carefully"));
+    assert!(answered
+        .clarifications
+        .iter()
+        .all(|record| record.status == ClarificationStatus::Answered));
+    assert!(form_blockers(&answered, &plan).is_empty());
+    assert!(crate::session::pending_question_forms(&answered).is_empty());
+}
+
+#[test]
+fn independent_same_title_discussions_at_different_indices_remain_ambiguous_after_reload() {
+    let (_dir, store, id, plan) = form_store();
+    let a = form(json!({"questions":[
+        {"title":"target","question":"first independent target?"},
+        {"title":"other-a","question":"first other question?"}
+    ]}));
+    let b = form(json!({"questions":[
+        {"title":"other-b","question":"second other question?"},
+        {"title":"target","question":"second independent target?"}
+    ]}));
+    let (first, _) = register(&store, &id, &plan, "run-a", &a, None);
+    // Independent persisted calls have no discussion revision link between them.
+    let (other, _) = register(&store, &id, &plan, "run-a", &b, None);
+    apply(
+        &store,
+        &id,
+        first,
+        &QuestionFormOutcome::Discussed("first discussion".into()),
+    );
+    apply(
+        &store,
+        &id,
+        other,
+        &QuestionFormOutcome::Discussed("independent discussion".into()),
+    );
+    let reopened = SessionStore::at_dir(store.sessions_dir().to_path_buf());
+    let revised =
+        form(json!({"questions":[{"title":"target","question":"which revised target?"}]}));
+    let (latest, _) = register(&reopened, &id, &plan, "run-a", &revised, None);
+    let before = reopened.load(&id).unwrap();
+    let unlinked = before
+        .clarifications
+        .iter()
+        .find(|record| record.invocation_id == latest)
+        .unwrap();
+    assert!(unlinked.origin_invocation_id.is_none());
+    assert!(unlinked.origin_question_index.is_none());
+    apply(
+        &reopened,
+        &id,
+        latest,
+        &QuestionFormOutcome::Answered(vec![text("src/lib.rs")]),
+    );
+    let answered = reopened.load(&id).unwrap();
+    for (invocation, index) in [(first, 0), (other, 1)] {
+        let original = answered
+            .clarifications
+            .iter()
+            .find(|record| record.invocation_id == invocation && record.question_index == index)
+            .unwrap();
+        assert_eq!(original.status, ClarificationStatus::Discussed);
+        assert!(original.answer.is_none());
+        assert!(form_blockers(&answered, &plan).contains(&invocation));
+    }
+    assert!(answered.has_unresolved_clarification(Some(&plan)));
+    assert_eq!(crate::session::pending_question_forms(&answered).len(), 2);
+}
+
 #[test]
 fn unrelated_untitled_question_in_the_same_run_never_clears_discussed_blocker() {
     let (_dir, store, id, plan) = form_store();
@@ -847,33 +1068,77 @@ fn scripted_tool(id: &str, name: &str, arguments: Value) -> Value {
 fn scripted_final() -> Value {
     json!({"id":"response-final","status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"The approved step is complete."}]}]})
 }
-fn read_fixture_request(stream: &mut std::net::TcpStream) -> Value {
-    use std::io::Read;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+fn read_fixture_request(stream: &mut impl std::io::Read) -> Option<Value> {
+    const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
     let mut data = Vec::new();
     let mut buffer = [0; 4096];
     loop {
         let count = stream.read(&mut buffer).expect("bounded request read");
-        assert!(count > 0);
+        assert!(
+            count > 0,
+            "fixture request closed before its frame completed"
+        );
         data.extend_from_slice(&buffer[..count]);
-        assert!(data.len() < 2 * 1024 * 1024);
+        assert!(data.len() < MAX_REQUEST_BYTES, "fixture request byte bound");
         if let Some(end) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
             let header = String::from_utf8_lossy(&data[..end]);
+            if header.lines().next() != Some("POST /v1/responses HTTP/1.1") {
+                return None;
+            }
             let length = header
                 .lines()
                 .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
                 })
-                .expect("content length");
-            if data.len() >= end + 4 + length {
-                return serde_json::from_slice(&data[end + 4..end + 4 + length]).unwrap();
+                .expect("Responses fixture POST requires valid content length");
+            let body_start = end + 4;
+            assert!(
+                length < MAX_REQUEST_BYTES - body_start,
+                "fixture body byte bound"
+            );
+            if data.len() >= body_start + length {
+                return Some(
+                    serde_json::from_slice(&data[body_start..body_start + length])
+                        .expect("Responses fixture POST requires JSON"),
+                );
             }
         }
     }
+}
+fn accept_scripted_form_post(
+    listener: &std::net::TcpListener,
+    deadline: Instant,
+) -> Option<(std::net::TcpStream, Value)> {
+    use std::io::Write;
+    for _ in 0..=8 {
+        let mut stream = loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("fixture accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        if let Some(request) = read_fixture_request(&mut stream) {
+            return Some((stream, request));
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+    panic!("Responses fixture received too many unrelated requests");
 }
 fn scripted_form_server(responses: Vec<Value>) -> (String, std::sync::mpsc::Receiver<Value>) {
     use std::io::Write;
@@ -884,19 +1149,10 @@ fn scripted_form_server(responses: Vec<Value>) -> (String, std::sync::mpsc::Rece
     std::thread::spawn(move || {
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
         for response in responses {
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if Instant::now() >= deadline {
-                            return;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("fixture accept: {error}"),
-                }
+            let Some((mut stream, request)) = accept_scripted_form_post(&listener, deadline) else {
+                return;
             };
-            sender.send(read_fixture_request(&mut stream)).unwrap();
+            sender.send(request).unwrap();
             let body = format!(
                 "data: {}\n\n",
                 json!({"type":"response.completed","response":response})
@@ -905,6 +1161,72 @@ fn scripted_form_server(responses: Vec<Value>) -> (String, std::sync::mpsc::Rece
         }
     });
     (format!("http://{address}/v1"), receiver)
+}
+#[test]
+fn scripted_form_fixture_ignores_bodyless_local_probe_before_responses_post() {
+    use std::io::{Read, Write};
+    let (url, requests) = scripted_form_server(vec![scripted_final()]);
+    let address = url
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/v1")
+        .unwrap();
+    let mut probe = std::net::TcpStream::connect(address).unwrap();
+    probe
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    probe
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut rejected = String::new();
+    probe.read_to_string(&mut rejected).unwrap();
+    assert!(rejected.starts_with("HTTP/1.1 404 Not Found"));
+    let mut valid = std::net::TcpStream::connect(address).unwrap();
+    valid
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    valid
+        .write_all(b"POST /v1/responses HTTP/1.1\r\ncOnTeNt-LeNgTh: 2\r\n\r\n{}")
+        .unwrap();
+    let mut response = String::new();
+    valid.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("response-final"));
+    assert_eq!(
+        requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        json!({})
+    );
+}
+#[test]
+fn scripted_form_fixture_retains_strict_bounded_post_framing_and_json() {
+    use std::io::{Cursor, Read};
+    struct Fragmented<'a>(&'a [u8]);
+    impl Read for Fragmented<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.0.len().min(buffer.len()).min(3);
+            buffer[..count].copy_from_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            Ok(count)
+        }
+    }
+    let request = b"POST /v1/responses HTTP/1.1\r\ncOnTeNt-LeNgTh: 12\r\n\r\n{\"value\":42}";
+    assert_eq!(
+        read_fixture_request(&mut Fragmented(request)),
+        Some(json!({"value":42}))
+    );
+    for request in [
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\n\r\n{}",
+        "POST /v1/responses HTTP/1.1\r\nContent-Length: invalid\r\n\r\n{}",
+        "POST /v1/responses HTTP/1.1\r\nContent-Length: 2097152\r\n\r\n",
+        "POST /v1/responses HTTP/1.1\r\nContent-Length: 4\r\n\r\n{}",
+        "POST /v1/responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{x",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| read_fixture_request(&mut Cursor::new(request))).is_err()
+        );
+    }
 }
 async fn run_scripted_form(
     responses: Vec<Value>,
