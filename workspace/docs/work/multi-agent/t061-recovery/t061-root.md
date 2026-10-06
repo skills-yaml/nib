@@ -7,7 +7,7 @@ status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T23:45:43Z
+updated_at: 2026-10-06T00:00:27Z
 scope:
   - Taskfile.yml
   - src/interactive
@@ -37,11 +37,17 @@ an older unbound legacy question through conversational routing or modal complet
 rejected recovery leaves the complete durable session unchanged. Reconciled stale
 catalog audit prose to active implementation and verified internal core evidence,
 without claiming shared branch delivery.
+Late independent review confirmed a continuation race after a successful answer
+commit: a replacement current plan could be selected. Bound continuation to the
+exact plan ID returned by lease-fenced persistence, with the same binding for
+bare-resume snapshots. Added a deterministic persisted-A/replaced-B fixture
+covering replacement plans with and without pending forms; rejection preserves
+the complete durable session.
 
 
 ## Validation
 
-Merged the independently reviewed core integration `2c4268550e76a037bdb141bd6c874e544fb16e1d`; retained both form and recovery exports in the shared module. Task fmt and source diff checks passed. Task test:interactive passed all 266 tests: 16 steering, 91 shared interaction (including 17 recovery API regressions), 115 TUI, 6 console, 27 plain chat, 10 CLI and 1 installer smoke-contract fixture. Strict task check passed installer syntax, workspace structure/catalog/memory/version/coordination, formatting and warning-denying Clippy across all targets/features. Task test:task-contract passed both composition/lint-policy fixtures. Independent spec then quality source review found no remaining defects; exact frozen record review and aggregate integration gates remain required. Task docs:check passed workspace/catalog/memory/version/coordination validation and all five documentation integrity fixtures after catalog and record reconciliation.
+Merged the independently reviewed core integration `2c4268550e76a037bdb141bd6c874e544fb16e1d`; retained both form and recovery exports in the shared module. Task fmt and source diff checks passed. Corrected-source task test:interactive passed all 267 tests: 16 steering, 92 shared interaction (including 18 recovery API regressions), 115 TUI, 6 console, 27 plain chat, 10 CLI and 1 installer smoke-contract fixture. Strict task check passed installer syntax, workspace structure/catalog/memory/version/coordination, formatting and warning-denying Clippy across all targets/features. Task test:task-contract passed both composition/lint-policy fixtures. The first handoff was subsequently rejected for the late exact-plan race above. Its aggregate integration run was interrupted before the internal ref advanced; staging source and logs are preserved in a runtime archive. Corrected-source formatting, interactive, strict static and Task-composition gates passed; renewed exact source/record review and aggregate integration are required. Task docs:check passed workspace/catalog/memory/version/coordination validation and all five documentation integrity fixtures after catalog and record reconciliation.
 
 ## Blockers and Dependencies
 

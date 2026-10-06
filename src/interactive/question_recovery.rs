@@ -339,7 +339,12 @@ pub fn recover_question_conversation(
                     && recoverable_record(&session, record)
             })
         {
-            return continue_after_answers(store, session_id).map(Some);
+            let plan_id = session
+                .plan
+                .as_ref()
+                .map(|plan| plan.id.as_str())
+                .ok_or_else(|| "no plan remains to resume".to_string())?;
+            return continue_after_answers(store, session_id, plan_id).map(Some);
         }
         return Ok(None);
     }
@@ -415,8 +420,14 @@ fn matched_response(
 fn continue_after_answers(
     store: &SessionStore,
     session_id: &str,
+    expected_plan_id: &str,
 ) -> Result<QuestionRecoveryEffect, String> {
     let session = load_session(store, session_id)?;
+    if session.plan.as_ref().map(|plan| plan.id.as_str()) != Some(expected_plan_id) {
+        return Err(
+            "the answered question plan is no longer current and cannot resume".to_string(),
+        );
+    }
     plan_admission(&session)?;
     let forms = eligible_forms(&session, store)?;
     if forms.len() > 1 {
@@ -435,12 +446,7 @@ fn continue_after_answers(
     if let Some(form) = forms.into_iter().next() {
         return Ok(QuestionRecoveryEffect::OpenForm(form));
     }
-    let plan_id = session
-        .plan
-        .as_ref()
-        .map(|plan| plan.id.as_str())
-        .ok_or_else(|| "no plan remains to resume".to_string())?;
-    match load_continue_plan_effect(store, session_id, plan_id)? {
+    match load_continue_plan_effect(store, session_id, expected_plan_id)? {
         InteractiveEffect::ContinuePlan { plan_id, goal } => {
             Ok(QuestionRecoveryEffect::ContinuePlan { plan_id, goal })
         }
@@ -472,15 +478,20 @@ pub fn complete_question_recovery(
         ),
         other => other,
     };
-    crate::session::persist_recovered_form_outcome(store, session_id, invocation_id, &outcome)?;
+    let persisted_plan_id =
+        crate::session::persist_recovered_form_outcome(store, session_id, invocation_id, &outcome)?;
     match outcome {
-        QuestionFormOutcome::Answered(_) => Ok(continue_after_answers(store, session_id)
-            .unwrap_or_else(|error| {
-                QuestionRecoveryEffect::Output(format!(
-                    "Your answers were saved. Dependent work remains paused: {}",
-                    bounded_public_text(&error, store.public_sensitive_values(), 1_000, false)
-                ))
-            })),
+        QuestionFormOutcome::Answered(_) => Ok(continue_after_answers(
+            store,
+            session_id,
+            &persisted_plan_id,
+        )
+        .unwrap_or_else(|error| {
+            QuestionRecoveryEffect::Output(format!(
+                "Your answers were saved. Dependent work remains paused: {}",
+                bounded_public_text(&error, store.public_sensitive_values(), 1_000, false)
+            ))
+        })),
         QuestionFormOutcome::Discussed(_) => {
             let plan = session
                 .plan

@@ -522,3 +522,54 @@ fn committed_answers_are_reported_saved_when_another_operation_blocks_resume() {
         ClarificationStatus::Unresolved
     );
 }
+
+#[test]
+fn committed_question_answers_cannot_resume_or_reopen_a_replacement_plan() {
+    for has_pending_question in [false, true] {
+        let (_directory, store, session_id, invocation_id, plan_id) =
+            recoverable_question_fixture();
+        let original_record = store.load(&session_id).unwrap().clarifications[0].clone();
+        let persisted_plan_id = crate::session::persist_recovered_form_outcome(
+            &store,
+            &session_id,
+            invocation_id,
+            &QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer: "beta".to_string(),
+                source: QuestionAnswerSource::Option,
+            }]),
+        )
+        .unwrap();
+        assert_eq!(persisted_plan_id, plan_id);
+        store
+            .update_session(&session_id, |session| {
+                let plan = session.plan.as_mut().unwrap();
+                plan.id = uuid::Uuid::new_v4().to_string();
+                plan.goal = "different approved work".to_string();
+                if has_pending_question {
+                    let mut record = original_record.clone();
+                    record.invocation_id = ToolInvocationId::new();
+                    record.plan_id = Some(plan.id.clone());
+                    record.question_event_index = session.events.len();
+                    session.events.push(SessionEvent {
+                        index: record.question_event_index,
+                        kind: "question_required".to_string(),
+                        details: json!({"invocation_id":record.invocation_id,"plan_id":plan.id,"question":record.question,"options":record.options}),
+                        timestamp: None,
+                    });
+                    session.clarifications.push(record);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let before = serde_json::to_value(store.load(&session_id).unwrap()).unwrap();
+        assert!(
+            continue_after_answers(&store, &session_id, &persisted_plan_id)
+                .unwrap_err()
+                .contains("no longer current")
+        );
+        assert_eq!(
+            serde_json::to_value(store.load(&session_id).unwrap()).unwrap(),
+            before
+        );
+    }
+}
