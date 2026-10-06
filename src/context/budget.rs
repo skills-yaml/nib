@@ -1019,7 +1019,7 @@ mod tests {
         assert!(system.contains("A source-backed project overview"));
         assert!(system.contains("task check: Run project checks"));
         assert!(system.contains("task verify: Run full verification"));
-        assert!(system.contains("/plan [prompt]"));
+        assert!(system.contains("/status"));
         assert!(bounded.approximate_tokens <= input_cap(4_000).unwrap());
     }
 

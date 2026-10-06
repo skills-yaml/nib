@@ -101,12 +101,15 @@ task build
    - `/help` - Show available commands
    - `/model` - Switch the active LLM model
    - `/session` - Preview and resume a persisted session
-   - `/questions [id]` - List or answer unresolved questions for the current plan
    - `/continue <plan-id>` - Explicitly continue that exact recovered plan
    - `/clear` - Start a fresh session
    - `/skills` - Manage installed skills
    - `/mcp` - Manage MCP servers
    - `/quit` - Exit the session
+
+   To recover an interrupted question, say `resume the question`. nib reopens the
+   saved question or asks which pending operation to resume. Complete its answers
+   before dependent work or plan completion; question sets require a final Submit.
 
    `nib --session <id>` resumes a profile-scoped session, and `--auth` runs
    authentication first. `nib chat` remains an explicit spelling of the same launcher;
