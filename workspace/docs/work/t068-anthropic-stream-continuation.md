@@ -30,3 +30,9 @@ Rationale: Recorded the verified native-stream preservation fact and its distinc
 - Focused conformance: 31 passed. Offline live harness: 71 passed, 1 paid test ignored. No credentialed or paid requests.
 - Existing signed-stream unit fixture now includes its valid native block starts/stops; the intentionally incomplete EOF rejection fixture remains negative.
 - Independent preparation review resolved the inventory-count finding. Production candidate review, frozen gates and delivery remain pending.
+
+## Independent Review Reconciliation
+
+The initial production review found that indexed native content could be silently sorted despite reversed or overlapping wire starts. The accepted fix flags a start whose index is not the next sequential index or whose predecessor remains open, and rejects tool authority at completion. Malformed-order and overlap HTTP regressions now accompany the earlier malformed fixtures. Existing text-only projection remains compatible.
+
+Delivery follows the normal lifecycle: qualify the exact PR merge revision Q; fast-forward shared development to Q and confirm it; commit the corresponding local test-state record T with catalog/release paths and fresh documentation/version gates; then deliver the same fully qualified Q to main. A later done-state record D includes both observed events and receives fresh exact review and qualification before shared delivery. Main never receives an unqualified metadata revision.

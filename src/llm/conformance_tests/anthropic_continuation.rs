@@ -228,6 +228,13 @@ async fn assert_invalid_native_turn(wire: String) -> LlmError {
 async fn malformed_native_blocks_fail_closed_without_private_authority() {
     let blocks = native_blocks();
     let valid = native_stream(&blocks);
+    let out_of_order = valid
+        .replace("\"index\":0", "\"index\":temporary")
+        .replace("\"index\":1", "\"index\":0")
+        .replace("\"index\":temporary", "\"index\":1");
+    let overlapping = valid
+        .replace("event: content_block_stop\ndata: {\"index\":0}\n\n", "")
+        .replace("event: content_block_stop\ndata: {\"index\":1}\n\n", "event: content_block_stop\ndata: {\"index\":0}\n\nevent: content_block_stop\ndata: {\"index\":1}\n\n");
     let wrong_type = valid.replace("\"type\":\"signature_delta\"", "\"type\":\"text_delta\"");
     let missing_stop = valid.replace("event: content_block_stop\ndata: {\"index\":0}\n\n", "");
     let duplicate_start = valid.replace("event: content_block_stop\ndata: {\"index\":0}\n\n", "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n");
@@ -245,6 +252,8 @@ async fn malformed_native_blocks_fail_closed_without_private_authority() {
     );
     event(&mut after_terminal, "message_stop", json!({}));
     for wire in [
+        out_of_order,
+        overlapping,
         wrong_type,
         missing_stop,
         duplicate_start,

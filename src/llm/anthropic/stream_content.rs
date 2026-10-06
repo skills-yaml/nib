@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 pub(super) struct NativeStreamContent {
     blocks: BTreeMap<usize, NativeBlock>,
     missing_start: bool,
+    invalid_sequence: bool,
     terminal_seen: bool,
 }
 
@@ -44,6 +45,9 @@ impl NativeStreamContent {
                 let index = index(data)?;
                 if self.blocks.contains_key(&index) {
                     return Err("Anthropic stream restarted a native content block".to_string());
+                }
+                if index != self.blocks.len() || self.blocks.values().any(|block| !block.closed) {
+                    self.invalid_sequence = true;
                 }
                 let value = data
                     .get("content_block")
@@ -99,6 +103,9 @@ impl NativeStreamContent {
     }
 
     pub(super) fn finish(self, calls: &[ToolCallRequest]) -> Result<Vec<Value>, String> {
+        if self.invalid_sequence {
+            return Err("Anthropic tool turn has out-of-order native content blocks".to_string());
+        }
         if self.missing_start {
             return Err("Anthropic tool turn is missing native content starts".to_string());
         }
