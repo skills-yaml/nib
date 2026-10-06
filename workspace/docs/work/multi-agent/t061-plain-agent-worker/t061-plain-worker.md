@@ -44,11 +44,27 @@ modal responders, awaits exact reconciliation and joins the stream renderer.
 No production stack setting, environment stack override, deadline, native
 exclusion, approval policy or recovery admission change is introduced.
 
+Independent review found that an unowned JoinHandle could detach the worker
+on router unwind and retain the stream sender while renderer cleanup waits.
+A private abort-on-drop owner now cancels it before prepared-state cleanup.
+A colocated bounded regression unwinds that owner while a real worker holds
+modal/stream resources, then checks cancellation, resource closure and absence
+of dependent continuation.
+
+The first positive interaction run exposed two unchanged goal/session-switch
+assertions: buffered input could cancel the worker before its first real poll.
+A first-poll handshake now restores the former biased polling order. Only a
+Pending first poll enables input routing; Ready or worker failure joins before
+routing buffered input. No goal is pre-appended or duplicated.
+
 ## Validation
 
 Negative task test:interactive reproduced the real stack failure on the unfixed
-code. Fixed-source Task fmt/check, interaction, agent/context, runtime and
-documentation gates remain pending. Independent exact source review is pending.
+code. Initial positive interaction validation failed those two existing chat
+assertions before reaching the low-stack CLI regression. Corrected-source Task
+fmt passed; strict check, interaction, full tests (including the colocated
+ownership test) and documentation gates remain pending. Renewed independent
+exact source review is pending.
 The shared applied nib-question-form minor reservation remains 0.3.0 from
 0.2.0; no second bump. Cargo runs serially through Task with one build job,
 debug symbols disabled and the configured native bwrap support flag.
