@@ -255,12 +255,12 @@ fn question_card_states_the_ask_and_numbered_choices() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let (reply_tx, _reply_rx) = oneshot::channel();
-    let question = PendingQuestion::new(TuiQuestionRequest {
-        question: "Choose a mode".to_string(),
-        proposed_answer: None,
-        options: vec!["plan".to_string(), "execute".to_string()],
-        reply: reply_tx,
-    });
+    let question = PendingQuestion::new(TuiQuestionRequest::single(
+        "Choose a mode".to_string(),
+        None,
+        vec!["plan".to_string(), "execute".to_string()],
+        reply_tx,
+    ));
     terminal
         .draw(|frame| {
             render_current_session_view(
@@ -282,10 +282,12 @@ fn question_card_states_the_ask_and_numbered_choices() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("Choose a mode"), "{rendered}");
-    assert!(rendered.contains("1. plan (1)"), "{rendered}");
-    assert!(rendered.contains("2. execute (2)"), "{rendered}");
-    assert!(rendered.contains("Leave unanswered"), "{rendered}");
-    assert!(rendered.contains("WAITING QUESTION"), "{rendered}");
+    assert!(rendered.contains("› 1. plan"), "{rendered}");
+    assert!(rendered.contains("2. execute"), "{rendered}");
+    assert!(
+        rendered.contains("Type something.") && rendered.contains("Chat about this"),
+        "{rendered}"
+    );
     assert!(rendered.contains("Enter"), "{rendered}");
     assert!(rendered.contains("Esc"), "{rendered}");
     assert!(rendered.contains("inspect wrap"), "{rendered}");

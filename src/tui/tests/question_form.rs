@@ -1,0 +1,674 @@
+use super::*;
+
+fn form_request(
+    reply: oneshot::Sender<crate::interactive::QuestionFormOutcome>,
+) -> TuiQuestionRequest {
+    let mut request = TuiQuestionRequest::single(
+        "Are prices final?".to_string(),
+        None,
+        vec!["Final".to_string(), "Review".to_string()],
+        reply,
+    );
+    request.form.header = Some("Pricing decisions".to_string());
+    request.form.questions[0].title = Some("Prices/VAT".to_string());
+    request.form.questions[0].options[0].description =
+        Some("Keep the displayed prices and include VAT.".to_string());
+    let mut second = request.form.questions[0].clone();
+    second.title = Some("Interval".to_string());
+    second.question = "Which interval?".to_string();
+    request.form.questions.push(second);
+    request
+}
+
+#[test]
+fn form_tabs_keep_drafts_and_send_only_from_submit() {
+    let (reply, mut response) = oneshot::channel();
+    let mut pending = Some(PendingQuestion::new(form_request(reply)));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert_eq!(pending.as_ref().unwrap().state.tab, 1);
+    assert!(!handle_question_key(&mut pending, KeyCode::Char('2')));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert!(pending.as_ref().unwrap().state.is_submit());
+    assert!(response.try_recv().is_err());
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap()
+    else {
+        panic!("answers")
+    };
+    assert_eq!(
+        answers
+            .iter()
+            .map(|answer| answer.answer.as_str())
+            .collect::<Vec<_>>(),
+        ["Final", "Review"]
+    );
+}
+
+#[test]
+fn form_card_renders_header_tabs_description_and_visible_editor() {
+    let (reply, _response) = oneshot::channel();
+    let mut pending = PendingQuestion::new(form_request(reply));
+    let backend = TestBackend::new(80, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context remains",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_text(terminal.backend().buffer());
+    for expected in [
+        "Pricing decisions",
+        "Are prices final?",
+        "☐ Prices/VAT",
+        "☐ Interval",
+        "☐ Submit",
+        "› 1. Final",
+        "Keep the displayed",
+        "Type something.",
+        "Chat about this",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
+    }
+    question_action_for_key(&mut pending, KeyCode::Char('3'));
+    question_action_for_key(&mut pending, KeyCode::Enter);
+    for character in "custom 1Y".chars() {
+        question_action_for_key(&mut pending, KeyCode::Char(character));
+    }
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context remains",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_text(terminal.backend().buffer());
+    assert!(rendered.contains("Your answer: custom 1Y"), "{rendered}");
+    assert!(rendered.contains("Are prices final?"), "{rendered}");
+}
+
+#[test]
+fn form_discussion_returns_message_and_escape_interrupts_either_editor() {
+    for discussed in [false, true] {
+        let (reply, mut response) = oneshot::channel();
+        let mut pending = Some(PendingQuestion::new(form_request(reply)));
+        handle_question_key(
+            &mut pending,
+            KeyCode::Char(if discussed { '4' } else { '3' }),
+        );
+        handle_question_key(&mut pending, KeyCode::Enter);
+        handle_question_key(&mut pending, KeyCode::Char('Y'));
+        assert!(handle_question_key(&mut pending, KeyCode::Esc));
+        assert_eq!(
+            response.try_recv().unwrap(),
+            crate::interactive::QuestionFormOutcome::LeftUnanswered
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    let mut pending = Some(PendingQuestion::new(form_request(reply)));
+    handle_question_key(&mut pending, KeyCode::Enter);
+    handle_question_key(&mut pending, KeyCode::Char('4'));
+    handle_question_key(&mut pending, KeyCode::Enter);
+    for character in "Why these prices?".chars() {
+        handle_question_key(&mut pending, KeyCode::Char(character));
+    }
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    assert_eq!(
+        response.try_recv().unwrap(),
+        crate::interactive::QuestionFormOutcome::Discussed("Why these prices?".to_string())
+    );
+}
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    buffer.content.iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn proposed_form_rows_hide_model_options_and_preserve_exact_sources() {
+    let (reply, mut response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions[1].proposed_answer = Some("Exact monthly proposal".to_string());
+    let mut pending = Some(PendingQuestion::new(request));
+    handle_question_key(&mut pending, KeyCode::Enter);
+    let question = pending.as_ref().unwrap();
+    let rows = question_form_lines(question, 80)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "› 1. Approve proposed answer",
+        "2. Reject and leave unanswered",
+        "3. Instruct otherwise",
+        "4. Chat about this",
+    ] {
+        assert!(rows.contains(expected), "{rows}");
+    }
+    assert!(!rows.contains("Final"));
+    assert!(!rows.contains("Type something."));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap()
+    else {
+        panic!("submitted answers")
+    };
+    assert_eq!(answers[1].answer, "Exact monthly proposal");
+    assert_eq!(
+        answers[1].source,
+        crate::interactive::QuestionAnswerSource::ApprovedProposal
+    );
+}
+
+#[test]
+fn narrow_tab_strip_shows_overflow_and_keeps_the_focused_submit_visible() {
+    let (reply, _response) = oneshot::channel();
+    let mut question = PendingQuestion::new(form_request(reply));
+    question.state.focus_tab(2);
+    let line = question_tab_line(&question.state, 18);
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains('←') && text.contains('→'), "{text}");
+    assert!(text.contains("☐ Submit"), "{text}");
+    assert!(line
+        .spans
+        .iter()
+        .any(|span| span.content.contains("Submit") && span.style != Style::default()));
+}
+
+#[test]
+fn tui_question_escape_stops_worker_with_waiting_outcome_without_global_cancel() {
+    let directory = tempdir().unwrap();
+    let mut config = NibConfig {
+        llm: mock_config(),
+        ..Default::default()
+    };
+    config.agent.answer_only = false;
+    save_nib_config_full(directory.path(), &mut config).unwrap();
+    let store = SessionStore::for_project(directory.path()).unwrap();
+    let goal = "ask a question";
+    let mut session = store.create_session();
+    session.plan = Some(crate::session::Plan::new(
+        goal,
+        vec![crate::session::PlanStep {
+            description: goal.to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    ));
+    let plan = session.plan.as_mut().unwrap();
+    plan.approved = true;
+    plan.steps[0].status = "InProgress".to_string();
+    assert!(plan.is_structured());
+    let plan_id = plan.id.clone();
+    store.save(&mut session).unwrap();
+    let (approval_tx, _approval_rx) = mpsc::channel();
+    let (question_tx, question_rx) = mpsc::channel();
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
+    let mut worker = prepare_tui_agent_worker(
+        TuiAgentProfileScope {
+            project_root: directory.path().to_path_buf(),
+            profile_id: "default".to_string(),
+            sessions_dir: store.sessions_dir().to_path_buf(),
+        },
+        session.id.clone(),
+        approval_tx,
+        question_tx,
+        stream_tx,
+    )
+    .unwrap()
+    .start_with_continuation(
+        goal.to_string(),
+        InteractiveAgentMode::Execute,
+        Some(plan_id.clone()),
+    )
+    .unwrap();
+    let request = question_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("admitted worker must reach a question");
+    let mut pending = Some(PendingQuestion::new(request));
+    assert!(handle_question_key(&mut pending, KeyCode::Esc));
+    assert!(!worker.cancellation.is_cancelled());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !worker.is_finished() && Instant::now() < deadline {
+        while stream_rx.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(worker.is_finished(), "Esc must stop the active worker");
+    worker.join().unwrap();
+    let persisted = store.load(&session.id).unwrap();
+    let plan = persisted.plan.as_ref().unwrap();
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert_eq!(
+        plan.steps[plan.current_step_index].outcome.as_deref(),
+        Some("question was not answered")
+    );
+    assert!(!persisted.clarifications.is_empty());
+    assert_eq!(persisted.plan.as_ref().unwrap().id, plan_id);
+    assert!(persisted
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()
+            && record.plan_id.as_deref() == Some(plan_id.as_str())
+            && record.run_id.as_deref() == Some(worker.run_id.as_str())));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "run_terminal"
+            && event.details["run_id"] == worker.run_id
+            && event.details["outcome"] == "waiting_for_user_input"));
+}
+
+#[test]
+fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
+    let (directory, store, session_id, invocation_id) = recoverable_question_session();
+    let scope = TuiAgentProfileScope {
+        project_root: directory.path().to_path_buf(),
+        profile_id: "default".to_string(),
+        sessions_dir: store.sessions_dir().to_path_buf(),
+    };
+    let (approval_tx, _approval_rx) = mpsc::channel();
+    let (question_tx, _question_rx) = mpsc::channel();
+    let (stream_tx, _stream_rx) = tokio::sync::mpsc::channel(100);
+    let (recovery_tx, _recovery_rx) = mpsc::channel();
+    let mut pending = None;
+    let mut worker = None;
+    let mut timeline = ActiveTimeline::load(&store, &session_id).unwrap();
+    start_tui_conversation(
+        "resume".to_string(),
+        QuestionConversationContext {
+            scope: &scope,
+            store: &store,
+            session_id: &session_id,
+            pending: &mut pending,
+            worker: &mut worker,
+            timeline: &mut timeline,
+            approval_tx: &approval_tx,
+            question_tx: &question_tx,
+            stream_tx: &stream_tx,
+            recovery_tx: &recovery_tx,
+        },
+    )
+    .unwrap();
+    assert!(worker.is_none());
+    assert_eq!(
+        pending
+            .as_ref()
+            .unwrap()
+            .recovery
+            .as_ref()
+            .unwrap()
+            .invocation_id,
+        invocation_id
+    );
+    assert!(store.load(&session_id).unwrap().clarifications[0]
+        .answer
+        .is_none());
+}
+
+#[test]
+fn long_description_scroll_keeps_question_and_selected_label_visible() {
+    let (reply, _response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions.truncate(1);
+    request.form.questions[0].options[0].description = Some(
+        (0..40)
+            .map(|index| format!("Description line {index}\n"))
+            .collect(),
+    );
+    let mut pending = PendingQuestion::new(request);
+    let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
+    for _ in 0..12 {
+        question_action_for_key(&mut pending, KeyCode::PageDown);
+    }
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_text(terminal.backend().buffer());
+    for expected in ["Are prices final?", "› 1. Final", "Description line 39"] {
+        assert!(rendered.contains(expected), "{rendered}");
+    }
+}
+
+#[test]
+fn narrow_subject_scroll_exposes_question_and_proposal_tails_before_exact_approval() {
+    let (reply, mut response) = oneshot::channel();
+    let proposal = format!(
+        "{}\nPROPOSAL TAIL",
+        "A long proposed answer with full content. ".repeat(60)
+    );
+    let mut request = TuiQuestionRequest::single(
+        format!(
+            "Inspect this question. {}\nQUESTION TAIL",
+            "Long question content. ".repeat(60)
+        ),
+        Some(proposal.clone()),
+        vec!["Hidden option".to_string()],
+        reply,
+    );
+    request.form.header = Some("Review proposal".to_string());
+    let mut pending = Some(PendingQuestion::new(request));
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    let mut saw_question_tail = false;
+    let mut saw_proposal_tail = false;
+    for _ in 0..200 {
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace",
+                    "mock",
+                    "you context",
+                    &Composer::default(),
+                    None,
+                    pending.as_ref(),
+                )
+            })
+            .unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        saw_question_tail |= rendered.contains("QUESTION TAIL");
+        saw_proposal_tail |= rendered.contains("PROPOSAL TAIL");
+        assert!(rendered.contains("Inspect this question."), "{rendered}");
+        assert!(
+            rendered.contains("› 1. Approve proposed answer"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Esc interrupt operation"), "{rendered}");
+        question_action_for_key(pending.as_mut().unwrap(), KeyCode::PageDown);
+    }
+    assert!(
+        saw_question_tail && saw_proposal_tail,
+        "Both accepted fields must be fully inspectable"
+    );
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    assert_eq!(
+        response.try_recv().unwrap(),
+        form_answer(
+            proposal.clone(),
+            crate::interactive::QuestionAnswerSource::ApprovedProposal
+        )
+    );
+}
+
+#[test]
+fn subject_scroll_preserves_visible_editor_and_input_error() {
+    let (reply, _response) = oneshot::channel();
+    let mut request = form_request(reply);
+    request.form.questions[0].question = "A long question. ".repeat(100);
+    request.form.questions[0].proposed_answer = Some("A long proposal. ".repeat(100));
+    let mut pending = PendingQuestion::new(request);
+    pending
+        .state
+        .open_editor(crate::interactive::QuestionEditorKind::Answer);
+    pending.state.error = Some("Empty answer retries".to_string());
+    question_action_for_key(&mut pending, KeyCode::PageDown);
+    let (rows, visible) = question_composer_rows(&pending, 40);
+    assert!(visible);
+    assert!(rows.len() <= 6, "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("Your answer:")));
+    assert!(rows.iter().any(|row| row.contains("Input error:")));
+    assert!(rows[1].contains("A long question."));
+}
+
+fn recovered_form_modal(
+    store: &SessionStore,
+    session_id: &str,
+) -> (
+    Option<PendingQuestion>,
+    mpsc::Receiver<crate::interactive::QuestionRecoveryEffect>,
+) {
+    let effect = crate::interactive::recover_question_conversation(store, session_id, "resume")
+        .unwrap()
+        .unwrap();
+    let crate::interactive::QuestionRecoveryEffect::OpenForm(form) = effect else {
+        panic!("recoverable form")
+    };
+    let (reply, receiver) = oneshot::channel();
+    drop(receiver);
+    let (completion, effects) = mpsc::channel();
+    let pending = PendingQuestion::recovered(
+        TuiQuestionRequest {
+            form: form.form,
+            initial_answers: form.initial_answers,
+            reply,
+        },
+        RecoveredQuestionTarget {
+            store: store.clone(),
+            session_id: session_id.to_string(),
+            invocation_id: form.invocation_id,
+            completion,
+        },
+    );
+    (Some(pending), effects)
+}
+
+fn change_saved_question(store: &SessionStore, session_id: &str, change: &str) {
+    if change == "busy" {
+        return;
+    }
+    if change == "answered" {
+        let session = store.load(session_id).unwrap();
+        let record = &session.clarifications[0];
+        let source = if record.proposed_answer.is_some() {
+            crate::interactive::QuestionAnswerSource::ApprovedProposal
+        } else {
+            crate::interactive::QuestionAnswerSource::Option
+        };
+        crate::interactive::complete_question_recovery(
+            store,
+            session_id,
+            record.invocation_id,
+            form_answer("alpha".to_string(), source),
+        )
+        .unwrap();
+        return;
+    }
+    store
+        .update_session(session_id, |session| {
+            let plan = session.plan.as_mut().unwrap();
+            match change {
+                "completed" => {
+                    plan.current_step_index = plan.steps.len();
+                    for step in &mut plan.steps {
+                        step.status = "Completed".to_string();
+                    }
+                }
+                "stopped" => plan.outcome = Some("stopped".to_string()),
+                "replaced" => plan.id = "replacement-plan".to_string(),
+                _ => panic!("unknown fixture change"),
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn recovered_escape_and_proposal_rejection_close_stale_or_busy_forms_without_writes() {
+    for proposal in [false, true] {
+        for change in ["answered", "completed", "stopped", "replaced", "busy"] {
+            let (_directory, store, session_id, _invocation_id) = recoverable_question_session();
+            if proposal {
+                store
+                    .update_session(&session_id, |session| {
+                        session.clarifications[0].proposed_answer = Some("alpha".to_string());
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let (mut pending, effects) = recovered_form_modal(&store, &session_id);
+            change_saved_question(&store, &session_id, change);
+            let lease =
+                (change == "busy").then(|| store.try_acquire_run_lease(&session_id).unwrap());
+            let before = serde_json::to_value(store.load(&session_id).unwrap()).unwrap();
+            let code = if proposal {
+                assert!(!handle_question_key(&mut pending, KeyCode::Char('2')));
+                KeyCode::Enter
+            } else {
+                KeyCode::Esc
+            };
+            assert!(
+                handle_question_key(&mut pending, code),
+                "{change}, {proposal}"
+            );
+            assert!(pending.is_none(), "{change}, {proposal}");
+            let crate::interactive::QuestionRecoveryEffect::Output(message) =
+                effects.try_recv().unwrap()
+            else {
+                panic!("interruption must not continue the operation")
+            };
+            assert!(message.contains("Question form closed"), "{message}");
+            assert!(message.contains("/status"), "{message}");
+            assert!(!message.contains("paused"), "{message}");
+            assert!(effects.try_recv().is_err());
+            assert_eq!(
+                serde_json::to_value(store.load(&session_id).unwrap()).unwrap(),
+                before,
+                "{change}, {proposal}"
+            );
+            drop(lease);
+        }
+    }
+}
+
+fn type_question_text(pending: &mut Option<PendingQuestion>, text: &str) {
+    for character in text.chars() {
+        assert!(!handle_question_key(pending, KeyCode::Char(character)));
+    }
+}
+
+fn assert_saved_discussion_once(store: &SessionStore, session_id: &str, plan_id: &str) {
+    let session = store.load(session_id).unwrap();
+    assert_eq!(session.clarifications.len(), 2);
+    assert!(session.clarifications.iter().all(|record| {
+        record.status == crate::session::ClarificationStatus::Discussed && record.answer.is_none()
+    }));
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "human_question_discussion_received")
+            .count(),
+        1
+    );
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| event.kind == "human_question_answer_received"));
+    assert_eq!(
+        session.human_intent.last().unwrap().text,
+        "Why these targets?"
+    );
+    assert!(session.has_unresolved_clarification(Some(plan_id)));
+    assert_eq!(session.plan.as_ref().unwrap().steps[0].status, "Blocked");
+}
+
+#[test]
+fn failed_recovered_discussion_preserves_checked_and_hidden_drafts_for_one_retry() {
+    let (_directory, store, session_id, invocation_id) = recoverable_question_session();
+    store
+        .update_session(&session_id, |session| {
+            session.clarifications[0].title = Some("Target".to_string());
+            let mut second = session.clarifications[0].clone();
+            second.question_index = 1;
+            second.title = Some("Interval".to_string());
+            second.question = "Which interval?".to_string();
+            session.clarifications.push(second);
+            Ok(())
+        })
+        .unwrap();
+    let (mut pending, effects) = recovered_form_modal(&store, &session_id);
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert!(!handle_question_key(&mut pending, KeyCode::Char('3')));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    type_question_text(&mut pending, "draft 1Y");
+    assert!(!handle_question_key(&mut pending, KeyCode::Left));
+    assert!(!handle_question_key(&mut pending, KeyCode::Char('4')));
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    type_question_text(&mut pending, "Why these targets?");
+    let before = store.load(&session_id).unwrap();
+    let plan_id = before.plan.as_ref().unwrap().id.clone();
+    let lease = store.try_acquire_run_lease(&session_id).unwrap();
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    let state = &pending.as_ref().unwrap().state;
+    assert_eq!(state.tab, 0);
+    assert_eq!(state.drafts[0].as_ref().unwrap().answer, "alpha");
+    assert_eq!(state.editor.as_ref().unwrap().text, "Why these targets?");
+    assert!(state.error.is_some());
+    assert!(effects.try_recv().is_err());
+    assert_eq!(
+        serde_json::to_value(store.load(&session_id).unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    assert!(!handle_question_key(&mut pending, KeyCode::Right));
+    assert_eq!(
+        pending
+            .as_ref()
+            .unwrap()
+            .state
+            .editor
+            .as_ref()
+            .unwrap()
+            .text,
+        "draft 1Y"
+    );
+    assert!(!handle_question_key(&mut pending, KeyCode::Left));
+    assert_eq!(
+        pending
+            .as_ref()
+            .unwrap()
+            .state
+            .editor
+            .as_ref()
+            .unwrap()
+            .text,
+        "Why these targets?"
+    );
+    drop(lease);
+    assert!(handle_question_key(&mut pending, KeyCode::Enter));
+    assert!(pending.is_none());
+    let crate::interactive::QuestionRecoveryEffect::ContinueDiscussion {
+        plan_id: continued_plan_id,
+        invocation_id: continued_invocation_id,
+        ..
+    } = effects.try_recv().unwrap()
+    else {
+        panic!("exact discussion continuation")
+    };
+    assert_eq!(continued_plan_id, plan_id);
+    assert_eq!(continued_invocation_id, invocation_id);
+    assert!(effects.try_recv().is_err());
+    assert!(!handle_question_key(&mut pending, KeyCode::Enter));
+    assert_saved_discussion_once(&store, &session_id, &plan_id);
+}

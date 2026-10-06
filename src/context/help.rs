@@ -157,7 +157,7 @@ mod tests {
         assert!(help.contains("Example project."));
         assert!(help.contains("task check: Check this project"));
         assert!(help.contains("task verify: Verify this project"));
-        assert!(help.contains("/plan [prompt]: Show the current plan or request planning"));
+        assert!(help.contains("/status: Show session, model, permissions, plan, and queue"));
         assert!(!help.contains("task test:"));
     }
 

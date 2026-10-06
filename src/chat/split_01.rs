@@ -2,6 +2,32 @@
 
 use super::*;
 
+struct PlainAgentAbortGuard(tokio::task::AbortHandle);
+
+impl PlainAgentAbortGuard {
+    fn new<T>(task: &tokio::task::JoinHandle<T>) -> Self {
+        Self(task.abort_handle())
+    }
+}
+
+impl Drop for PlainAgentAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn plain_agent_join_result(
+    result: Result<Result<nib::agent::AgentRunSummary, String>, tokio::task::JoinError>,
+) -> Result<nib::agent::AgentRunSummary, String> {
+    result.unwrap_or_else(|error| {
+        Err(if error.is_cancelled() {
+            "plain agent runtime worker was cancelled".to_string()
+        } else {
+            "plain agent runtime worker panicked".to_string()
+        })
+    })
+}
+
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) fn execute_prepared_agent_step(
     mut prepared: PreparedPlainAgentStep,
@@ -32,15 +58,43 @@ pub(crate) fn execute_prepared_agent_step(
     } else {
         println!("Maintenance active: exact-run steering is unavailable; Enter queues.");
     }
-    let (result, quit_requested) = prepared.runtime.block_on(async {
-        let mut agent = Box::pin(nib::agent::run_agent_loop_for_profile(
-            scope.project.to_path_buf(),
-            scope.profile_id,
-            scope.session_store.sessions_dir(),
-            session_id,
-            goal,
+    let worker_project = scope.project.to_path_buf();
+    let worker_profile = scope.profile_id.to_string();
+    let worker_sessions = scope.session_store.sessions_dir().to_path_buf();
+    let worker_session = session_id.to_string();
+    let worker_goal = goal.to_string();
+    let (first_poll_tx, first_poll_rx) = tokio::sync::oneshot::channel();
+    // Construct and poll the agent on the configured runtime worker, keeping
+    // the caller's small main stack limited to input routing and joining.
+    let mut agent = prepared.runtime.spawn(async move {
+        let mut running = Box::pin(nib::agent::run_agent_loop_for_profile(
+            worker_project,
+            &worker_profile,
+            &worker_sessions,
+            &worker_session,
+            &worker_goal,
             loop_cfg,
         ));
+        let mut first_poll_tx = Some(first_poll_tx);
+        std::future::poll_fn(|context| {
+            let result = std::future::Future::poll(running.as_mut(), context);
+            if let Some(sender) = first_poll_tx.take() {
+                let _ = sender.send(result.is_ready());
+            }
+            result
+        })
+        .await
+    });
+    // This owner drops before prepared's renderer join if routing unwinds.
+    let _agent_owner = PlainAgentAbortGuard::new(&agent);
+    let (result, quit_requested) = prepared.runtime.block_on(async {
+        // Match the old biased inline poll: route input only after a Pending
+        // first poll. Ready or a panicked first poll must join before any input.
+        if !matches!(first_poll_rx.await, Ok(false)) {
+            let result = plain_agent_join_result((&mut agent).await);
+            modal_state.clear();
+            return (result, false);
+        }
         let mut pending_approval: Option<PlainApprovalPrompt> = None;
         let mut pending_question: Option<PlainQuestionPrompt> = None;
         let mut pending_modal_response: Option<PendingPlainModalResponse> = None;
@@ -53,11 +107,12 @@ pub(crate) fn execute_prepared_agent_step(
             tokio::select! {
                 biased;
                 result = &mut agent => {
+                    let result = plain_agent_join_result(result);
                     if let Some(prompt) = pending_approval.take() {
                         let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
                     }
                     if let Some(prompt) = pending_question.take() {
-                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::Cancelled);
+                        let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::Cancelled);
                     }
                     if let Some(response) = pending_modal_response.take() {
                         response.fail_closed();
@@ -121,46 +176,25 @@ pub(crate) fn execute_prepared_agent_step(
                 }
                 Some(prompt) = question_rx.recv(), if pending_question.is_none() => {
                     if input_open {
-                        println!("\nQuestion: {}", prompt.question);
-                        if let Some(proposal) = prompt.proposed_answer.as_deref() {
-                            println!("Proposed answer: {proposal}");
-                            println!("1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise");
-                        }
-                        if prompt.proposed_answer.is_none() {
-                            for (index, option) in prompt.options.iter().enumerate() {
-                                println!("  {}. {}", index + 1, option);
-                            }
-                        }
-                        if prompt.proposed_answer.is_some() {
-                            print!("Decision or answer: ");
-                        } else if prompt.options.is_empty() {
-                            print!("Answer: ");
-                        } else {
-                            print!("Answer (number or text): ");
-                        }
-                        let _ = io::stdout().flush();
                         pending_question = Some(prompt);
+                        if let Some(prompt) = pending_question.as_ref() {
+                            print!("{}", prompt.form.render(&prompt.sensitive_values));
+                            let _ = io::stdout().flush();
+                        }
                         if let Some(line) = buffered_modal_line.take() {
-                            if let Some(prompt) = pending_question.as_ref() {
-                                match interpret_plain_question_line(&line, &prompt.options, prompt.proposed_answer.as_deref()) {
-                                    PlainQuestionLine::Outcome(outcome) => {
-                                        let prompt = pending_question.take().expect("question");
-                                        pending_modal_response = Some(PendingPlainModalResponse::Question {
-                                            outcome,
-                                            reply: prompt.reply,
-                                        });
-                                        request_plain_modal_frame_delimiter();
-                                    }
-                                    PlainQuestionLine::Retry(message) => println!("{message}"),
-                                    PlainQuestionLine::Command(_) => println!(
-                                        "buffered command was not applied; enter it after the prompt is shown"
-                                    ),
-                                }
+                            if line.trim_start().starts_with(":command") {
+                                println!("buffered command was not applied; enter it after the prompt is shown");
+                            } else if let Some(outcome) = pending_question.as_mut().and_then(|prompt| prompt.form.submit_line(&line)) {
+                                let prompt = pending_question.take().expect("question");
+                                pending_modal_response = complete_plain_question_prompt(prompt, outcome);
+                            } else if let Some(prompt) = pending_question.as_ref() {
+                                print!("{}", prompt.form.render(&prompt.sensitive_values));
+                                let _ = io::stdout().flush();
                             }
                         }
                     } else {
                         modal_state.clear();
-                        let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
+                        let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::InputClosed);
                     }
                 }
                 line = input.read_line_async(), if input_open && buffered_modal_line.is_none() => {
@@ -176,7 +210,7 @@ pub(crate) fn execute_prepared_agent_step(
                                 let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied_input_closed());
                             }
                             if let Some(prompt) = pending_question.take() {
-                                let _ = prompt.reply.send(nib::agent::QuestionOutcome::InputClosed);
+                                let _ = prompt.reply.send(nib::interactive::QuestionFormOutcome::InputClosed);
                             }
                             continue;
                         }
@@ -188,6 +222,10 @@ pub(crate) fn execute_prepared_agent_step(
                                 .expect("checked pending modal response");
                             modal_state.clear();
                             response.deliver();
+                        } else if line.trim() == "esc" && matches!(pending_modal_response, Some(PendingPlainModalResponse::Question { .. })) {
+                            if let Some(PendingPlainModalResponse::Question { reply, .. }) = pending_modal_response.take() {
+                                let _ = reply.send(nib::interactive::QuestionFormOutcome::LeftUnanswered);
+                            }
                         } else {
                             println!(
                                 "[input rejected] surplus modal line was not applied; press Enter on an empty line to return input ownership"
@@ -245,49 +283,16 @@ pub(crate) fn execute_prepared_agent_step(
                         continue;
                     }
                     if pending_question.is_some() {
-                        let prompt = pending_question.as_ref().expect("question");
-                        let options = prompt.options.clone();
-                        let proposed_answer = prompt.proposed_answer.clone();
-                        match interpret_plain_question_line(&line, &options, proposed_answer.as_deref()) {
-                            PlainQuestionLine::Outcome(outcome) => {
-                                let prompt = pending_question.take().expect("question");
-                                pending_modal_response = Some(PendingPlainModalResponse::Question {
-                                    outcome,
-                                    reply: prompt.reply,
-                                });
-                                request_plain_modal_frame_delimiter();
-                            }
-                            PlainQuestionLine::Retry(message) => {
-                                println!("{message}");
-                                if proposed_answer.is_some() {
-                                    print!("Decision or answer: ");
-                                } else if options.is_empty() {
-                                    print!("Answer: ");
-                                } else {
-                                    print!("Answer (number or text): ");
-                                }
-                                let _ = io::stdout().flush();
-                            }
-                            PlainQuestionLine::Command(command) => {
-                                match execute_interactive_command_in_state(
-                                    command,
-                                    scope.project,
-                                    scope.profile_id,
-                                    scope.session_store,
-                                    session_id,
-                                    "running",
-                                ) {
-                                    Ok(InteractiveEffect::Output(output)) => {
-                                        println!("{output}")
-                                    }
-                                    Ok(_) => println!(
-                                        "command completed without changing the pending question"
-                                    ),
-                                    Err(error) => println!("{error}"),
-                                }
-                                print!("Decision or answer: ");
-                                let _ = io::stdout().flush();
-                            }
+                        if inspect_plain_question_command(&line, scope, session_id, "running") {
+                            // Inspection keeps the same question responder and drafts.
+                        } else if let Some(outcome) = pending_question.as_mut().and_then(|prompt| prompt.form.submit_line(&line)) {
+                            let prompt = pending_question.take().expect("question");
+                            pending_modal_response = complete_plain_question_prompt(prompt, outcome);
+                            continue;
+                        }
+                        if let Some(prompt) = pending_question.as_ref() {
+                            print!("{}", prompt.form.render(&prompt.sensitive_values));
+                            let _ = io::stdout().flush();
                         }
                         continue;
                     }
@@ -389,6 +394,23 @@ pub(crate) fn execute_prepared_agent_step(
     })
 }
 
+fn complete_plain_question_prompt(
+    prompt: PlainQuestionPrompt,
+    outcome: nib::interactive::QuestionFormOutcome,
+) -> Option<PendingPlainModalResponse> {
+    if outcome.is_success() {
+        request_plain_modal_frame_delimiter();
+        Some(PendingPlainModalResponse::Question {
+            outcome,
+            reply: prompt.reply,
+        })
+    } else {
+        // Interrupts reach the worker immediately, even while stdin remains open.
+        let _ = prompt.reply.send(outcome);
+        None
+    }
+}
+
 pub(crate) fn execute_plain_continuation(
     scope: &PlainAgentScope<'_>,
     session_id: &str,
@@ -407,6 +429,176 @@ pub(crate) fn execute_plain_continuation(
         cfg.continuation_plan_id = Some(plan_id.to_string());
     }
     execute_prepared_agent_step(prepared, scope, session_id, goal, input, modal_state)
+}
+
+pub(crate) fn execute_plain_question_recovery(
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    mut effect: nib::interactive::QuestionRecoveryEffect,
+    input: &ConsoleInput,
+    modal_state: PlainModalState,
+) -> Result<PlainAgentDisposition, String> {
+    use nib::interactive::QuestionRecoveryEffect;
+    let sensitive_values = nib::config::load_nib_config_full(scope.project)
+        .map_err(|error| error.to_string())?
+        .public_session_sensitive_values();
+    loop {
+        match effect {
+            QuestionRecoveryEffect::Output(output) => {
+                println!(
+                    "{}",
+                    nib::interactive::bounded_public_text(
+                        &output,
+                        &sensitive_values,
+                        64 * 1024,
+                        true
+                    )
+                );
+                return Ok(PlainAgentDisposition::Completed);
+            }
+            QuestionRecoveryEffect::OpenForm(persisted) => {
+                effect = complete_plain_recovery_form(
+                    scope,
+                    session_id,
+                    persisted,
+                    None,
+                    input,
+                    &sensitive_values,
+                )?;
+            }
+            QuestionRecoveryEffect::OpenEditor {
+                form,
+                question_index,
+            } => {
+                effect = complete_plain_recovery_form(
+                    scope,
+                    session_id,
+                    form,
+                    Some(question_index),
+                    input,
+                    &sensitive_values,
+                )?;
+            }
+            QuestionRecoveryEffect::ContinuePlan { plan_id, goal } => {
+                return execute_plain_continuation(
+                    scope,
+                    session_id,
+                    &goal,
+                    &plan_id,
+                    input,
+                    modal_state,
+                );
+            }
+            QuestionRecoveryEffect::ContinueDiscussion {
+                plan_id,
+                goal,
+                invocation_id,
+            } => {
+                let mut prepared = PreparedPlainAgentStep::prepare(
+                    scope,
+                    session_id,
+                    InteractiveAgentMode::Execute,
+                    modal_state.clone(),
+                )?;
+                if let Some(cfg) = prepared.loop_cfg.as_mut() {
+                    cfg.continuation_plan_id = Some(plan_id);
+                    cfg.discussion_invocation_id = Some(invocation_id);
+                }
+                return execute_prepared_agent_step(
+                    prepared,
+                    scope,
+                    session_id,
+                    &goal,
+                    input,
+                    modal_state,
+                );
+            }
+        }
+    }
+}
+
+fn complete_plain_recovery_form(
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    persisted: nib::session::PersistedQuestionForm,
+    editor: Option<Option<usize>>,
+    input: &ConsoleInput,
+    sensitive_values: &[String],
+) -> Result<nib::interactive::QuestionRecoveryEffect, String> {
+    let mut form = crate::console::LineQuestionForm::new(persisted.form, persisted.initial_answers);
+    if let Some(index) = editor {
+        form.enter_editor(index)?;
+    }
+    let outcome = loop {
+        print!("{}", form.render(sensitive_values));
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let line = match input.read_line_blocking() {
+            Ok(line) => line,
+            Err(_) => break nib::interactive::QuestionFormOutcome::InputClosed,
+        };
+        if inspect_plain_question_command(&line, scope, session_id, "waiting_for_user_input") {
+            continue;
+        }
+        if let Some(outcome) = form.submit_line(&line) {
+            break outcome;
+        }
+    };
+    let outcome = frame_plain_recovery_outcome(input, outcome);
+    nib::interactive::complete_question_recovery(
+        scope.session_store,
+        session_id,
+        persisted.invocation_id,
+        outcome,
+    )
+}
+
+fn inspect_plain_question_command(
+    line: &str,
+    scope: &PlainAgentScope<'_>,
+    session_id: &str,
+    state: &str,
+) -> bool {
+    if !line.trim_start().starts_with(":command") {
+        return false;
+    }
+    match parse_plain_question_answer(line, &[]) {
+        InteractionReduction::ModalCommand(command) => {
+            match execute_interactive_command_in_state(
+                command,
+                scope.project,
+                scope.profile_id,
+                scope.session_store,
+                session_id,
+                state,
+            ) {
+                Ok(InteractiveEffect::Output(output)) => println!("{output}"),
+                Ok(_) => println!("command completed without changing the pending question"),
+                Err(error) => println!("{error}"),
+            }
+        }
+        InteractionReduction::Error { message, .. } => println!("{message}"),
+        _ => println!("invalid prompt-local command"),
+    }
+    true
+}
+
+pub(crate) fn frame_plain_recovery_outcome(
+    input: &ConsoleInput,
+    outcome: nib::interactive::QuestionFormOutcome,
+) -> nib::interactive::QuestionFormOutcome {
+    use nib::interactive::QuestionFormOutcome;
+    if !outcome.is_success() {
+        return outcome;
+    }
+    request_plain_modal_frame_delimiter();
+    loop {
+        match input.read_line_blocking() {
+            Ok(line) if line.trim().is_empty() => return outcome,
+            Ok(line) if line.trim() == "esc" => return QuestionFormOutcome::LeftUnanswered,
+            Ok(_) => println!("[input rejected] surplus modal line was not applied; press Enter on an empty line to return input ownership"),
+            Err(_) => return QuestionFormOutcome::InputClosed,
+        }
+    }
 }
 
 pub(crate) fn execute_plain_turn_and_queued_follow_ups(
@@ -463,5 +655,79 @@ pub(crate) fn drain_plain_queued_follow_ups(
             PlainAgentDisposition::Completed => {}
             disposition => return Ok(disposition),
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn router_unwind_aborts_pending_worker_and_closes_its_stream_without_continuing() {
+        struct PendingResources {
+            _stream: tokio::sync::mpsc::Sender<()>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for PendingResources {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let runtime = nib::agent::build_agent_runtime("test runtime").unwrap();
+        let modal = PlainModalState::default();
+        let pending_modal = modal.clone();
+        let forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let continued = forbidden.clone();
+        let (stream, mut events) = tokio::sync::mpsc::channel(1);
+        let (dropped, destroyed) = std::sync::mpsc::channel();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = tokio::sync::oneshot::channel::<()>();
+        let mut task = runtime.spawn(async move {
+            let mut pending = Box::pin(async move {
+                let resources = PendingResources {
+                    _stream: stream,
+                    dropped,
+                };
+                assert!(pending_modal.claim(PLAIN_MODAL_QUESTION));
+                if resume.await.is_ok() {
+                    continued.store(true, Ordering::SeqCst);
+                }
+                drop(resources);
+            });
+            let mut ready = Some(ready);
+            std::future::poll_fn(|context| {
+                let result = std::future::Future::poll(pending.as_mut(), context);
+                if let Some(sender) = ready.take() {
+                    sender.send(result.is_pending()).unwrap();
+                }
+                result
+            })
+            .await
+        });
+        assert!(waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap());
+        assert!(modal.is_pending());
+        let unwind = std::panic::catch_unwind(|| {
+            let _owner = PlainAgentAbortGuard::new(&task);
+            panic!("plain router unwind");
+        });
+        assert!(unwind.is_err());
+        // A detached worker would accept this continuation and run forbidden work.
+        let _ = release.send(());
+        let joined = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await
+            })
+            .expect("worker teardown deadline");
+        assert!(joined.unwrap_err().is_cancelled());
+        destroyed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker resources dropped");
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(!forbidden.load(Ordering::SeqCst));
     }
 }

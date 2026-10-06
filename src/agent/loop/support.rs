@@ -932,6 +932,25 @@ pub(crate) fn supersede_unapproved_plan_for_steering(
 }
 
 pub(crate) fn safe_question_arguments(arguments: &Value, sensitive_values: &[String]) -> Value {
+    if let Ok(form) = crate::interactive::parse_question_form(arguments) {
+        return match crate::interactive::public_question_form(&form, sensitive_values) {
+            Ok(form) => {
+                let mut safe = form.tool_arguments();
+                safe["dependent_paths"] = json!(bounded_clarification_dependency_paths(arguments)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|path| crate::interactive::bounded_public_text(
+                        path,
+                        sensitive_values,
+                        4096,
+                        false
+                    ))
+                    .collect::<Vec<_>>());
+                safe
+            }
+            Err(_) => json!({"invalid_question_form":true}),
+        };
+    }
     let question = arguments
         .get("question")
         .and_then(Value::as_str)
@@ -996,6 +1015,7 @@ pub(crate) fn safe_question_arguments(arguments: &Value, sensitive_values: &[Str
     safe
 }
 
+#[cfg(test)]
 pub(crate) fn safe_question_execution_arguments(
     arguments: &Value,
     answer: &Result<String, String>,
@@ -1033,12 +1053,14 @@ pub(crate) fn safe_question_execution_arguments(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct ReusedClarificationAnswer {
     pub(crate) answer: String,
     pub(crate) answer_message_index: Option<usize>,
     pub(crate) answer_event_index: Option<usize>,
 }
 
+#[cfg(test)]
 pub(crate) struct ClarificationPrompt<'a> {
     pub(crate) question: &'a str,
     pub(crate) proposed_answer: Option<&'a str>,
@@ -1046,6 +1068,7 @@ pub(crate) struct ClarificationPrompt<'a> {
     pub(crate) dependent_paths: &'a [String],
 }
 
+#[cfg(test)]
 pub(crate) fn persist_question_required(
     store: &SessionStore,
     session_id: &str,
@@ -1112,12 +1135,14 @@ pub(crate) fn persist_question_required(
                     .as_ref()
                     .map(|_| "reused exact answered question in the same plan".to_string()),
                 outcome: prior.as_ref().map(|_| "answered".to_string()),
+                ..Default::default()
             });
             Ok(prior)
         })
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn persist_question_observation(
     store: &SessionStore,
     session_id: &str,
@@ -1270,6 +1295,7 @@ pub(crate) fn unresolved_clarification_dependencies(
                     ClarificationStatus::Pending
                         | ClarificationStatus::Unresolved
                         | ClarificationStatus::Cancelled
+                        | ClarificationStatus::Discussed
                 )
         })
         .collect::<Vec<_>>();
@@ -1408,6 +1434,7 @@ impl QuestionOutcome {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clarification_status(&self) -> ClarificationStatus {
         match self {
             Self::Answered(_) | Self::ApprovedProposal(_) => ClarificationStatus::Answered,
@@ -1418,6 +1445,7 @@ impl QuestionOutcome {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn reason(&self) -> &'static str {
         match self {
             Self::Answered(_) => "answered",
@@ -1438,9 +1466,87 @@ pub struct QuestionRequestContext<'a> {
     pub options: &'a [String],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct QuestionFormRequestContext<'a> {
+    pub invocation_id: crate::tools::ToolInvocationId,
+    pub form: &'a crate::interactive::QuestionForm,
+    pub initial_answers: &'a [Option<crate::interactive::QuestionAnswer>],
+}
+
+impl QuestionOutcome {
+    pub fn from_form(outcome: crate::interactive::QuestionFormOutcome) -> Self {
+        use crate::interactive::{QuestionAnswerSource, QuestionFormOutcome};
+        match outcome {
+            QuestionFormOutcome::Answered(mut answers) if answers.len() == 1 => {
+                let answer = answers.remove(0);
+                if answer.source == QuestionAnswerSource::ApprovedProposal {
+                    Self::ApprovedProposal(answer.answer)
+                } else {
+                    Self::Answered(answer.answer)
+                }
+            }
+            QuestionFormOutcome::LeftUnanswered => Self::LeftUnanswered,
+            QuestionFormOutcome::Cancelled => Self::Cancelled,
+            QuestionFormOutcome::InputClosed => Self::InputClosed,
+            QuestionFormOutcome::InputUnavailable(error) => Self::InputUnavailable(error),
+            _ => Self::InputUnavailable(
+                "legacy question callback does not support forms or discussion".to_string(),
+            ),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait QuestionHandler: Send + Sync {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String>;
+
+    async fn ask_form(
+        &self,
+        context: QuestionFormRequestContext<'_>,
+    ) -> crate::interactive::QuestionFormOutcome {
+        use crate::interactive::{QuestionAnswer, QuestionAnswerSource, QuestionFormOutcome};
+        if context.form.questions.len() != 1 {
+            return QuestionFormOutcome::InputUnavailable(
+                "form handler required for a question set".to_string(),
+            );
+        }
+        let question = &context.form.questions[0];
+        let options = question
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect::<Vec<_>>();
+        let outcome = self
+            .ask_with_context(QuestionRequestContext {
+                invocation_id: context.invocation_id,
+                question: &question.question,
+                proposed_answer: question.proposed_answer.as_deref(),
+                options: &options,
+            })
+            .await;
+        match outcome {
+            QuestionOutcome::Answered(answer) => {
+                let source = if question.proposed_answer.is_none() && options.contains(&answer) {
+                    QuestionAnswerSource::Option
+                } else {
+                    QuestionAnswerSource::Text
+                };
+                QuestionFormOutcome::Answered(vec![QuestionAnswer { answer, source }])
+            }
+            QuestionOutcome::ApprovedProposal(answer) => {
+                QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                    answer,
+                    source: QuestionAnswerSource::ApprovedProposal,
+                }])
+            }
+            QuestionOutcome::LeftUnanswered => QuestionFormOutcome::LeftUnanswered,
+            QuestionOutcome::Cancelled => QuestionFormOutcome::Cancelled,
+            QuestionOutcome::InputClosed => QuestionFormOutcome::InputClosed,
+            QuestionOutcome::InputUnavailable(error) => {
+                QuestionFormOutcome::InputUnavailable(error)
+            }
+        }
+    }
 
     async fn ask_with_context(&self, context: QuestionRequestContext<'_>) -> QuestionOutcome {
         match self.ask(context.question, context.options).await {
@@ -1472,6 +1578,8 @@ pub struct AgentLoopConfig {
     pub run_id: Option<String>,
     pub steering: Option<ExactRunSteeringReceiver>,
     pub continuation_plan_id: Option<String>,
+    /// A lease-persisted recovered discussion permits conversation on this exact call.
+    pub discussion_invocation_id: Option<crate::tools::ToolInvocationId>,
 }
 
 impl Default for AgentLoopConfig {
@@ -1490,6 +1598,7 @@ impl Default for AgentLoopConfig {
             run_id: None,
             steering: None,
             continuation_plan_id: None,
+            discussion_invocation_id: None,
         }
     }
 }

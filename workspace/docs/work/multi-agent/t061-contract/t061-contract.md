@@ -1,0 +1,115 @@
+---
+schema_version: 1
+coordination_id: t061-contract
+agent_id: t061-contract
+role: implementer
+status: complete
+base_revision: d738e5de95173999906ff4a962e5339638265e1f
+task_ref: detached
+branch_authorization: none
+updated_at: 2026-10-05T23:16:36Z
+scope:
+  - src/agent
+  - src/chat/test_part_0.rs
+  - src/context/mod.rs
+  - src/interactive/mod.rs
+  - src/interactive/question_form.rs
+  - src/interactive/tests.rs
+  - src/session
+  - src/tools
+  - src/tui/tests/mod.rs
+---
+
+# Peer Work Record
+
+## Assignment
+
+Implement T067 AC-1, AC-2, AC-3, AC-4, AC-6, AC-8 and AC-9: shared question forms, semantic validation, exact reuse, linked session obligations, guarded recovery and runtime observations. Preserve legacy single-question callers.
+
+## Actions
+
+Created an isolated worktree through an atomic peer claim from the reviewed preparation integration.
+Implemented shared form types and local line parsers, schema/byte/identity validation,
+native handler adaptation, persistent indexed obligations and explicit revision links.
+Implemented lease-fenced recovery and single-use human discussion continuation evidence.
+Dependent paths and completion remain gated; answers/discussion retain no tool authority.
+Added focused behavior coverage and minimal legacy fixture field defaults.
+Added deterministic native agent-loop fixtures covering grouped publication,
+successful discussion, disjoint inspection, dependent-tool rejection and
+premature completion rejection. Hardened public executor rejection of both
+legacy and native forged human outcome fields. Recovery checks every indexed
+sibling under the run lease and preserves explicit revision chains across reload.
+Late independent review found that unidentified legacy records could be recovered
+despite later run metadata. Tightened public recovery to truly run-free legacy
+sessions. The private discussion exception requires exact recovered human
+provenance and the single freshly admitted current run. Preparation audits the
+binding of an unbound legacy obligation to that run, preserving old events;
+repeated checks require that exact audit, and identified bindings stay unchanged.
+Added direct-helper atomic rejection, legacy compatibility, inferred terminal,
+audited admission and actual agent-entry/reload/recovery regressions.
+
+## Validation
+
+The first task check:all-targets and subsequent strict task check passed.
+An iterative check caught a missing verifier argument and schema-helper placement;
+both were corrected before the passing strict gate.
+Task test:agent-context passed 91 context tests, 97 agent tests and 2 metadata tests.
+The initial interactive gate passed its steering, shared interactive, TUI and
+console slices, then exposed a readable closed-input audit error compatibility
+regression in one plain fixture. The error was corrected without changing its
+durable outcome. The final task test:interactive rerun passed all 249 tests:
+16 steering, 74 shared interaction, 115 TUI, 6 console, 27 plain, 10 CLI and
+1 installer smoke-contract fixture. The final task test:agent-context rerun
+passed all 190 tests, including the reordered-index and mixed-operation recovery
+regressions. Frozen-source task check passed installer syntax, workspace
+structure/catalog/memory/version/coordination validation, formatting and
+Clippy across all targets and features. Record-only reconciliation is validated
+with task workspace:check before publication.
+
+That candidate was subsequently rejected for the late legacy admission finding.
+Its combined native integration gate was interrupted before the internal
+integration advanced. The staging source and logs were preserved in the runtime
+archive; no successful combined gate or delivery is claimed.
+The corrected task test:agent-context passed all 195 tests: 91 context,
+102 agent and 2 metadata. Its first attempt exposed a fixture-only optimistic
+snapshot error from copying a persisted revision into an empty store. The fixture
+now retains the original project lifetime and reopens its actual durable store;
+the corrected actual-entry/reload/recovery regression passes. Corrected-source
+task check passed installer syntax, workspace, catalog, memory, version and
+coordination validation, formatting and Clippy across all targets and features.
+Corrected-source task test:interactive passed all 249 tests: 16 steering,
+74 shared interaction, 115 TUI, 6 console, 27 plain, 10 CLI and 1 installer
+smoke-contract fixture. Record-only reconciliation is validated with
+task workspace:check before renewed publication.
+
+Self-review maps schema, display bounds and legacy adapters to AC-1 and AC-2;
+discussion, interruption, dependency and completion behavior to AC-3;
+displayed-proposal approval and source validation to AC-4; exact reuse, indexed
+obligations, lease admission and explicit revision recovery links to AC-6;
+human-input authority boundaries and malformed-call rejection to AC-8;
+deterministic source/validation evidence to AC-9.
+
+## Blockers and Dependencies
+
+None.
+
+## Next Step
+
+Independent exact review, then serialized integration with full native gates.
+
+## Handoff
+
+The previous handoff is superseded by the legacy admission correction. Fresh
+affected author gates passed; the corrected candidate requires renewed
+independent exact review and combined native integration validation.
+The shared form/parser exports, native handler request and lease-fenced session
+recovery APIs are available for the frontend and recovery lanes. Legacy trait
+outcomes remain unchanged, and default callbacks reject grouped forms requiring
+a native Submit handler. Implementation remains in development pending combined
+native integration. No main delivery or publication is claimed.
+
+Memory Impact: none for this bounded implementation lane. It implements the
+already approved form contract; shared delivery memory and spec reconciliation
+belong to the final integration lane.
+
+Peer integration contains reviewed source revision `d3dbfacbc1a687f4d7c52f92e1c2ab387d865fd5`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.

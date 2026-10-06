@@ -711,52 +711,6 @@ pub(crate) fn render_approval_band(
     );
 }
 
-pub(crate) fn render_question_band(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    question: &PendingQuestion,
-) {
-    if question.request.proposed_answer.is_some() {
-        let choices = [
-            ("Approve proposed answer".to_string(), "1".to_string()),
-            ("Reject and leave unanswered".to_string(), "2".to_string()),
-            ("Instruct otherwise".to_string(), "3".to_string()),
-        ];
-        let selected = if question.focus == QuestionFocus::Actions {
-            question.selected_decision
-        } else {
-            choices.len()
-        };
-        render_numbered_choice_band(
-            frame,
-            area,
-            &choices,
-            selected,
-            "Up/Down select · Enter choose · Tab type another answer · Esc reject",
-        );
-        return;
-    }
-    let mut choices: Vec<(String, String)> = question
-        .request
-        .options
-        .iter()
-        .enumerate()
-        .map(|(index, option)| (option.clone(), (index + 1).to_string()))
-        .collect();
-    choices.push(("Leave unanswered".to_string(), "esc".to_string()));
-    let selected = match question.focus {
-        QuestionFocus::Suggestions => question.selected_option.unwrap_or(0),
-        QuestionFocus::Actions => choices.len().saturating_sub(1),
-        QuestionFocus::Editor => choices.len(),
-    };
-    let hint = if question.focus == QuestionFocus::Editor {
-        "Type an answer · Tab suggestions · Enter submit · Esc leave unanswered"
-    } else {
-        "Up/Down select · Tab editor/actions · Enter submit · Esc leave unanswered"
-    };
-    render_numbered_choice_band(frame, area, &choices, selected, hint);
-}
-
 pub(crate) fn render_workspace_band(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,

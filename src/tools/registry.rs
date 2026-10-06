@@ -313,33 +313,11 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         ),
         metadata(
             "ask_question",
-            "Pause the loop and request structured user input.",
+            "Request one question or a related question form; discussion leaves dependent work blocked.",
             PermissionLevel::Safe,
             false,
             false,
-            json!({
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "minLength": 1, "maxLength": 20000},
-                    "proposed_answer": {"type": "string", "minLength": 1, "maxLength": 20000,
-                        "description": "A specific answer for the user to approve, reject, or replace. This never approves a tool action."},
-                    "options": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
-                        "maxItems": 20,
-                        "default": []
-                    },
-                    "dependent_paths": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
-                        "maxItems": 32,
-                        "default": [],
-                        "description": "Worktree-relative paths whose actions require this answer. Empty means the whole current plan step."
-                    }
-                },
-                "required": ["question"],
-                "additionalProperties": false
-            }),
+            question_form_schema(),
         ),
     ];
 
@@ -370,6 +348,33 @@ pub fn tool_names() -> Vec<&'static str> {
     let mut names: Vec<_> = REGISTRY.keys().copied().collect();
     names.sort_unstable();
     names
+}
+
+fn question_form_schema() -> Value {
+    let option = json!({"oneOf":[
+        {"type":"string","minLength":1,"maxLength":1000},
+        {"type":"object","properties":{"label":{"type":"string","minLength":1,"maxLength":200},"description":{"type":"string","maxLength":1000}},"required":["label"],"additionalProperties":false}
+    ]});
+    let options = json!({"type":"array","items":option,"maxItems":20});
+    let question = json!({"type":"string","minLength":1,"maxLength":20000});
+    json!({
+        "type":"object",
+        "properties":{
+            "header":{"type":"string","maxLength":500},
+            "question":question,
+            "proposed_answer":question,
+            "options":options,
+            "questions":{"type":"array","minItems":1,"maxItems":8,"items":{
+                "type":"object","properties":{
+                    "title":{"type":"string","minLength":1,"maxLength":40},
+                    "question":question,"proposed_answer":question,"options":options
+                },"required":["question"],"additionalProperties":false
+            }},
+            "dependent_paths":{"type":"array","items":{"type":"string","minLength":1,"maxLength":4096},"maxItems":32,"default":[],"description":"Paths depending on these answers. Empty means the whole current plan step."}
+        },
+        "oneOf":[{"required":["question"],"not":{"required":["questions"]}},{"required":["questions"],"not":{"anyOf":[{"required":["question"]},{"required":["options"]},{"required":["proposed_answer"]}]}}],
+        "additionalProperties":false
+    })
 }
 
 #[cfg(test)]

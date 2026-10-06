@@ -89,10 +89,9 @@ impl PlainModalState {
 }
 
 pub(crate) struct PlainQuestionPrompt {
-    pub(crate) question: String,
-    pub(crate) proposed_answer: Option<String>,
-    pub(crate) options: Vec<String>,
-    pub(crate) reply: tokio::sync::oneshot::Sender<nib::agent::QuestionOutcome>,
+    pub(crate) form: crate::console::LineQuestionForm,
+    pub(crate) sensitive_values: Vec<String>,
+    pub(crate) reply: tokio::sync::oneshot::Sender<nib::interactive::QuestionFormOutcome>,
 }
 
 pub(crate) enum PendingPlainModalResponse {
@@ -101,8 +100,8 @@ pub(crate) enum PendingPlainModalResponse {
         reply: tokio::sync::oneshot::Sender<nib::tools::models::ApprovalDecision>,
     },
     Question {
-        outcome: nib::agent::QuestionOutcome,
-        reply: tokio::sync::oneshot::Sender<nib::agent::QuestionOutcome>,
+        outcome: nib::interactive::QuestionFormOutcome,
+        reply: tokio::sync::oneshot::Sender<nib::interactive::QuestionFormOutcome>,
     },
 }
 
@@ -124,7 +123,7 @@ impl PendingPlainModalResponse {
                 let _ = reply.send(nib::tools::models::ApprovalDecision::denied());
             }
             Self::Question { reply, .. } => {
-                let _ = reply.send(nib::agent::QuestionOutcome::InputClosed);
+                let _ = reply.send(nib::interactive::QuestionFormOutcome::InputClosed);
             }
         }
     }
@@ -138,6 +137,7 @@ pub(crate) struct BrokeredPlainApprovalHandler {
 pub(crate) struct BrokeredPlainQuestionHandler {
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<PlainQuestionPrompt>,
     pub(crate) modal_state: PlainModalState,
+    pub(crate) sensitive_values: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -209,8 +209,32 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         &self,
         context: nib::agent::QuestionRequestContext<'_>,
     ) -> nib::agent::QuestionOutcome {
+        let form = crate::console::legacy_question_form(&context);
+        nib::agent::QuestionOutcome::from_form(
+            self.ask_form(nib::agent::QuestionFormRequestContext {
+                invocation_id: context.invocation_id,
+                form: &form,
+                initial_answers: &[],
+            })
+            .await,
+        )
+    }
+
+    async fn ask_form(
+        &self,
+        context: nib::agent::QuestionFormRequestContext<'_>,
+    ) -> nib::interactive::QuestionFormOutcome {
+        use nib::interactive::QuestionFormOutcome;
+        if context.form.questions.is_empty() {
+            return QuestionFormOutcome::InputUnavailable("question form is empty".into());
+        }
+        let displayed =
+            match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
+                Ok(form) => form,
+                Err(error) => return QuestionFormOutcome::InputUnavailable(error),
+            };
         if !self.modal_state.claim(PLAIN_MODAL_QUESTION) {
-            return nib::agent::QuestionOutcome::InputUnavailable(
+            return QuestionFormOutcome::InputUnavailable(
                 "another interactive prompt already owns plain input".to_string(),
             );
         }
@@ -218,27 +242,23 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         if self
             .tx
             .send(PlainQuestionPrompt {
-                question: context.question.to_string(),
-                proposed_answer: context.proposed_answer.map(str::to_string),
-                options: context.options.to_vec(),
+                form: crate::console::LineQuestionForm::new(
+                    displayed,
+                    context.initial_answers.to_vec(),
+                ),
+                sensitive_values: self.sensitive_values.clone(),
                 reply,
             })
             .is_err()
         {
             self.modal_state.clear();
-            return nib::agent::QuestionOutcome::InputUnavailable(
-                "plain question input router stopped".to_string(),
+            return QuestionFormOutcome::InputUnavailable(
+                "plain question input router stopped".into(),
             );
         }
-        let outcome = match response.await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                self.modal_state.clear();
-                return nib::agent::QuestionOutcome::InputUnavailable(
-                    "plain question input router stopped".to_string(),
-                );
-            }
-        };
+        let outcome = response.await.unwrap_or_else(|_| {
+            QuestionFormOutcome::InputUnavailable("plain question input router stopped".into())
+        });
         self.modal_state.clear();
         outcome
     }
@@ -602,15 +622,29 @@ pub(crate) fn run_plain_with_input_and_modal_state(
     }
 
     if let Some(goal) = args.run.as_deref() {
-        println!("Thinking...");
-        match execute_plain_turn_and_queued_follow_ups(
-            &agent_scope,
-            &sid,
-            goal,
-            InteractiveAgentMode::Execute,
-            &input,
-            modal_state.clone(),
-        ) {
+        let result =
+            match nib::interactive::recover_question_conversation(&session_store, &sid, goal) {
+                Ok(Some(effect)) => execute_plain_question_recovery(
+                    &agent_scope,
+                    &sid,
+                    effect,
+                    &input,
+                    modal_state.clone(),
+                ),
+                Ok(None) => {
+                    println!("Thinking...");
+                    execute_plain_turn_and_queued_follow_ups(
+                        &agent_scope,
+                        &sid,
+                        goal,
+                        InteractiveAgentMode::Execute,
+                        &input,
+                        modal_state.clone(),
+                    )
+                }
+                Err(error) => Err(error),
+            };
+        match result {
             Ok(PlainAgentDisposition::Completed) => {}
             Ok(PlainAgentDisposition::Cancelled) => println!(
                 "{}",
@@ -815,83 +849,29 @@ pub(crate) fn run_plain_with_input_and_modal_state(
                         Err(error) => println!("{error}"),
                     }
                 }
-                Ok(InteractiveEffect::OpenQuestion {
-                    invocation_id,
-                    question,
-                    proposed_answer,
-                    options,
-                }) => {
-                    println!("Recovered question {invocation_id}: {question}");
-                    if let Some(proposal) = proposed_answer.as_deref() {
-                        println!("Proposed answer: {proposal}");
-                        println!("1. Approve proposed answer\n2. Reject and leave unanswered\n3. Instruct otherwise");
-                    }
-                    if proposed_answer.is_none() {
-                        for (index, option) in options.iter().enumerate() {
-                            println!("  {}. {}", index + 1, option);
+                Ok(InteractiveEffect::OpenQuestion { invocation_id, .. }) => {
+                    let result = match nib::interactive::recover_question_conversation(
+                        &session_store,
+                        &sid,
+                        &format!("resume {invocation_id}"),
+                    ) {
+                        Ok(Some(effect)) => execute_plain_question_recovery(
+                            &agent_scope,
+                            &sid,
+                            effect,
+                            &input,
+                            modal_state.clone(),
+                        ),
+                        Ok(None) => Err("that question is no longer eligible for recovery".into()),
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(PlainAgentDisposition::QuitRequested(terminal)) => {
+                            println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
+                            break 'repl;
                         }
-                    }
-                    loop {
-                        print!("Decision or answer: ");
-                        let _ = io::stdout().flush();
-                        let line = match input.read_line_blocking() {
-                            Ok(line) => line,
-                            Err(error) => {
-                                println!("{error}");
-                                break;
-                            }
-                        };
-                        match interpret_plain_question_line(
-                            &line,
-                            &options,
-                            proposed_answer.as_deref(),
-                        ) {
-                            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(
-                                answer,
-                            )) => {
-                                let saved = nib::interactive::persist_recovered_question_answer(
-                                    &session_store,
-                                    &sid,
-                                    &invocation_id,
-                                    &answer,
-                                );
-                                match saved {
-                                    Ok(plan_id) => {
-                                        println!("Saved answer. Continue with /continue {plan_id}")
-                                    }
-                                    Err(error) => println!("{error}"),
-                                }
-                                break;
-                            }
-                            PlainQuestionLine::Outcome(
-                                nib::agent::QuestionOutcome::ApprovedProposal(answer),
-                            ) => {
-                                let saved = nib::interactive::persist_recovered_proposed_answer(
-                                    &session_store,
-                                    &sid,
-                                    &invocation_id,
-                                    &answer,
-                                );
-                                match saved {
-                                    Ok(plan_id) => println!(
-                                        "Saved approved answer. Continue with /continue {plan_id}"
-                                    ),
-                                    Err(error) => println!("{error}"),
-                                }
-                                break;
-                            }
-                            PlainQuestionLine::Retry(message) => println!("{message}"),
-                            PlainQuestionLine::Outcome(
-                                nib::agent::QuestionOutcome::LeftUnanswered,
-                            ) => {
-                                println!("Question left unanswered. Dependent work is paused.");
-                                break;
-                            }
-                            other => {
-                                println!("question was not answered: {other:?}");
-                                break;
-                            }
-                        }
+                        Err(error) => println!("{error}"),
+                        _ => {}
                     }
                 }
                 Ok(InteractiveEffect::RunAgent { goal, mode }) => {
@@ -933,6 +913,30 @@ pub(crate) fn run_plain_with_input_and_modal_state(
             continue;
         };
 
+        match nib::interactive::recover_question_conversation(&session_store, &sid, &goal) {
+            Ok(Some(effect)) => {
+                match execute_plain_question_recovery(
+                    &agent_scope,
+                    &sid,
+                    effect,
+                    &input,
+                    modal_state.clone(),
+                ) {
+                    Ok(PlainAgentDisposition::QuitRequested(terminal)) => {
+                        println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
+                        break 'repl;
+                    }
+                    Err(error) => println!("{error}"),
+                    _ => {}
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                println!("{error}");
+                continue;
+            }
+        }
         let _ = maybe_assign_session_display_name(&session_store, &sid, &goal);
         println!("Thinking...");
 
@@ -1351,10 +1355,7 @@ impl PreparedPlainAgentStep {
         let sensitive_values = nib::config::load_nib_config_full(scope.project)
             .map_err(|error| error.to_string())?
             .public_session_sensitive_values();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("failed to initialize the async runtime: {error}"))?;
+        let runtime = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
         let cancellation = nib::agent::CancellationSignal::new();
         let run_id = uuid::Uuid::new_v4().simple().to_string();
         let (steering, steering_receiver) = if mode == InteractiveAgentMode::Compact {
@@ -1368,6 +1369,7 @@ impl PreparedPlainAgentStep {
             )?;
             (Some(steering), Some(receiver))
         };
+        let question_sensitive_values = sensitive_values.clone();
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
         let renderer = std::thread::Builder::new()
             .name("nib-plain-stream".to_string())
@@ -1406,6 +1408,7 @@ impl PreparedPlainAgentStep {
             question_handler: Some(Arc::new(BrokeredPlainQuestionHandler {
                 tx: question_tx,
                 modal_state: modal_state.clone(),
+                sensitive_values: question_sensitive_values,
             })),
             stream_tx: Some(stream_tx),
             cancellation: Some(cancellation.clone()),
@@ -1523,62 +1526,6 @@ pub(crate) fn complete_plain_approval_line(
         )),
         InteractionReduction::Error { message, .. } => Err(message),
         _ => Ok(Some(nib::tools::models::ApprovalDecision::denied())),
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum PlainQuestionLine {
-    Retry(String),
-    Outcome(nib::agent::QuestionOutcome),
-    Command(nib::interactive::InteractiveCommand),
-}
-
-pub(crate) fn interpret_plain_question_line(
-    line: &str,
-    options: &[String],
-    proposed_answer: Option<&str>,
-) -> PlainQuestionLine {
-    if let Some(proposed_answer) = proposed_answer {
-        if line.trim_start().starts_with(":command") {
-            return match parse_plain_question_answer(line, options) {
-                InteractionReduction::ModalCommand(command) => PlainQuestionLine::Command(command),
-                InteractionReduction::Error { message, .. } => PlainQuestionLine::Retry(message),
-                _ => PlainQuestionLine::Retry("invalid prompt-local command".to_string()),
-            };
-        }
-        return match nib::interactive::parse_proposed_question_input(line) {
-            nib::interactive::ProposedQuestionInput::Approve => PlainQuestionLine::Outcome(
-                nib::agent::QuestionOutcome::ApprovedProposal(proposed_answer.to_string()),
-            ),
-            nib::interactive::ProposedQuestionInput::Reject => {
-                PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::LeftUnanswered)
-            }
-            nib::interactive::ProposedQuestionInput::InstructOtherwise => PlainQuestionLine::Retry(
-                "Type the alternative answer, then press Enter".to_string(),
-            ),
-            nib::interactive::ProposedQuestionInput::Answer(answer) => {
-                PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(answer))
-            }
-            nib::interactive::ProposedQuestionInput::Retry(message) => {
-                PlainQuestionLine::Retry(message)
-            }
-        };
-    }
-    match parse_plain_question_answer(line, options) {
-        InteractionReduction::QuestionAnswered(answer) => {
-            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::Answered(answer))
-        }
-        InteractionReduction::QuestionLeftUnanswered => {
-            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::LeftUnanswered)
-        }
-        InteractionReduction::QuestionInputClosed => {
-            PlainQuestionLine::Outcome(nib::agent::QuestionOutcome::InputClosed)
-        }
-        InteractionReduction::ModalCommand(command) => PlainQuestionLine::Command(command),
-        InteractionReduction::Error { message, .. } => PlainQuestionLine::Retry(message),
-        _ => PlainQuestionLine::Retry(
-            "question input was rejected by the shared reducer".to_string(),
-        ),
     }
 }
 

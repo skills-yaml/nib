@@ -64,7 +64,7 @@ fn recoverable_question_session() -> (
     let directory = tempdir().expect("session directory");
     let store = SessionStore::at_dir(directory.path().join("sessions"));
     let mut session = store.try_create_session().expect("session");
-    let plan = crate::session::Plan::new(
+    let mut plan = crate::session::Plan::new(
         "resume after answering",
         vec![crate::session::PlanStep {
             description: "use answer".to_string(),
@@ -76,6 +76,7 @@ fn recoverable_question_session() -> (
             content_generation: 0,
         }],
     );
+    plan.approved = true;
     let plan_id = plan.id.clone();
     let invocation_id = crate::tools::ToolInvocationId::new();
     session.plan = Some(plan);
@@ -105,6 +106,7 @@ fn recoverable_question_session() -> (
             answer_event_index: None,
             reason: Some("left unanswered".to_string()),
             outcome: Some("left_unanswered".to_string()),
+            ..Default::default()
         });
     store.save(&mut session).expect("recoverable question");
     (directory, store, session.id, invocation_id)
@@ -130,3 +132,15 @@ fn mock_config() -> LlmConfig {
 mod lifecycle;
 mod render;
 mod session;
+
+fn form_answer(
+    answer: String,
+    source: crate::interactive::QuestionAnswerSource,
+) -> crate::interactive::QuestionFormOutcome {
+    crate::interactive::QuestionFormOutcome::Answered(vec![crate::interactive::QuestionAnswer {
+        answer,
+        source,
+    }])
+}
+
+mod question_form;

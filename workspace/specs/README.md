@@ -35,7 +35,8 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | --- | --- | --- | --- |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
-| [T061](development/interactive/T061_question_form.md) | interactive | development | Published accepted-contract documentation only; runtime implementation pending and requires a fresh atomic reservation before starting. |
+| [T061](development/interactive/T061_question_form.md) | interactive | development | User-authorized runtime implementation active through linked T067 at fresh 0.3.0; published accepted-contract membership remains preserved. |
+| [T067](development/interactive/T067_question_form_runtime_implementation.md) | interactive | development | Linked T061 runtime implementation owns fresh nib-question-form 0.3.0 reservation; published 0.2.0 accepted-contract history preserved. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
 | [T062](done/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T063](done/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
@@ -129,10 +130,14 @@ The following pre-v7 audit records retain their original completion semantics.
 
 T060 corrects Task listing instruction preflight, terminal scope recovery, and
 home-installed Task availability under bwrap. See [T060](done/tools-sandbox/T060_terminal_listing_instruction_preflight.md).
-T061 is in development for the question form. The contract is accepted and
-implementation has not started. The 2026-10-01 revision uses conversational
-recovery, Esc interruption, and proposal chat, and removes `/plan` and `/questions`
-from the planned interactive command surface. See [T061](development/interactive/T061_question_form.md).
+T061 is in development for the accepted question-form contract, with runtime
+implementation active under linked [T067](development/interactive/T067_question_form_runtime_implementation.md)
+at reserved version 0.3.0. Independently reviewed core code has passed aggregate
+native gates in internal peer integration; frontend, compatibility and command
+reconciliation continue before shared test/main delivery. The accepted interaction
+uses conversational recovery, Esc interruption and proposal chat and removes
+`/plan` and `/questions` from the final interactive command surface. See
+[T061](development/interactive/T061_question_form.md).
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
@@ -238,7 +243,7 @@ work or narrower guarantees.
 - [T055: Conversational Repository-Aware Help](done/context-memory/T055_conversational_repository_aware_help.md)
 - [T056: Session Worktree Preflight Recovery](done/tools-sandbox/T056_session_worktree_preflight_recovery.md)
 - [T058: Preflight Diagnostics and Independent Read Progress](done/tools-sandbox/T058_preflight_diagnostics_and_independent_read_progress.md)
-- [T061: Question Form](development/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; implementation has not started.
+- [T061: Question Form](development/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; runtime implementation is active under T067, with shared branch delivery pending.
 
 ### Feature specs
 

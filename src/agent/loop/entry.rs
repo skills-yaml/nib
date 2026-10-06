@@ -215,13 +215,27 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
     }
     .and_then(|recovered| {
         if let Some(plan_id) = cfg.continuation_plan_id.as_deref() {
-            validate_continue_admission(
-                &runtime.session_store,
-                session_id,
-                plan_id,
-                goal,
-                &run_id,
-            )?;
+            if let Some(invocation_id) = cfg.discussion_invocation_id {
+                validate_discussion_admission(
+                    &runtime.session_store,
+                    session_id,
+                    plan_id,
+                    goal,
+                    &run_id,
+                    invocation_id,
+                )?;
+            } else {
+                validate_continue_admission(
+                    &runtime.session_store,
+                    session_id,
+                    plan_id,
+                    goal,
+                    &run_id,
+                )?;
+            }
+        }
+        if cfg.discussion_invocation_id.is_some() && cfg.continuation_plan_id.is_none() {
+            return Err("discussion continuation requires its exact persisted plan".to_string());
         }
         Ok(recovered)
     });

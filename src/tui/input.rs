@@ -446,19 +446,16 @@ pub(crate) fn model_action_for_key(
 
 impl PendingQuestion {
     pub(crate) fn new(request: TuiQuestionRequest) -> Self {
-        let has_proposal = request.proposed_answer.is_some();
+        let state = crate::interactive::QuestionFormState::new(
+            request.form.clone(),
+            &request.initial_answers,
+        );
         Self {
             request,
             recovery: None,
-            response: String::new(),
-            selected_option: None,
-            selected_decision: 1,
-            focus: if has_proposal {
-                QuestionFocus::Actions
-            } else {
-                QuestionFocus::Editor
-            },
-            error: None,
+            state,
+            description_scroll: 0,
+            subject_scroll: 0,
         }
     }
 
@@ -469,156 +466,65 @@ impl PendingQuestion {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum QuestionAction {
-    Pending,
-    Submit(String),
-    ApproveProposal(String),
-    LeaveUnanswered,
-    Error(String),
-}
-
-pub(crate) fn submit_question_answer(question: &PendingQuestion, answer: &str) -> QuestionAction {
-    let state = InteractionState {
-        question_pending: true,
-        ..InteractionState::default()
-    };
-    match reduce_interaction(
-        &state,
-        InteractionInput::QuestionAnswer {
-            answer,
-            options: &question.request.options,
-            selected_option: question.selected_option,
-        },
-    ) {
-        InteractionReduction::QuestionAnswered(answer) => QuestionAction::Submit(answer),
-        InteractionReduction::QuestionLeftUnanswered => QuestionAction::LeaveUnanswered,
-        InteractionReduction::Error { message, .. } => QuestionAction::Error(message),
-        InteractionReduction::ModalCommand(_) => QuestionAction::Error(
-            crate::interactive::modal_command_unsupported_message().to_string(),
-        ),
-        _ => QuestionAction::Error("question input was rejected by the shared reducer".to_string()),
-    }
-}
-
 pub(crate) fn question_action_for_key(
     question: &mut PendingQuestion,
     code: KeyCode,
-) -> QuestionAction {
+) -> Option<crate::interactive::QuestionFormOutcome> {
+    use crate::interactive::QuestionFormEvent as Input;
     match code {
-        KeyCode::Tab => {
-            let has_suggestions =
-                question.request.proposed_answer.is_none() && !question.request.options.is_empty();
-            question.focus = match question.focus {
-                QuestionFocus::Editor if has_suggestions => QuestionFocus::Suggestions,
-                QuestionFocus::Editor | QuestionFocus::Suggestions => QuestionFocus::Actions,
-                QuestionFocus::Actions => QuestionFocus::Editor,
-            };
-            QuestionAction::Pending
+        KeyCode::PageDown => {
+            question.description_scroll = question.description_scroll.saturating_add(4);
+            question.subject_scroll = question.subject_scroll.saturating_add(1);
+            return None;
         }
-        KeyCode::BackTab => {
-            let has_suggestions =
-                question.request.proposed_answer.is_none() && !question.request.options.is_empty();
-            question.focus = match question.focus {
-                QuestionFocus::Editor => QuestionFocus::Actions,
-                QuestionFocus::Suggestions => QuestionFocus::Editor,
-                QuestionFocus::Actions if !has_suggestions => QuestionFocus::Editor,
-                QuestionFocus::Actions => QuestionFocus::Suggestions,
-            };
-            QuestionAction::Pending
+        KeyCode::PageUp => {
+            question.description_scroll = question.description_scroll.saturating_sub(4);
+            question.subject_scroll = question.subject_scroll.saturating_sub(1);
+            return None;
         }
-        KeyCode::Char(character)
-            if question.focus == QuestionFocus::Editor
-                && question.response.len().saturating_add(character.len_utf8())
-                    <= MAX_COMPOSER_BYTES =>
-        {
-            question.response.push(character);
-            question.error = None;
-            QuestionAction::Pending
+        _ => {
+            question.description_scroll = 0;
+            question.subject_scroll = 0;
         }
-        KeyCode::Backspace if question.focus == QuestionFocus::Editor => {
-            question.response.pop();
-            question.error = None;
-            QuestionAction::Pending
-        }
-        KeyCode::Up if question.focus == QuestionFocus::Suggestions => {
-            if let Some(selected) = question.selected_option {
-                question.selected_option = selected.checked_sub(1);
-            }
-            QuestionAction::Pending
-        }
-        KeyCode::Up
-            if question.focus == QuestionFocus::Actions
-                && question.request.proposed_answer.is_some() =>
-        {
-            question.selected_decision = question.selected_decision.saturating_sub(1);
-            QuestionAction::Pending
-        }
-        KeyCode::Down
-            if question.focus == QuestionFocus::Actions
-                && question.request.proposed_answer.is_some() =>
-        {
-            question.selected_decision = question.selected_decision.saturating_add(1).min(2);
-            QuestionAction::Pending
-        }
-        KeyCode::Char(digit @ '1'..='3')
-            if question.focus == QuestionFocus::Actions
-                && question.request.proposed_answer.is_some() =>
-        {
-            question.selected_decision = usize::from(digit as u8 - b'1');
-            QuestionAction::Pending
-        }
-        KeyCode::Down if question.focus == QuestionFocus::Suggestions => {
-            let last = question.request.options.len().saturating_sub(1);
-            question.selected_option = Some(match question.selected_option {
-                Some(selected) => selected.saturating_add(1).min(last),
-                None => 0,
-            });
-            QuestionAction::Pending
-        }
-        KeyCode::Enter => match question.focus {
-            QuestionFocus::Actions => {
-                if let Some(proposal) = question.request.proposed_answer.as_deref() {
-                    match question.selected_decision {
-                        0 => QuestionAction::ApproveProposal(proposal.to_string()),
-                        1 => QuestionAction::LeaveUnanswered,
-                        _ => {
-                            question.focus = QuestionFocus::Editor;
-                            QuestionAction::Pending
-                        }
-                    }
-                } else {
-                    QuestionAction::LeaveUnanswered
-                }
-            }
-            QuestionFocus::Suggestions => {
-                if let Some(index) = question.selected_option {
-                    if let Some(option) = question.request.options.get(index) {
-                        return QuestionAction::Submit(option.clone());
-                    }
-                }
-                QuestionAction::Error("select an option or type a custom answer".to_string())
-            }
-            QuestionFocus::Editor => submit_question_answer(question, &question.response),
-        },
-        KeyCode::Esc => QuestionAction::LeaveUnanswered,
-        _ => QuestionAction::Pending,
     }
+    let input = match code {
+        KeyCode::Esc => Input::Interrupt,
+        KeyCode::Left | KeyCode::BackTab => Input::PreviousTab,
+        KeyCode::Right | KeyCode::Tab => Input::NextTab,
+        KeyCode::Up => Input::PreviousRow,
+        KeyCode::Down => Input::NextRow,
+        KeyCode::Enter => Input::Choose,
+        KeyCode::Backspace => Input::Backspace,
+        KeyCode::Char(digit @ '0'..='9') if question.state.editor.is_none() => Input::SelectRow(
+            digit
+                .to_digit(10)
+                .and_then(|digit| digit.checked_sub(1))
+                .map_or(usize::MAX, |digit| digit as usize),
+        ),
+        KeyCode::Char(character) => Input::Type(character),
+        _ => return None,
+    };
+    question.state.apply(input)
 }
 
 pub(crate) fn paste_question_answer(question: &mut PendingQuestion, pasted: &str) {
-    if question.focus != QuestionFocus::Editor {
-        return;
+    if question.state.editor.is_none() && question.state.current_question().is_some() {
+        question
+            .state
+            .open_editor(crate::interactive::QuestionEditorKind::Answer);
     }
-    let input = std::mem::take(&mut question.response);
+    let Some(draft) = question.state.editor.as_mut() else {
+        return;
+    };
+    let input = std::mem::take(&mut draft.text);
     let mut editor = Composer {
         cursor: input.len(),
         input,
         ..Composer::default()
     };
     let outcome = editor.insert_paste(pasted);
-    question.response = editor.input;
-    question.error = outcome.visible_status();
+    draft.text = editor.input;
+    question.state.error = outcome.visible_status();
 }
 
 pub(crate) fn open_prompt_command_overlay(
@@ -638,87 +544,49 @@ pub(crate) fn handle_question_key(question: &mut Option<PendingQuestion>, code: 
     let Some(pending) = question.as_mut() else {
         return false;
     };
-    let action = question_action_for_key(pending, code);
-    match action {
-        QuestionAction::Pending => false,
-        QuestionAction::ApproveProposal(response) => {
-            if let Some(target) = question
-                .as_ref()
-                .and_then(|pending| pending.recovery.as_ref())
+    let saved_state =
+        (pending.recovery.is_some() && code == KeyCode::Enter).then(|| pending.state.clone());
+    let Some(outcome) = question_action_for_key(pending, code) else {
+        return false;
+    };
+    if let Some(target) = pending.recovery.as_ref() {
+        // The draw loop consumes recovery effects so the exact operation starts only
+        // after the atomic persisted form submission succeeds.
+        match crate::interactive::complete_question_recovery(
+            &target.store,
+            &target.session_id,
+            target.invocation_id,
+            outcome.clone(),
+        ) {
+            Ok(effect) => {
+                let _ = target.completion.send(effect);
+            }
+            Err(_)
+                if matches!(
+                    outcome,
+                    crate::interactive::QuestionFormOutcome::LeftUnanswered
+                ) =>
             {
-                match crate::interactive::persist_recovered_proposed_answer(
-                    &target.store,
-                    &target.session_id,
-                    &target.invocation_id,
-                    &response,
-                ) {
-                    Ok(_) => {
-                        question.take();
-                        return true;
-                    }
-                    Err(message) => {
-                        if let Some(pending) = question.as_mut() {
-                            pending.error = Some(message);
-                        }
-                        return false;
-                    }
+                let _ = target.completion.send(
+                    crate::interactive::QuestionRecoveryEffect::Output(
+                        "Question form closed. The saved state changed or could not be updated. Check /status before continuing."
+                            .to_string(),
+                    ),
+                );
+            }
+            Err(message) => {
+                if let Some(saved_state) = saved_state {
+                    pending.state = saved_state;
                 }
+                pending.state.error = Some(message);
+                return false;
             }
-            if let Some(pending) = question.take() {
-                let _ = pending
-                    .request
-                    .reply
-                    .send(crate::agent::QuestionOutcome::ApprovedProposal(response));
-            }
-            true
-        }
-        QuestionAction::Submit(response) => {
-            if let Some(target) = question
-                .as_ref()
-                .and_then(|pending| pending.recovery.as_ref())
-            {
-                match crate::interactive::persist_recovered_question_answer(
-                    &target.store,
-                    &target.session_id,
-                    &target.invocation_id,
-                    &response,
-                ) {
-                    Ok(_) => {
-                        question.take();
-                        return true;
-                    }
-                    Err(message) => {
-                        if let Some(pending) = question.as_mut() {
-                            pending.error = Some(message);
-                        }
-                        return false;
-                    }
-                }
-            }
-            if let Some(pending) = question.take() {
-                let _ = pending
-                    .request
-                    .reply
-                    .send(crate::agent::QuestionOutcome::Answered(response));
-            }
-            true
-        }
-        QuestionAction::LeaveUnanswered => {
-            if let Some(pending) = question.take() {
-                let _ = pending
-                    .request
-                    .reply
-                    .send(crate::agent::QuestionOutcome::LeftUnanswered);
-            }
-            true
-        }
-        QuestionAction::Error(message) => {
-            if let Some(pending) = question.as_mut() {
-                pending.error = Some(message);
-            }
-            false
         }
     }
+    if let Some(pending) = question.take() {
+        let _ = pending.request.reply.send(outcome);
+    }
+    true
 }
 
 pub(crate) fn approval_decision_from_answer(answer: &str) -> Result<ApprovalDecision, String> {

@@ -462,7 +462,7 @@ else
 fi
 
 interrupt_question_input() {
-  wait_for_pty_output "$fixture/$current_case.txt" 'Question:'
+  wait_for_pty_output "$fixture/$current_case.txt" 'Answer (number'
   printf '\003'
   wait_for_pty_output "$fixture/$current_case.txt" "$child_status_marker:130"
 }
@@ -558,7 +558,7 @@ grep -Fq 'Forked session' "$fixture/plain-semantics.txt"
 
 plain_question_input() {
   local question_output="$fixture/plain-question.txt"
-  wait_for_pty_output "$question_output" 'Answer (number or text):'
+  wait_for_pty_output "$question_output" 'Answer (number'
   printf ':command /status\n'
   wait_for_pty_output "$question_output" 'Configured approval preset:'
   printf '2\n\n'
@@ -572,7 +572,7 @@ run_pty_case \
   plain_question_input \
   'TERM=xterm-256color NO_COLOR=1' \
   "--plain --run 'ask a question before continuing'"
-grep -Fq 'Answer (number or text):' "$fixture/plain-question.txt"
+grep -Fq 'Answer (number' "$fixture/plain-question.txt"
 grep -Fq '"answer":"full"' "$fixture/plain-question.txt"
 grep -Fq 'Goodbye. Session saved' "$fixture/plain-question.txt"
 
@@ -657,7 +657,7 @@ tui_question_input() {
   # labels on macOS. This short, unique status heading remains contiguous there.
   wait_for_pty_output "$output" 'Verification' || return 1
   sleep 0.3
-  # Number keys type into the answer editor; Enter submits option 2 (full).
+  # Number keys select a question row; Enter answers with option 2 (full).
   printf '2\r'
   local session
   session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')" || return 1
