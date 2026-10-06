@@ -18,6 +18,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
+mod question_form;
+mod question_recovery;
+pub use question_form::*;
 mod split_00;
 mod split_01;
 mod split_02;
@@ -116,3 +119,6 @@ mod tests;
 
 mod question_state;
 pub use question_state::{QuestionEditor, QuestionEditorKind, QuestionFormEvent, QuestionFormState};
+pub use question_recovery::{
+    complete_question_recovery, recover_question_conversation, QuestionRecoveryEffect,
+};

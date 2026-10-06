@@ -12,20 +12,23 @@ State: development
 2. Foundation: add normalized form/answer types and semantic validation, keep
    legacy handler entrypoints working, persist linked per-question obligations,
    support exact reuse and discussed results, enforce completion/dependency gating.
-3. Surfaces: implement a shared form reducer and TUI card/tabs/editors; adapt
+3. Recovery API integration: expose typed recovery/editor effects and exact
+   lease-fenced persistence before the frontends consume them. Keep the old slash
+   commands only on the internal integration ref until frontend fixtures migrate.
+4. Surfaces: implement a shared form reducer and TUI card/tabs/editors; adapt
    plain/chat/console/one-shot line protocols with one submit boundary for sets.
-4. Recovery: route ordinary conversation to exact persisted operation identities;
+5. Recovery integration: route ordinary conversation to exact persisted operation identities;
    reopen unfinished forms before resuming, block ambiguous/unrelated responses,
    preserve existing execution admission and proposal approval requirements.
-5. Reconcile: remove /plan and /questions from registration/help/completion,
+6. Reconcile: remove /plan and /questions from registration/help/completion,
    update runtime prompt and user guide, add behavioral/regression fixtures for
    each criterion, and resolve durable memory before completion.
-6. Review spec compliance, then quality/security/data-integrity/public-interface
+7. Review spec compliance, then quality/security/data-integrity/public-interface
    behavior on exact candidates. Fix all findings and renew affected gate modules.
-7. Freeze combined implementation and run task check, task test, task docs:check,
+8. Freeze combined implementation and run task check, task test, task docs:check,
    task test:interactive, and applicable native interactive/release qualification
    modules. Register task check/test exactly as Taskfile verify composition.
-8. Deliver to development after green exact combined CI; record the actual event
+9. Deliver to development after green exact combined CI; record the actual event
    and move to test. Qualify exact main candidate on Linux/macOS/Windows, verify
    actual main merge, reconcile acceptance/catalog/versions/memory and move to done.
    Renew review/frozen gates for final records before delivery. Publication separate.
@@ -70,3 +73,13 @@ Use the focused and frozen Task gates specified above and in T061/T067.
 
 Discussion must never resolve dependency obligations; recovery must not guess
 operation identity. Preserve old session fields and published version history.
+
+
+## Integration Slices
+
+The recovery API lane contributes the prerequisites for AC-7 while the final
+command-reconciliation task removes registration, parsing, help, completion and
+CLI assertions after the migrated native surfaces are integrated. Compatibility
+fixtures select an enduring registered status command and native prompt readiness
+marker. Every internal integration slice runs the registered native check/test
+gates; only the complete accepted candidate is promoted to development and main.

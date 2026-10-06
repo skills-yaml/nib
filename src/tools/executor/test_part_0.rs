@@ -700,7 +700,7 @@ async fn executor_results_and_audit_use_encoded_control_safe_projection() {
         .with_auto_approve(true);
 
     let result = executor
-        .execute(
+        .execute_question_form(
             ToolCall {
                 invocation_id: crate::tools::ToolInvocationId::new(),
                 tool_name: "ask_question".to_string(),

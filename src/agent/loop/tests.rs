@@ -162,3 +162,6 @@ mod part_a;
 mod part_b;
 #[path = "part_c.rs"]
 mod part_c;
+
+#[path = "question_form_tests.rs"]
+mod question_form_tests;

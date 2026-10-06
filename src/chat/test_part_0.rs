@@ -1025,6 +1025,7 @@ fn plain_recovered_question_retries_invalid_input_before_persisting() {
             answer_event_index: None,
             reason: Some("left unanswered".to_string()),
             outcome: Some("left_unanswered".to_string()),
+            ..Default::default()
         });
     store.save(&mut session).expect("recoverable question");
     let session_id = session.id.clone();
