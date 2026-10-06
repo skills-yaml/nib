@@ -1108,6 +1108,17 @@ fn read_fixture_request(stream: &mut impl std::io::Read) -> Option<Value> {
         }
     }
 }
+fn configure_fixture_stream(stream: &std::net::TcpStream) {
+    // BSD accept can inherit the listener's nonblocking mode; the bounded
+    // request reader needs blocking I/O for delayed headers and bodies.
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+}
 fn accept_scripted_form_post(
     listener: &std::net::TcpListener,
     deadline: Instant,
@@ -1126,12 +1137,7 @@ fn accept_scripted_form_post(
                 Err(error) => panic!("fixture accept: {error}"),
             }
         };
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+        configure_fixture_stream(&stream);
         if let Some(request) = read_fixture_request(&mut stream) {
             return Some((stream, request));
         }
@@ -1161,6 +1167,43 @@ fn scripted_form_server(responses: Vec<Value>) -> (String, std::sync::mpsc::Rece
         }
     });
     (format!("http://{address}/v1"), receiver)
+}
+#[test]
+fn scripted_form_fixture_waits_for_delayed_payload_on_a_nonblocking_accepted_socket() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    // Force BSD inheritance on every platform before exercising the shared
+    // fixture configuration and actual bounded JSON request reader.
+    stream.set_nonblocking(true).unwrap();
+    assert_eq!(
+        stream.read(&mut [0; 1]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    configure_fixture_stream(&stream);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        sender.send(read_fixture_request(&mut stream)).unwrap();
+    });
+    assert!(matches!(
+        receiver.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    client
+        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    client
+        .write_all(b"POST /v1/responses HTTP/1.1\r\nContent-Length: 12\r\n\r\n{\"value\":42}")
+        .unwrap();
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        Some(json!({"value":42}))
+    );
+    reader.join().unwrap();
 }
 #[test]
 fn scripted_form_fixture_ignores_bodyless_local_probe_before_responses_post() {
