@@ -18,8 +18,8 @@ The [owning work record](t061-lines.md) tracks implementation and gate evidence.
 
 ## Dependencies
 
-Source compilation requires the shared contract/runtime APIs and recovery router
-from the corresponding implementation lanes. Cargo runs remain serialized.
+The verified shared contract/runtime APIs and recovery router are merged into
+this worktree. Cargo runs remain serialized; the TUI lane holds the next slot.
 
 ## Integration
 

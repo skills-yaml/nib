@@ -39,6 +39,8 @@ empty delimiter before persistence/resumption; inspection retains the responder
 and escaped command text stays literal. Added delayed-surplus and command
 recovery regressions. Esc also interrupts pending successful question frames.
 Description indentation now follows the numbered prefix width for rows 10–20.
+Merged the verified shared core and recovery API integration. The merge preserved
+all line adapters/fixtures and native legacy defaults without a source conflict.
 
 ## Validation
 
@@ -46,11 +48,15 @@ Preparation passed the full strict native gates. Lane gates are pending; Cargo
 is serialized and this lane waits for the core lane to release its slot.
 Diff whitespace check passed. Behavioral fixtures are authored but have not run;
 shared API dependencies must integrate before compilation and native gates.
+The verified API dependencies are now present and their signatures/default
+compatibility have been checked against the line adapters. Formatting and native
+gates still wait for the TUI lane to release its exclusive compilation slot.
 
 ## Blockers and Dependencies
 
-The agreed shared form/parser and persisted recovery APIs are supplied by the
-contract/runtime and recovery lanes. No implementation ambiguity is introduced.
+The agreed shared form/parser and persisted recovery APIs are now integrated.
+The TUI lane holds the exclusive compilation slot; no Cargo or Task gates run
+from this lane until that slot is released.
 
 ## Memory Impact
 
