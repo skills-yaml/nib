@@ -1,12 +1,12 @@
 # T068: Preserve Anthropic Streamed Tool Continuations
 
-**Status:** Development
-State: development
+**Status:** Test
+State: test
 Primary Feature: llm-providers
 
 ## Problem and Authority
 
-The user authorized continuing [T023](T023_live_llm_provider_model_integration_qualification.md) with offline investigation and correction of evidenced adapter defects. Independent source review found that Anthropic streaming discards thinking/signature/redacted-thinking blocks and reconstructs the private continuation from aggregated text and tool calls. The completion path preserves native blocks. Anthropic requires the complete unmodified thinking blocks accompanying tool use to return with tool results.
+The user authorized continuing [T023](../../development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) with offline investigation and correction of evidenced adapter defects. Independent source review found that Anthropic streaming discards thinking/signature/redacted-thinking blocks and reconstructs the private continuation from aggregated text and tool calls. The completion path preserves native blocks. Anthropic requires the complete unmodified thinking blocks accompanying tool use to return with tool results.
 
 This compatible repair follows the shipped [T022](../../done/llm-providers/T022_provider_neutral_llm_contract_and_adapter_conformance.md) contract. T023's retained refusal used completion for both requests; the streaming defect is not established as that refusal's cause. T023 stays in development and its live acceptance remains unresolved.
 
@@ -76,3 +76,7 @@ Rationale: Appended the native streaming preservation contract and separate unre
 The pre-fix local HTTP regression failed at `46a5a51b0de263deffa5d316a0578db78b288d0f`: outgoing assistant content collapsed six native blocks into aggregated text and two tool calls; 26 existing conformance cases passed. After repair, `task test:llm-conformance` passes 31 cases, including exact native assistant arrays, completion/stream parity, single explicit-error and parallel success results, private projection checks, malformed/unfinished/after-terminal rejection, refusal and continuation byte/item limits. Existing conformance covers one-use scope and invocation guards. `task test:llm-live:offline` passes 71 tests with the paid qualification ignored.
 
 These credential-free results support AC-1 through AC-5. AC-6 remains open until exact independent review, frozen native/hosted qualification and observed shared development/main delivery. T023's historical complete-path refusal remains unexplained.
+
+## Confirmed Shared Integration
+
+Shared development was verified at `9762df5c10727889adff072045fcd8a8c1369dff` on 2026-10-06T11:58:18.336608+00:00. Frozen native task verify/docs:check/versions:check and exact-merge Linux/macOS/Windows CI 37453323677 passed, including clean exact-source optimized binary qualification and native interactions. This observed integration establishes test state. Main delivery and publication remain separate pending events.

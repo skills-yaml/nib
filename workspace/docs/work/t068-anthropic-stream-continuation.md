@@ -36,3 +36,7 @@ Rationale: Recorded the verified native-stream preservation fact and its distinc
 The initial production review found that indexed native content could be silently sorted despite reversed or overlapping wire starts. The accepted fix flags a start whose index is not the next sequential index or whose predecessor remains open, and rejects tool authority at completion. Malformed-order and overlap HTTP regressions now accompany the earlier malformed fixtures. Existing text-only projection remains compatible.
 
 Delivery follows the normal lifecycle: qualify the exact PR merge revision Q; fast-forward shared development to Q and confirm it; commit the corresponding local test-state record T with catalog/release paths and fresh documentation/version gates; then deliver the same fully qualified Q to main. A later done-state record D includes both observed events and receives fresh exact review and qualification before shared delivery. Main never receives an unqualified metadata revision.
+
+## Confirmed Development Event
+
+Shared development is verified at `9762df5c10727889adff072045fcd8a8c1369dff` on 2026-10-06T11:58:18.336608+00:00. Frozen native verify/docs/versions and exact all-platform CI 37453323677 passed. T068 moves to test with matching catalog and reservation paths; main/publication remain pending. This local committed Test record precedes delivery of the same qualified Q to main.

@@ -518,7 +518,7 @@ and the existing catalog lifecycle remain intact.
 - Type: fact
 - Source: T068 source inspection and credential-free conformance fixtures
 - Confidence: high
-- Review: independent candidate review pending
+- Review: 2026-10-06 independent exact-candidate review
 - Supersedes: none
 
 Content:
