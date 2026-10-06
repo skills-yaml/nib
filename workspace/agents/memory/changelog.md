@@ -524,3 +524,15 @@ and the existing catalog lifecycle remain intact.
 Content:
 
 Appended the verified native Anthropic streaming preservation contract to facts.md, including opaque privacy/bounds and the distinction from T023's unresolved completion-path refusal. T068 is a compatible patch reservation; its offline fixtures do not establish live-provider qualification or authorize paid calls. No real provider content, credentials or private thought data is stored.
+
+## 2026-10-06 - Anthropic streamed repair delivered
+
+- Type: fact
+- Source: T068, PR49 and verified identical development/main refs
+- Confidence: high
+- Review: independent completion-record review pending
+- Supersedes: earlier T068 implementation-only snapshot
+
+Content:
+
+Appended the verified T068 codec delivery, exact acceptance/gate evidence, unchanged single 0.3.1 target and reconciled catalog to facts.md. T023 remains unresolved and no paid-provider pass or protected production rollout is inferred.

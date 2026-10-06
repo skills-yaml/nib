@@ -435,3 +435,15 @@ paid-provider qualification changes are authorized by this record update.
 Content:
 
 Anthropic streamed tool-result replay must retain the complete ordered native assistant content privately, including signed thinking (also empty displayed thinking), split opaque signatures, redacted-thinking data, native text boundaries and tool input values. Projected public events and debug output exclude those private values. T068 repairs the streaming path with deterministic HTTP round-trip and malformed/limit fixtures; the completion path already retained native content. T023's historical tool-continuation refusal used completion for both requests, so the independently evidenced streaming defect is not its established cause. Live qualification, model/default changes and paid calls remain separate from this repair.
+
+## 2026-10-06 - Anthropic streamed repair delivered
+
+- Type: fact
+- Source: T068, PR49 and verified identical development/main refs
+- Confidence: high
+- Review: independent completion-record review pending
+- Supersedes: earlier T068 implementation-only snapshot
+
+Content:
+
+T068's native Anthropic streamed continuation repair reached shared development and main at `9762df5c10727889adff072045fcd8a8c1369dff` on 2026-10-06 (development 2026-10-06T11:58:18.336608+00:00, main 2026-10-06T12:01:05.731122+00:00) via PR49. Exact independent code/Test reviews, native verify/docs/versions and Linux/macOS/Windows qualification passed, including 84.54% Linux coverage. Native signed/omitted/redacted blocks remain private, ordered and bounded, with malformed streams rejected before tool authority. The reconciled catalog is 78 done, T023 development and two backlog proposals. T023's completion-path refusal remains unresolved; no paid qualification or default/prompt change is implied. Publication and protected production rollout remain separate observed events.
