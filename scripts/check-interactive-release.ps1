@@ -308,13 +308,15 @@ curator_enabled = false
 
     $env:TERM = "dumb"
     $env:NO_COLOR = "1"
+    # Match the visible prompt prefix: ConPTY can render its trailing space as
+    # cursor movement instead of a literal space in the captured output.
     $plainCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary; exit `$LASTEXITCODE"
     $activeStage = "plain-dumb-terminal"
     $plainResult = Invoke-WindowsPseudoTerminal `
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $plainCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; WaitForOutput = "You> " }
+            [pscustomobject]@{ Text = "/status`r`n/quit`r`n"; WaitForOutput = "You>" }
         ) `
         -TimeoutMilliseconds 30000
     if ($plainResult.ExitCode -ne 0 -or
@@ -351,7 +353,7 @@ curator_enabled = false
         -Executable $pwshPath `
         -Arguments @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $copyCommand) `
         -InputChunks @(
-            [pscustomobject]@{ Text = "/copy`r`n/quit`r`n"; WaitForOutput = "You> " }
+            [pscustomobject]@{ Text = "/copy`r`n/quit`r`n"; WaitForOutput = "You>" }
         ) `
         -TimeoutMilliseconds 30000
     if ($copyResult.ExitCode -ne 0 -or
