@@ -7,7 +7,7 @@ status: active
 base_revision: d8b8d82fa55fb7f5f5f32ae1da87a1ccf157ea88
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-06T03:53:39Z
+updated_at: 2026-10-06T04:14:18Z
 scope:
   - scripts/check-interactive-release.ps1
   - tests/installers.rs
@@ -32,17 +32,28 @@ reject trailing-space synchronization. Input chunks, 30-second deadlines,
 clipboard content checks, fallback checks and console restoration stay intact.
 The shared nib-question-form reservation remains 0.3.0 from 0.2.0; no bump is
 introduced.
+Independent source review found no confirmed defect in checkpoint e9221006.
+Applied the required Rust assertion formatting in checkpoint 842c4b5 without
+changing behavior.
 
 ## Validation
 
-Read-only source inspection confirmed the raw-output mismatch and bounded change.
-Native Task gates remain pending until the exclusive Cargo slot is available.
-The Windows ConPTY clipboard stage requires hosted native rerun after integration.
+Task fmt passed without edits; task check passed strict all-target/all-feature
+Clippy and native workspace, versions and coordination validation.
+task test:installers passed all 42 fixtures, including both stable prompt waits
+and rejection of trailing-space synchronization. task docs:check passed native
+workspace validators and all five integrity tests; documentation validation is
+renewed after these final record edits before publishing the handoff.
+All Cargo used a fresh worktree-bound target, one build job and disabled debug
+symbols. The optional portable PowerShell syntax/output Task could not execute
+because PowerShell is unavailable locally. Actual Windows ConPTY clipboard
+qualification remains pending hosted native rerun on the integrated candidate.
+The shared 0.3.0 reservation was freshly checked at handoff; no second bump occurs.
 
 ## Blockers and Dependencies
 
-Depends on integrated t061-command-reconciliation. Another lane currently holds
-the exclusive Cargo slot; no Cargo or Task validation has run in this lane.
+Depends on integrated t061-command-reconciliation. No implementation blocker.
+Hosted native Windows qualification remains a delivery gate.
 
 ## Memory Impact
 
@@ -52,10 +63,12 @@ adds no durable project decision; shared lifecycle evidence remains with T061/T0
 
 ## Next Step
 
-Obtain independent source review, then run authorized focused Task gates when
-the exclusive slot is granted and publish a clean exact handoff.
+Renew exact independent review of final records, then integrate through registered
+native gates and qualify the resulting hosted Windows candidate.
 
 ## Handoff
 
-Source checkpoint ready for independent review; native validation and formal
-handoff remain pending. No shared delivery or Windows qualification is claimed.
+Author gates passed; the clean exact handoff requires renewed independent review
+before registered integration. No shared delivery or Windows qualification is
+claimed. The Cargo slot is released after final documentation validation and
+handoff publication.
