@@ -1017,7 +1017,7 @@ fn footer_and_completion_follow_the_current_interaction() {
     question.agent_mode = "WAITING QUESTION".to_string();
     assert_eq!(
         footer_line(&question, &viewport, 0, WaitingKind::Question, None, false),
-        "approval manual · WAITING QUESTION · Type answer · Enter submit · Esc leave unanswered"
+        "Up/Down select · Enter choose · Esc interrupt operation"
     );
     let mut workspace = chrome.clone();
     workspace.agent_mode = "WAITING PERMISSION".to_string();

@@ -598,7 +598,8 @@ pub(crate) fn render_session_activities(
     let band = waiting_band.as_ref().or(band).or(completion_band.as_ref());
     let completion_h = band
         .map(|band| {
-            if matches!(band, InteractionBand::Approval(req) if req.call.tool_name == "run_terminal") {
+            if matches!(band, InteractionBand::Question(_))
+                || matches!(band, InteractionBand::Approval(req) if req.call.tool_name == "run_terminal") {
                 command_approval_reserved_height(
                     frame.area().height,
                     band.row_count(),
@@ -747,9 +748,20 @@ pub(crate) fn render_session_activities(
                 .unwrap_or_else(|| (composer_visual_rows(composer, inner.width), true));
             let (cx, cursor_row) = if overlay.is_some() {
                 if let Some(question) = pending_question.filter(|question| {
-                    waiting == WaitingKind::Question && question.request.options.is_empty()
+                    waiting == WaitingKind::Question && question.state.editor.is_some()
                 }) {
-                    composer_cursor_cell(&question.response, question.response.len(), inner.width)
+                    {
+                        let row = rows
+                            .len()
+                            .saturating_sub(1 + usize::from(question.state.error.is_some()));
+                        (
+                            u16::try_from(
+                                rows.get(row).map_or(0, |row| unicode_display_width(row)),
+                            )
+                            .unwrap_or(u16::MAX),
+                            u16::try_from(row).unwrap_or(u16::MAX),
+                        )
+                    }
                 } else {
                     (COMPOSER_PROMPT_CELLS, 0)
                 }
@@ -762,7 +774,14 @@ pub(crate) fn render_session_activities(
                 .min(rows.len().saturating_sub(visible_height));
             let placeholder = overlay.is_none() && composer.input.is_empty();
             let muted_first = overlay.as_ref().is_some_and(|(_, editable)| {
-                *editable && pending_question.is_some_and(|question| question.response.is_empty())
+                *editable
+                    && pending_question.is_some_and(|question| {
+                        question
+                            .state
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.text.is_empty())
+                    })
             });
             let lines = rows
                 .iter()
