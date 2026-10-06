@@ -18,6 +18,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
+mod question_form;
+mod question_recovery;
+pub use question_form::*;
 mod split_00;
 mod split_01;
 mod split_02;
@@ -113,3 +116,7 @@ pub use split_03::{
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+pub use question_recovery::{
+    complete_question_recovery, recover_question_conversation, QuestionRecoveryEffect,
+};

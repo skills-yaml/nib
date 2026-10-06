@@ -86,6 +86,7 @@ pub(crate) fn recoverable_question_fixture() -> (
             answer_event_index: None,
             reason: Some("left unanswered".to_string()),
             outcome: Some("left_unanswered".to_string()),
+            ..Default::default()
         });
     store.save(&mut session).expect("recoverable question");
     (directory, store, session.id, invocation_id, plan_id)

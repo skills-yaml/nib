@@ -1025,154 +1025,58 @@ match state {
                     &request.name,
                     &request.arguments,
                 )?;
-                let raw_question = request
-                    .arguments
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .filter(|question| !question.trim().is_empty())
-                    .ok_or_else(|| "ask_question requires a non-empty question".to_string())?;
-                let question = crate::interactive::bounded_public_text(
-                    raw_question,
+                let form = crate::interactive::public_question_form(
+                    &crate::interactive::parse_question_form(&request.arguments)?,
                     &public_output_sensitive_values,
-                    MAX_QUESTION_BYTES,
-                    false,
-                );
-                let proposed_answer = request
-                    .arguments
-                    .get("proposed_answer")
-                    .and_then(Value::as_str)
-                    .filter(|answer| !answer.trim().is_empty())
-                    .map(|answer| {
-                        crate::interactive::bounded_public_text(
-                            answer,
-                            &public_output_sensitive_values,
-                            MAX_QUESTION_BYTES,
-                            false,
-                        )
-                    });
-                resources.observe_question(&question);
-                let options = request
-                    .arguments
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(|option| {
-                                crate::interactive::bounded_public_text(
-                                    option,
-                                    &public_output_sensitive_values,
-                                    MAX_QUESTION_OPTION_BYTES,
-                                    false,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let dependent_paths = bounded_clarification_dependency_paths(&request.arguments)?;
-                let reused = persist_question_required(
-                    &store,
-                    session_id,
-                    active_plan_id.as_deref(),
-                    request.invocation_id,
-                    ClarificationPrompt {
-                        question: &question,
-                        proposed_answer: proposed_answer.as_deref(),
-                        options: &options,
-                        dependent_paths: &dependent_paths,
-                    },
                 )?;
-                if reused.is_none() {
+                for question in &form.questions {
+                    resources.observe_question(&question.question);
+                }
+                let dependent_paths = bounded_clarification_dependency_paths(&request.arguments)?;
+                let dependent_paths = if dependent_paths.iter().any(|path| {
+                    crate::interactive::bounded_public_text(
+                        path, &public_output_sensitive_values, 4096, false,
+                    ) != *path
+                }) {
+                    Vec::new()
+                } else {
+                    dependent_paths
+                };
+                let initial = prepare_question_form(
+                    QuestionFormBinding {
+                        store: &store,
+                        session_id,
+                        plan_id: active_plan_id.as_deref(),
+                        run_id: &run_id,
+                        invocation_id: request.invocation_id,
+                        dependent_paths: &dependent_paths,
+                        discussion_invocation_id: cfg.discussion_invocation_id,
+                    },
+                    &form,
+                )?;
+                if initial.iter().any(Option::is_none) {
                     emit(
                         &cfg.stream_tx,
                         StreamEvent::QuestionRequired {
-                            question: question.clone(),
-                            options: options.clone(),
+                            question: form.questions.iter()
+                                .map(|question| question.question.as_str())
+                                .collect::<Vec<_>>().join("\n"),
+                            options: form.questions[0].options.iter()
+                                .map(|option| option.label.clone()).collect(),
                         },
-                    )
-                    .await;
+                    ).await;
                 }
-
-                let reused_answer = reused.is_some();
-                let outcome = match reused {
-                    Some(prior) => QuestionOutcome::Answered(prior.answer),
-                    None => match cfg.question_handler.as_ref() {
-                        Some(handler) => {
-                            handler
-                                .ask_with_context(QuestionRequestContext {
-                                    invocation_id: request.invocation_id,
-                                    question: &question,
-                                    proposed_answer: proposed_answer.as_deref(),
-                                    options: &options,
-                                })
-                                .await
-                        }
-                        None => QuestionOutcome::InputUnavailable(
-                            "no question handler configured".to_string(),
-                        ),
-                    },
-                };
-                let outcome = match outcome {
-                    QuestionOutcome::Answered(answer) => {
-                        let answer = crate::interactive::bounded_public_text(
-                            &answer,
-                            &public_output_sensitive_values,
-                            MAX_QUESTION_BYTES,
-                            false,
-                        );
-                        if answer.trim().is_empty() {
-                            QuestionOutcome::InputUnavailable(
-                                "question handler returned an empty answer".to_string(),
-                            )
-                        } else {
-                            QuestionOutcome::Answered(answer)
-                        }
-                    }
-                    QuestionOutcome::ApprovedProposal(answer) => {
-                        let answer = crate::interactive::bounded_public_text(
-                            &answer,
-                            &public_output_sensitive_values,
-                            MAX_QUESTION_BYTES,
-                            false,
-                        );
-                        if answer.trim().is_empty()
-                            || proposed_answer.as_deref() != Some(answer.as_str())
-                        {
-                            QuestionOutcome::InputUnavailable(
-                                "approved proposal did not match the displayed answer".to_string(),
-                            )
-                        } else {
-                            QuestionOutcome::ApprovedProposal(answer)
-                        }
-                    }
-                    QuestionOutcome::InputUnavailable(error) => {
-                        QuestionOutcome::InputUnavailable(crate::interactive::bounded_public_text(
-                            &error,
-                            &public_output_sensitive_values,
-                            MAX_QUESTION_BYTES,
-                            false,
-                        ))
-                    }
-                    other => other,
-                };
-                let answer = match &outcome {
-                    QuestionOutcome::Answered(answer)
-                    | QuestionOutcome::ApprovedProposal(answer) => Ok(answer.clone()),
-                    QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
-                    QuestionOutcome::Cancelled => Err("cancelled".to_string()),
-                    QuestionOutcome::InputClosed => Err("input closed".to_string()),
-                    QuestionOutcome::InputUnavailable(error) => Err(error.clone()),
-                };
-
-                let arguments = safe_question_execution_arguments(
-                    &request.arguments,
-                    &answer,
+                let outcome = request_form_answer(
+                    &cfg, request.invocation_id, &form, &initial,
                     &public_output_sensitive_values,
-                );
+                ).await;
+                let mut arguments = form.tool_arguments();
+                arguments["dependent_paths"] = json!(dependent_paths);
+                arguments["_question_outcome"] = serde_json::to_value(&outcome)
+                    .map_err(|error| error.to_string())?;
                 resources.record_tool_attempt();
                 let result = executor
-                    .execute(
+                    .execute_question_form(
                         ToolCall {
                             invocation_id: request.invocation_id,
                             tool_name: request.name.clone(),
@@ -1184,15 +1088,9 @@ match state {
                     )
                     .await;
                 tool_call_count += 1;
-                let (question_success, question_output, question_error) = match &answer {
-                    Ok(answer) if result.success => (
-                        true,
-                        Some(json!({"question": question, "answer": answer})),
-                        None,
-                    ),
-                    Ok(_) => (false, result.output.clone(), result.error.clone()),
-                    Err(error) => (false, result.output.clone(), Some(error.clone())),
-                };
+                let question_success = outcome.is_success() && result.success;
+                let question_output = result.output.clone();
+                let question_error = result.error.clone();
                 emit(
                     &cfg.stream_tx,
                     StreamEvent::ToolCompleted {
@@ -1236,13 +1134,8 @@ match state {
                 if batch_success {
                     failed_tool_batches.reset();
                 }
-                persist_question_observation(
-                    &store,
-                    session_id,
-                    request.invocation_id,
-                    &pending_observations,
-                    &outcome,
-                    reused_answer,
+                persist_form_observation(
+                    &store, session_id, request.invocation_id, &pending_observations, &outcome,
                 )?;
                 let plan_updated = update_plan_tool_outcome(
                     &store,
@@ -1250,7 +1143,9 @@ match state {
                     active_plan_id.as_deref(),
                     &normalized_goal,
                     batch_success,
-                    if batch_success {
+                    if matches!(outcome, crate::interactive::QuestionFormOutcome::Discussed(_)) {
+                        "question discussed; required answers remain unresolved"
+                    } else if batch_success {
                         "question answered"
                     } else {
                         "question was not answered"
@@ -1381,6 +1276,16 @@ match state {
                                     );
                                     return Ok((false, false, false, None));
                                 }
+                                if session.has_unresolved_clarification(active_plan_id.as_deref()) {
+                                    if let Some(plan) = session.plan.as_mut() {
+                                        plan.outcome = Some("unresolved_clarification".to_string());
+                                    }
+                                    append_session_event(
+                                        session, "step_completion_rejected",
+                                        json!({"reason":"unresolved_clarification"}),
+                                    );
+                                    return Ok((true, true, false, None));
+                                }
                                 let mut next_step = None;
                                 let mut should_continue = false;
                                 if let Some(plan) = session.plan.as_mut() {
@@ -1412,7 +1317,16 @@ match state {
                             "plan_binding_changed".to_string()
                         } else if blocked {
                             continue_plan = false;
-                            "blocked_step_unresolved".to_string()
+                            if store.load_result(session_id)
+                                .map_err(|error| error.to_string())?
+                                .is_some_and(|session| {
+                                    session.has_unresolved_clarification(active_plan_id.as_deref())
+                                })
+                            {
+                                "unresolved_clarification".to_string()
+                            } else {
+                                "blocked_step_unresolved".to_string()
+                            }
                         } else if should_continue {
                             continue_plan = true;
                             let next_step =
