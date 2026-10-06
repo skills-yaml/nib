@@ -1183,10 +1183,15 @@ fn scripted_form_fixture_waits_for_delayed_payload_on_a_nonblocking_accepted_soc
         std::io::ErrorKind::WouldBlock
     );
     configure_fixture_stream(&stream);
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
     let (sender, receiver) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
+        ready_sender.send(()).unwrap();
         sender.send(read_fixture_request(&mut stream)).unwrap();
     });
+    ready_receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
     assert!(matches!(
         receiver.recv_timeout(std::time::Duration::from_millis(100)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout)
