@@ -31,7 +31,7 @@ Metadata:
 ## Current V7 Inventory
 
 The current catalog contains 77 done specs (including 70 preserved historical
-records), one development spec (T023) and two backlog proposals.
+records), two development specs (T023/T068) and two backlog proposals.
 T061 and linked T067 are complete after verified main delivery on 2026-10-06.
 T062 and linked T063/T064/T065/T066 are complete after verified main delivery. The complete standard,
 DESIGN.md, blocked/test directories, feature catalog and native gates are adopted.
@@ -39,6 +39,7 @@ Older inventory counts below are historical snapshots, superseded by this sectio
 
 ## Active Gaps and Future Scope
 
+- T068 tracks the offline repair of private native Anthropic streamed tool continuations; patch 0.3.1 is applied and verification remains pending.
 - T023 remains in `development/`. The protected six-provider catalog passed on
   2026-09-25 and reviewed OpenRouter IDs/retained canary reports are recorded.
   Tool-continuation failures remain open, including Anthropic final-response refusal;
@@ -138,7 +139,7 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 77 specs are in `done/`, T023 alone is in `development/`, and
+- Lifecycle: 77 specs are in `done/`, T023 and T068 are in `development/`, and
   FT-021/FT-022 remain in `backlog/`. `workspace/specs/README.md` is the authoritative per-spec
   index.
 - Question forms: legacy single calls and sets of up to eight share described choices,

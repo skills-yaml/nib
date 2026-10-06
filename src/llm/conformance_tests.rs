@@ -1,3 +1,6 @@
+#[path = "conformance_tests/anthropic_continuation.rs"]
+mod anthropic_continuation;
+
 use super::*;
 use crate::config::{LlmConfig, ProviderEntry};
 use crate::llm::factory::create_client;
