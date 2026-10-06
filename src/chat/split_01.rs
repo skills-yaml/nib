@@ -32,15 +32,25 @@ pub(crate) fn execute_prepared_agent_step(
     } else {
         println!("Maintenance active: exact-run steering is unavailable; Enter queues.");
     }
-    let (result, quit_requested) = prepared.runtime.block_on(async {
-        let mut agent = Box::pin(nib::agent::run_agent_loop_for_profile(
-            scope.project.to_path_buf(),
-            scope.profile_id,
-            scope.session_store.sessions_dir(),
-            session_id,
-            goal,
+    let worker_project = scope.project.to_path_buf();
+    let worker_profile = scope.profile_id.to_string();
+    let worker_sessions = scope.session_store.sessions_dir().to_path_buf();
+    let worker_session = session_id.to_string();
+    let worker_goal = goal.to_string();
+    // Construct and poll the agent on the configured runtime worker, keeping
+    // the caller's small main stack limited to input routing and joining.
+    let mut agent = prepared.runtime.spawn(async move {
+        Box::pin(nib::agent::run_agent_loop_for_profile(
+            worker_project,
+            &worker_profile,
+            &worker_sessions,
+            &worker_session,
+            &worker_goal,
             loop_cfg,
-        ));
+        ))
+        .await
+    });
+    let (result, quit_requested) = prepared.runtime.block_on(async {
         let mut pending_approval: Option<PlainApprovalPrompt> = None;
         let mut pending_question: Option<PlainQuestionPrompt> = None;
         let mut pending_modal_response: Option<PendingPlainModalResponse> = None;
@@ -53,6 +63,13 @@ pub(crate) fn execute_prepared_agent_step(
             tokio::select! {
                 biased;
                 result = &mut agent => {
+                    let result = result.unwrap_or_else(|error| {
+                        Err(if error.is_cancelled() {
+                            "plain agent runtime worker was cancelled".to_string()
+                        } else {
+                            "plain agent runtime worker panicked".to_string()
+                        })
+                    });
                     if let Some(prompt) = pending_approval.take() {
                         let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
                     }

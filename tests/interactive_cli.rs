@@ -649,7 +649,22 @@ fn assert_plain_live_interruption(interruption: &[u8]) {
     let mut config = nib::config::load_nib_config_full(project.path()).expect("mock config");
     config.agent.answer_only = false;
     save_nib_config_full(project.path(), &mut config).expect("modal mock config");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nib"))
+    // Exercise the Windows-sized main stack on Unix as well; runtime workers
+    // retain their separately configured stack allocation.
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "ulimit -s 1024 && exec \"$@\"",
+            "nib-small-main-stack",
+        ]);
+        command.arg(env!("CARGO_BIN_EXE_nib"));
+        command
+    };
+    #[cfg(not(unix))]
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nib"));
+    let mut child = command
         .arg("--plain")
         .env("NIB_NO_UPDATE_CHECK", "1")
         .current_dir(project.path())
