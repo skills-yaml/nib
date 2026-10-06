@@ -3,11 +3,11 @@ schema_version: 1
 coordination_id: t061-help-compatibility
 agent_id: t061-help
 role: implementer
-status: active
+status: handoff
 base_revision: 2c4268550e76a037bdb141bd6c874e544fb16e1d
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-06T00:25:12Z
+updated_at: 2026-10-06T02:41:11Z
 scope:
   - README.md
   - scripts/check-interactive-release.ps1
@@ -39,16 +39,32 @@ one-shot/plain waits, rendered plain prompt and Windows readiness marker.
 Native cancellation, answer JSON, persisted outcome, restoration, offline
 execution and bounded timeout assertions remain in place. Merged the verified
 recovery API integration without conflicts; the bounded compatibility patch
-and shared recovery/catalog records remain intact.
+and shared recovery/catalog records remain intact. Merged the latest verified
+TUI, revision-recovery and line integration without conflicts; the seven-file
+compatibility patch remains unchanged against that combined base.
 
 ## Validation
 
 Independent source review of the initial compatibility checkpoint found no
 confirmed defect. Source review after the recovery API merge and whitespace
 validation found no additional stale compatibility consumer within scope.
-The README recovery example matches the integrated router. Compilation and Task gates are pending the
-exclusive Cargo slot; none were run during another lane's compilation.
-Fresh affected gates will run before handoff.
+The README recovery example matches the integrated router, and the stable
+question readiness marker matches the integrated native renderer. Renewed
+independent source review against the latest combined integration found no
+source defect; formal review of the final committed records remains pending.
+
+Task fmt and task check passed, including installer syntax, workspace structure,
+catalog, memory, version and coordination validation, formatting and Clippy
+across all targets and features. Task test:agent-context passed 200 tests:
+91 context, 107 agent and 2 build metadata. Task test:runtime-e2e passed all
+54 tests, including the changed assembled conversational-help fixture.
+Task test:installers passed all 42 tests, including the native smoke readiness
+contract. No source correction was needed during these gates.
+Final task docs:check passed workspace, catalog, memory, version and coordination
+validation plus all 5 documentation integrity tests. The shared nib-question-form
+0.3.0 reservation remains unchanged; no bump is applied by this lane.
+All Cargo operations ran serially in the authorized slot with one build job,
+debug symbols disabled and strict native isolation tests required.
 
 ## Blockers and Dependencies
 
@@ -56,12 +72,14 @@ None.
 
 ## Next Step
 
-Run authorized Task gates when the compilation slot is available, reconcile
-validation records and publish the exact candidate for independent review.
+Publish the clean exact candidate after final documentation validation, then
+obtain independent exact review and combined native integration validation.
 
 ## Handoff
 
-Not ready: native validation and independent exact review are pending.
+Affected native author and final documentation gates passed. Independent exact review and combined native integration remain
+required. The bounded patch preserves cancellation, modal ownership framing,
+terminal restoration and persisted answer/outcome checks. No delivery is claimed.
 
 Memory Impact: none. These bounded consumers implement the approved contract
 and record no new durable decision or preference.
