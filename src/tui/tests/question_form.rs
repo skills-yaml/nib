@@ -1,10 +1,18 @@
 use super::*;
 
-fn form_request(reply: oneshot::Sender<crate::interactive::QuestionFormOutcome>) -> TuiQuestionRequest {
-    let mut request = TuiQuestionRequest::single("Are prices final?".to_string(), None, vec!["Final".to_string(), "Review".to_string()], reply);
+fn form_request(
+    reply: oneshot::Sender<crate::interactive::QuestionFormOutcome>,
+) -> TuiQuestionRequest {
+    let mut request = TuiQuestionRequest::single(
+        "Are prices final?".to_string(),
+        None,
+        vec!["Final".to_string(), "Review".to_string()],
+        reply,
+    );
     request.form.header = Some("Pricing decisions".to_string());
     request.form.questions[0].title = Some("Prices/VAT".to_string());
-    request.form.questions[0].options[0].description = Some("Keep the displayed prices and include VAT.".to_string());
+    request.form.questions[0].options[0].description =
+        Some("Keep the displayed prices and include VAT.".to_string());
     let mut second = request.form.questions[0].clone();
     second.title = Some("Interval".to_string());
     second.question = "Which interval?".to_string();
@@ -23,8 +31,17 @@ fn form_tabs_keep_drafts_and_send_only_from_submit() {
     assert!(pending.as_ref().unwrap().state.is_submit());
     assert!(response.try_recv().is_err());
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
-    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap() else { panic!("answers") };
-    assert_eq!(answers.iter().map(|answer| answer.answer.as_str()).collect::<Vec<_>>(), ["Final", "Review"]);
+    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap()
+    else {
+        panic!("answers")
+    };
+    assert_eq!(
+        answers
+            .iter()
+            .map(|answer| answer.answer.as_str())
+            .collect::<Vec<_>>(),
+        ["Final", "Review"]
+    );
 }
 
 #[test]
@@ -33,13 +50,54 @@ fn form_card_renders_header_tabs_description_and_visible_editor() {
     let mut pending = PendingQuestion::new(form_request(reply));
     let backend = TestBackend::new(80, 30);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you  context remains", &Composer::default(), None, Some(&pending))).unwrap();
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context remains",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
     let rendered = buffer_text(terminal.backend().buffer());
-    for expected in ["Pricing decisions", "Are prices final?", "☐ Prices/VAT", "☐ Interval", "☐ Submit", "› 1. Final", "Keep the displayed", "Type something.", "Chat about this"] { assert!(rendered.contains(expected), "missing {expected}: {rendered}"); }
+    for expected in [
+        "Pricing decisions",
+        "Are prices final?",
+        "☐ Prices/VAT",
+        "☐ Interval",
+        "☐ Submit",
+        "› 1. Final",
+        "Keep the displayed",
+        "Type something.",
+        "Chat about this",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
+    }
     question_action_for_key(&mut pending, KeyCode::Char('3'));
     question_action_for_key(&mut pending, KeyCode::Enter);
-    for character in "custom 1Y".chars() { question_action_for_key(&mut pending, KeyCode::Char(character)); }
-    terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you  context remains", &Composer::default(), None, Some(&pending))).unwrap();
+    for character in "custom 1Y".chars() {
+        question_action_for_key(&mut pending, KeyCode::Char(character));
+    }
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context remains",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
     let rendered = buffer_text(terminal.backend().buffer());
     assert!(rendered.contains("Your answer: custom 1Y"), "{rendered}");
     assert!(rendered.contains("Are prices final?"), "{rendered}");
@@ -50,20 +108,31 @@ fn form_discussion_returns_message_and_escape_interrupts_either_editor() {
     for discussed in [false, true] {
         let (reply, mut response) = oneshot::channel();
         let mut pending = Some(PendingQuestion::new(form_request(reply)));
-        handle_question_key(&mut pending, KeyCode::Char(if discussed { '4' } else { '3' }));
+        handle_question_key(
+            &mut pending,
+            KeyCode::Char(if discussed { '4' } else { '3' }),
+        );
         handle_question_key(&mut pending, KeyCode::Enter);
         handle_question_key(&mut pending, KeyCode::Char('Y'));
         assert!(handle_question_key(&mut pending, KeyCode::Esc));
-        assert_eq!(response.try_recv().unwrap(), crate::interactive::QuestionFormOutcome::LeftUnanswered);
+        assert_eq!(
+            response.try_recv().unwrap(),
+            crate::interactive::QuestionFormOutcome::LeftUnanswered
+        );
     }
     let (reply, mut response) = oneshot::channel();
     let mut pending = Some(PendingQuestion::new(form_request(reply)));
     handle_question_key(&mut pending, KeyCode::Enter);
     handle_question_key(&mut pending, KeyCode::Char('4'));
     handle_question_key(&mut pending, KeyCode::Enter);
-    for character in "Why these prices?".chars() { handle_question_key(&mut pending, KeyCode::Char(character)); }
+    for character in "Why these prices?".chars() {
+        handle_question_key(&mut pending, KeyCode::Char(character));
+    }
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
-    assert_eq!(response.try_recv().unwrap(), crate::interactive::QuestionFormOutcome::Discussed("Why these prices?".to_string()));
+    assert_eq!(
+        response.try_recv().unwrap(),
+        crate::interactive::QuestionFormOutcome::Discussed("Why these prices?".to_string())
+    );
 }
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
@@ -78,15 +147,32 @@ fn proposed_form_rows_hide_model_options_and_preserve_exact_sources() {
     let mut pending = Some(PendingQuestion::new(request));
     handle_question_key(&mut pending, KeyCode::Enter);
     let question = pending.as_ref().unwrap();
-    let rows = question_form_lines(question, 80).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join("\n");
-    for expected in ["› 1. Approve proposed answer", "2. Reject and leave unanswered", "3. Instruct otherwise", "4. Chat about this"] { assert!(rows.contains(expected), "{rows}"); }
+    let rows = question_form_lines(question, 80)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "› 1. Approve proposed answer",
+        "2. Reject and leave unanswered",
+        "3. Instruct otherwise",
+        "4. Chat about this",
+    ] {
+        assert!(rows.contains(expected), "{rows}");
+    }
     assert!(!rows.contains("Final"));
     assert!(!rows.contains("Type something."));
     assert!(!handle_question_key(&mut pending, KeyCode::Enter));
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
-    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap() else { panic!("submitted answers") };
+    let crate::interactive::QuestionFormOutcome::Answered(answers) = response.try_recv().unwrap()
+    else {
+        panic!("submitted answers")
+    };
     assert_eq!(answers[1].answer, "Exact monthly proposal");
-    assert_eq!(answers[1].source, crate::interactive::QuestionAnswerSource::ApprovedProposal);
+    assert_eq!(
+        answers[1].source,
+        crate::interactive::QuestionAnswerSource::ApprovedProposal
+    );
 }
 
 #[test]
@@ -95,33 +181,73 @@ fn narrow_tab_strip_shows_overflow_and_keeps_the_focused_submit_visible() {
     let mut question = PendingQuestion::new(form_request(reply));
     question.state.focus_tab(2);
     let line = question_tab_line(&question.state, 18);
-    let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
     assert!(text.contains('←') && text.contains('→'), "{text}");
     assert!(text.contains("☐ Submit"), "{text}");
-    assert!(line.spans.iter().any(|span| span.content.contains("Submit") && span.style != Style::default()));
+    assert!(line
+        .spans
+        .iter()
+        .any(|span| span.content.contains("Submit") && span.style != Style::default()));
 }
 
 #[test]
 fn tui_question_escape_stops_worker_with_waiting_outcome_without_global_cancel() {
     let directory = tempdir().unwrap();
-    let mut config = NibConfig { llm: mock_config(), ..Default::default() };
+    let mut config = NibConfig {
+        llm: mock_config(),
+        ..Default::default()
+    };
     config.agent.answer_only = false;
     save_nib_config_full(directory.path(), &mut config).unwrap();
     let store = SessionStore::for_project(directory.path()).unwrap();
     let goal = "ask a question";
     let mut session = store.create_session();
-    session.plan = Some(crate::session::Plan::new(goal, vec![crate::session::PlanStep {
-        description: goal.to_string(), status: "Pending".to_string(), outcome: None,
-        attempts: 0, updated_at: None, verification_obligations: Vec::new(), content_generation: 0,
-    }]));
+    session.plan = Some(crate::session::Plan::new(
+        goal,
+        vec![crate::session::PlanStep {
+            description: goal.to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    ));
+    let plan = session.plan.as_mut().unwrap();
+    plan.approved = true;
+    plan.steps[0].status = "InProgress".to_string();
+    assert!(plan.is_structured());
+    let plan_id = plan.id.clone();
     store.save(&mut session).unwrap();
     let (approval_tx, _approval_rx) = mpsc::channel();
     let (question_tx, question_rx) = mpsc::channel();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
-    let mut worker = spawn_tui_agent_worker(TuiAgentProfileScope {
-        project_root: directory.path().to_path_buf(), profile_id: "default".to_string(), sessions_dir: store.sessions_dir().to_path_buf(),
-    }, session.id.clone(), goal.to_string(), InteractiveAgentMode::Execute, approval_tx, question_tx, stream_tx).unwrap();
-    let request = question_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut worker = prepare_tui_agent_worker(
+        TuiAgentProfileScope {
+            project_root: directory.path().to_path_buf(),
+            profile_id: "default".to_string(),
+            sessions_dir: store.sessions_dir().to_path_buf(),
+        },
+        session.id.clone(),
+        approval_tx,
+        question_tx,
+        stream_tx,
+    )
+    .unwrap()
+    .start_with_continuation(
+        goal.to_string(),
+        InteractiveAgentMode::Execute,
+        Some(plan_id.clone()),
+    )
+    .unwrap();
+    let request = question_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("admitted worker must reach a question");
     let mut pending = Some(PendingQuestion::new(request));
     assert!(handle_question_key(&mut pending, KeyCode::Esc));
     assert!(!worker.cancellation.is_cancelled());
@@ -133,15 +259,36 @@ fn tui_question_escape_stops_worker_with_waiting_outcome_without_global_cancel()
     assert!(worker.is_finished(), "Esc must stop the active worker");
     worker.join().unwrap();
     let persisted = store.load(&session.id).unwrap();
-    assert_eq!(persisted.plan.as_ref().unwrap().outcome.as_deref(), Some("waiting_for_user_input"));
-    assert!(persisted.clarifications.iter().all(|record| record.answer.is_none()));
-    assert!(persisted.events.iter().any(|event| event.kind == "run_terminal" && event.details["outcome"] == "waiting_for_user_input"));
+    let plan = persisted.plan.as_ref().unwrap();
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert_eq!(
+        plan.steps[plan.current_step_index].outcome.as_deref(),
+        Some("question was not answered")
+    );
+    assert!(!persisted.clarifications.is_empty());
+    assert_eq!(persisted.plan.as_ref().unwrap().id, plan_id);
+    assert!(persisted
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()
+            && record.plan_id.as_deref() == Some(plan_id.as_str())
+            && record.run_id.as_deref() == Some(worker.run_id.as_str())));
+    assert!(persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "run_terminal"
+            && event.details["run_id"] == worker.run_id
+            && event.details["outcome"] == "waiting_for_user_input"));
 }
 
 #[test]
 fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
     let (directory, store, session_id, invocation_id) = recoverable_question_session();
-    let scope = TuiAgentProfileScope { project_root: directory.path().to_path_buf(), profile_id: "default".to_string(), sessions_dir: store.sessions_dir().to_path_buf() };
+    let scope = TuiAgentProfileScope {
+        project_root: directory.path().to_path_buf(),
+        profile_id: "default".to_string(),
+        sessions_dir: store.sessions_dir().to_path_buf(),
+    };
     let (approval_tx, _approval_rx) = mpsc::channel();
     let (question_tx, _question_rx) = mpsc::channel();
     let (stream_tx, _stream_rx) = tokio::sync::mpsc::channel(100);
@@ -149,10 +296,36 @@ fn startup_conversation_reopens_recovered_form_before_spawning_worker() {
     let mut pending = None;
     let mut worker = None;
     let mut timeline = ActiveTimeline::load(&store, &session_id).unwrap();
-    start_tui_conversation("resume".to_string(), QuestionConversationContext { scope: &scope, store: &store, session_id: &session_id, pending: &mut pending, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }).unwrap();
+    start_tui_conversation(
+        "resume".to_string(),
+        QuestionConversationContext {
+            scope: &scope,
+            store: &store,
+            session_id: &session_id,
+            pending: &mut pending,
+            worker: &mut worker,
+            timeline: &mut timeline,
+            approval_tx: &approval_tx,
+            question_tx: &question_tx,
+            stream_tx: &stream_tx,
+            recovery_tx: &recovery_tx,
+        },
+    )
+    .unwrap();
     assert!(worker.is_none());
-    assert_eq!(pending.as_ref().unwrap().recovery.as_ref().unwrap().invocation_id, invocation_id);
-    assert!(store.load(&session_id).unwrap().clarifications[0].answer.is_none());
+    assert_eq!(
+        pending
+            .as_ref()
+            .unwrap()
+            .recovery
+            .as_ref()
+            .unwrap()
+            .invocation_id,
+        invocation_id
+    );
+    assert!(store.load(&session_id).unwrap().clarifications[0]
+        .answer
+        .is_none());
 }
 
 #[test]
@@ -160,22 +333,50 @@ fn long_description_scroll_keeps_question_and_selected_label_visible() {
     let (reply, _response) = oneshot::channel();
     let mut request = form_request(reply);
     request.form.questions.truncate(1);
-    request.form.questions[0].options[0].description = Some((0..40).map(|index| format!("Description line {index}\n")).collect());
+    request.form.questions[0].options[0].description = Some(
+        (0..40)
+            .map(|index| format!("Description line {index}\n"))
+            .collect(),
+    );
     let mut pending = PendingQuestion::new(request);
     let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
-    for _ in 0..12 { question_action_for_key(&mut pending, KeyCode::PageDown); }
-    terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you  context", &Composer::default(), None, Some(&pending))).unwrap();
+    for _ in 0..12 {
+        question_action_for_key(&mut pending, KeyCode::PageDown);
+    }
+    terminal
+        .draw(|frame| {
+            render_current_session_view(
+                frame,
+                "workspace",
+                "mock",
+                "you  context",
+                &Composer::default(),
+                None,
+                Some(&pending),
+            )
+        })
+        .unwrap();
     let rendered = buffer_text(terminal.backend().buffer());
-    for expected in ["Are prices final?", "› 1. Final", "Description line 39"] { assert!(rendered.contains(expected), "{rendered}"); }
+    for expected in ["Are prices final?", "› 1. Final", "Description line 39"] {
+        assert!(rendered.contains(expected), "{rendered}");
+    }
 }
 
 #[test]
 fn narrow_subject_scroll_exposes_question_and_proposal_tails_before_exact_approval() {
     let (reply, mut response) = oneshot::channel();
-    let proposal = format!("{}\nPROPOSAL TAIL", "A long proposed answer with full content. ".repeat(60));
+    let proposal = format!(
+        "{}\nPROPOSAL TAIL",
+        "A long proposed answer with full content. ".repeat(60)
+    );
     let mut request = TuiQuestionRequest::single(
-        format!("Inspect this question. {}\nQUESTION TAIL", "Long question content. ".repeat(60)),
-        Some(proposal.clone()), vec!["Hidden option".to_string()], reply,
+        format!(
+            "Inspect this question. {}\nQUESTION TAIL",
+            "Long question content. ".repeat(60)
+        ),
+        Some(proposal.clone()),
+        vec!["Hidden option".to_string()],
+        reply,
     );
     request.form.header = Some("Review proposal".to_string());
     let mut pending = Some(PendingQuestion::new(request));
@@ -183,18 +384,42 @@ fn narrow_subject_scroll_exposes_question_and_proposal_tails_before_exact_approv
     let mut saw_question_tail = false;
     let mut saw_proposal_tail = false;
     for _ in 0..200 {
-        terminal.draw(|frame| render_current_session_view(frame, "workspace", "mock", "you context", &Composer::default(), None, pending.as_ref())).unwrap();
+        terminal
+            .draw(|frame| {
+                render_current_session_view(
+                    frame,
+                    "workspace",
+                    "mock",
+                    "you context",
+                    &Composer::default(),
+                    None,
+                    pending.as_ref(),
+                )
+            })
+            .unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
         saw_question_tail |= rendered.contains("QUESTION TAIL");
         saw_proposal_tail |= rendered.contains("PROPOSAL TAIL");
         assert!(rendered.contains("Inspect this question."), "{rendered}");
-        assert!(rendered.contains("› 1. Approve proposed answer"), "{rendered}");
+        assert!(
+            rendered.contains("› 1. Approve proposed answer"),
+            "{rendered}"
+        );
         assert!(rendered.contains("Esc interrupt operation"), "{rendered}");
         question_action_for_key(pending.as_mut().unwrap(), KeyCode::PageDown);
     }
-    assert!(saw_question_tail && saw_proposal_tail, "Both accepted fields must be fully inspectable");
+    assert!(
+        saw_question_tail && saw_proposal_tail,
+        "Both accepted fields must be fully inspectable"
+    );
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
-    assert_eq!(response.try_recv().unwrap(), form_answer(proposal.clone(), crate::interactive::QuestionAnswerSource::ApprovedProposal));
+    assert_eq!(
+        response.try_recv().unwrap(),
+        form_answer(
+            proposal.clone(),
+            crate::interactive::QuestionAnswerSource::ApprovedProposal
+        )
+    );
 }
 
 #[test]
@@ -204,7 +429,9 @@ fn subject_scroll_preserves_visible_editor_and_input_error() {
     request.form.questions[0].question = "A long question. ".repeat(100);
     request.form.questions[0].proposed_answer = Some("A long proposal. ".repeat(100));
     let mut pending = PendingQuestion::new(request);
-    pending.state.open_editor(crate::interactive::QuestionEditorKind::Answer);
+    pending
+        .state
+        .open_editor(crate::interactive::QuestionEditorKind::Answer);
     pending.state.error = Some("Empty answer retries".to_string());
     question_action_for_key(&mut pending, KeyCode::PageDown);
     let (rows, visible) = question_composer_rows(&pending, 40);

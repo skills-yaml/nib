@@ -1,9 +1,9 @@
 ---
 schema_version: 1
 coordination_id: t061-tui
-status: active
+status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
-updated_at: 2026-10-05T22:05:37Z
+updated_at: 2026-10-06T00:41:31Z
 ---
 
 # Peer Task
@@ -14,8 +14,8 @@ t061-tui self-claimed this task through the shared peer board.
 
 ## Dependencies
 
-None.
+Verified internal core and recovery integration `2fbe1edc7b9e0f2346393ad9d510eca2d7443d95` supplies the shared APIs.
 
 ## Integration
 
-Independent peer review and transactional integration are required.
+The TUI lane passed 285 focused interactive tests and strict checks. Final record checks passed; renewed independent exact review and transactional aggregate integration remain required. Full accepted contract and shared branch delivery remain pending combined work.

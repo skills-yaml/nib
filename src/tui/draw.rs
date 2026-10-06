@@ -61,13 +61,41 @@ pub(crate) fn draw_loop(
 
     if welcome.consent_directory.is_none() {
         if let Some(goal) = pending_goal.take() {
-            start_tui_conversation(goal, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx })?;
+            start_tui_conversation(
+                goal,
+                QuestionConversationContext {
+                    scope: &agent_profile_scope,
+                    store: &store,
+                    session_id: &active_session_id,
+                    pending: &mut pending_question,
+                    worker: &mut worker,
+                    timeline: &mut timeline,
+                    approval_tx: &approval_tx,
+                    question_tx: &question_tx,
+                    stream_tx: &stream_tx,
+                    recovery_tx: &recovery_tx,
+                },
+            )?;
         }
     }
 
     let loop_result = loop {
         while let Ok(effect) = recovery_rx.try_recv() {
-            apply_question_recovery_effect(effect, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx })?;
+            apply_question_recovery_effect(
+                effect,
+                QuestionConversationContext {
+                    scope: &agent_profile_scope,
+                    store: &store,
+                    session_id: &active_session_id,
+                    pending: &mut pending_question,
+                    worker: &mut worker,
+                    timeline: &mut timeline,
+                    approval_tx: &approval_tx,
+                    question_tx: &question_tx,
+                    stream_tx: &stream_tx,
+                    recovery_tx: &recovery_tx,
+                },
+            )?;
         }
 
         drain_stream_events_bounded(&mut stream_rx, &mut timeline, 64);
@@ -429,7 +457,21 @@ pub(crate) fn draw_loop(
                                     timeline
                                         .push_status("Allowed work in this directory.".to_string());
                                     if let Some(goal) = released_goal {
-                                        if let Err(error) = start_tui_conversation(goal, QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }) {
+                                        if let Err(error) = start_tui_conversation(
+                                            goal,
+                                            QuestionConversationContext {
+                                                scope: &agent_profile_scope,
+                                                store: &store,
+                                                session_id: &active_session_id,
+                                                pending: &mut pending_question,
+                                                worker: &mut worker,
+                                                timeline: &mut timeline,
+                                                approval_tx: &approval_tx,
+                                                question_tx: &question_tx,
+                                                stream_tx: &stream_tx,
+                                                recovery_tx: &recovery_tx,
+                                            },
+                                        ) {
                                             break Err(error);
                                         }
                                     }
@@ -506,7 +548,9 @@ pub(crate) fn draw_loop(
                     completion.sync_for(&composer.input, Some(project_root));
                     quit_arm = None;
                     if let Some(question) = pending_question.as_mut() {
-                        if let Some(editor) = question.state.editor.as_mut() { editor.text.clear(); }
+                        if let Some(editor) = question.state.editor.as_mut() {
+                            editor.text.clear();
+                        }
                         question.state.error = None;
                     }
                     timeline.push_status("Draft cleared.".to_string());
@@ -1097,14 +1141,28 @@ pub(crate) fn draw_loop(
                                             worker.as_ref().map(|worker| worker.run_id.clone()),
                                         );
                                     }
-                                    Ok(InteractiveEffect::OpenQuestion { invocation_id, question, proposed_answer, options }) => {
+                                    Ok(InteractiveEffect::OpenQuestion {
+                                        invocation_id,
+                                        question,
+                                        proposed_answer,
+                                        options,
+                                    }) => {
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         drop(reply_rx);
                                         pending_question = Some(PendingQuestion::recovered(
-                                            TuiQuestionRequest::single(question, proposed_answer, options, reply_tx),
+                                            TuiQuestionRequest::single(
+                                                question,
+                                                proposed_answer,
+                                                options,
+                                                reply_tx,
+                                            ),
                                             RecoveredQuestionTarget {
-                                                store: store.clone(), session_id: active_session_id.clone(),
-                                                invocation_id: serde_json::from_value(serde_json::Value::String(invocation_id)).map_err(io::Error::other)?,
+                                                store: store.clone(),
+                                                session_id: active_session_id.clone(),
+                                                invocation_id: serde_json::from_value(
+                                                    serde_json::Value::String(invocation_id),
+                                                )
+                                                .map_err(io::Error::other)?,
                                                 completion: recovery_tx.clone(),
                                             },
                                         ));
@@ -1147,7 +1205,21 @@ pub(crate) fn draw_loop(
                                     &mut chrome_generation,
                                 );
                                 timeline.push_status(format!("[user] {goal}"));
-                                if let Err(error) = start_tui_conversation(goal.clone(), QuestionConversationContext { scope: &agent_profile_scope, store: &store, session_id: &active_session_id, pending: &mut pending_question, worker: &mut worker, timeline: &mut timeline, approval_tx: &approval_tx, question_tx: &question_tx, stream_tx: &stream_tx, recovery_tx: &recovery_tx }) {
+                                if let Err(error) = start_tui_conversation(
+                                    goal.clone(),
+                                    QuestionConversationContext {
+                                        scope: &agent_profile_scope,
+                                        store: &store,
+                                        session_id: &active_session_id,
+                                        pending: &mut pending_question,
+                                        worker: &mut worker,
+                                        timeline: &mut timeline,
+                                        approval_tx: &approval_tx,
+                                        question_tx: &question_tx,
+                                        stream_tx: &stream_tx,
+                                        recovery_tx: &recovery_tx,
+                                    },
+                                ) {
                                     composer.set_text(goal);
                                     timeline.push_status(format!("[recovery error] {error}"));
                                 }

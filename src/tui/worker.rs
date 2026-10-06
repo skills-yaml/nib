@@ -107,13 +107,19 @@ impl PreparedTuiAgentWorker {
     }
 
     pub(crate) fn start_with_continuation(
-        self, goal: String, mode: InteractiveAgentMode, continuation_plan_id: Option<String>,
+        self,
+        goal: String,
+        mode: InteractiveAgentMode,
+        continuation_plan_id: Option<String>,
     ) -> io::Result<TuiAgentWorker> {
         self.start_with_recovery(goal, mode, continuation_plan_id, None)
     }
 
     pub(crate) fn start_with_recovery(
-        mut self, goal: String, mode: InteractiveAgentMode, continuation_plan_id: Option<String>,
+        mut self,
+        goal: String,
+        mode: InteractiveAgentMode,
+        continuation_plan_id: Option<String>,
         discussion_invocation_id: Option<crate::tools::ToolInvocationId>,
     ) -> io::Result<TuiAgentWorker> {
         let start_tx = self
@@ -201,7 +207,9 @@ pub(crate) fn prepare_tui_agent_worker(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            let Ok((goal, mode, run_id, steering, continuation_plan_id, discussion_invocation_id)) = start_rx.recv() else {
+            let Ok((goal, mode, run_id, steering, continuation_plan_id, discussion_invocation_id)) =
+                start_rx.recv()
+            else {
                 return;
             };
 
@@ -345,7 +353,9 @@ pub(crate) fn cancel_pending_interactions(
         let _ = request.reply.send(ApprovalDecision::denied());
     }
     while let Ok(request) = question_rx.try_recv() {
-        let _ = request.reply.send(crate::interactive::QuestionFormOutcome::Cancelled);
+        let _ = request
+            .reply
+            .send(crate::interactive::QuestionFormOutcome::Cancelled);
     }
 }
 

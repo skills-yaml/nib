@@ -118,7 +118,9 @@ pub use split_03::{
 mod tests;
 
 mod question_state;
-pub use question_state::{QuestionEditor, QuestionEditorKind, QuestionFormEvent, QuestionFormState};
 pub use question_recovery::{
     complete_question_recovery, recover_question_conversation, QuestionRecoveryEffect,
+};
+pub use question_state::{
+    QuestionEditor, QuestionEditorKind, QuestionFormEvent, QuestionFormState,
 };

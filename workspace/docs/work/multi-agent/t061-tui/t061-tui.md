@@ -3,11 +3,11 @@ schema_version: 1
 coordination_id: t061-tui
 agent_id: t061-tui
 role: implementer
-status: active
+status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T22:05:37Z
+updated_at: 2026-10-06T00:41:31Z
 scope:
   - src/interactive/mod.rs
   - src/interactive/question_state.rs
@@ -26,16 +26,28 @@ Created an isolated worktree through an atomic peer claim. Added shared form red
 
 ## Validation
 
-No Cargo or Task commands run; core lane owns the serialized compilation slot.
+Merged independently reviewed internal core and recovery integration `2fbe1edc7b9e0f2346393ad9d510eca2d7443d95`, preserving all shared module exports. Task fmt passed. Strict Task check passed all targets and features after extracting the recovery dispatcher helper to satisfy the 100-line limit. Task test:interactive passed all 285 tests: 16 steering, 100 shared interaction (including eight form reducer cases), 125 TUI (including ten new form cases), six console, 27 plain chat, ten CLI and one installer smoke-contract fixture. The initial run exposed a stale literal-Y expectation and an inadmissible test plan; corrected those fixtures. Existing waiting reconciliation records a blocked step and exact waiting run terminal rather than assigning Plan.outcome. The native Esc test verifies nonempty unresolved records bound to the exact admitted plan/run, blocked step, joined worker and no global cancellation. Final strict Task check passed after the fixture corrections and record reconciliation. Task docs:check passed workspace structure, catalog, memory, version and coordination validation plus all five documentation integrity fixtures; documentation evidence is renewed on the final record text before handoff.
+
+## Acceptance Evidence
+
+- AC-1: First-row chevron, option labels/descriptions, digit selection, literal Y/digits, visible editors and empty-input retry are covered by reducer, transport and rendering cases.
+- AC-2: Draft preservation, wraparound tabs, replacements, checkmarks, incomplete Submit focus and Submit-only emission are covered by shared reducer and native tab tests.
+- AC-3: Native discussion emits its message and discards unsubmitted drafts; Esc in either editor and an actual admitted worker preserves unanswered records and stops with exact waiting reconciliation. Durable discussion dependency gating is supplied by the reviewed core lane.
+- AC-4: Mixed proposal sets hide model options, retain exact rows and answer source; narrow-terminal scrolling exposes the full question/proposal before approving its exact complete value.
+- AC-6: Idle, startup and consent-released conversation use the exact persisted recovery effect; startup reopening and persistence-before-modal-close regressions verify the thin adapter. Full linked identity/admission behavior is supplied by the reviewed core/API lanes.
+- AC-8: Question text stays in the modal editor; literal text escape, modal command retries and F2/approval ordering retain local input separation. Tool approval and verification admission remain in the shared runtime.
+- AC-9: Focused native and static evidence supports this bounded lane. Independent exact review and aggregate integration gates remain required; final complete T061/T067 acceptance belongs to combined delivery.
 
 ## Blockers and Dependencies
 
-Await core shared types and root recovery module integration before native compilation.
+Core and root recovery APIs are available through the verified internal revision above. Final command removal, line surfaces, user-guide reconciliation and shared branch delivery remain separate planned work. No version bump was added; the shared nib-question-form minor reservation remains 0.3.0 from baseline 0.2.0.
 
 ## Next Step
 
-Merge reviewed core/root APIs, run serialized focused gates, resolve findings, publish exact clean handoff.
+Obtain independent exact-candidate source/record review, publish the clean handoff and run serialized aggregate integration.
 
 ## Handoff
 
-Pending exact native validation and independent candidate review. Memory classification: none; this lane implements the accepted contract and central delivery records own its durable context.
+Frozen TUI form and shared reducer implementation with native evidence. Full T061/T067 and final command removal are not complete through this lane alone. Retain the isolated worktree through integration and final delivery.
+
+Memory Impact: none; this lane implements the accepted interaction contract without a new durable decision. Central delivery records own the shared shipped facts and lifecycle context.

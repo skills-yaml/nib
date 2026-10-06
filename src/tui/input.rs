@@ -446,8 +446,17 @@ pub(crate) fn model_action_for_key(
 
 impl PendingQuestion {
     pub(crate) fn new(request: TuiQuestionRequest) -> Self {
-        let state = crate::interactive::QuestionFormState::new(request.form.clone(), &request.initial_answers);
-        Self { request, recovery: None, state, description_scroll: 0, subject_scroll: 0 }
+        let state = crate::interactive::QuestionFormState::new(
+            request.form.clone(),
+            &request.initial_answers,
+        );
+        Self {
+            request,
+            recovery: None,
+            state,
+            description_scroll: 0,
+            subject_scroll: 0,
+        }
     }
 
     pub(crate) fn recovered(request: TuiQuestionRequest, target: RecoveredQuestionTarget) -> Self {
@@ -457,12 +466,26 @@ impl PendingQuestion {
     }
 }
 
-pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyCode) -> Option<crate::interactive::QuestionFormOutcome> {
+pub(crate) fn question_action_for_key(
+    question: &mut PendingQuestion,
+    code: KeyCode,
+) -> Option<crate::interactive::QuestionFormOutcome> {
     use crate::interactive::QuestionFormEvent as Input;
     match code {
-        KeyCode::PageDown => { question.description_scroll = question.description_scroll.saturating_add(4); question.subject_scroll = question.subject_scroll.saturating_add(1); return None; }
-        KeyCode::PageUp => { question.description_scroll = question.description_scroll.saturating_sub(4); question.subject_scroll = question.subject_scroll.saturating_sub(1); return None; }
-        _ => { question.description_scroll = 0; question.subject_scroll = 0; },
+        KeyCode::PageDown => {
+            question.description_scroll = question.description_scroll.saturating_add(4);
+            question.subject_scroll = question.subject_scroll.saturating_add(1);
+            return None;
+        }
+        KeyCode::PageUp => {
+            question.description_scroll = question.description_scroll.saturating_sub(4);
+            question.subject_scroll = question.subject_scroll.saturating_sub(1);
+            return None;
+        }
+        _ => {
+            question.description_scroll = 0;
+            question.subject_scroll = 0;
+        }
     }
     let input = match code {
         KeyCode::Esc => Input::Interrupt,
@@ -472,7 +495,12 @@ pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyC
         KeyCode::Down => Input::NextRow,
         KeyCode::Enter => Input::Choose,
         KeyCode::Backspace => Input::Backspace,
-        KeyCode::Char(digit @ '0'..='9') if question.state.editor.is_none() => Input::SelectRow(digit.to_digit(10).and_then(|digit| digit.checked_sub(1)).map_or(usize::MAX, |digit| digit as usize)),
+        KeyCode::Char(digit @ '0'..='9') if question.state.editor.is_none() => Input::SelectRow(
+            digit
+                .to_digit(10)
+                .and_then(|digit| digit.checked_sub(1))
+                .map_or(usize::MAX, |digit| digit as usize),
+        ),
         KeyCode::Char(character) => Input::Type(character),
         _ => return None,
     };
@@ -480,10 +508,20 @@ pub(crate) fn question_action_for_key(question: &mut PendingQuestion, code: KeyC
 }
 
 pub(crate) fn paste_question_answer(question: &mut PendingQuestion, pasted: &str) {
-    if question.state.editor.is_none() && question.state.current_question().is_some() { question.state.open_editor(crate::interactive::QuestionEditorKind::Answer); }
-    let Some(draft) = question.state.editor.as_mut() else { return; };
+    if question.state.editor.is_none() && question.state.current_question().is_some() {
+        question
+            .state
+            .open_editor(crate::interactive::QuestionEditorKind::Answer);
+    }
+    let Some(draft) = question.state.editor.as_mut() else {
+        return;
+    };
     let input = std::mem::take(&mut draft.text);
-    let mut editor = Composer { cursor: input.len(), input, ..Composer::default() };
+    let mut editor = Composer {
+        cursor: input.len(),
+        input,
+        ..Composer::default()
+    };
     let outcome = editor.insert_paste(pasted);
     draft.text = editor.input;
     question.state.error = outcome.visible_status();
@@ -503,19 +541,33 @@ pub(crate) fn open_prompt_command_overlay(
 }
 
 pub(crate) fn handle_question_key(question: &mut Option<PendingQuestion>, code: KeyCode) -> bool {
-    let Some(pending) = question.as_mut() else { return false; };
-    let Some(outcome) = question_action_for_key(pending, code) else { return false; };
+    let Some(pending) = question.as_mut() else {
+        return false;
+    };
+    let Some(outcome) = question_action_for_key(pending, code) else {
+        return false;
+    };
     if let Some(target) = pending.recovery.as_ref() {
         // The draw loop consumes recovery effects so the exact operation starts only
         // after the atomic persisted form submission succeeds.
-        match crate::interactive::complete_question_recovery(&target.store, &target.session_id, target.invocation_id, outcome.clone()) {
+        match crate::interactive::complete_question_recovery(
+            &target.store,
+            &target.session_id,
+            target.invocation_id,
+            outcome.clone(),
+        ) {
             Ok(effect) => {
                 let _ = target.completion.send(effect);
             }
-            Err(message) => { pending.state.error = Some(message); return false; }
+            Err(message) => {
+                pending.state.error = Some(message);
+                return false;
+            }
         }
     }
-    if let Some(pending) = question.take() { let _ = pending.request.reply.send(outcome); }
+    if let Some(pending) = question.take() {
+        let _ = pending.request.reply.send(outcome);
+    }
     true
 }
 

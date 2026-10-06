@@ -133,8 +133,14 @@ mod lifecycle;
 mod render;
 mod session;
 
-fn form_answer(answer: String, source: crate::interactive::QuestionAnswerSource) -> crate::interactive::QuestionFormOutcome {
-    crate::interactive::QuestionFormOutcome::Answered(vec![crate::interactive::QuestionAnswer { answer, source }])
+fn form_answer(
+    answer: String,
+    source: crate::interactive::QuestionAnswerSource,
+) -> crate::interactive::QuestionFormOutcome {
+    crate::interactive::QuestionFormOutcome::Answered(vec![crate::interactive::QuestionAnswer {
+        answer,
+        source,
+    }])
 }
 
 mod question_form;

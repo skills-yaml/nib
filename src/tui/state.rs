@@ -871,11 +871,20 @@ impl TuiQuestionRequest {
             form: crate::interactive::QuestionForm {
                 header: None,
                 questions: vec![crate::interactive::FormQuestion {
-                    title: None, question, proposed_answer,
-                    options: options.into_iter().map(|label| crate::interactive::QuestionOption { label, description: None }).collect(),
+                    title: None,
+                    question,
+                    proposed_answer,
+                    options: options
+                        .into_iter()
+                        .map(|label| crate::interactive::QuestionOption {
+                            label,
+                            description: None,
+                        })
+                        .collect(),
                 }],
             },
-            initial_answers: Vec::new(), reply,
+            initial_answers: Vec::new(),
+            reply,
         }
     }
 }
@@ -887,10 +896,14 @@ pub struct TuiQuestionHandler {
 #[async_trait::async_trait]
 impl crate::agent::QuestionHandler for TuiQuestionHandler {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
-        let outcome = self.ask_with_context(crate::agent::QuestionRequestContext {
-            invocation_id: crate::tools::ToolInvocationId::new(),
-            question, proposed_answer: None, options,
-        }).await;
+        let outcome = self
+            .ask_with_context(crate::agent::QuestionRequestContext {
+                invocation_id: crate::tools::ToolInvocationId::new(),
+                question,
+                proposed_answer: None,
+                options,
+            })
+            .await;
         match outcome {
             crate::agent::QuestionOutcome::Answered(answer)
             | crate::agent::QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
@@ -901,21 +914,55 @@ impl crate::agent::QuestionHandler for TuiQuestionHandler {
         }
     }
 
-    async fn ask_with_context(&self, context: crate::agent::QuestionRequestContext<'_>) -> crate::agent::QuestionOutcome {
+    async fn ask_with_context(
+        &self,
+        context: crate::agent::QuestionRequestContext<'_>,
+    ) -> crate::agent::QuestionOutcome {
         let (reply, response) = oneshot::channel();
-        if self.tx.send(TuiQuestionRequest::single(context.question.to_string(), context.proposed_answer.map(str::to_string), context.options.to_vec(), reply)).is_err() {
-            return crate::agent::QuestionOutcome::InputUnavailable("TUI question channel closed".to_string());
+        if self
+            .tx
+            .send(TuiQuestionRequest::single(
+                context.question.to_string(),
+                context.proposed_answer.map(str::to_string),
+                context.options.to_vec(),
+                reply,
+            ))
+            .is_err()
+        {
+            return crate::agent::QuestionOutcome::InputUnavailable(
+                "TUI question channel closed".to_string(),
+            );
         }
         crate::agent::QuestionOutcome::from_form(response.await.unwrap_or(
-            crate::interactive::QuestionFormOutcome::InputUnavailable("TUI question response was dropped".to_string())))
+            crate::interactive::QuestionFormOutcome::InputUnavailable(
+                "TUI question response was dropped".to_string(),
+            ),
+        ))
     }
 
-    async fn ask_form(&self, context: crate::agent::QuestionFormRequestContext<'_>) -> crate::interactive::QuestionFormOutcome {
+    async fn ask_form(
+        &self,
+        context: crate::agent::QuestionFormRequestContext<'_>,
+    ) -> crate::interactive::QuestionFormOutcome {
         let (reply, response) = oneshot::channel();
-        if self.tx.send(TuiQuestionRequest { form: context.form.clone(), initial_answers: context.initial_answers.to_vec(), reply }).is_err() {
-            return crate::interactive::QuestionFormOutcome::InputUnavailable("TUI question channel closed".to_string());
+        if self
+            .tx
+            .send(TuiQuestionRequest {
+                form: context.form.clone(),
+                initial_answers: context.initial_answers.to_vec(),
+                reply,
+            })
+            .is_err()
+        {
+            return crate::interactive::QuestionFormOutcome::InputUnavailable(
+                "TUI question channel closed".to_string(),
+            );
         }
-        response.await.unwrap_or(crate::interactive::QuestionFormOutcome::InputUnavailable("TUI question response was dropped".to_string()))
+        response
+            .await
+            .unwrap_or(crate::interactive::QuestionFormOutcome::InputUnavailable(
+                "TUI question response was dropped".to_string(),
+            ))
     }
 }
 

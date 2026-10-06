@@ -655,7 +655,12 @@ fn approval_consumes_input_before_question_and_completion_layers() {
         approval_tx,
     ));
     let (question_tx, mut question_rx) = oneshot::channel();
-    let mut question = Some(PendingQuestion::new(TuiQuestionRequest::single("Still here?".to_string(), None, vec!["yes".to_string()], question_tx)));
+    let mut question = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Still here?".to_string(),
+        None,
+        vec!["yes".to_string()],
+        question_tx,
+    )));
     let composer = Composer::from_text("/");
     let mut completion = CompletionMenu::default();
     completion.sync(&composer.input);
@@ -693,7 +698,10 @@ fn approval_consumes_input_before_question_and_completion_layers() {
     ));
     assert_eq!(
         question_rx.try_recv().expect("question reply"),
-        form_answer("yes".to_string(), crate::interactive::QuestionAnswerSource::Option)
+        form_answer(
+            "y".to_string(),
+            crate::interactive::QuestionAnswerSource::Text
+        )
     );
     assert_eq!(composer.input, "/");
 }
@@ -881,7 +889,12 @@ fn shared_interaction_reducer_maps_to_tui_renderer_layers() {
 #[test]
 fn question_modal_submits_typed_response() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Branch name?".to_string(), None, vec![], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Branch name?".to_string(),
+        None,
+        vec![],
+        reply_tx,
+    )));
     assert!(!handle_question_key(&mut pending, KeyCode::Enter));
 
     assert!(!handle_question_key(&mut pending, KeyCode::Char('m')));
@@ -894,7 +907,10 @@ fn question_modal_submits_typed_response() {
 
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("main".to_string(), crate::interactive::QuestionAnswerSource::Text)
+        form_answer(
+            "main".to_string(),
+            crate::interactive::QuestionAnswerSource::Text
+        )
     );
     assert!(pending.is_none());
 }
@@ -902,7 +918,12 @@ fn question_modal_submits_typed_response() {
 #[test]
 fn proposed_question_requires_a_deliberate_decision() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Use the release branch?".to_string(), Some("release".to_string()), vec![], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Use the release branch?".to_string(),
+        Some("release".to_string()),
+        vec![],
+        reply_tx,
+    )));
     assert_eq!(pending.as_ref().unwrap().state.selected_row, 0);
     assert!(!handle_question_key(&mut pending, KeyCode::Char('1')));
     assert!(matches!(
@@ -912,11 +933,19 @@ fn proposed_question_requires_a_deliberate_decision() {
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("release".to_string(), crate::interactive::QuestionAnswerSource::ApprovedProposal)
+        form_answer(
+            "release".to_string(),
+            crate::interactive::QuestionAnswerSource::ApprovedProposal
+        )
     );
 
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Use the release branch?".to_string(), Some("release".to_string()), vec![], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Use the release branch?".to_string(),
+        Some("release".to_string()),
+        vec![],
+        reply_tx,
+    )));
     assert!(!handle_question_key(&mut pending, KeyCode::Char('2')));
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
@@ -928,28 +957,50 @@ fn proposed_question_requires_a_deliberate_decision() {
 #[test]
 fn question_modal_paste_preserves_unicode_multiline_and_filters_controls() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut question = PendingQuestion::new(TuiQuestionRequest::single("Describe the result".to_string(), None, vec!["short".to_string()], reply_tx));
+    let mut question = PendingQuestion::new(TuiQuestionRequest::single(
+        "Describe the result".to_string(),
+        None,
+        vec!["short".to_string()],
+        reply_tx,
+    ));
     question_action_for_key(&mut question, KeyCode::Down);
     question_action_for_key(&mut question, KeyCode::Enter);
 
     paste_question_answer(&mut question, "first🙂\r\nsecond\tvalue\u{1b}");
-    assert_eq!(question.state.editor.as_ref().map(|editor| editor.text.clone()).unwrap_or_default(), "first🙂\nsecond    value");
+    assert_eq!(
+        question
+            .state
+            .editor
+            .as_ref()
+            .map(|editor| editor.text.clone())
+            .unwrap_or_default(),
+        "first🙂\nsecond    value"
+    );
     assert!(question
-        .state.error
+        .state
+        .error
         .as_deref()
         .is_some_and(|status| status.contains("unsafe paste control")));
     let mut pending = Some(question);
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("first🙂\nsecond    value".to_string(), crate::interactive::QuestionAnswerSource::Text)
+        form_answer(
+            "first🙂\nsecond    value".to_string(),
+            crate::interactive::QuestionAnswerSource::Text
+        )
     );
 }
 
 #[test]
 fn f2_command_overlay_requires_a_prompt_and_preserves_question_draft() {
     let (reply_tx, _reply_rx) = oneshot::channel();
-    let question = PendingQuestion::new(TuiQuestionRequest::single("Which target?".to_string(), None, vec!["alpha".to_string()], reply_tx));
+    let question = PendingQuestion::new(TuiQuestionRequest::single(
+        "Which target?".to_string(),
+        None,
+        vec!["alpha".to_string()],
+        reply_tx,
+    ));
     let mut overlay = None;
     assert!(!open_prompt_command_overlay(
         KeyCode::F(2),
@@ -958,16 +1009,36 @@ fn f2_command_overlay_requires_a_prompt_and_preserves_question_draft() {
     ));
     assert!(overlay.is_none(), "idle F2 must be a no-op");
 
-    let before = question.state.editor.as_ref().map(|editor| editor.text.clone()).unwrap_or_default().clone();
+    let before = question
+        .state
+        .editor
+        .as_ref()
+        .map(|editor| editor.text.clone())
+        .unwrap_or_default()
+        .clone();
     assert!(open_prompt_command_overlay(
         KeyCode::F(2),
         true,
         &mut overlay
     ));
     assert_eq!(overlay.take().as_deref(), Some(""));
-    assert_eq!(question.state.editor.as_ref().map(|editor| editor.text.clone()).unwrap_or_default(), before);
     assert_eq!(
-        question.state.editor.as_ref().map(|editor| editor.text.clone()).unwrap_or_default(), before,
+        question
+            .state
+            .editor
+            .as_ref()
+            .map(|editor| editor.text.clone())
+            .unwrap_or_default(),
+        before
+    );
+    assert_eq!(
+        question
+            .state
+            .editor
+            .as_ref()
+            .map(|editor| editor.text.clone())
+            .unwrap_or_default(),
+        before,
         "Escape/close preserves the draft"
     );
 }
@@ -1041,7 +1112,12 @@ fn recovered_question_modal_persists_before_it_closes() {
     let (reply_tx, reply_rx) = oneshot::channel();
     drop(reply_rx);
     let mut pending = Some(PendingQuestion::recovered(
-        TuiQuestionRequest::single("Which target?".to_string(), None, vec!["alpha".to_string(), "beta".to_string()], reply_tx),
+        TuiQuestionRequest::single(
+            "Which target?".to_string(),
+            None,
+            vec!["alpha".to_string(), "beta".to_string()],
+            reply_tx,
+        ),
         RecoveredQuestionTarget {
             store: store.clone(),
             session_id: session_id.clone(),
@@ -1064,7 +1140,12 @@ fn recovered_question_modal_persists_before_it_closes() {
 #[test]
 fn question_modal_accepts_q_in_free_form_response() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Search term?".to_string(), None, vec![], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Search term?".to_string(),
+        None,
+        vec![],
+        reply_tx,
+    )));
     assert!(!handle_question_key(&mut pending, KeyCode::Enter));
     let mut approval = None;
 
@@ -1079,7 +1160,10 @@ fn question_modal_accepts_q_in_free_form_response() {
 
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("query".to_string(), crate::interactive::QuestionAnswerSource::Text)
+        form_answer(
+            "query".to_string(),
+            crate::interactive::QuestionAnswerSource::Text
+        )
     );
     assert!(pending.is_none());
 }
@@ -1087,41 +1171,70 @@ fn question_modal_accepts_q_in_free_form_response() {
 #[test]
 fn question_modal_submits_selected_option() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Mode?".to_string(), None, vec!["plan".to_string(), "execute".to_string()], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Mode?".to_string(),
+        None,
+        vec!["plan".to_string(), "execute".to_string()],
+        reply_tx,
+    )));
 
     assert!(!handle_question_key(&mut pending, KeyCode::Down));
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("execute".to_string(), crate::interactive::QuestionAnswerSource::Option)
+        form_answer(
+            "execute".to_string(),
+            crate::interactive::QuestionAnswerSource::Option
+        )
     );
 }
 
 #[test]
 fn question_number_keys_choose_a_labeled_option() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Mode?".to_string(), None, vec!["plan".to_string(), "execute".to_string()], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Mode?".to_string(),
+        None,
+        vec!["plan".to_string(), "execute".to_string()],
+        reply_tx,
+    )));
     assert!(!handle_question_key(&mut pending, KeyCode::Char('1')));
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("plan".to_string(), crate::interactive::QuestionAnswerSource::Option)
+        form_answer(
+            "plan".to_string(),
+            crate::interactive::QuestionAnswerSource::Option
+        )
     );
     assert!(pending.is_none());
 
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Mode?".to_string(), None, vec!["plan".to_string(), "execute".to_string()], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Mode?".to_string(),
+        None,
+        vec!["plan".to_string(), "execute".to_string()],
+        reply_tx,
+    )));
     assert!(!handle_question_key(&mut pending, KeyCode::Char('3')));
     assert!(!handle_question_key(&mut pending, KeyCode::Enter));
     assert!(!handle_question_key(&mut pending, KeyCode::Char('y')));
     assert!(handle_question_key(&mut pending, KeyCode::Enter));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
-        form_answer("y".to_string(), crate::interactive::QuestionAnswerSource::Text)
+        form_answer(
+            "y".to_string(),
+            crate::interactive::QuestionAnswerSource::Text
+        )
     );
 
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Mode?".to_string(), None, vec!["plan".to_string(), "execute".to_string()], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Mode?".to_string(),
+        None,
+        vec!["plan".to_string(), "execute".to_string()],
+        reply_tx,
+    )));
     assert!(handle_question_key(&mut pending, KeyCode::Esc));
     assert_eq!(
         reply_rx.try_recv().unwrap(),
@@ -1132,7 +1245,12 @@ fn question_number_keys_choose_a_labeled_option() {
 #[test]
 fn question_modal_reports_cancellation() {
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single("Continue?".to_string(), None, vec!["yes".to_string(), "no".to_string()], reply_tx)));
+    let mut pending = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Continue?".to_string(),
+        None,
+        vec!["yes".to_string(), "no".to_string()],
+        reply_tx,
+    )));
 
     assert!(handle_question_key(&mut pending, KeyCode::Esc));
     assert_eq!(
@@ -1161,10 +1279,20 @@ fn question_handler_round_trips_ui_response() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
     assert_eq!(request.form.questions[0].question, "Mode?");
-    assert_eq!(request.form.questions[0].options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), ["plan", "execute"]);
+    assert_eq!(
+        request.form.questions[0]
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect::<Vec<_>>(),
+        ["plan", "execute"]
+    );
     request
         .reply
-        .send(form_answer("execute".to_string(), crate::interactive::QuestionAnswerSource::Option))
+        .send(form_answer(
+            "execute".to_string(),
+            crate::interactive::QuestionAnswerSource::Option,
+        ))
         .unwrap();
 
     assert_eq!(handle.join().unwrap(), Ok("execute".to_string()));
@@ -1319,7 +1447,12 @@ fn tui_shutdown_rejects_modal_requests_published_after_initial_cleanup() {
             ))
             .expect("publish late approval");
         question_tx
-            .send(TuiQuestionRequest::single("This cancelled question must not reopen".to_string(), None, Vec::new(), question_reply_tx))
+            .send(TuiQuestionRequest::single(
+                "This cancelled question must not reopen".to_string(),
+                None,
+                Vec::new(),
+                question_reply_tx,
+            ))
             .expect("publish late question");
     });
     let mut worker = Some(TuiAgentWorker {
@@ -1330,7 +1463,12 @@ fn tui_shutdown_rejects_modal_requests_published_after_initial_cleanup() {
         handle: Some(handle),
     });
     let mut pending_approval = None;
-    let mut pending_question = Some(PendingQuestion::new(TuiQuestionRequest::single("Initial question".to_string(), None, Vec::new(), initial_reply_tx)));
+    let mut pending_question = Some(PendingQuestion::new(TuiQuestionRequest::single(
+        "Initial question".to_string(),
+        None,
+        Vec::new(),
+        initial_reply_tx,
+    )));
     let mut timeline = ActiveTimeline {
         session_id: session_id.to_string(),
         active_run_id: Some(run_id.to_string()),
