@@ -112,13 +112,13 @@
       "target": "0.3.1",
       "impact": "patch",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t068-author",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/llm-providers/T068_anthropic_stream_continuation_preservation.md"
+        "workspace/specs/done/llm-providers/T068_anthropic_stream_continuation_preservation.md"
       ],
-      "evidence": "User-authorized T023 offline investigation found an independently confirmed streamed native-content preservation defect. The atomic shared transaction reserved patch 0.3.1 from public development 0.3.0 at 94539d051a99df7e082ee98596799856b914c22f on 2026-10-06. The designated author applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before implementation artifacts. T068 owns this shipped compatible repair; T023 live qualification remains unresolved. Application is not publication; production rollout is separate."
+      "evidence": "User-authorized T023 offline investigation found an independently confirmed streamed native-content preservation defect. The atomic shared transaction reserved patch 0.3.1 from public development 0.3.0 at 94539d051a99df7e082ee98596799856b914c22f on 2026-10-06. The designated author applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before implementation artifacts. T068 owns this shipped compatible repair; T023 live qualification remains unresolved. Application is not publication; production rollout is separate. Verified shared development integration at 9762df5c10727889adff072045fcd8a8c1369dff on 2026-10-06T11:58:18.336608+00:00 after independent exact review, frozen native gates and all-platform CI 37453323677. Main delivery and publication remain separate pending events. Verified SAME-revision main delivery 9762df5c10727889adff072045fcd8a8c1369dff on 2026-10-06T12:01:05.731122+00:00 after independent local Test-record review 9ab6d564d0816bfbd97068eeb0199767f7904ef1. PR49 confirms the merge on 2026-10-06T12:01:06Z. Acceptance, canonical done membership and memory reconcile this event; development publication and protected production rollout are separately verified. Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied."
     }
   ]
 }
