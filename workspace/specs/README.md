@@ -38,6 +38,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [T061](done/interactive/T061_question_form.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T067](done/interactive/T067_question_form_runtime_implementation.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
+| [T068](development/llm-providers/T068_anthropic_stream_continuation_preservation.md) | llm-providers | development | User-authorized offline T023 investigation confirmed loss of native private content in streaming; patch reservation 0.3.1 applied, implementation and exact gates pending. |
 | [T062](done/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T063](done/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T064](done/release-delivery/T064_interrupt_smoke_input_lifetime.md) | release-delivery | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
@@ -138,7 +139,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **77 done, 1 development (T023), and 2 backlog**. Publication is separate.
+Current catalog: **77 done, 2 development (T023/T068), and 2 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
