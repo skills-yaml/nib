@@ -28,80 +28,6 @@ fn plain_agent_join_result(
     })
 }
 
-#[cfg(test)]
-mod ownership_tests {
-    use super::*;
-
-    #[test]
-    fn router_unwind_aborts_pending_worker_and_closes_its_stream_without_continuing() {
-        struct PendingResources {
-            _stream: tokio::sync::mpsc::Sender<()>,
-            dropped: std::sync::mpsc::Sender<()>,
-        }
-        impl Drop for PendingResources {
-            fn drop(&mut self) {
-                let _ = self.dropped.send(());
-            }
-        }
-        let runtime = nib::agent::build_agent_runtime("test runtime").unwrap();
-        let modal = PlainModalState::default();
-        let pending_modal = modal.clone();
-        let forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let continued = forbidden.clone();
-        let (stream, mut events) = tokio::sync::mpsc::channel(1);
-        let (dropped, destroyed) = std::sync::mpsc::channel();
-        let (ready, waiting) = std::sync::mpsc::channel();
-        let (release, resume) = tokio::sync::oneshot::channel::<()>();
-        let mut task = runtime.spawn(async move {
-            let mut pending = Box::pin(async move {
-                let resources = PendingResources {
-                    _stream: stream,
-                    dropped,
-                };
-                assert!(pending_modal.claim(PLAIN_MODAL_QUESTION));
-                if resume.await.is_ok() {
-                    continued.store(true, Ordering::SeqCst);
-                }
-                drop(resources);
-            });
-            let mut ready = Some(ready);
-            std::future::poll_fn(|context| {
-                let result = std::future::Future::poll(pending.as_mut(), context);
-                if let Some(sender) = ready.take() {
-                    sender.send(result.is_pending()).unwrap();
-                }
-                result
-            })
-            .await
-        });
-        assert!(waiting
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap());
-        assert!(modal.is_pending());
-        let unwind = std::panic::catch_unwind(|| {
-            let _owner = PlainAgentAbortGuard::new(&task);
-            panic!("plain router unwind");
-        });
-        assert!(unwind.is_err());
-        // A detached worker would accept this continuation and run forbidden work.
-        let _ = release.send(());
-        let joined = runtime
-            .block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await
-            })
-            .expect("worker teardown deadline");
-        assert!(joined.unwrap_err().is_cancelled());
-        destroyed
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("worker resources dropped");
-        assert!(matches!(
-            events.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-        ));
-        assert!(!forbidden.load(Ordering::SeqCst));
-    }
-}
-
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) fn execute_prepared_agent_step(
     mut prepared: PreparedPlainAgentStep,
@@ -729,5 +655,79 @@ pub(crate) fn drain_plain_queued_follow_ups(
             PlainAgentDisposition::Completed => {}
             disposition => return Ok(disposition),
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn router_unwind_aborts_pending_worker_and_closes_its_stream_without_continuing() {
+        struct PendingResources {
+            _stream: tokio::sync::mpsc::Sender<()>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for PendingResources {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let runtime = nib::agent::build_agent_runtime("test runtime").unwrap();
+        let modal = PlainModalState::default();
+        let pending_modal = modal.clone();
+        let forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let continued = forbidden.clone();
+        let (stream, mut events) = tokio::sync::mpsc::channel(1);
+        let (dropped, destroyed) = std::sync::mpsc::channel();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = tokio::sync::oneshot::channel::<()>();
+        let mut task = runtime.spawn(async move {
+            let mut pending = Box::pin(async move {
+                let resources = PendingResources {
+                    _stream: stream,
+                    dropped,
+                };
+                assert!(pending_modal.claim(PLAIN_MODAL_QUESTION));
+                if resume.await.is_ok() {
+                    continued.store(true, Ordering::SeqCst);
+                }
+                drop(resources);
+            });
+            let mut ready = Some(ready);
+            std::future::poll_fn(|context| {
+                let result = std::future::Future::poll(pending.as_mut(), context);
+                if let Some(sender) = ready.take() {
+                    sender.send(result.is_pending()).unwrap();
+                }
+                result
+            })
+            .await
+        });
+        assert!(waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap());
+        assert!(modal.is_pending());
+        let unwind = std::panic::catch_unwind(|| {
+            let _owner = PlainAgentAbortGuard::new(&task);
+            panic!("plain router unwind");
+        });
+        assert!(unwind.is_err());
+        // A detached worker would accept this continuation and run forbidden work.
+        let _ = release.send(());
+        let joined = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await
+            })
+            .expect("worker teardown deadline");
+        assert!(joined.unwrap_err().is_cancelled());
+        destroyed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker resources dropped");
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(!forbidden.load(Ordering::SeqCst));
     }
 }
