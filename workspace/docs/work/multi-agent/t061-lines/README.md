@@ -1,9 +1,9 @@
 ---
 schema_version: 1
 coordination_id: t061-lines
-status: active
+status: handoff
 base_revision: d738e5de95173999906ff4a962e5339638265e1f
-updated_at: 2026-10-05T22:05:46Z
+updated_at: 2026-10-06T02:07:20Z
 ---
 
 # Peer Task
@@ -18,11 +18,15 @@ The [owning work record](t061-lines.md) tracks implementation and gate evidence.
 
 ## Dependencies
 
-The verified shared contract/runtime APIs and recovery router are merged into
-this worktree. Cargo runs remain serialized; the TUI lane holds the next slot.
+The verified shared contract, TUI and recovery remediation integration
+`1ecda00ffcbc6b019a6f8409117fea24c631789a` is merged into this worktree.
+The lane used its serialized compilation slot for checkout-bound native gates.
+The shared nib-question-form 0.3.0 reservation remains applied; no bump was added.
 
 ## Integration
 
 Independent peer review and transactional integration are required.
-The implementation checkpoint is not a verified handoff; focused/native gates
-and combined exact-candidate review remain pending.
+Strict Task check and all 300 selected interactive tests passed on the frozen
+source. Task docs:check passed all native governance modules and five
+documentation integrity fixtures on these handoff records.
+Independent exact review and fresh aggregate integration gates remain required.

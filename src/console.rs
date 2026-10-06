@@ -1,13 +1,15 @@
-use nib::agent::{QuestionFormRequestContext, QuestionHandler, QuestionOutcome, QuestionRequestContext};
-use nib::interactive::{
-    FormQuestion, QuestionAnswer, QuestionAnswerSource, QuestionEditorInput, QuestionForm,
-    QuestionFormOutcome, QuestionLineInput, QuestionSubmitInput,
+use nib::agent::{
+    QuestionFormRequestContext, QuestionHandler, QuestionOutcome, QuestionRequestContext,
 };
 #[cfg(test)]
 use nib::interactive::InteractionConsumer;
 use nib::interactive::{
     modal_command_unsupported_message, reduce_interaction, InteractionDecision, InteractionInput,
     InteractionReduction, InteractionState,
+};
+use nib::interactive::{
+    FormQuestion, QuestionAnswer, QuestionAnswerSource, QuestionEditorInput, QuestionForm,
+    QuestionFormOutcome, QuestionLineInput, QuestionSubmitInput,
 };
 use nib::tools::executor::{ApprovalContext, ApprovalHandler};
 use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
@@ -314,9 +316,16 @@ impl LineQuestionForm {
                 *answer = None;
             }
         }
-        let stage = answers.iter().position(Option::is_none)
+        let stage = answers
+            .iter()
+            .position(Option::is_none)
             .map_or(LineQuestionStage::Submit, LineQuestionStage::Choice);
-        Self { form, answers, stage, retry: None }
+        Self {
+            form,
+            answers,
+            stage,
+            retry: None,
+        }
     }
 
     pub(crate) fn enter_editor(&mut self, question_index: Option<usize>) -> Result<(), String> {
@@ -341,18 +350,54 @@ impl LineQuestionForm {
                 if self.form.questions.len() > 1 {
                     for (question, answer) in self.form.questions.iter().zip(&self.answers) {
                         if let Some(answer) = answer {
-                            output.push_str(&format!("[checked] {}: {}\n", question.title.as_deref().unwrap_or("Question"), nib::interactive::bounded_public_text(&answer.answer, sensitive_values, 2_048, true)));
+                            output.push_str(&format!(
+                                "[checked] {}: {}\n",
+                                question.title.as_deref().unwrap_or("Question"),
+                                nib::interactive::bounded_public_text(
+                                    &answer.answer,
+                                    sensitive_values,
+                                    2_048,
+                                    true
+                                )
+                            ));
                         }
                     }
-                    output.push_str(&format!("Question {}/{} — {}\n", index + 1, self.form.questions.len(), self.form.questions[index].title.as_deref().unwrap_or("Question")));
+                    output.push_str(&format!(
+                        "Question {}/{} — {}\n",
+                        index + 1,
+                        self.form.questions.len(),
+                        self.form.questions[index]
+                            .title
+                            .as_deref()
+                            .unwrap_or("Question")
+                    ));
                 }
                 output.push_str(&render_line_question(&self.form.questions[index]));
             }
-            LineQuestionStage::Text(_) => output.push_str("Type the alternative answer, then press Enter (esc interrupts operation): "),
-            LineQuestionStage::Discussion => output.push_str("Chat about this (esc interrupts operation): "),
+            LineQuestionStage::Text(_) => output.push_str(
+                "Type the alternative answer, then press Enter (esc interrupts operation): ",
+            ),
+            LineQuestionStage::Discussion => {
+                output.push_str("Chat about this (esc interrupts operation): ")
+            }
             LineQuestionStage::Submit => {
-                for (index, (question, answer)) in self.form.questions.iter().zip(&self.answers).enumerate() {
-                    output.push_str(&format!("{}. {}: {}\n", index + 1, question.title.as_deref().unwrap_or("Question"), answer.as_ref().map_or_else(|| "unanswered".to_string(), |answer| nib::interactive::bounded_public_text(&answer.answer, sensitive_values, 2_048, true))));
+                for (index, (question, answer)) in
+                    self.form.questions.iter().zip(&self.answers).enumerate()
+                {
+                    output.push_str(&format!(
+                        "{}. {}: {}\n",
+                        index + 1,
+                        question.title.as_deref().unwrap_or("Question"),
+                        answer.as_ref().map_or_else(
+                            || "unanswered".to_string(),
+                            |answer| nib::interactive::bounded_public_text(
+                                &answer.answer,
+                                sensitive_values,
+                                2_048,
+                                true
+                            )
+                        )
+                    ));
                 }
                 output.push_str("Submit these answers? Enter submits, a number reopens that question (chat discusses; esc interrupts operation): ");
             }
@@ -364,16 +409,34 @@ impl LineQuestionForm {
         self.retry = None;
         match self.stage {
             LineQuestionStage::Choice(index) => self.submit_choice(index, line),
-            LineQuestionStage::Text(index) => match nib::interactive::parse_question_editor_input(line) {
-                QuestionEditorInput::Text(answer) => self.record_answer(index, QuestionAnswer { answer, source: QuestionAnswerSource::Text }),
-                QuestionEditorInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
-                QuestionEditorInput::Retry(message) => { self.retry = Some(message); None }
-            },
-            LineQuestionStage::Discussion => match nib::interactive::parse_question_editor_input(line) {
-                QuestionEditorInput::Text(message) => Some(QuestionFormOutcome::Discussed(message)),
-                QuestionEditorInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
-                QuestionEditorInput::Retry(message) => { self.retry = Some(message); None }
-            },
+            LineQuestionStage::Text(index) => {
+                match nib::interactive::parse_question_editor_input(line) {
+                    QuestionEditorInput::Text(answer) => self.record_answer(
+                        index,
+                        QuestionAnswer {
+                            answer,
+                            source: QuestionAnswerSource::Text,
+                        },
+                    ),
+                    QuestionEditorInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
+                    QuestionEditorInput::Retry(message) => {
+                        self.retry = Some(message);
+                        None
+                    }
+                }
+            }
+            LineQuestionStage::Discussion => {
+                match nib::interactive::parse_question_editor_input(line) {
+                    QuestionEditorInput::Text(message) => {
+                        Some(QuestionFormOutcome::Discussed(message))
+                    }
+                    QuestionEditorInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
+                    QuestionEditorInput::Retry(message) => {
+                        self.retry = Some(message);
+                        None
+                    }
+                }
+            }
             LineQuestionStage::Submit => self.submit_set(line),
         }
     }
@@ -381,23 +444,45 @@ impl LineQuestionForm {
     fn submit_choice(&mut self, index: usize, line: &str) -> Option<QuestionFormOutcome> {
         match nib::interactive::parse_question_line(&self.form.questions[index], line) {
             QuestionLineInput::Answer(answer) => self.record_answer(index, answer),
-            QuestionLineInput::EnterText => { self.stage = LineQuestionStage::Text(index); None }
-            QuestionLineInput::EnterDiscussion => { self.stage = LineQuestionStage::Discussion; None }
-            QuestionLineInput::Reject | QuestionLineInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
-            QuestionLineInput::Retry(message) => { self.retry = Some(message); None }
+            QuestionLineInput::EnterText => {
+                self.stage = LineQuestionStage::Text(index);
+                None
+            }
+            QuestionLineInput::EnterDiscussion => {
+                self.stage = LineQuestionStage::Discussion;
+                None
+            }
+            QuestionLineInput::Reject | QuestionLineInput::Interrupt => {
+                Some(QuestionFormOutcome::LeftUnanswered)
+            }
+            QuestionLineInput::Retry(message) => {
+                self.retry = Some(message);
+                None
+            }
         }
     }
 
-    fn record_answer(&mut self, index: usize, answer: QuestionAnswer) -> Option<QuestionFormOutcome> {
-        if let Err(message) = nib::interactive::validate_question_answer(&self.form.questions[index], &answer) {
+    fn record_answer(
+        &mut self,
+        index: usize,
+        answer: QuestionAnswer,
+    ) -> Option<QuestionFormOutcome> {
+        if let Err(message) =
+            nib::interactive::validate_question_answer(&self.form.questions[index], &answer)
+        {
             self.retry = Some(message);
             return None;
         }
         self.answers[index] = Some(answer);
         if self.form.questions.len() == 1 {
-            return Some(QuestionFormOutcome::Answered(self.answers.iter().flatten().cloned().collect()));
+            return Some(QuestionFormOutcome::Answered(
+                self.answers.iter().flatten().cloned().collect(),
+            ));
         }
-        self.stage = self.answers.iter().position(Option::is_none)
+        self.stage = self
+            .answers
+            .iter()
+            .position(Option::is_none)
             .map_or(LineQuestionStage::Submit, LineQuestionStage::Choice);
         None
     }
@@ -410,13 +495,24 @@ impl LineQuestionForm {
                     self.retry = Some("Every question needs an answer before Submit".into());
                     None
                 } else {
-                    Some(QuestionFormOutcome::Answered(self.answers.iter().flatten().cloned().collect()))
+                    Some(QuestionFormOutcome::Answered(
+                        self.answers.iter().flatten().cloned().collect(),
+                    ))
                 }
             }
-            QuestionSubmitInput::Reopen(index) => { self.stage = LineQuestionStage::Choice(index); None }
-            QuestionSubmitInput::EnterDiscussion => { self.stage = LineQuestionStage::Discussion; None }
+            QuestionSubmitInput::Reopen(index) => {
+                self.stage = LineQuestionStage::Choice(index);
+                None
+            }
+            QuestionSubmitInput::EnterDiscussion => {
+                self.stage = LineQuestionStage::Discussion;
+                None
+            }
             QuestionSubmitInput::Interrupt => Some(QuestionFormOutcome::LeftUnanswered),
-            QuestionSubmitInput::Retry(message) => { self.retry = Some(message); None }
+            QuestionSubmitInput::Retry(message) => {
+                self.retry = Some(message);
+                None
+            }
         }
     }
 }
@@ -434,7 +530,10 @@ fn render_line_question(question: &FormQuestion) -> String {
                 output.push_str(&format!("{}{description}\n", " ".repeat(prefix.len())));
             }
         }
-        output.push_str(&format!("  {}. Type something.\n", question.options.len() + 1));
+        output.push_str(&format!(
+            "  {}. Type something.\n",
+            question.options.len() + 1
+        ));
         question.options.len() + 2
     };
     output.push_str(&format!("────────────────────────────────\n  {chat_row}. Chat about this\n\nAnswer (number, text, or chat; esc interrupts operation): "));
@@ -442,21 +541,38 @@ fn render_line_question(question: &FormQuestion) -> String {
 }
 
 pub(crate) fn legacy_question_form(context: &QuestionRequestContext<'_>) -> QuestionForm {
-    QuestionForm { header: None, questions: vec![FormQuestion {
-        title: None, question: context.question.to_string(),
-        proposed_answer: context.proposed_answer.map(str::to_string),
-        options: context.options.iter().map(|label| nib::interactive::QuestionOption { label: label.clone(), description: None }).collect(),
-    }] }
+    QuestionForm {
+        header: None,
+        questions: vec![FormQuestion {
+            title: None,
+            question: context.question.to_string(),
+            proposed_answer: context.proposed_answer.map(str::to_string),
+            options: context
+                .options
+                .iter()
+                .map(|label| nib::interactive::QuestionOption {
+                    label: label.clone(),
+                    description: None,
+                })
+                .collect(),
+        }],
+    }
 }
 
 impl ConsoleQuestionHandler {
     #[cfg(test)]
     pub fn new(input: ConsoleInput) -> Self {
-        Self { input, sensitive_values: Vec::new() }
+        Self {
+            input,
+            sensitive_values: Vec::new(),
+        }
     }
 
     pub fn with_sensitive_values(input: ConsoleInput, sensitive_values: Vec<String>) -> Self {
-        Self { input, sensitive_values }
+        Self {
+            input,
+            sensitive_values,
+        }
     }
 }
 
@@ -466,15 +582,18 @@ impl QuestionHandler for ConsoleQuestionHandler {
         if context.form.questions.is_empty() {
             return QuestionFormOutcome::InputUnavailable("question form is empty".into());
         }
-        let displayed = match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
-            Ok(form) => form,
-            Err(error) => return QuestionFormOutcome::InputUnavailable(error),
-        };
+        let displayed =
+            match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
+                Ok(form) => form,
+                Err(error) => return QuestionFormOutcome::InputUnavailable(error),
+            };
         let mut form = LineQuestionForm::new(displayed, context.initial_answers.to_vec());
         loop {
             print!("{}", form.render(&self.sensitive_values));
             if io::stdout().flush().is_err() {
-                return QuestionFormOutcome::InputUnavailable("failed to flush question prompt".into());
+                return QuestionFormOutcome::InputUnavailable(
+                    "failed to flush question prompt".into(),
+                );
             }
             let line = match self.input.read_line_async().await {
                 Ok(line) => line,
@@ -510,13 +629,15 @@ impl QuestionHandler for ConsoleQuestionHandler {
 
     async fn ask_with_context(&self, context: QuestionRequestContext<'_>) -> QuestionOutcome {
         let form = legacy_question_form(&context);
-        QuestionOutcome::from_form(self.ask_form(QuestionFormRequestContext {
-            invocation_id: context.invocation_id,
-            form: &form,
-            initial_answers: &[],
-        }).await)
+        QuestionOutcome::from_form(
+            self.ask_form(QuestionFormRequestContext {
+                invocation_id: context.invocation_id,
+                form: &form,
+                initial_answers: &[],
+            })
+            .await,
+        )
     }
-
 }
 
 #[cfg(test)]
@@ -742,56 +863,159 @@ mod tests {
 
     fn form_question(title: &str, proposal: Option<&str>) -> FormQuestion {
         FormQuestion {
-            title: Some(title.into()), question: format!("Choose {title}"),
+            title: Some(title.into()),
+            question: format!("Choose {title}"),
             proposed_answer: proposal.map(str::to_string),
-            options: vec![nib::interactive::QuestionOption { label: "alpha".into(), description: Some("First target".into()) }, nib::interactive::QuestionOption { label: "beta".into(), description: None }],
+            options: vec![
+                nib::interactive::QuestionOption {
+                    label: "alpha".into(),
+                    description: Some("First target".into()),
+                },
+                nib::interactive::QuestionOption {
+                    label: "beta".into(),
+                    description: None,
+                },
+            ],
         }
     }
 
-    async fn answer_form(form: &QuestionForm, input: &str, initial: &[Option<QuestionAnswer>]) -> QuestionFormOutcome {
+    async fn answer_form(
+        form: &QuestionForm,
+        input: &str,
+        initial: &[Option<QuestionAnswer>],
+    ) -> QuestionFormOutcome {
         ConsoleQuestionHandler::new(ConsoleInput::new(Cursor::new(input.as_bytes().to_vec())))
-            .ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form, initial_answers: initial }).await
+            .ask_form(QuestionFormRequestContext {
+                invocation_id: nib::tools::ToolInvocationId::new(),
+                form,
+                initial_answers: initial,
+            })
+            .await
     }
 
     #[tokio::test]
     async fn console_sets_require_submit_and_allow_replacing_a_draft() {
-        let form = QuestionForm { header: Some("Targets".into()), questions: vec![form_question("First", None), form_question("Second", None)] };
-        assert_eq!(answer_form(&form, "1\n2\n", &[]).await, QuestionFormOutcome::InputClosed, "unsubmitted drafts cannot become answers");
+        let form = QuestionForm {
+            header: Some("Targets".into()),
+            questions: vec![form_question("First", None), form_question("Second", None)],
+        };
+        assert_eq!(
+            answer_form(&form, "1\n2\n", &[]).await,
+            QuestionFormOutcome::InputClosed,
+            "unsubmitted drafts cannot become answers"
+        );
         let outcome = answer_form(&form, "0\n1\n2\n1\ntext: chat\n\n", &[]).await;
-        assert_eq!(outcome, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer: "chat".into(), source: QuestionAnswerSource::Text }, QuestionAnswer { answer: "beta".into(), source: QuestionAnswerSource::Option }]));
+        assert_eq!(
+            outcome,
+            QuestionFormOutcome::Answered(vec![
+                QuestionAnswer {
+                    answer: "chat".into(),
+                    source: QuestionAnswerSource::Text
+                },
+                QuestionAnswer {
+                    answer: "beta".into(),
+                    source: QuestionAnswerSource::Option
+                }
+            ])
+        );
     }
 
     #[tokio::test]
     async fn console_single_questions_finish_without_a_submit_line() {
-        let form = QuestionForm { header: None, questions: vec![form_question("Target", None)] };
-        assert_eq!(answer_form(&form, "3\n\ntext: 1\n", &[]).await, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer: "1".into(), source: QuestionAnswerSource::Text }]));
-        assert_eq!(answer_form(&form, "Y\n", &[]).await, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer: "Y".into(), source: QuestionAnswerSource::Text }]));
+        let form = QuestionForm {
+            header: None,
+            questions: vec![form_question("Target", None)],
+        };
+        assert_eq!(
+            answer_form(&form, "3\n\ntext: 1\n", &[]).await,
+            QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer: "1".into(),
+                source: QuestionAnswerSource::Text
+            }])
+        );
+        assert_eq!(
+            answer_form(&form, "Y\n", &[]).await,
+            QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer: "Y".into(),
+                source: QuestionAnswerSource::Text
+            }])
+        );
     }
 
     #[tokio::test]
     async fn console_discussion_and_interruptions_discard_set_drafts() {
-        let form = QuestionForm { header: None, questions: vec![form_question("First", None), form_question("Second", Some("proposal"))] };
-        assert_eq!(answer_form(&form, "1\n4\n\nWhy this target?\n", &[]).await, QuestionFormOutcome::Discussed("Why this target?".into()));
+        let form = QuestionForm {
+            header: None,
+            questions: vec![
+                form_question("First", None),
+                form_question("Second", Some("proposal")),
+            ],
+        };
+        assert_eq!(
+            answer_form(&form, "1\n4\n\nWhy this target?\n", &[]).await,
+            QuestionFormOutcome::Discussed("Why this target?".into())
+        );
         for input in ["1\nesc\n", "1\n3\nesc\n", "1\nchat\nesc\n", "1\n2\n"] {
-            assert_eq!(answer_form(&form, input, &[]).await, QuestionFormOutcome::LeftUnanswered, "{input:?}");
+            assert_eq!(
+                answer_form(&form, input, &[]).await,
+                QuestionFormOutcome::LeftUnanswered,
+                "{input:?}"
+            );
         }
         for input in ["1\n3\n", "1\nchat\n"] {
-            assert_eq!(answer_form(&form, input, &[]).await, QuestionFormOutcome::InputClosed, "{input:?}");
+            assert_eq!(
+                answer_form(&form, input, &[]).await,
+                QuestionFormOutcome::InputClosed,
+                "{input:?}"
+            );
         }
     }
 
     #[tokio::test]
     async fn console_preserves_reused_answers_and_exact_proposal_sources() {
-        let form = QuestionForm { header: None, questions: vec![form_question("First", None), form_question("Second", Some("displayed proposal"))] };
-        let reused = QuestionAnswer { answer: "alpha".into(), source: QuestionAnswerSource::Option };
-        assert_eq!(answer_form(&form, "1\n\n", &[Some(reused.clone()), None]).await, QuestionFormOutcome::Answered(vec![reused, QuestionAnswer { answer: "displayed proposal".into(), source: QuestionAnswerSource::ApprovedProposal }]));
-        let single = QuestionForm { header: None, questions: vec![form_question("Single", Some("displayed proposal"))] };
-        assert_eq!(answer_form(&single, "3\nreplacement\n", &[]).await, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer: "replacement".into(), source: QuestionAnswerSource::Text }]));
+        let form = QuestionForm {
+            header: None,
+            questions: vec![
+                form_question("First", None),
+                form_question("Second", Some("displayed proposal")),
+            ],
+        };
+        let reused = QuestionAnswer {
+            answer: "alpha".into(),
+            source: QuestionAnswerSource::Option,
+        };
+        assert_eq!(
+            answer_form(&form, "1\n\n", &[Some(reused.clone()), None]).await,
+            QuestionFormOutcome::Answered(vec![
+                reused,
+                QuestionAnswer {
+                    answer: "displayed proposal".into(),
+                    source: QuestionAnswerSource::ApprovedProposal
+                }
+            ])
+        );
+        let single = QuestionForm {
+            header: None,
+            questions: vec![form_question("Single", Some("displayed proposal"))],
+        };
+        assert_eq!(
+            answer_form(&single, "3\nreplacement\n", &[]).await,
+            QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer: "replacement".into(),
+                source: QuestionAnswerSource::Text
+            }])
+        );
     }
 
     #[test]
     fn native_line_rows_render_descriptions_and_redact_drafts() {
-        let form = QuestionForm { header: Some("secret header".into()), questions: vec![form_question("First", None), form_question("Second", Some("proposal"))] };
+        let form = QuestionForm {
+            header: Some("secret header".into()),
+            questions: vec![
+                form_question("First", None),
+                form_question("Second", Some("proposal")),
+            ],
+        };
         let mut state = LineQuestionForm::new(form, vec![]);
         let rendered = state.render(&["secret".into()]);
         assert!(rendered.contains("Question 1/2 — First"));
@@ -806,18 +1030,38 @@ mod tests {
         assert!(!rendered.contains("First target"));
     }
 
-
     #[tokio::test]
     async fn native_proposal_approval_returns_exact_publicly_displayed_value() {
-        let form = QuestionForm { header: None, questions: vec![form_question("Target", Some("proposal with private-secret"))] };
+        let form = QuestionForm {
+            header: None,
+            questions: vec![form_question(
+                "Target",
+                Some("proposal with private-secret"),
+            )],
+        };
         let sensitive = vec!["private-secret".to_string()];
-        let displayed = nib::interactive::public_question_form(&form, &sensitive).expect("public form");
+        let displayed =
+            nib::interactive::public_question_form(&form, &sensitive).expect("public form");
         let input = ConsoleInput::new(Cursor::new(b"1\n".to_vec()));
         let outcome = ConsoleQuestionHandler::with_sensitive_values(input, sensitive)
-            .ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form: &form, initial_answers: &[] }).await;
-        let answer = displayed.questions[0].proposed_answer.clone().expect("displayed proposal");
+            .ask_form(QuestionFormRequestContext {
+                invocation_id: nib::tools::ToolInvocationId::new(),
+                form: &form,
+                initial_answers: &[],
+            })
+            .await;
+        let answer = displayed.questions[0]
+            .proposed_answer
+            .clone()
+            .expect("displayed proposal");
         assert!(!answer.contains("private-secret"));
-        assert_eq!(outcome, QuestionFormOutcome::Answered(vec![QuestionAnswer { answer, source: QuestionAnswerSource::ApprovedProposal }]));
+        assert_eq!(
+            outcome,
+            QuestionFormOutcome::Answered(vec![QuestionAnswer {
+                answer,
+                source: QuestionAnswerSource::ApprovedProposal
+            }])
+        );
     }
 
     #[tokio::test]
@@ -825,22 +1069,49 @@ mod tests {
         let mut question = form_question("Target", None);
         question.options[0].label = "private-first".into();
         question.options[1].label = "private-second".into();
-        let form = QuestionForm { header: None, questions: vec![question] };
+        let form = QuestionForm {
+            header: None,
+            questions: vec![question],
+        };
         let input = ConsoleInput::new(Cursor::new(b"1\n".to_vec()));
-        let handler = ConsoleQuestionHandler::with_sensitive_values(input.clone(), vec!["private-first".into(), "private-second".into()]);
-        assert!(matches!(handler.ask_form(QuestionFormRequestContext { invocation_id: nib::tools::ToolInvocationId::new(), form: &form, initial_answers: &[] }).await, QuestionFormOutcome::InputUnavailable(_)));
-        assert!(!input.broker_started(), "ambiguous displayed options were rejected before input consumption");
+        let handler = ConsoleQuestionHandler::with_sensitive_values(
+            input.clone(),
+            vec!["private-first".into(), "private-second".into()],
+        );
+        assert!(matches!(
+            handler
+                .ask_form(QuestionFormRequestContext {
+                    invocation_id: nib::tools::ToolInvocationId::new(),
+                    form: &form,
+                    initial_answers: &[]
+                })
+                .await,
+            QuestionFormOutcome::InputUnavailable(_)
+        ));
+        assert!(
+            !input.broker_started(),
+            "ambiguous displayed options were rejected before input consumption"
+        );
     }
-
 
     #[test]
     fn native_descriptions_align_with_double_digit_option_labels() {
         let mut question = form_question("Many choices", None);
-        question.options = (1..=10).map(|index| nib::interactive::QuestionOption {
-            label: format!("choice{index}"), description: (index == 10).then(|| "Aligned description".into()),
-        }).collect();
-        let form = LineQuestionForm::new(QuestionForm { header: None, questions: vec![question] }, vec![]);
-        assert!(form.render(&[]).contains("  10. choice10\n      Aligned description"));
+        question.options = (1..=10)
+            .map(|index| nib::interactive::QuestionOption {
+                label: format!("choice{index}"),
+                description: (index == 10).then(|| "Aligned description".into()),
+            })
+            .collect();
+        let form = LineQuestionForm::new(
+            QuestionForm {
+                header: None,
+                questions: vec![question],
+            },
+            vec![],
+        );
+        assert!(form
+            .render(&[])
+            .contains("  10. choice10\n      Aligned description"));
     }
-
 }

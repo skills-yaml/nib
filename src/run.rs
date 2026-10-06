@@ -174,7 +174,10 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         model: args.model.clone(),
         auto_approve: args.yes,
         approval_handler: Some(Arc::new(ConsoleApprovalHandler::new(input.clone()))),
-        question_handler: Some(Arc::new(ConsoleQuestionHandler::with_sensitive_values(input, sensitive_values.clone()))),
+        question_handler: Some(Arc::new(ConsoleQuestionHandler::with_sensitive_values(
+            input,
+            sensitive_values.clone(),
+        ))),
         stream_tx: Some(stream_tx),
         cancellation: Some(cancellation.clone()),
         ..Default::default()

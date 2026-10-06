@@ -1,6 +1,6 @@
 use nib::config::{save_nib_config_full, NibConfig};
 use nib::session::SessionStore;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -546,41 +546,93 @@ fn one_shot_sigint_reconciles_and_exits_130() {
     }
 }
 
-
 #[test]
 fn one_shot_question_card_interrupts_with_conversational_recovery_guidance() {
     let project = configured_project();
-    let output = run_with_input(project.path(), &["run", "ask a question before continuing", "--max-steps", "5"], b"esc\n");
+    let output = run_with_input(
+        project.path(),
+        &[
+            "run",
+            "ask a question before continuing",
+            "--max-steps",
+            "5",
+        ],
+        b"esc\n",
+    );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 question card");
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 recovery guidance");
     assert!(stdout.contains("3. Type something."), "{stdout}");
     assert!(stdout.contains("4. Chat about this"), "{stdout}");
-    assert!(stderr.contains("answer the pending question or ask to resume"), "{stderr}");
-    assert!(!stderr.contains("/questions") && !stderr.contains("/continue"), "{stderr}");
+    assert!(
+        stderr.contains("answer the pending question or ask to resume"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("/questions") && !stderr.contains("/continue"),
+        "{stderr}"
+    );
     let store = SessionStore::for_project(project.path()).expect("session store");
-    let session_id = store.list_result().expect("sessions").pop().expect("question session");
+    let session_id = store
+        .list_result()
+        .expect("sessions")
+        .pop()
+        .expect("question session");
     let session = store.load(&session_id).expect("persisted interruption");
-    assert!(session.clarifications.iter().all(|record| record.answer.is_none()));
-    assert!(session.events.iter().any(|event| event.kind == "reconciliation" && event.details["outcome"] == "waiting_for_user_input"));
+    assert_question_waiting(&session);
+    assert!(session
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()));
+    assert!(session
+        .events
+        .iter()
+        .any(|event| event.kind == "reconciliation"
+            && event.details["outcome"] == "waiting_for_user_input"));
 }
 
 #[test]
 fn one_shot_question_discussion_is_successful_without_answering() {
     let project = configured_project();
-    let output = run_with_input(project.path(), &["run", "ask a question before continuing", "--max-steps", "5"], b"chat\nWhy do you need that mode?\n");
+    let output = run_with_input(
+        project.path(),
+        &[
+            "run",
+            "ask a question before continuing",
+            "--max-steps",
+            "5",
+        ],
+        b"chat\nWhy do you need that mode?\n",
+    );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 discussion card");
     assert!(stdout.contains("Chat about this"), "{stdout}");
     let store = SessionStore::for_project(project.path()).expect("session store");
-    let session_id = store.list_result().expect("sessions").pop().expect("discussion session");
+    let session_id = store
+        .list_result()
+        .expect("sessions")
+        .pop()
+        .expect("discussion session");
     let session = store.load(&session_id).expect("persisted discussion");
-    let audit = session.tool_calls.iter().find(|record| record.tool_name.as_deref() == Some("ask_question")).expect("question observation");
+    let audit = session
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("ask_question"))
+        .expect("question observation");
+    let question = assert_question_identity(&session, audit);
+    assert_eq!(
+        question.status,
+        nib::session::ClarificationStatus::Discussed
+    );
     assert!(audit.error.is_none(), "{audit:?}");
     let result = audit.result.as_ref().expect("successful discussion result");
     assert_eq!(result["success"], true, "{result}");
-    assert!(session.messages.iter().any(|message| message.role == "tool" && message.content.contains("discussed") && message.content.contains("Why do you need that mode?")));
-    assert!(session.clarifications.iter().all(|record| record.answer.is_none()));
+    assert!(session.messages.iter().any(|message| message.role == "tool"
+        && message.content.contains("discussed")
+        && message.content.contains("Why do you need that mode?")));
+    assert!(session
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()));
 }
-
 
 #[test]
 fn plain_esc_reconciles_with_live_input_without_a_modal_delimiter() {
@@ -591,39 +643,226 @@ fn plain_esc_reconciles_with_live_input_without_a_modal_delimiter() {
 
 fn assert_plain_live_interruption(interruption: &[u8]) {
     let project = configured_project();
+    // Exercise the admitted planner/question path rather than answer-only control.
+    let mut config = nib::config::load_nib_config_full(project.path()).expect("mock config");
+    config.agent.answer_only = false;
+    save_nib_config_full(project.path(), &mut config).expect("modal mock config");
     let mut child = Command::new(env!("CARGO_BIN_EXE_nib"))
-        .arg("--plain").env("NIB_NO_UPDATE_CHECK", "1").current_dir(project.path())
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn live plain chat");
+        .arg("--plain")
+        .env("NIB_NO_UPDATE_CHECK", "1")
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn live plain chat");
+    let output_reader = LivePlainOutput::start(child.stdout.take().expect("plain output"));
     let mut input = child.stdin.take().expect("live prompt input");
-    input.write_all(b"ask a question before continuing\n").expect("start question");
+    input
+        .write_all(b"ask a question before continuing\n")
+        .expect("start question");
     let store = SessionStore::for_project(project.path()).expect("session store");
-    wait_for_plain_question_event(&mut child, &store, "question_required");
-    input.write_all(interruption).expect("interrupt without delimiter");
-    let session = wait_for_plain_question_event(&mut child, &store, "run_terminal");
-    assert!(child.try_wait().expect("chat status").is_none(), "interactive stdin remains open");
-    assert!(session.events.iter().any(|event| event.kind == "run_terminal" && event.details["outcome"] == "waiting_for_user_input"));
-    assert!(session.clarifications.iter().all(|record| record.answer.is_none()));
-    assert!(!session.tool_calls.iter().any(|record| record.tool_name.as_deref() == Some("run_terminal")), "dependent terminal work did not run");
+    wait_for_plain_question_event(&mut child, &store, "question_required", &output_reader);
+    if output_reader
+        .ready
+        .recv_timeout(Duration::from_secs(15))
+        .is_err()
+    {
+        let diagnostic = failed_plain_child_diagnostic(&mut child);
+        panic!(
+            "plain question prompt was not rendered: {diagnostic}; {}",
+            output_reader.text()
+        );
+    }
+    input
+        .write_all(interruption)
+        .expect("interrupt without delimiter");
+    let session = wait_for_plain_question_event(&mut child, &store, "run_terminal", &output_reader);
+    assert_question_waiting(&session);
+    assert!(
+        child.try_wait().expect("chat status").is_none(),
+        "interactive stdin remains open"
+    );
+    assert!(session
+        .events
+        .iter()
+        .any(|event| event.kind == "run_terminal"
+            && event.details["outcome"] == "waiting_for_user_input"));
+    assert!(session
+        .clarifications
+        .iter()
+        .all(|record| record.answer.is_none()));
+    assert!(
+        !session
+            .tool_calls
+            .iter()
+            .any(|record| record.tool_name.as_deref() == Some("run_terminal")),
+        "dependent terminal work did not run"
+    );
     input.write_all(b"/quit\n").expect("quit reconciled chat");
     drop(input);
     let output = child.wait_with_output().expect("collect plain chat");
+    output_reader.reader.join().expect("plain output reader");
     assert!(output.status.success(), "{output:?}");
 }
 
-fn wait_for_plain_question_event(child: &mut std::process::Child, store: &SessionStore, kind: &str) -> nib::session::Session {
+struct LivePlainOutput {
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ready: std::sync::mpsc::Receiver<()>,
+    reader: std::thread::JoinHandle<()>,
+}
+
+impl LivePlainOutput {
+    fn start(mut stdout: std::process::ChildStdout) -> Self {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let recording = captured.clone();
+        let (notify, ready) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; 512];
+            let mut notified = false;
+            loop {
+                let count = stdout.read(&mut buffer).expect("read plain stdout");
+                if count == 0 {
+                    break;
+                }
+                let mut output = recording.lock().expect("plain output recording");
+                let retained = count.min((64 * 1024_usize).saturating_sub(output.len()));
+                output.extend_from_slice(&buffer[..retained]);
+                if !notified && String::from_utf8_lossy(&output).contains("Answer (number") {
+                    notified = true;
+                    let _ = notify.send(());
+                }
+            }
+        });
+        Self {
+            captured,
+            ready,
+            reader,
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.captured.lock().expect("plain output recording")).into_owned()
+    }
+}
+
+fn wait_for_plain_question_event(
+    child: &mut std::process::Child,
+    store: &SessionStore,
+    kind: &str,
+    output: &LivePlainOutput,
+) -> nib::session::Session {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Some(session) = store.list_result().expect("sessions").into_iter()
+        if let Some(session) = store
+            .list_result()
+            .expect("sessions")
+            .into_iter()
             .filter_map(|id| store.load(&id))
-            .find(|session| session.events.iter().any(|event| event.kind == kind)) {
+            .find(|session| session.events.iter().any(|event| event.kind == kind))
+        {
             return session;
         }
         if Instant::now() >= deadline {
-            child.kill().expect("stop timed-out plain fixture");
-            let status = child.wait().expect("collect timeout status");
-            panic!("plain {kind} did not reconcile: {status}");
+            let diagnostic = failed_plain_child_diagnostic(child);
+            let sessions = store
+                .list_result()
+                .expect("timeout sessions")
+                .into_iter()
+                .filter_map(|id| store.load(&id))
+                .map(|session| session.events)
+                .collect::<Vec<_>>();
+            panic!(
+                "plain {kind} did not reconcile: {diagnostic}; stdout={}; events={sessions:?}",
+                output.text()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn assert_question_identity<'a>(
+    session: &'a nib::session::Session,
+    audit: &nib::session::ToolCallRecord,
+) -> &'a nib::session::ClarificationRecord {
+    assert!(
+        !session.clarifications.is_empty(),
+        "the question must remain persisted"
+    );
+    let invocation = audit.invocation_id.expect("audited question invocation");
+    let question = session
+        .clarifications
+        .iter()
+        .find(|record| record.invocation_id == invocation && record.question_index == 0)
+        .expect("the audited question has an exact persisted clarification");
+    assert_eq!(question.question, "Which verification mode?");
+    let plan = session.plan.as_ref().expect("current question plan");
+    assert_eq!(question.plan_id.as_deref(), Some(plan.id.as_str()));
+    let run = question.run_id.as_deref().expect("question operation run");
+    let required = session
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "question_required"
+                && event.details["invocation_id"] == serde_json::json!(invocation)
+                && event.details["question_index"] == 0
+        })
+        .expect("exact question-required event");
+    assert_eq!(required.details["run_id"].as_str(), Some(run));
+    assert!(
+        session
+            .events
+            .iter()
+            .any(|event| event.kind == "run_started"
+                && event.details["run_id"].as_str() == Some(run)),
+        "the question is tied to a real operation"
+    );
+    question
+}
+
+fn assert_question_waiting(session: &nib::session::Session) {
+    let audit = session
+        .tool_calls
+        .iter()
+        .find(|record| record.tool_name.as_deref() == Some("ask_question"))
+        .expect("interrupted question audit");
+    let question = assert_question_identity(session, audit);
+    assert_eq!(
+        question.status,
+        nib::session::ClarificationStatus::Unresolved
+    );
+    assert!(question.answer.is_none());
+    assert!(
+        session
+            .events
+            .iter()
+            .any(|event| event.kind == "run_terminal"
+                && event.details["run_id"].as_str() == question.run_id.as_deref()
+                && event.details["outcome"] == "waiting_for_user_input"),
+        "the exact interrupted worker reconciled to waiting"
+    );
+}
+
+fn failed_plain_child_diagnostic(child: &mut std::process::Child) -> String {
+    child.kill().expect("stop timed-out plain fixture");
+    let status = child.wait().expect("collect timeout status");
+    let mut stdout = Vec::new();
+    if let Some(output) = child.stdout.take() {
+        output
+            .take(64 * 1024)
+            .read_to_end(&mut stdout)
+            .expect("bounded timeout stdout");
+    }
+    let mut stderr = Vec::new();
+    if let Some(output) = child.stderr.take() {
+        output
+            .take(64 * 1024)
+            .read_to_end(&mut stderr)
+            .expect("bounded timeout stderr");
+    }
+    format!(
+        "status={status}; stdout={}; stderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    )
 }

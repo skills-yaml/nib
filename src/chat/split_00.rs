@@ -210,9 +210,14 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         context: nib::agent::QuestionRequestContext<'_>,
     ) -> nib::agent::QuestionOutcome {
         let form = crate::console::legacy_question_form(&context);
-        nib::agent::QuestionOutcome::from_form(self.ask_form(nib::agent::QuestionFormRequestContext {
-            invocation_id: context.invocation_id, form: &form, initial_answers: &[],
-        }).await)
+        nib::agent::QuestionOutcome::from_form(
+            self.ask_form(nib::agent::QuestionFormRequestContext {
+                invocation_id: context.invocation_id,
+                form: &form,
+                initial_answers: &[],
+            })
+            .await,
+        )
     }
 
     async fn ask_form(
@@ -223,22 +228,33 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         if context.form.questions.is_empty() {
             return QuestionFormOutcome::InputUnavailable("question form is empty".into());
         }
-        let displayed = match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
-            Ok(form) => form,
-            Err(error) => return QuestionFormOutcome::InputUnavailable(error),
-        };
+        let displayed =
+            match nib::interactive::public_question_form(context.form, &self.sensitive_values) {
+                Ok(form) => form,
+                Err(error) => return QuestionFormOutcome::InputUnavailable(error),
+            };
         if !self.modal_state.claim(PLAIN_MODAL_QUESTION) {
             return QuestionFormOutcome::InputUnavailable(
                 "another interactive prompt already owns plain input".to_string(),
             );
         }
         let (reply, response) = tokio::sync::oneshot::channel();
-        if self.tx.send(PlainQuestionPrompt {
-            form: crate::console::LineQuestionForm::new(displayed, context.initial_answers.to_vec()),
-            sensitive_values: self.sensitive_values.clone(), reply,
-        }).is_err() {
+        if self
+            .tx
+            .send(PlainQuestionPrompt {
+                form: crate::console::LineQuestionForm::new(
+                    displayed,
+                    context.initial_answers.to_vec(),
+                ),
+                sensitive_values: self.sensitive_values.clone(),
+                reply,
+            })
+            .is_err()
+        {
             self.modal_state.clear();
-            return QuestionFormOutcome::InputUnavailable("plain question input router stopped".into());
+            return QuestionFormOutcome::InputUnavailable(
+                "plain question input router stopped".into(),
+            );
         }
         let outcome = response.await.unwrap_or_else(|_| {
             QuestionFormOutcome::InputUnavailable("plain question input router stopped".into())
@@ -246,7 +262,6 @@ impl nib::agent::QuestionHandler for BrokeredPlainQuestionHandler {
         self.modal_state.clear();
         outcome
     }
-
 }
 
 pub(crate) static PLAIN_SIGNAL_STATE: OnceLock<
@@ -607,14 +622,28 @@ pub(crate) fn run_plain_with_input_and_modal_state(
     }
 
     if let Some(goal) = args.run.as_deref() {
-        let result = match nib::interactive::recover_question_conversation(&session_store, &sid, goal) {
-            Ok(Some(effect)) => execute_plain_question_recovery(&agent_scope, &sid, effect, &input, modal_state.clone()),
-            Ok(None) => {
-                println!("Thinking...");
-                execute_plain_turn_and_queued_follow_ups(&agent_scope, &sid, goal, InteractiveAgentMode::Execute, &input, modal_state.clone())
-            }
-            Err(error) => Err(error),
-        };
+        let result =
+            match nib::interactive::recover_question_conversation(&session_store, &sid, goal) {
+                Ok(Some(effect)) => execute_plain_question_recovery(
+                    &agent_scope,
+                    &sid,
+                    effect,
+                    &input,
+                    modal_state.clone(),
+                ),
+                Ok(None) => {
+                    println!("Thinking...");
+                    execute_plain_turn_and_queued_follow_ups(
+                        &agent_scope,
+                        &sid,
+                        goal,
+                        InteractiveAgentMode::Execute,
+                        &input,
+                        modal_state.clone(),
+                    )
+                }
+                Err(error) => Err(error),
+            };
         match result {
             Ok(PlainAgentDisposition::Completed) => {}
             Ok(PlainAgentDisposition::Cancelled) => println!(
@@ -820,15 +849,23 @@ pub(crate) fn run_plain_with_input_and_modal_state(
                         Err(error) => println!("{error}"),
                     }
                 }
-                Ok(InteractiveEffect::OpenQuestion { invocation_id, question, proposed_answer, options }) => {
-                    let form = nib::interactive::QuestionForm { header: None, questions: vec![nib::interactive::FormQuestion {
-                        title: None, question, proposed_answer,
-                        options: options.into_iter().map(|label| nib::interactive::QuestionOption { label, description: None }).collect(),
-                    }] };
-                    let effect = nib::interactive::QuestionRecoveryEffect::OpenForm(nib::session::PersistedQuestionForm {
-                        invocation_id, run_id: None, plan_id: None, form, initial_answers: Vec::new(),
-                    });
-                    match execute_plain_question_recovery(&agent_scope, &sid, effect, &input, modal_state.clone()) {
+                Ok(InteractiveEffect::OpenQuestion { invocation_id, .. }) => {
+                    let result = match nib::interactive::recover_question_conversation(
+                        &session_store,
+                        &sid,
+                        &format!("resume {invocation_id}"),
+                    ) {
+                        Ok(Some(effect)) => execute_plain_question_recovery(
+                            &agent_scope,
+                            &sid,
+                            effect,
+                            &input,
+                            modal_state.clone(),
+                        ),
+                        Ok(None) => Err("that question is no longer eligible for recovery".into()),
+                        Err(error) => Err(error),
+                    };
+                    match result {
                         Ok(PlainAgentDisposition::QuitRequested(terminal)) => {
                             println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
                             break 'repl;
@@ -878,7 +915,13 @@ pub(crate) fn run_plain_with_input_and_modal_state(
 
         match nib::interactive::recover_question_conversation(&session_store, &sid, &goal) {
             Ok(Some(effect)) => {
-                match execute_plain_question_recovery(&agent_scope, &sid, effect, &input, modal_state.clone()) {
+                match execute_plain_question_recovery(
+                    &agent_scope,
+                    &sid,
+                    effect,
+                    &input,
+                    modal_state.clone(),
+                ) {
                     Ok(PlainAgentDisposition::QuitRequested(terminal)) => {
                         println!("{}", plain_quit_disposition(&session_store, &sid, terminal));
                         break 'repl;
@@ -889,7 +932,10 @@ pub(crate) fn run_plain_with_input_and_modal_state(
                 continue;
             }
             Ok(None) => {}
-            Err(error) => { println!("{error}"); continue; }
+            Err(error) => {
+                println!("{error}");
+                continue;
+            }
         }
         let _ = maybe_assign_session_display_name(&session_store, &sid, &goal);
         println!("Thinking...");

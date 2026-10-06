@@ -345,7 +345,10 @@ fn complete_plain_question_prompt(
 ) -> Option<PendingPlainModalResponse> {
     if outcome.is_success() {
         request_plain_modal_frame_delimiter();
-        Some(PendingPlainModalResponse::Question { outcome, reply: prompt.reply })
+        Some(PendingPlainModalResponse::Question {
+            outcome,
+            reply: prompt.reply,
+        })
     } else {
         // Interrupts reach the worker immediately, even while stdin remains open.
         let _ = prompt.reply.send(outcome);
@@ -382,29 +385,78 @@ pub(crate) fn execute_plain_question_recovery(
 ) -> Result<PlainAgentDisposition, String> {
     use nib::interactive::QuestionRecoveryEffect;
     let sensitive_values = nib::config::load_nib_config_full(scope.project)
-        .map_err(|error| error.to_string())?.public_session_sensitive_values();
+        .map_err(|error| error.to_string())?
+        .public_session_sensitive_values();
     loop {
         match effect {
             QuestionRecoveryEffect::Output(output) => {
-                println!("{}", nib::interactive::bounded_public_text(&output, &sensitive_values, 64 * 1024, true));
+                println!(
+                    "{}",
+                    nib::interactive::bounded_public_text(
+                        &output,
+                        &sensitive_values,
+                        64 * 1024,
+                        true
+                    )
+                );
                 return Ok(PlainAgentDisposition::Completed);
             }
             QuestionRecoveryEffect::OpenForm(persisted) => {
-                effect = complete_plain_recovery_form(scope, session_id, persisted, None, input, &sensitive_values)?;
+                effect = complete_plain_recovery_form(
+                    scope,
+                    session_id,
+                    persisted,
+                    None,
+                    input,
+                    &sensitive_values,
+                )?;
             }
-            QuestionRecoveryEffect::OpenEditor { form, question_index } => {
-                effect = complete_plain_recovery_form(scope, session_id, form, Some(question_index), input, &sensitive_values)?;
+            QuestionRecoveryEffect::OpenEditor {
+                form,
+                question_index,
+            } => {
+                effect = complete_plain_recovery_form(
+                    scope,
+                    session_id,
+                    form,
+                    Some(question_index),
+                    input,
+                    &sensitive_values,
+                )?;
             }
             QuestionRecoveryEffect::ContinuePlan { plan_id, goal } => {
-                return execute_plain_continuation(scope, session_id, &goal, &plan_id, input, modal_state);
+                return execute_plain_continuation(
+                    scope,
+                    session_id,
+                    &goal,
+                    &plan_id,
+                    input,
+                    modal_state,
+                );
             }
-            QuestionRecoveryEffect::ContinueDiscussion { plan_id, goal, invocation_id } => {
-                let mut prepared = PreparedPlainAgentStep::prepare(scope, session_id, InteractiveAgentMode::Execute, modal_state.clone())?;
+            QuestionRecoveryEffect::ContinueDiscussion {
+                plan_id,
+                goal,
+                invocation_id,
+            } => {
+                let mut prepared = PreparedPlainAgentStep::prepare(
+                    scope,
+                    session_id,
+                    InteractiveAgentMode::Execute,
+                    modal_state.clone(),
+                )?;
                 if let Some(cfg) = prepared.loop_cfg.as_mut() {
                     cfg.continuation_plan_id = Some(plan_id);
                     cfg.discussion_invocation_id = Some(invocation_id);
                 }
-                return execute_prepared_agent_step(prepared, scope, session_id, &goal, input, modal_state);
+                return execute_prepared_agent_step(
+                    prepared,
+                    scope,
+                    session_id,
+                    &goal,
+                    input,
+                    modal_state,
+                );
             }
         }
     }
@@ -419,7 +471,9 @@ fn complete_plain_recovery_form(
     sensitive_values: &[String],
 ) -> Result<nib::interactive::QuestionRecoveryEffect, String> {
     let mut form = crate::console::LineQuestionForm::new(persisted.form, persisted.initial_answers);
-    if let Some(index) = editor { form.enter_editor(index)?; }
+    if let Some(index) = editor {
+        form.enter_editor(index)?;
+    }
     let outcome = loop {
         print!("{}", form.render(sensitive_values));
         io::stdout().flush().map_err(|error| error.to_string())?;
@@ -430,10 +484,17 @@ fn complete_plain_recovery_form(
         if inspect_plain_question_command(&line, scope, session_id, "waiting_for_user_input") {
             continue;
         }
-        if let Some(outcome) = form.submit_line(&line) { break outcome; }
+        if let Some(outcome) = form.submit_line(&line) {
+            break outcome;
+        }
     };
     let outcome = frame_plain_recovery_outcome(input, outcome);
-    nib::interactive::complete_question_recovery(scope.session_store, session_id, persisted.invocation_id, outcome)
+    nib::interactive::complete_question_recovery(
+        scope.session_store,
+        session_id,
+        persisted.invocation_id,
+        outcome,
+    )
 }
 
 fn inspect_plain_question_command(
@@ -442,10 +503,19 @@ fn inspect_plain_question_command(
     session_id: &str,
     state: &str,
 ) -> bool {
-    if !line.trim_start().starts_with(":command") { return false; }
+    if !line.trim_start().starts_with(":command") {
+        return false;
+    }
     match parse_plain_question_answer(line, &[]) {
         InteractionReduction::ModalCommand(command) => {
-            match execute_interactive_command_in_state(command, scope.project, scope.profile_id, scope.session_store, session_id, state) {
+            match execute_interactive_command_in_state(
+                command,
+                scope.project,
+                scope.profile_id,
+                scope.session_store,
+                session_id,
+                state,
+            ) {
                 Ok(InteractiveEffect::Output(output)) => println!("{output}"),
                 Ok(_) => println!("command completed without changing the pending question"),
                 Err(error) => println!("{error}"),
@@ -462,7 +532,9 @@ pub(crate) fn frame_plain_recovery_outcome(
     outcome: nib::interactive::QuestionFormOutcome,
 ) -> nib::interactive::QuestionFormOutcome {
     use nib::interactive::QuestionFormOutcome;
-    if !outcome.is_success() { return outcome; }
+    if !outcome.is_success() {
+        return outcome;
+    }
     request_plain_modal_frame_delimiter();
     loop {
         match input.read_line_blocking() {
