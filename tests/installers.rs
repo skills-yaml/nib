@@ -354,7 +354,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
         "WaitForOutput = \"Work in this directory\"",
         "WaitForOutput = \"Allowed work\"",
         "WaitForOutput = \"again\"",
-        "WaitForOutput = \"You> \"",
+        "WaitForOutput = \"You>\"",
         "WaitForOutput = \"Answer (number\"",
         "NibHostDiagnostics",
         "Timed out while draining redirected Windows plain-mode output",
@@ -387,6 +387,14 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
             "missing Windows interactive smoke contract: {contract}"
         );
     }
+    assert_eq!(
+        windows_script.matches("WaitForOutput = \"You>\"").count(),
+        2
+    );
+    assert!(
+        !windows_script.contains("WaitForOutput = \"You> \""),
+        "ConPTY prompt waits must accept cursor movement after the visible prefix"
+    );
     assert!(windows_script.contains("if (Test-Path -LiteralPath $fixture) {"));
     let child_adapter = include_str!("../scripts/start-windows-pseudoterminal-child.ps1");
     assert!(child_adapter.contains("$startInfo = [Diagnostics.ProcessStartInfo]::new()"));
