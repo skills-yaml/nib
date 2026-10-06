@@ -47,7 +47,7 @@ all line adapters/fixtures and native legacy defaults without a source conflict.
 Preparation passed the full strict native gates. Lane gates are pending; Cargo
 is serialized and this lane waits for the core lane to release its slot.
 Diff whitespace check passed. Behavioral fixtures are authored but have not run;
-shared API dependencies must integrate before compilation and native gates.
+compilation and native gates wait for the serialized slot.
 The verified API dependencies are now present and their signatures/default
 compatibility have been checked against the line adapters. Formatting and native
 gates still wait for the TUI lane to release its exclusive compilation slot.
