@@ -456,6 +456,8 @@ fn status_and_plan_projection_show_verification_state_and_authority() {
     )
     .expect("status");
     assert!(status.contains("required-project-gate | pending | project"));
+    assert!(status.contains("Planned 1 to-do"));
+    assert!(status.contains("○ verify"));
     let plan = session.plan.as_ref().expect("plan");
     let activity = plan_activity(plan, &[]);
     assert_eq!(
