@@ -22,6 +22,7 @@ pub(crate) fn draw_loop(
     };
     let (approval_tx, approval_rx) = mpsc::channel::<TuiApprovalRequest>();
     let (question_tx, question_rx) = mpsc::channel::<TuiQuestionRequest>();
+    let (recovery_tx, recovery_rx) = mpsc::channel::<crate::interactive::QuestionRecoveryEffect>();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<SessionStreamEvent>(100);
     let (mut timeline, initial_session) =
         ActiveTimeline::load_with_session(&store, &active_session_id)?;
@@ -33,24 +34,8 @@ pub(crate) fn draw_loop(
     if let Some(goal) = pending_goal.as_deref() {
         let _ = maybe_assign_session_display_name(&store, &active_session_id, goal);
     }
-    let mut worker = if welcome.consent_directory.is_none() {
-        if let Some(goal) = pending_goal.take() {
-            Some(spawn_tui_agent_worker(
-                agent_profile_scope.clone(),
-                active_session_id.clone(),
-                goal,
-                InteractiveAgentMode::Execute,
-                approval_tx.clone(),
-                question_tx.clone(),
-                stream_tx.clone(),
-            )?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    timeline.bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
+    let mut worker = None;
+    timeline.bind_run(None);
 
     let mut pending_approval: Option<TuiApprovalRequest> = None;
     let mut pending_question: Option<PendingQuestion> = None;
@@ -74,7 +59,45 @@ pub(crate) fn draw_loop(
     let mut exit_requested = false;
     let mut exit_requested_with_active_run = false;
 
+    if welcome.consent_directory.is_none() {
+        if let Some(goal) = pending_goal.take() {
+            start_tui_conversation(
+                goal,
+                QuestionConversationContext {
+                    scope: &agent_profile_scope,
+                    store: &store,
+                    session_id: &active_session_id,
+                    pending: &mut pending_question,
+                    worker: &mut worker,
+                    timeline: &mut timeline,
+                    approval_tx: &approval_tx,
+                    question_tx: &question_tx,
+                    stream_tx: &stream_tx,
+                    recovery_tx: &recovery_tx,
+                },
+            )?;
+        }
+    }
+
     let loop_result = loop {
+        while let Ok(effect) = recovery_rx.try_recv() {
+            apply_question_recovery_effect(
+                effect,
+                QuestionConversationContext {
+                    scope: &agent_profile_scope,
+                    store: &store,
+                    session_id: &active_session_id,
+                    pending: &mut pending_question,
+                    worker: &mut worker,
+                    timeline: &mut timeline,
+                    approval_tx: &approval_tx,
+                    question_tx: &question_tx,
+                    stream_tx: &stream_tx,
+                    recovery_tx: &recovery_tx,
+                },
+            )?;
+        }
+
         drain_stream_events_bounded(&mut stream_rx, &mut timeline, 64);
         let worker_finished = worker.as_ref().is_some_and(TuiAgentWorker::is_finished);
         if let Err(error) = reap_finished_worker(
@@ -434,20 +457,22 @@ pub(crate) fn draw_loop(
                                     timeline
                                         .push_status("Allowed work in this directory.".to_string());
                                     if let Some(goal) = released_goal {
-                                        match spawn_tui_agent_worker(
-                                            agent_profile_scope.clone(),
-                                            active_session_id.clone(),
+                                        if let Err(error) = start_tui_conversation(
                                             goal,
-                                            InteractiveAgentMode::Execute,
-                                            approval_tx.clone(),
-                                            question_tx.clone(),
-                                            stream_tx.clone(),
+                                            QuestionConversationContext {
+                                                scope: &agent_profile_scope,
+                                                store: &store,
+                                                session_id: &active_session_id,
+                                                pending: &mut pending_question,
+                                                worker: &mut worker,
+                                                timeline: &mut timeline,
+                                                approval_tx: &approval_tx,
+                                                question_tx: &question_tx,
+                                                stream_tx: &stream_tx,
+                                                recovery_tx: &recovery_tx,
+                                            },
                                         ) {
-                                            Ok(next) => {
-                                                timeline.bind_run(Some(next.run_id.clone()));
-                                                worker = Some(next);
-                                            }
-                                            Err(error) => break Err(error),
+                                            break Err(error);
                                         }
                                     }
                                 }
@@ -523,8 +548,10 @@ pub(crate) fn draw_loop(
                     completion.sync_for(&composer.input, Some(project_root));
                     quit_arm = None;
                     if let Some(question) = pending_question.as_mut() {
-                        question.response.clear();
-                        question.error = None;
+                        if let Some(editor) = question.state.editor.as_mut() {
+                            editor.text.clear();
+                        }
+                        question.state.error = None;
                     }
                     timeline.push_status("Draft cleared.".to_string());
                     continue;
@@ -1123,20 +1150,21 @@ pub(crate) fn draw_loop(
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         drop(reply_rx);
                                         pending_question = Some(PendingQuestion::recovered(
-                                            TuiQuestionRequest {
+                                            TuiQuestionRequest::single(
                                                 question,
                                                 proposed_answer,
                                                 options,
-                                                reply: reply_tx,
-                                            },
+                                                reply_tx,
+                                            ),
                                             RecoveredQuestionTarget {
                                                 store: store.clone(),
                                                 session_id: active_session_id.clone(),
-                                                invocation_id: invocation_id.clone(),
+                                                invocation_id: serde_json::from_value(
+                                                    serde_json::Value::String(invocation_id),
+                                                )
+                                                .map_err(io::Error::other)?,
+                                                completion: recovery_tx.clone(),
                                             },
-                                        ));
-                                        timeline.push_status(format!(
-                                            "Answer recovered question {invocation_id}"
                                         ));
                                     }
                                     Ok(InteractiveEffect::RunAgent { goal, mode }) => {
@@ -1177,17 +1205,24 @@ pub(crate) fn draw_loop(
                                     &mut chrome_generation,
                                 );
                                 timeline.push_status(format!("[user] {goal}"));
-                                worker = Some(spawn_tui_agent_worker(
-                                    agent_profile_scope.clone(),
-                                    active_session_id.clone(),
-                                    goal,
-                                    InteractiveAgentMode::Execute,
-                                    approval_tx.clone(),
-                                    question_tx.clone(),
-                                    stream_tx.clone(),
-                                )?);
-                                timeline
-                                    .bind_run(worker.as_ref().map(|worker| worker.run_id.clone()));
+                                if let Err(error) = start_tui_conversation(
+                                    goal.clone(),
+                                    QuestionConversationContext {
+                                        scope: &agent_profile_scope,
+                                        store: &store,
+                                        session_id: &active_session_id,
+                                        pending: &mut pending_question,
+                                        worker: &mut worker,
+                                        timeline: &mut timeline,
+                                        approval_tx: &approval_tx,
+                                        question_tx: &question_tx,
+                                        stream_tx: &stream_tx,
+                                        recovery_tx: &recovery_tx,
+                                    },
+                                ) {
+                                    composer.set_text(goal);
+                                    timeline.push_status(format!("[recovery error] {error}"));
+                                }
                             }
                             InteractionReduction::Consumed(_)
                             | InteractionReduction::ModalCommand(_)

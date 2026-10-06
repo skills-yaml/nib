@@ -324,8 +324,7 @@ impl InteractionBand<'_> {
                 command_approval_lines(request).len().max(2)
             }
             Self::Approval(_) | Self::Workspace { .. } => 2,
-            Self::Question(question) if question.request.options.is_empty() => 1,
-            Self::Question(question) => question.request.options.len().saturating_add(1),
+            Self::Question(question) => question_form_reserved_rows(question),
         }
     }
 
@@ -342,7 +341,7 @@ impl InteractionBand<'_> {
                 "Press enter to confirm or esc to cancel"
             }
             Self::Approval(_) => "Y/Enter approve once · N deny · Esc deny",
-            Self::Question(_) => "Enter / 1-9 answer · Esc skip",
+            Self::Question(question) => question.state.footer(),
             Self::Workspace { .. } => "Y/Enter allow this directory · N decline",
         }
     }
@@ -856,10 +855,38 @@ impl TuiApprovalHandler {
 }
 
 pub struct TuiQuestionRequest {
-    pub question: String,
-    pub proposed_answer: Option<String>,
-    pub options: Vec<String>,
-    pub reply: oneshot::Sender<crate::agent::QuestionOutcome>,
+    pub form: crate::interactive::QuestionForm,
+    pub initial_answers: Vec<Option<crate::interactive::QuestionAnswer>>,
+    pub reply: oneshot::Sender<crate::interactive::QuestionFormOutcome>,
+}
+
+impl TuiQuestionRequest {
+    pub fn single(
+        question: String,
+        proposed_answer: Option<String>,
+        options: Vec<String>,
+        reply: oneshot::Sender<crate::interactive::QuestionFormOutcome>,
+    ) -> Self {
+        Self {
+            form: crate::interactive::QuestionForm {
+                header: None,
+                questions: vec![crate::interactive::FormQuestion {
+                    title: None,
+                    question,
+                    proposed_answer,
+                    options: options
+                        .into_iter()
+                        .map(|label| crate::interactive::QuestionOption {
+                            label,
+                            description: None,
+                        })
+                        .collect(),
+                }],
+            },
+            initial_answers: Vec::new(),
+            reply,
+        }
+    }
 }
 
 pub struct TuiQuestionHandler {
@@ -869,17 +896,17 @@ pub struct TuiQuestionHandler {
 #[async_trait::async_trait]
 impl crate::agent::QuestionHandler for TuiQuestionHandler {
     async fn ask(&self, question: &str, options: &[String]) -> Result<String, String> {
-        match self
+        let outcome = self
             .ask_with_context(crate::agent::QuestionRequestContext {
                 invocation_id: crate::tools::ToolInvocationId::new(),
                 question,
                 proposed_answer: None,
                 options,
             })
-            .await
-        {
-            crate::agent::QuestionOutcome::Answered(answer) => Ok(answer),
-            crate::agent::QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
+            .await;
+        match outcome {
+            crate::agent::QuestionOutcome::Answered(answer)
+            | crate::agent::QuestionOutcome::ApprovedProposal(answer) => Ok(answer),
             crate::agent::QuestionOutcome::LeftUnanswered => Err("left unanswered".to_string()),
             crate::agent::QuestionOutcome::Cancelled => Err("cancelled".to_string()),
             crate::agent::QuestionOutcome::InputClosed => Err("input closed".to_string()),
@@ -891,50 +918,67 @@ impl crate::agent::QuestionHandler for TuiQuestionHandler {
         &self,
         context: crate::agent::QuestionRequestContext<'_>,
     ) -> crate::agent::QuestionOutcome {
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply, response) = oneshot::channel();
         if self
             .tx
-            .send(TuiQuestionRequest {
-                question: context.question.to_string(),
-                proposed_answer: context.proposed_answer.map(str::to_string),
-                options: context.options.to_vec(),
-                reply: reply_tx,
-            })
+            .send(TuiQuestionRequest::single(
+                context.question.to_string(),
+                context.proposed_answer.map(str::to_string),
+                context.options.to_vec(),
+                reply,
+            ))
             .is_err()
         {
             return crate::agent::QuestionOutcome::InputUnavailable(
                 "TUI question channel closed".to_string(),
             );
         }
-        reply_rx
+        crate::agent::QuestionOutcome::from_form(response.await.unwrap_or(
+            crate::interactive::QuestionFormOutcome::InputUnavailable(
+                "TUI question response was dropped".to_string(),
+            ),
+        ))
+    }
+
+    async fn ask_form(
+        &self,
+        context: crate::agent::QuestionFormRequestContext<'_>,
+    ) -> crate::interactive::QuestionFormOutcome {
+        let (reply, response) = oneshot::channel();
+        if self
+            .tx
+            .send(TuiQuestionRequest {
+                form: context.form.clone(),
+                initial_answers: context.initial_answers.to_vec(),
+                reply,
+            })
+            .is_err()
+        {
+            return crate::interactive::QuestionFormOutcome::InputUnavailable(
+                "TUI question channel closed".to_string(),
+            );
+        }
+        response
             .await
-            .unwrap_or(crate::agent::QuestionOutcome::InputUnavailable(
+            .unwrap_or(crate::interactive::QuestionFormOutcome::InputUnavailable(
                 "TUI question response was dropped".to_string(),
             ))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QuestionFocus {
-    Editor,
-    Suggestions,
-    Actions,
-}
-
 pub(crate) struct PendingQuestion {
     pub(crate) request: TuiQuestionRequest,
     pub(crate) recovery: Option<RecoveredQuestionTarget>,
-    pub(crate) response: String,
-    pub(crate) selected_option: Option<usize>,
-    pub(crate) selected_decision: usize,
-    pub(crate) focus: QuestionFocus,
-    pub(crate) error: Option<String>,
+    pub(crate) state: crate::interactive::QuestionFormState,
+    pub(crate) description_scroll: usize,
+    pub(crate) subject_scroll: usize,
 }
 
 pub(crate) struct RecoveredQuestionTarget {
     pub(crate) store: SessionStore,
     pub(crate) session_id: String,
-    pub(crate) invocation_id: String,
+    pub(crate) invocation_id: crate::tools::ToolInvocationId,
+    pub(crate) completion: mpsc::Sender<crate::interactive::QuestionRecoveryEffect>,
 }
 
 pub(crate) const MAX_COMPOSER_BYTES: usize = 16 * 1024;

@@ -23,6 +23,7 @@ pub(crate) type TuiAgentStart = (
     String,
     Option<crate::agent::ExactRunSteeringReceiver>,
     Option<String>,
+    Option<crate::tools::ToolInvocationId>,
 );
 
 pub(crate) struct PreparedTuiAgentWorker {
@@ -106,10 +107,20 @@ impl PreparedTuiAgentWorker {
     }
 
     pub(crate) fn start_with_continuation(
+        self,
+        goal: String,
+        mode: InteractiveAgentMode,
+        continuation_plan_id: Option<String>,
+    ) -> io::Result<TuiAgentWorker> {
+        self.start_with_recovery(goal, mode, continuation_plan_id, None)
+    }
+
+    pub(crate) fn start_with_recovery(
         mut self,
         goal: String,
         mode: InteractiveAgentMode,
         continuation_plan_id: Option<String>,
+        discussion_invocation_id: Option<crate::tools::ToolInvocationId>,
     ) -> io::Result<TuiAgentWorker> {
         let start_tx = self
             .start_tx
@@ -135,6 +146,7 @@ impl PreparedTuiAgentWorker {
                 run_id.clone(),
                 steering_receiver,
                 continuation_plan_id,
+                discussion_invocation_id,
             ))
             .map_err(|_| io::Error::other("prepared TUI worker stopped before activation"))?;
         Ok(TuiAgentWorker {
@@ -195,7 +207,9 @@ pub(crate) fn prepare_tui_agent_worker(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            let Ok((goal, mode, run_id, steering, continuation_plan_id)) = start_rx.recv() else {
+            let Ok((goal, mode, run_id, steering, continuation_plan_id, discussion_invocation_id)) =
+                start_rx.recv()
+            else {
                 return;
             };
 
@@ -235,6 +249,7 @@ pub(crate) fn prepare_tui_agent_worker(
                     run_id: Some(run_id),
                     steering,
                     continuation_plan_id,
+                    discussion_invocation_id,
                     ..Default::default()
                 };
 
@@ -332,13 +347,15 @@ pub(crate) fn cancel_pending_interactions(
         let _ = question
             .request
             .reply
-            .send(crate::agent::QuestionOutcome::Cancelled);
+            .send(crate::interactive::QuestionFormOutcome::Cancelled);
     }
     while let Ok(request) = approval_rx.try_recv() {
         let _ = request.reply.send(ApprovalDecision::denied());
     }
     while let Ok(request) = question_rx.try_recv() {
-        let _ = request.reply.send(crate::agent::QuestionOutcome::Cancelled);
+        let _ = request
+            .reply
+            .send(crate::interactive::QuestionFormOutcome::Cancelled);
     }
 }
 

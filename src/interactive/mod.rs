@@ -117,6 +117,10 @@ pub use split_03::{
 #[path = "tests.rs"]
 mod tests;
 
+mod question_state;
 pub use question_recovery::{
     complete_question_recovery, recover_question_conversation, QuestionRecoveryEffect,
+};
+pub use question_state::{
+    QuestionEditor, QuestionEditorKind, QuestionFormEvent, QuestionFormState,
 };
