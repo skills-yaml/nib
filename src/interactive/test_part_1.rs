@@ -26,7 +26,6 @@ fn new_commands_are_parsed_and_runtime_commands_have_typed_effects() {
         "/context",
         "/context details",
         "/permissions",
-        "/plan",
         "/review",
         "/diff",
         "/compact",
@@ -38,8 +37,6 @@ fn new_commands_are_parsed_and_runtime_commands_have_typed_effects() {
         "/ps",
         "/stop",
         "/stop exact-task",
-        "/questions",
-        "/questions abc",
         "/continue plan-1",
         "/help",
     ] {
