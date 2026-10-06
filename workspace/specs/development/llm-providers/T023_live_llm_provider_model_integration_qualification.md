@@ -1085,6 +1085,10 @@ The index and memory now reflect the newer live evidence. These local checks
 do not establish a live-provider pass or close the continuation failure.
 
 
+### Offline continuation investigation (2026-10-06)
+
+User-authorized continuation of the offline investigation found a separately confirmed streamed native-content defect: private thinking/signature/redacted blocks were dropped, and assistant blocks were reconstructed in a different order. Linked [T068](T068_anthropic_stream_continuation_preservation.md) owns the compatible patch reservation and deterministic repair. The retained failed canary used completion for both requests, whose raw native blocks are preserved, so this finding does not establish its refusal's cause. Its hosted artifact listing is now empty; preserve the historical classification instead of claiming a fresh live result. T023's canary, selected and full acceptance remains unresolved.
+
 ## Affected Areas
 
 - `tests/llm_live.rs` and live-only support modules/fixtures

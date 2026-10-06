@@ -423,3 +423,15 @@ Production was separately inspected and remains 0.1.0 at
 production rollout or updater-rollout approval. T061/T067 stay done, and T023
 remains the sole development spec. No runtime behavior, provider defaults or
 paid-provider qualification changes are authorized by this record update.
+
+## 2026-10-06 - Anthropic native streamed continuation preservation
+
+- Type: fact
+- Source: T068 source inspection and credential-free conformance fixtures
+- Confidence: high
+- Review: independent candidate review pending
+- Supersedes: none
+
+Content:
+
+Anthropic streamed tool-result replay must retain the complete ordered native assistant content privately, including signed thinking (also empty displayed thinking), split opaque signatures, redacted-thinking data, native text boundaries and tool input values. Projected public events and debug output exclude those private values. T068 repairs the streaming path with deterministic HTTP round-trip and malformed/limit fixtures; the completion path already retained native content. T023's historical tool-continuation refusal used completion for both requests, so the independently evidenced streaming defect is not its established cause. Live qualification, model/default changes and paid calls remain separate from this repair.
