@@ -7,7 +7,7 @@ const REDACTED: &str = "encrypted-redacted-sentinel";
 
 fn native_blocks() -> Vec<Value> {
     vec![
-        json!({"type": "thinking", "thinking": THOUGHT, "signature": SIGNATURE}),
+        json!({"type": "thinking", "thinking": THOUGHT, "signature": SIGNATURE, "provider_metadata": {"opaque": "private-metadata-sentinel"}}),
         json!({"type": "redacted_thinking", "data": REDACTED}),
         json!({"type": "tool_use", "id": "toolu_alpha", "name": "probe_alpha", "input": {"slot": 1}}),
         json!({"type": "text", "text": "visible-between-tools"}),
@@ -62,8 +62,9 @@ fn native_stream(blocks: &[Value]) -> String {
         }
         if block["type"] == "thinking" {
             let signature = block["signature"].as_str().unwrap();
-            let (first, last) = signature.split_at(signature.len() / 2);
-            for fragment in [first, last] {
+            let chunk_size = (signature.len() / 2).clamp(1, 64 * 1024);
+            for bytes in signature.as_bytes().chunks(chunk_size) {
+                let fragment = std::str::from_utf8(bytes).expect("ASCII fixture signature");
                 event(
                     &mut wire,
                     "content_block_delta",
@@ -82,7 +83,7 @@ fn native_stream(blocks: &[Value]) -> String {
     wire
 }
 
-async fn captured_continuation(streamed: bool, blocks: &[Value]) -> Value {
+async fn captured_continuation(streamed: bool, blocks: &[Value], error_result: bool) -> Value {
     let first = ScriptedHttpResponse::new(
         "200 OK",
         if streamed {
@@ -117,7 +118,13 @@ async fn captured_continuation(streamed: bool, blocks: &[Value]) -> Value {
             events.push(event.unwrap());
         }
         let projected = format!("{events:?}");
-        for private in [THOUGHT, SIGNATURE, REDACTED, "omitted-thinking-signature"] {
+        for private in [
+            THOUGHT,
+            SIGNATURE,
+            REDACTED,
+            "omitted-thinking-signature",
+            "private-metadata-sentinel",
+        ] {
             assert!(!projected.contains(private));
         }
         stream.finish().await.unwrap()
@@ -128,17 +135,24 @@ async fn captured_continuation(streamed: bool, blocks: &[Value]) -> Value {
             .unwrap()
     };
     let debug = format!("{response:?}");
-    for private in [THOUGHT, SIGNATURE, REDACTED, "omitted-thinking-signature"] {
+    for private in [
+        THOUGHT,
+        SIGNATURE,
+        REDACTED,
+        "omitted-thinking-signature",
+        "private-metadata-sentinel",
+    ] {
         assert!(!debug.contains(private));
     }
     assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
     let mut continuation = response.continuation.unwrap();
     for call in response.tool_calls.unwrap().into_iter().rev() {
-        continuation
-            .record_tool_result(
-                ToolResult::success(call.invocation_id, json!({"receipt": call.name})).unwrap(),
-            )
-            .unwrap();
+        let result = if error_result {
+            ToolResult::error(call.invocation_id, json!({"receipt": call.name})).unwrap()
+        } else {
+            ToolResult::success(call.invocation_id, json!({"receipt": call.name})).unwrap()
+        };
+        continuation.record_tool_result(result).unwrap();
     }
     let final_response = client
         .complete(
@@ -157,7 +171,7 @@ async fn captured_continuation(streamed: bool, blocks: &[Value]) -> Value {
 #[tokio::test]
 async fn streamed_thinking_and_redacted_blocks_survive_exact_parallel_continuation() {
     let blocks = native_blocks();
-    let streamed = captured_continuation(true, &blocks).await;
+    let streamed = captured_continuation(true, &blocks, false).await;
     assert_eq!(streamed["messages"][1]["content"], json!(blocks));
     assert_eq!(
         streamed["messages"][2]["content"][0]["tool_use_id"],
@@ -167,7 +181,101 @@ async fn streamed_thinking_and_redacted_blocks_survive_exact_parallel_continuati
         streamed["messages"][2]["content"][1]["tool_use_id"],
         "toolu_beta"
     );
-    assert_eq!(streamed["messages"][2]["content"][0]["is_error"], false);
-    let complete = captured_continuation(false, &blocks).await;
+    assert_eq!(
+        streamed["messages"][2]["content"],
+        json!([
+            {"type": "tool_result", "tool_use_id": "toolu_alpha", "content": "{\"receipt\":\"probe_alpha\"}", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "toolu_beta", "content": "{\"receipt\":\"probe_beta\"}", "is_error": false}
+        ])
+    );
+    let complete = captured_continuation(false, &blocks, false).await;
     assert_eq!(streamed, complete);
+}
+
+#[tokio::test]
+async fn omitted_thinking_single_tool_preserves_explicit_error_classification() {
+    let all = native_blocks();
+    let blocks = vec![all[4].clone(), all[5].clone()];
+    let body = captured_continuation(true, &blocks, true).await;
+    assert_eq!(body["messages"][1]["content"], json!(blocks));
+    assert_eq!(
+        body["messages"][2]["content"],
+        json!([
+            {"type": "tool_result", "tool_use_id": "toolu_beta", "content": "{\"receipt\":\"probe_beta\"}", "is_error": true}
+        ])
+    );
+}
+
+async fn assert_invalid_native_turn(wire: String) -> LlmError {
+    let (endpoint, _) = serve_once("200 OK", "text/event-stream", &wire);
+    let client = ConformanceAdapter::Anthropic.client(endpoint);
+    let messages = [LlmMessage::user("synthetic validation")];
+    let request = LlmRequest::new(&messages, None)
+        .with_scope(LlmRequestScope::new("invalid-session", "invalid-run").unwrap());
+    let stream = client.stream(request).await.unwrap();
+    let error = stream
+        .finish()
+        .await
+        .expect_err("invalid native turn must provide no tool authority");
+    let debug = format!("{error:?}");
+    for private in [THOUGHT, SIGNATURE, REDACTED] {
+        assert!(!debug.contains(private));
+    }
+    error
+}
+
+#[tokio::test]
+async fn malformed_native_blocks_fail_closed_without_private_authority() {
+    let blocks = native_blocks();
+    let valid = native_stream(&blocks);
+    let wrong_type = valid.replace("\"type\":\"signature_delta\"", "\"type\":\"text_delta\"");
+    let missing_stop = valid.replace("event: content_block_stop\ndata: {\"index\":0}\n\n", "");
+    let duplicate_start = valid.replace("event: content_block_stop\ndata: {\"index\":0}\n\n", "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n");
+    let missing_terminal = valid.replace("event: message_stop\ndata: {}\n\n", "");
+    let truncated = valid.replace("tool_use\"}}", "max_tokens\"}}");
+    let mut missing_signature = blocks.clone();
+    missing_signature[0]["signature"] = json!("");
+    let mut invalid_redaction = blocks.clone();
+    invalid_redaction[1]["data"] = json!(false);
+    let mut after_terminal = valid.replace("event: message_stop\ndata: {}\n\n", "");
+    event(
+        &mut after_terminal,
+        "content_block_start",
+        json!({"index": 6, "content_block": {"type": "thinking", "thinking": THOUGHT}}),
+    );
+    event(&mut after_terminal, "message_stop", json!({}));
+    for wire in [
+        wrong_type,
+        missing_stop,
+        duplicate_start,
+        missing_terminal,
+        truncated,
+        native_stream(&missing_signature),
+        native_stream(&invalid_redaction),
+        after_terminal,
+    ] {
+        assert_ne!(wire, valid);
+        assert_invalid_native_turn(wire).await;
+    }
+}
+
+#[tokio::test]
+async fn preserved_private_content_obeys_continuation_byte_and_item_bounds() {
+    let mut large = native_blocks();
+    large[0]["signature"] = json!("s".repeat(crate::llm::types::MAX_CONTINUATION_BYTES + 1));
+    let bytes = assert_invalid_native_turn(native_stream(&large)).await;
+    assert!(bytes.contains("continuation"));
+    assert!(bytes.contains("byte limit"));
+    let mut many = vec![native_blocks()[4].clone(); crate::llm::types::MAX_CONTINUATION_ITEMS - 1];
+    many.push(native_blocks()[2].clone());
+    let items = assert_invalid_native_turn(native_stream(&many)).await;
+    assert!(items.contains("continuation"));
+    assert!(items.contains("item limit"));
+}
+
+#[tokio::test]
+async fn provider_refusal_retains_no_executable_streamed_authority() {
+    let refused = native_stream(&native_blocks()).replace("tool_use\"}}", "refusal\"}}");
+    let error = assert_invalid_native_turn(refused).await;
+    assert!(error.contains("refusal"));
 }

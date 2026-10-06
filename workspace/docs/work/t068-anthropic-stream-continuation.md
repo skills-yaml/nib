@@ -20,5 +20,13 @@ Atomic `nib-anthropic-stream` patch target 0.3.1 from public development 0.3.0, 
 
 ## Memory Impact
 
-Status: pending
-Rationale: Durable codec preservation findings will be reconciled before handoff.
+Status: updated
+Rationale: Recorded the verified native-stream preservation fact and its distinction from T023's unresolved complete-path refusal in facts.md and changelog.md.
+
+## Offline Results
+
+- Red regression at `46a5a51b0de263deffa5d316a0578db78b288d0f`: exact native continuation failed with all 26 earlier conformance cases passing.
+- Private indexed reconstruction now retains opaque thinking/signature/redacted fields, initial metadata and native block order. Validated tool values and existing neutral correlation remain authoritative. Fixed diagnostics contain no raw native values.
+- Focused conformance: 31 passed. Offline live harness: 71 passed, 1 paid test ignored. No credentialed or paid requests.
+- Existing signed-stream unit fixture now includes its valid native block starts/stops; the intentionally incomplete EOF rejection fixture remains negative.
+- Independent preparation review resolved the inventory-count finding. Production candidate review, frozen gates and delivery remain pending.

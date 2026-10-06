@@ -37,11 +37,11 @@ No provider/model substitution, prompt or effort change, refusal suppression, al
 
 ## Acceptance Criteria
 
-- [ ] AC-1: A valid streamed tool turn preserves original native block order, boundaries, thinking text, split signatures, redacted data and tool argument values in the outgoing continuation.
-- [ ] AC-2: Thinking with empty displayed text retains its signature; completion and streaming construct equivalent native continuations for equivalent responses.
-- [ ] AC-3: Single and parallel tool results preserve provider call IDs, neutral invocation correlation, classification and one-use scope guards.
-- [ ] AC-4: Private thought/signature/redacted values appear in no public stream delta or debug projection; existing byte/item/continuation bounds remain enforced.
-- [ ] AC-5: Malformed or unfinished native blocks, missing terminal, truncation and refusal cannot produce executable tool authority; normal text/tool streaming stays compatible.
+- [x] AC-1: A valid streamed tool turn preserves original native block order, boundaries, thinking text, split signatures, redacted data and tool argument values in the outgoing continuation.
+- [x] AC-2: Thinking with empty displayed text retains its signature; completion and streaming construct equivalent native continuations for equivalent responses.
+- [x] AC-3: Single and parallel tool results preserve provider call IDs, neutral invocation correlation, classification and one-use scope guards.
+- [x] AC-4: Private thought/signature/redacted values appear in no public stream delta or debug projection; existing byte/item/continuation bounds remain enforced.
+- [x] AC-5: Malformed or unfinished native blocks, missing terminal, truncation and refusal cannot produce executable tool authority; normal text/tool streaming stays compatible.
 - [ ] AC-6: Independent exact-candidate review and fresh Task/native platform gates pass; versions, catalog, documentation, memory and confirmed development/main delivery are reconciled.
 
 ## Validation Gates
@@ -68,5 +68,11 @@ Opaque provider blocks must remain private and bounded. A malformed stream fails
 
 ## Memory Impact
 
-Status: pending
-Rationale: Reconcile the verified private preservation contract and its distinction from unresolved live refusal evidence before delivery.
+Status: updated
+Rationale: Appended the native streaming preservation contract and separate unresolved completion-path refusal to facts.md and changelog.md; no private provider content is stored.
+
+## Offline Acceptance Evidence
+
+The pre-fix local HTTP regression failed at `46a5a51b0de263deffa5d316a0578db78b288d0f`: outgoing assistant content collapsed six native blocks into aggregated text and two tool calls; 26 existing conformance cases passed. After repair, `task test:llm-conformance` passes 31 cases, including exact native assistant arrays, completion/stream parity, single explicit-error and parallel success results, private projection checks, malformed/unfinished/after-terminal rejection, refusal and continuation byte/item limits. Existing conformance covers one-use scope and invocation guards. `task test:llm-live:offline` passes 71 tests with the paid qualification ignored.
+
+These credential-free results support AC-1 through AC-5. AC-6 remains open until exact independent review, frozen native/hosted qualification and observed shared development/main delivery. T023's historical complete-path refusal remains unexplained.

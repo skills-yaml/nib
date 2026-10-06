@@ -512,3 +512,15 @@ from applied to released, preserving the target, baseline, member and old releas
 history. Production remains a separate 0.1.0 event; no version bump, runtime
 change or paid-provider qualification is implied. Completed T061/T067 history
 and the existing catalog lifecycle remain intact.
+
+## 2026-10-06 - Anthropic native streamed continuation preservation
+
+- Type: fact
+- Source: T068 source inspection and credential-free conformance fixtures
+- Confidence: high
+- Review: independent candidate review pending
+- Supersedes: none
+
+Content:
+
+Appended the verified native Anthropic streaming preservation contract to facts.md, including opaque privacy/bounds and the distinction from T023's unresolved completion-path refusal. T068 is a compatible patch reservation; its offline fixtures do not establish live-provider qualification or authorize paid calls. No real provider content, credentials or private thought data is stored.

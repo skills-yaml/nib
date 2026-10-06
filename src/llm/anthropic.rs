@@ -1,5 +1,7 @@
 //! Anthropic Messages API client.
 
+mod stream_content;
+
 #[cfg(test)]
 use crate::llm::types::LlmMessage;
 use crate::llm::types::{
@@ -528,7 +530,7 @@ impl LlmClient for AnthropicClient {
                     let completion = match complete_anthropic_stream(
                         content,
                         tool_calls,
-                        parser.take_call_ids(),
+                        parser,
                         reason,
                         &model,
                         continuation_scope,
@@ -570,7 +572,7 @@ impl LlmClient for AnthropicClient {
                     return;
                 }
 
-                let events = match parser.parse_event(&event.event, &data) {
+                let events = match parser.parse_native_event(&event.event, &data) {
                     Ok(events) => events,
                     Err(error) => {
                         fail_anthropic_stream(
@@ -791,34 +793,19 @@ fn anthropic_terminal_status(
 fn complete_anthropic_stream(
     content: String,
     tool_calls: crate::llm::ToolCallAccumulator,
-    call_ids: BTreeMap<usize, ProviderCallId>,
+    mut parser: AnthropicStreamParser,
     finish_reason: LlmFinishReason,
     model: &str,
     scope: Option<LlmRequestScope>,
     usage: Option<LlmUsage>,
 ) -> Result<LlmResponse, String> {
-    let tool_calls = tool_calls.finish_with_call_ids(call_ids)?;
+    let tool_calls = tool_calls.finish_with_call_ids(parser.take_call_ids())?;
     let terminal_status = anthropic_terminal_status(finish_reason, !tool_calls.is_empty())?;
     let completed_content = (!content.trim().is_empty()).then_some(content);
     let continuation = if tool_calls.is_empty() {
         None
     } else {
-        let mut assistant_content = Vec::new();
-        if let Some(content) = completed_content.as_ref() {
-            assistant_content.push(json!({"type": "text", "text": content}));
-        }
-        for call in &tool_calls {
-            let call_id = call
-                .call_id
-                .as_ref()
-                .ok_or_else(|| "Anthropic tool call is missing its provider call ID".to_string())?;
-            assistant_content.push(json!({
-                "type": "tool_use",
-                "id": call_id.as_str(),
-                "name": call.name,
-                "input": call.arguments,
-            }));
-        }
+        let assistant_content = parser.native_content.finish(&tool_calls)?;
         Some(anthropic_continuation(
             model,
             scope,
@@ -872,12 +859,22 @@ fn is_anthropic_error_envelope(event_type: &str, data: &Value) -> bool {
 
 #[derive(Default)]
 struct AnthropicStreamParser {
+    native_content: stream_content::NativeStreamContent,
     call_ids: BTreeMap<usize, ProviderCallId>,
     native_call_ids: BTreeSet<String>,
     content_indexes: BTreeSet<usize>,
 }
 
 impl AnthropicStreamParser {
+    fn parse_native_event(
+        &mut self,
+        event_type: &str,
+        data: &Value,
+    ) -> Result<Vec<LlmStreamEvent>, String> {
+        self.native_content.observe(event_type, data)?;
+        self.parse_event(event_type, data)
+    }
+
     #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn parse_event(
         &mut self,
@@ -1634,14 +1631,18 @@ mod tests {
         let body = concat!(
             "event: message_start\n",
             "data: {\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0}}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"index\":0,\"delta\":{\"text\":\"work\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":0}\n\n",
             "event: content_block_start\n",
             "data: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_read\",\"name\":\"read_file\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"index\":1,\"delta\":{\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"index\":1,\"delta\":{\"partial_json\":\"\\\"README.md\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":1}\n\n",
             "event: message_delta\n",
             "data: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7,\"output_tokens_details\":{\"thinking_tokens\":3}}}\n\n",
             "event: message_stop\n",
