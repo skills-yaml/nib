@@ -2,6 +2,32 @@
 
 use super::*;
 
+struct PlainAgentAbortGuard(tokio::task::AbortHandle);
+
+impl PlainAgentAbortGuard {
+    fn new<T>(task: &tokio::task::JoinHandle<T>) -> Self {
+        Self(task.abort_handle())
+    }
+}
+
+impl Drop for PlainAgentAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn plain_agent_join_result(
+    result: Result<Result<nib::agent::AgentRunSummary, String>, tokio::task::JoinError>,
+) -> Result<nib::agent::AgentRunSummary, String> {
+    result.unwrap_or_else(|error| {
+        Err(if error.is_cancelled() {
+            "plain agent runtime worker was cancelled".to_string()
+        } else {
+            "plain agent runtime worker panicked".to_string()
+        })
+    })
+}
+
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) fn execute_prepared_agent_step(
     mut prepared: PreparedPlainAgentStep,
@@ -32,15 +58,43 @@ pub(crate) fn execute_prepared_agent_step(
     } else {
         println!("Maintenance active: exact-run steering is unavailable; Enter queues.");
     }
-    let (result, quit_requested) = prepared.runtime.block_on(async {
-        let mut agent = Box::pin(nib::agent::run_agent_loop_for_profile(
-            scope.project.to_path_buf(),
-            scope.profile_id,
-            scope.session_store.sessions_dir(),
-            session_id,
-            goal,
+    let worker_project = scope.project.to_path_buf();
+    let worker_profile = scope.profile_id.to_string();
+    let worker_sessions = scope.session_store.sessions_dir().to_path_buf();
+    let worker_session = session_id.to_string();
+    let worker_goal = goal.to_string();
+    let (first_poll_tx, first_poll_rx) = tokio::sync::oneshot::channel();
+    // Construct and poll the agent on the configured runtime worker, keeping
+    // the caller's small main stack limited to input routing and joining.
+    let mut agent = prepared.runtime.spawn(async move {
+        let mut running = Box::pin(nib::agent::run_agent_loop_for_profile(
+            worker_project,
+            &worker_profile,
+            &worker_sessions,
+            &worker_session,
+            &worker_goal,
             loop_cfg,
         ));
+        let mut first_poll_tx = Some(first_poll_tx);
+        std::future::poll_fn(|context| {
+            let result = std::future::Future::poll(running.as_mut(), context);
+            if let Some(sender) = first_poll_tx.take() {
+                let _ = sender.send(result.is_ready());
+            }
+            result
+        })
+        .await
+    });
+    // This owner drops before prepared's renderer join if routing unwinds.
+    let _agent_owner = PlainAgentAbortGuard::new(&agent);
+    let (result, quit_requested) = prepared.runtime.block_on(async {
+        // Match the old biased inline poll: route input only after a Pending
+        // first poll. Ready or a panicked first poll must join before any input.
+        if !matches!(first_poll_rx.await, Ok(false)) {
+            let result = plain_agent_join_result((&mut agent).await);
+            modal_state.clear();
+            return (result, false);
+        }
         let mut pending_approval: Option<PlainApprovalPrompt> = None;
         let mut pending_question: Option<PlainQuestionPrompt> = None;
         let mut pending_modal_response: Option<PendingPlainModalResponse> = None;
@@ -53,6 +107,7 @@ pub(crate) fn execute_prepared_agent_step(
             tokio::select! {
                 biased;
                 result = &mut agent => {
+                    let result = plain_agent_join_result(result);
                     if let Some(prompt) = pending_approval.take() {
                         let _ = prompt.reply.send(nib::tools::models::ApprovalDecision::denied());
                     }
@@ -600,5 +655,79 @@ pub(crate) fn drain_plain_queued_follow_ups(
             PlainAgentDisposition::Completed => {}
             disposition => return Ok(disposition),
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn router_unwind_aborts_pending_worker_and_closes_its_stream_without_continuing() {
+        struct PendingResources {
+            _stream: tokio::sync::mpsc::Sender<()>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for PendingResources {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let runtime = nib::agent::build_agent_runtime("test runtime").unwrap();
+        let modal = PlainModalState::default();
+        let pending_modal = modal.clone();
+        let forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let continued = forbidden.clone();
+        let (stream, mut events) = tokio::sync::mpsc::channel(1);
+        let (dropped, destroyed) = std::sync::mpsc::channel();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = tokio::sync::oneshot::channel::<()>();
+        let mut task = runtime.spawn(async move {
+            let mut pending = Box::pin(async move {
+                let resources = PendingResources {
+                    _stream: stream,
+                    dropped,
+                };
+                assert!(pending_modal.claim(PLAIN_MODAL_QUESTION));
+                if resume.await.is_ok() {
+                    continued.store(true, Ordering::SeqCst);
+                }
+                drop(resources);
+            });
+            let mut ready = Some(ready);
+            std::future::poll_fn(|context| {
+                let result = std::future::Future::poll(pending.as_mut(), context);
+                if let Some(sender) = ready.take() {
+                    sender.send(result.is_pending()).unwrap();
+                }
+                result
+            })
+            .await
+        });
+        assert!(waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap());
+        assert!(modal.is_pending());
+        let unwind = std::panic::catch_unwind(|| {
+            let _owner = PlainAgentAbortGuard::new(&task);
+            panic!("plain router unwind");
+        });
+        assert!(unwind.is_err());
+        // A detached worker would accept this continuation and run forbidden work.
+        let _ = release.send(());
+        let joined = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await
+            })
+            .expect("worker teardown deadline");
+        assert!(joined.unwrap_err().is_cancelled());
+        destroyed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker resources dropped");
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(!forbidden.load(Ordering::SeqCst));
     }
 }

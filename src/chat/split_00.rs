@@ -1355,10 +1355,7 @@ impl PreparedPlainAgentStep {
         let sensitive_values = nib::config::load_nib_config_full(scope.project)
             .map_err(|error| error.to_string())?
             .public_session_sensitive_values();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("failed to initialize the async runtime: {error}"))?;
+        let runtime = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
         let cancellation = nib::agent::CancellationSignal::new();
         let run_id = uuid::Uuid::new_v4().simple().to_string();
         let (steering, steering_receiver) = if mode == InteractiveAgentMode::Compact {
