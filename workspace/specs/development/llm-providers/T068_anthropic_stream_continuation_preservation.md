@@ -69,7 +69,7 @@ Opaque provider blocks must remain private and bounded. A malformed stream fails
 ## Memory Impact
 
 Status: updated
-Rationale: Appended the native streaming preservation contract and separate unresolved completion-path refusal to facts.md and changelog.md; no private provider content is stored.
+Rationale: Appended the native streaming preservation contract and separate unresolved completion-path refusal to [workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md); no private provider content is stored.
 
 ## Offline Acceptance Evidence
 

@@ -21,7 +21,7 @@ Atomic `nib-anthropic-stream` patch target 0.3.1 from public development 0.3.0, 
 ## Memory Impact
 
 Status: updated
-Rationale: Recorded the verified native-stream preservation fact and its distinction from T023's unresolved complete-path refusal in facts.md and changelog.md.
+Rationale: Recorded the verified native-stream preservation fact and its distinction from T023's unresolved complete-path refusal in [workspace/agents/memory/facts.md](../../agents/memory/facts.md) and [workspace/agents/memory/changelog.md](../../agents/memory/changelog.md).
 
 ## Offline Results
 
