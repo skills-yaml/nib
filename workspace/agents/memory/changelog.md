@@ -495,3 +495,20 @@ reservation with preserved 0.2.0 contract history, and the reconciled catalog of
 77 done / T023 development / two backlog specs. Paid live qualification and public
 archive publication remain separate; no private session data or sample answers
 are stored. Earlier accepted decisions remain preserved.
+
+## 2026-10-06 - Question-form development publication reconciled
+
+- Type: fact / publication update
+- Source: T067 existing release phase and verified public development artifacts
+- Confidence: high
+- Review: independent publication-scope review; exact records and fresh verification required before delivery
+
+Content:
+
+Appended to facts.md the verified 0.3.0 development publication at exact
+70acf355eb55621a0206b5070b2b6205e37502ed, its successful release run and four
+archive metadata checks. workspace/releases.json now reconciles nib-question-form
+from applied to released, preserving the target, baseline, member and old release
+history. Production remains a separate 0.1.0 event; no version bump, runtime
+change or paid-provider qualification is implied. Completed T061/T067 history
+and the existing catalog lifecycle remain intact.

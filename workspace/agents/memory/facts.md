@@ -398,3 +398,28 @@ in backlog. T023's continuation/selected/full qualification remains open; no pai
 calls or model-default changes are authorized by this delivery. Public development
 and production archive publication are separately verified events, not inferred
 from main delivery. Completion records receive fresh exact review and verification.
+
+## 2026-10-06 - Verified question-form 0.3.0 development publication
+
+- Type: fact
+- Source: T067 release ledger, public nib-release.json, GitHub asset metadata and Release Artifacts 37430352520
+- Confidence: high
+- Review: independent publication-scope review; exact record review and fresh gates required before delivery
+- Supersedes: earlier applied-only and completion-preparation publication snapshots for nib-question-form
+
+Content:
+
+The nib-question-form 0.3.0 reservation is released through verified development
+publication at `70acf355eb55621a0206b5070b2b6205e37502ed`, published on
+2026-10-06T07:50:47Z by successful Release Artifacts 37430352520. The public
+manifest binds skills-yaml/nib, development-latest, version, source revision and
+all four native archive sizes/digests; GitHub uploaded-asset metadata matches.
+The artifact receipt is workspace/docs/work/t067-publication-reconciliation.md.
+This is the existing target from baseline 0.2.0, with no second bump or change to
+T067 membership or T061's published 0.2.0 contract-documentation history.
+
+Production was separately inspected and remains 0.1.0 at
+`15123a3ef275458efc87200400219aeacc3e9ea9`; development publication is not a
+production rollout or updater-rollout approval. T061/T067 stay done, and T023
+remains the sole development spec. No runtime behavior, provider defaults or
+paid-provider qualification changes are authorized by this record update.
