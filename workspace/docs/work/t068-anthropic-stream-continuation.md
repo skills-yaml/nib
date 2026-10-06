@@ -29,7 +29,7 @@ Rationale: Recorded the verified native-stream preservation fact and its distinc
 - Private indexed reconstruction now retains opaque thinking/signature/redacted fields, initial metadata and native block order. Validated tool values and existing neutral correlation remain authoritative. Fixed diagnostics contain no raw native values.
 - Focused conformance: 31 passed. Offline live harness: 71 passed, 1 paid test ignored. No credentialed or paid requests.
 - Existing signed-stream unit fixture now includes its valid native block starts/stops; the intentionally incomplete EOF rejection fixture remains negative.
-- Independent preparation review resolved the inventory-count finding. Production candidate review, frozen gates and delivery remain pending.
+- Independent preparation and exact production reviews passed; inventory and sequence findings were resolved. Frozen native/all-platform gates passed at the confirmed integration revision below. Main delivery remains pending.
 
 ## Independent Review Reconciliation
 

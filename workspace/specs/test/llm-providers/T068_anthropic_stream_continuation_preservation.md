@@ -77,6 +77,9 @@ The pre-fix local HTTP regression failed at `46a5a51b0de263deffa5d316a0578db78b2
 
 These credential-free results support AC-1 through AC-5. AC-6 remains open until exact independent review, frozen native/hosted qualification and observed shared development/main delivery. T023's historical complete-path refusal remains unexplained.
 
-## Confirmed Shared Integration
+## Integration Evidence
+
+Revision: 9762df5c10727889adff072045fcd8a8c1369dff
+Outcome: passed
 
 Shared development was verified at `9762df5c10727889adff072045fcd8a8c1369dff` on 2026-10-06T11:58:18.336608+00:00. Frozen native task verify/docs:check/versions:check and exact-merge Linux/macOS/Windows CI 37453323677 passed, including clean exact-source optimized binary qualification and native interactions. This observed integration establishes test state. Main delivery and publication remain separate pending events.
