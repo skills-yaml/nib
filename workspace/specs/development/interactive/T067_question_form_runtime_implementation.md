@@ -78,3 +78,10 @@ Published 0.2.0 history is retained; rollback never decrements a published targe
 Status: pending
 Rationale: Resolve shared T061 shipped form/recovery/compatibility facts from exact
 implementation and review evidence, then update category and changelog once.
+
+## Implementation Evidence (2026-10-06)
+
+The [T061 evidence table](T061_question_form.md#implementation-evidence-2026-10-06)
+maps all nine criteria to behavioral fixtures and pending final delivery gates.
+The single 0.3.0 reservation remains applied; no second bump is introduced.
+Implementation stays in development until verified shared integration.

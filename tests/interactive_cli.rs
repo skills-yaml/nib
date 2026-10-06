@@ -122,6 +122,8 @@ fn plain_help_lists_ft019_commands_and_incomplete_slash_is_not_a_goal() {
         assert!(stdout.contains(command), "missing {command} in {stdout}");
     }
     assert!(stdout.contains("/stop [task-id]"), "{stdout}");
+    assert!(!stdout.contains("/plan"), "{stdout}");
+    assert!(!stdout.contains("/questions"), "{stdout}");
     assert!(
         !stdout.contains("explicit compact waits on T003"),
         "{stdout}"

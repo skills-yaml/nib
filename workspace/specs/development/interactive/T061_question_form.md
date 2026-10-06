@@ -438,3 +438,24 @@ acceptance criteria above. The adjacent plan orders foundation, surface adapters
 conversational recovery, independent review, frozen gates, development integration,
 main delivery and final lifecycle reconciliation. Implementation remains in
 this development state until actual shared integration is verified.
+
+## Implementation Evidence (2026-10-06)
+
+The integrated prerequisite lanes implement the accepted contract; shared
+development/main delivery and final acceptance are still pending. Evidence below
+supports source review without claiming a lifecycle transition.
+
+| Criteria | Observable evidence |
+| --- | --- |
+| AC-1, AC-2 | Shared form reducer and TUI card tests exercise selection, visible editors, single-item arrays, checked drafts, wrapping tabs and explicit complete Submit. |
+| AC-3, AC-4 | Agent/session and TUI tests exercise successful discussion with unresolved obligations, exact proposal sources, interruption worker reconciliation and stale/busy recovery closure. |
+| AC-5 | Shared line adapter and CLI fixtures exercise sequential drafts, review/reopen/Submit, literal text, discussion and the plain framing boundary before persistence or continuation. |
+| AC-6 | Guarded recovery tests exercise exact run/plan/invocation identity, restart, partial reuse, revised discussed obligations, ambiguous origins and concurrent plan replacement. |
+| AC-7 | Interactive registration/help/completion and CLI fixtures exclude the removed commands; status retains saved one-step plan detail and verification diagnostics. |
+| AC-8 | Schema, private outcome transport, leased persistence and agent admission fixtures reject malformed calls and preserve tool approval, verification and dependency gates. |
+| AC-9 | Author task check passed; focused interaction (302), agent-context (200) and runtime end-to-end (54) cases passed. Documentation validation passed five integrity tests and native workspace validators; frozen combined/native qualification and hosted delivery evidence remain pending. |
+
+Independent source spec-compliance review preceded quality/security/integrity/interface
+review on checkpoint `e8e2c8dd58ced7e1ccb386fe837b6f3fee7ed0d7`; neither found a
+confirmed defect. Final records and the strengthened status fixture receive renewed
+exact review before integration. No paid LLM qualification was run.

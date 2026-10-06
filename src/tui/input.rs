@@ -544,6 +544,8 @@ pub(crate) fn handle_question_key(question: &mut Option<PendingQuestion>, code: 
     let Some(pending) = question.as_mut() else {
         return false;
     };
+    let saved_state =
+        (pending.recovery.is_some() && code == KeyCode::Enter).then(|| pending.state.clone());
     let Some(outcome) = question_action_for_key(pending, code) else {
         return false;
     };
@@ -559,7 +561,23 @@ pub(crate) fn handle_question_key(question: &mut Option<PendingQuestion>, code: 
             Ok(effect) => {
                 let _ = target.completion.send(effect);
             }
+            Err(_)
+                if matches!(
+                    outcome,
+                    crate::interactive::QuestionFormOutcome::LeftUnanswered
+                ) =>
+            {
+                let _ = target.completion.send(
+                    crate::interactive::QuestionRecoveryEffect::Output(
+                        "Question form closed. The saved state changed or could not be updated. Check /status before continuing."
+                            .to_string(),
+                    ),
+                );
+            }
             Err(message) => {
+                if let Some(saved_state) = saved_state {
+                    pending.state = saved_state;
+                }
                 pending.state.error = Some(message);
                 return false;
             }
