@@ -368,3 +368,33 @@ documentation only and implementation needs a fresh atomic reservation from
 latest published state. The shared 0.2.0 target was applied once and development
 publication was verified separately; main completion does not claim production
 publication.
+
+## 2026-10-06 - Verified T061 question-form runtime delivery
+
+- Type: fact
+- Source: T061/T067 actual branch events, independent acceptance, native Task gates and CI 37419726793
+- Confidence: high
+- Review: independent exact spec-compliance, quality/security/interface and Test-record reviews
+- Supersedes: earlier current lifecycle counts and pending T061 implementation snapshots
+
+Content:
+
+T061's complete question-form contract and linked T067 runtime implementation
+are delivered at `a3b99632ae8cb452d5bfaff5555a3728999e8ba5`, verified on shared
+development on 2026-10-06 at 06:37:20 UTC and main at 06:40:26 UTC.
+Whole-spec independent acceptance and exact frozen native/hosted qualification
+passed, including Linux/macOS/Windows native interactions and 84.48% Linux coverage.
+Question calls support legacy singles or sets of up to eight, described choices,
+visible editors and explicit set submission. Discussion leaves linked obligations
+unresolved; interruption stops the worker. Persisted exact operation/plan/invocation
+identity supports conversational recovery without approving tools or waiving
+verification. `/plan` and `/questions` are removed from interactive commands;
+internal runtime plans remain authoritative. Legacy session defaults stay compatible.
+
+The single minor runtime target is nib-question-form 0.3.0, applied once from
+published 0.2.0 through T067. T061 retains its 0.2.0 contract-documentation history.
+The current catalog has 77 done specs, T023 alone in development, and FT-021/FT-022
+in backlog. T023's continuation/selected/full qualification remains open; no paid
+calls or model-default changes are authorized by this delivery. Public development
+and production archive publication are separately verified events, not inferred
+from main delivery. Completion records receive fresh exact review and verification.

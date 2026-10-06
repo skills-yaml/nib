@@ -35,8 +35,8 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | --- | --- | --- | --- |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
-| [T061](test/interactive/T061_question_form.md) | interactive | test | Exact independently accepted runtime candidate a3b99632ae8cb452d5bfaff5555a3728999e8ba5 integrated into shared development on 2026-10-06 at 06:37:20 UTC after native and all-platform CI 37419726793 passed; main delivery pending. |
-| [T067](test/interactive/T067_question_form_runtime_implementation.md) | interactive | test | Exact independently accepted runtime candidate a3b99632ae8cb452d5bfaff5555a3728999e8ba5 integrated into shared development on 2026-10-06 at 06:37:20 UTC after native and all-platform CI 37419726793 passed; main delivery pending. |
+| [T061](done/interactive/T061_question_form.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
+| [T067](done/interactive/T067_question_form_runtime_implementation.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
 | [T062](done/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T063](done/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
@@ -130,14 +130,15 @@ The following pre-v7 audit records retain their original completion semantics.
 
 T060 corrects Task listing instruction preflight, terminal scope recovery, and
 home-installed Task availability under bwrap. See [T060](done/tools-sandbox/T060_terminal_listing_instruction_preflight.md).
-T061 and linked [T067](test/interactive/T067_question_form_runtime_implementation.md)
-are in test after verified shared development integration of independently
-accepted candidate `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` on 2026-10-06 at
-06:37:20 UTC. Native frozen gates and Linux/macOS/Windows CI 37419726793 passed.
-The implemented form includes conversational recovery, Esc interruption and
-proposal chat, and removes `/plan` and `/questions` from interactive commands.
-Main delivery remains pending. See [T061](test/interactive/T061_question_form.md).
-Current catalog: **75 done, 1 development, 2 test, and 2 backlog**.
+T061 and linked [T067](done/interactive/T067_question_form_runtime_implementation.md)
+are done after verified main delivery of independently accepted candidate
+`a3b99632ae8cb452d5bfaff5555a3728999e8ba5` on 2026-10-06 at 06:40:26 UTC,
+following confirmed development integration at 06:37:20 UTC. Native frozen gates
+and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
+forms, conversational recovery, Esc interruption and proposal chat are delivered;
+`/plan` and `/questions` are removed from interactive commands. See
+[T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
+Current catalog: **77 done, 1 development (T023), and 2 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
@@ -243,7 +244,7 @@ work or narrower guarantees.
 - [T055: Conversational Repository-Aware Help](done/context-memory/T055_conversational_repository_aware_help.md)
 - [T056: Session Worktree Preflight Recovery](done/tools-sandbox/T056_session_worktree_preflight_recovery.md)
 - [T058: Preflight Diagnostics and Independent Read Progress](done/tools-sandbox/T058_preflight_diagnostics_and_independent_read_progress.md)
-- [T061: Question Form](test/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; runtime implementation and exact native/all-platform gates passed under T067; shared development integration is verified and main delivery is pending.
+- [T061: Question Form](done/interactive/T061_question_form.md) — one `ask_question` call may carry one question or a set; runtime implementation and exact native/all-platform gates passed under T067; development/main delivery and all nine criteria are reconciled.
 
 ### Feature specs
 

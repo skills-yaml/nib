@@ -1,8 +1,8 @@
 # T061: Question Form
 
-**Status:** Test — implementation integrated into shared development.
+**Status:** Done — implementation delivered to verified shared main.
 
-State: test
+State: done
 Primary Feature: interactive
 
 Contract accepted on 2026-09-30, revised by the user on 2026-10-01;
@@ -301,40 +301,40 @@ object options; unknown fields stay rejected.
 
 ## Acceptance Criteria
 
-- [ ] A call with `question` and string options shows the one-question card, with
+- [x] A call with `question` and string options shows the one-question card, with
   the chevron on row 1, the description under an object option, and the typed
   draft visible. Enter on row 1 submits that label. Digits move the chevron.
   `Type something.` submits non-empty text. Empty input retries.
-- [ ] A call with one `questions` item uses that same card and no tab strip. A
+- [x] A call with one `questions` item uses that same card and no tab strip. A
   call with two to eight questions shows tabs, keeps drafts while moving, and
   returns every answer only from Submit. Submit before each question has a draft
   retries on the first unanswered question.
-- [ ] `Chat about this` on either form returns `status: discussed` and the
+- [x] `Chat about this` on either form returns `status: discussed` and the
   message, leaves every question in the call unanswered, does not pause the run,
   and does not unblock `dependent_paths`. Esc, `esc`, EOF, and cancellation
   interrupt the operation from the list or either editor, stop its worker,
   and reconcile to waiting for input.
-- [ ] A proposed-answer question still approves only the displayed proposal,
+- [x] A proposed-answer question still approves only the displayed proposal,
   rejects through `Reject and leave unanswered`, and takes a replacement only
   from `Instruct otherwise`. Model options stay hidden. A fourth row,
   `Chat about this`, works on single questions and mixed sets.
-- [ ] Plain chat, the console, and one-shot print the same rows and descriptions.
+- [x] Plain chat, the console, and one-shot print the same rows and descriptions.
   A set waits for the submit line. `text:` forces a literal answer. `chat`
   starts the message prompt.
-- [ ] An exact reused single question does not prompt. A set pre-checks reused
+- [x] An exact reused single question does not prompt. A set pre-checks reused
   questions. A changed description asks again. A conversational answer resumes
   the exact interrupted operation automatically once required answers are
   complete. A resume request reopens the pending form. Discussed and interrupted
   obligations survive restart and block dependent work until their linked
   answers resolve them. Ambiguous or unrelated messages cannot resume an
   operation or clear another question's blocker.
-- [ ] `/plan` and `/questions` are absent from registration, help, and completion.
+- [x] `/plan` and `/questions` are absent from registration, help, and completion.
   Internal plans, persisted step state, and progress remain consistent; recovery
   requires no slash command.
-- [ ] A question answer, a discussed message, and a custom answer do not approve
+- [x] A question answer, a discussed message, and a custom answer do not approve
   a tool or waive verification. Invalid calls and invalid input produce no extra
   model turn.
-- [ ] Focused interaction and runtime tests, `task docs:check`, and `task verify`
+- [x] Focused interaction and runtime tests, `task docs:check`, and `task verify`
   pass. The user guide matches the card.
 
 ## Implementation Plan
@@ -405,11 +405,12 @@ no acceptance checkbox is promoted by this documentation update.
 
 ## Memory Impact
 
-Status: pending
+Status: updated
 
-Rationale: The accepted user decisions remain recorded in memory. Resolve shipped form,
-linked clarification recovery, compatibility, and delivery facts after exact
-implementation/review evidence is available; update category and changelog then.
+Rationale: Verified shipped question-form, linked recovery, compatibility, version
+and actual branch-delivery facts are appended to [workspace/agents/memory/facts.md](../../../agents/memory/facts.md)
+and the [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md). Accepted decisions remain
+preserved; no session identities or private answers are recorded.
 
 ## Published Contract Version Boundary (2026-10-05)
 
@@ -429,7 +430,7 @@ The atomic reservation is `nib-question-form`, minor 0.3.0 from 0.2.0. The
 public development manifest was checked at commit
 `3cc4550b7d807f39a5fecf07196ee2b703503b24`; it reports 0.2.0. The production
 rolling release remains 0.1.0. No versioned 0.3.0 tag is occupied. Prior released
-`nib-next` evidence preserves T061's documentation-only history; its active member
+`nib-next` evidence preserves T061's documentation-only history; its
 membership and minor impact remain preserved publication history; canonical member
 paths follow lifecycle transitions. The linked
 [T067 runtime implementation](T067_question_form_runtime_implementation.md) owns the
@@ -439,14 +440,14 @@ impact, or claiming question-form implementation in 0.2.0.
 Stable acceptance identifiers AC-1 through AC-9 refer in order to the nine
 acceptance criteria above. The adjacent plan orders foundation, surface adapters,
 conversational recovery, independent review, frozen gates, development integration,
-main delivery and final lifecycle reconciliation. The confirmed shared integration event below establishes the test state.
+main delivery and final lifecycle reconciliation. The confirmed shared integration event below established test state; the subsequent main event establishes done.
 
 ## Implementation Evidence (2026-10-06)
 
-The independently accepted combined implementation is integrated into shared
-development. Main delivery and final lifecycle reconciliation are pending.
+The independently accepted combined implementation passed exact native and
+all-platform qualification and is delivered to shared development and main.
 
-Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is pending.
+Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is confirmed below.
 
 | Criteria | Observable evidence |
 | --- | --- |
@@ -498,3 +499,27 @@ Outcome: passed
 The exact qualified source was pushed to shared development and its remote ref
 verified on 2026-10-06 at 06:37:20 UTC. Independent whole-spec acceptance, frozen
 native Task gates and Linux/macOS/Windows CI 37419726793 passed before this event.
+
+## Acceptance Fixture Traceability
+
+| Criteria | Behavioral fixtures |
+| --- | --- |
+| AC-1, AC-2 | [Shared reducer](../../../../src/interactive/question_state.rs), [TUI form](../../../../src/tui/tests/question_form.rs). |
+| AC-3, AC-4 | [Agent forms](../../../../src/agent/loop/question_form_tests.rs), [session obligations](../../../../src/session/question_forms.rs), [CLI interruption](../../../../tests/interactive_cli.rs), [worker unwind](../../../../src/chat/split_01.rs). |
+| AC-5 | [Shared line contract](../../../../src/interactive/question_form.rs), [console](../../../../src/console.rs), [chat](../../../../src/chat/test_part_0.rs), [CLI](../../../../tests/interactive_cli.rs). |
+| AC-6 | [Guarded recovery](../../../../src/interactive/question_recovery_tests.rs), [TUI recovery](../../../../src/tui/tests/question_form.rs), [agent obligations](../../../../src/agent/loop/question_form_tests.rs). |
+| AC-7 | [Interactive command tests](../../../../src/interactive/test_part_0.rs), [CLI](../../../../tests/interactive_cli.rs), [help](../../../../src/context/help.rs). |
+| AC-8 | [Tool validation](../../../../src/tools/core.rs), [executor admission](../../../../src/tools/executor/test_part_0.rs), [session](../../../../src/session/question_forms.rs), [agent](../../../../src/agent/loop/question_form_tests.rs). |
+| AC-9 | The exact qualification table and confirmed integration/main events above and below; user-guide links passed all five documentation checks. |
+
+## Main Merge Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+Actual shared main delivery `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed on 2026-10-06 at 06:40:26 UTC and its remote ref verified immediately afterward. The same exact revision was integrated into development at 06:37:20 UTC. GitHub subsequently confirms [PR46](https://github.com/skills-yaml/nib/pull/46) merged at 2026-10-06T06:40:27Z with this exact merge revision. Publication remains separate.
+
+Independent Test-record review approved exact candidate
+`e4c8fe712f9bd2efd5c2d0ae7db81624fed54032` before the unchanged qualified
+implementation advanced to main. Completion records receive fresh independent
+review and full native/hosted verification before their own delivery.
