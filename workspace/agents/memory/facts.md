@@ -441,9 +441,21 @@ Anthropic streamed tool-result replay must retain the complete ordered native as
 - Type: fact
 - Source: T068, PR49 and verified identical development/main refs
 - Confidence: high
-- Review: independent completion-record review pending
+- Review: 2026-10-06 independent completion-record review
 - Supersedes: earlier T068 implementation-only snapshot
 
 Content:
 
 T068's native Anthropic streamed continuation repair reached shared development and main at `9762df5c10727889adff072045fcd8a8c1369dff` on 2026-10-06 (development 2026-10-06T11:58:18.336608+00:00, main 2026-10-06T12:01:05.731122+00:00) via PR49. Exact independent code/Test reviews, native verify/docs/versions and Linux/macOS/Windows qualification passed, including 84.54% Linux coverage. Native signed/omitted/redacted blocks remain private, ordered and bounded, with malformed streams rejected before tool authority. The reconciled catalog is 78 done, T023 development and two backlog proposals. T023's completion-path refusal remains unresolved; no paid qualification or default/prompt change is implied. Publication and protected production rollout remain separate observed events.
+
+## 2026-10-06 - Anthropic repair development publication
+
+- Type: fact
+- Source: T068 and inspected public development release manifest/asset metadata
+- Confidence: high
+- Review: independent publication-record review required before delivery
+- Supersedes: earlier T068 publication-pending snapshot
+
+Content:
+
+Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:14Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.

@@ -102,3 +102,16 @@ The SAME qualified revision advanced to shared main on 2026-10-06T12:01:05.73112
 | AC-6 | Independent exact author/merge and Test-record reviews; frozen clean native verify/docs/versions and all-platform CI 37453323677; Linux 84.54% coverage; actual identical development/main events above; versions/catalog/memory reconciled. Final record delivery has its own fresh exact review and full gates. |
 
 No live acceptance is inferred for T023. The compatible patch remains 0.3.1, applied once; production rollout and development publication are separate observed events.
+
+## Development Publication Evidence
+
+Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:14Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
+
+| Archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| nib-linux-x86_64.tar.gz | 13070461 | `549e752486ca025656624af275cba15f7fa70f7cddec6bb8bf706ecd00c807a2` |
+| nib-macos-aarch64.tar.gz | 11205065 | `927e64f82b322e8b14f8c8d8447b64d826d9c5cb3e5e861d4c2b7f65923e1482` |
+| nib-macos-x86_64.tar.gz | 11829733 | `b5d301c4628267c74a54e7bde3c657b496ae01dcb9a1727219d0b1b88a58b57d` |
+| nib-windows-x86_64.zip | 11459390 | `879a742320b31a6c4272f84e5a6bc4b44ae3f0a06b7d2b2ff2d8775700c58158` |
+
+The immutable source revision and manifest digest identify this publication even when development-latest is subsequently refreshed.

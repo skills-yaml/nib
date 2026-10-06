@@ -530,9 +530,21 @@ Appended the verified native Anthropic streaming preservation contract to facts.
 - Type: fact
 - Source: T068, PR49 and verified identical development/main refs
 - Confidence: high
-- Review: independent completion-record review pending
+- Review: 2026-10-06 independent completion-record review
 - Supersedes: earlier T068 implementation-only snapshot
 
 Content:
 
 Appended the verified T068 codec delivery, exact acceptance/gate evidence, unchanged single 0.3.1 target and reconciled catalog to facts.md. T023 remains unresolved and no paid-provider pass or protected production rollout is inferred.
+
+## 2026-10-06 - Anthropic repair development publication
+
+- Type: fact
+- Source: T068 and inspected public development release manifest/asset metadata
+- Confidence: high
+- Review: independent publication-record review required before delivery
+- Supersedes: earlier T068 publication-pending snapshot
+
+Content:
+
+Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:14Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
