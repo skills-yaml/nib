@@ -7,7 +7,7 @@ status: active
 base_revision: 2c4268550e76a037bdb141bd6c874e544fb16e1d
 task_ref: detached
 branch_authorization: none
-updated_at: 2026-10-05T23:38:15Z
+updated_at: 2026-10-06T00:25:12Z
 scope:
   - README.md
   - scripts/check-interactive-release.ps1
@@ -37,12 +37,16 @@ question prompt prefix; clarified number-row selection followed by Enter in
 TUI smoke comments. Strengthened installer contracts for the actual Unix
 one-shot/plain waits, rendered plain prompt and Windows readiness marker.
 Native cancellation, answer JSON, persisted outcome, restoration, offline
-execution and bounded timeout assertions remain in place.
+execution and bounded timeout assertions remain in place. Merged the verified
+recovery API integration without conflicts; the bounded compatibility patch
+and shared recovery/catalog records remain intact.
 
 ## Validation
 
-Source review and whitespace validation found no additional stale compatibility
-consumer within the fixed scope. Compilation and Task gates are pending the
+Independent source review of the initial compatibility checkpoint found no
+confirmed defect. Source review after the recovery API merge and whitespace
+validation found no additional stale compatibility consumer within scope.
+The README recovery example matches the integrated router. Compilation and Task gates are pending the
 exclusive Cargo slot; none were run during another lane's compilation.
 Fresh affected gates will run before handoff.
 
