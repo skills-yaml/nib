@@ -12,8 +12,8 @@ updated_at: 2026-10-06T02:09:09Z
 
 t061-lines self-claimed this task through the shared peer board.
 The bounded lane implements native line forms and recovery adapters for
-[T061](../../../../specs/development/interactive/T061_question_form.md) and
-[T067](../../../../specs/development/interactive/T067_question_form_runtime_implementation.md).
+[T061](../../../../specs/README.md#status-catalog) and
+[T067](../../../../specs/README.md#status-catalog).
 The [owning work record](t061-lines.md) tracks implementation and gate evidence.
 
 ## Dependencies

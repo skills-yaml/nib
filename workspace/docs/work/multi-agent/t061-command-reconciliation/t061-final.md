@@ -83,3 +83,24 @@ main delivery or publication is claimed. Full acceptance and shipped memory
 facts remain pending in T061/T067 until those events are verified.
 
 Peer integration contains reviewed source revision `3b8140c6e020d7d28cf88b9201906b2b19c78b1a`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.
+
+## Whole-Spec Qualification and Shared Development Event
+
+Independent whole-spec acceptance approved all nine criteria on internal
+integration f8b09bf5c26ab2ce6f7ef0b5f119abf83a38b782. Its tree matches qualified
+source a3b99632ae8cb452d5bfaff5555a3728999e8ba5. All required frozen native
+Task gates and CI 37419726793 passed on that source, including Linux/macOS/Windows
+optimized qualifiers and native smokes, and 84.48% Linux line coverage.
+Shared development was pushed and its exact remote ref verified on
+2026-10-06 at 06:37:20 UTC. Main delivery is pending; publication is separate.
+
+## Verified Main Event and Completion Reconciliation
+
+Independent review approved Test records e4c8fe712f9bd2efd5c2d0ae7db81624fed54032.
+The same exact prequalified source a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+was pushed to main on 2026-10-06 at 06:40:26 UTC and its remote ref confirmed.
+T061/T067 and the plan reconcile done state, all nine criteria, canonical catalog
+and release member paths, and shared shipped facts/changelog. Final completion
+records require renewed independent exact review and fresh native/hosted gates
+before delivery. Public archive publication remains separate. The bounded source
+repair memory stays none; whole-spec shipped facts are updated in T061/T067.

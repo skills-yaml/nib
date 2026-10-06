@@ -1,6 +1,8 @@
 # T067: T061 Question Form Runtime Implementation
 
-State: development
+**Status:** Done — verified shared main delivery and reconciled acceptance.
+
+State: done
 Primary Feature: interactive
 
 ## Problem
@@ -21,23 +23,23 @@ No paid live LLM qualification or governed instruction changes are included.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Legacy and structured single-question cards meet T061 selection,
+- [x] AC-1: Legacy and structured single-question cards meet T061 selection,
   description, visible text, digit navigation and local retry behavior.
-- [ ] AC-2: Sets of two to eight preserve drafts and return answers only on Submit;
+- [x] AC-2: Sets of two to eight preserve drafts and return answers only on Submit;
   one-item arrays keep the single card; incomplete Submit focuses unanswered input.
-- [ ] AC-3: Discussion succeeds while keeping every dependency obligation unresolved;
+- [x] AC-3: Discussion succeeds while keeping every dependency obligation unresolved;
   Esc/EOF/cancellation reconcile and stop the worker as specified by T061.
-- [ ] AC-4: Proposed-answer rows approve only the displayed value, preserve rejection,
+- [x] AC-4: Proposed-answer rows approve only the displayed value, preserve rejection,
   allow replacement and whole-call discussion, including mixed sets.
-- [ ] AC-5: Plain/chat/console/one-shot share rows, descriptions, literal text escaping,
+- [x] AC-5: Plain/chat/console/one-shot share rows, descriptions, literal text escaping,
   discussion input, sequential drafts and final set submit/reopen.
-- [ ] AC-6: Exact reuse, changed-description re-ask and linked operation recovery survive
+- [x] AC-6: Exact reuse, changed-description re-ask and linked operation recovery survive
   restart; ambiguous/unrelated inputs cannot clear or resume the wrong obligation.
-- [ ] AC-7: /plan and /questions disappear from interactive registration/help/completion,
+- [x] AC-7: /plan and /questions disappear from interactive registration/help/completion,
   preserving internal plans, progress and audit state.
-- [ ] AC-8: Answers and discussion never approve tools or waive verification; malformed
+- [x] AC-8: Answers and discussion never approve tools or waive verification; malformed
   calls are rejected before handlers and invalid input retries locally.
-- [ ] AC-9: Behavioral fixtures, documentation and frozen native/hosted gates pass;
+- [x] AC-9: Behavioral fixtures, documentation and frozen native/hosted gates pass;
   T061 and this linked implementation reconcile acceptance and actual lifecycle events.
 
 ## Affected Areas
@@ -75,13 +77,37 @@ Published 0.2.0 history is retained; rollback never decrements a published targe
 
 ## Memory Impact
 
-Status: pending
-Rationale: Resolve shared T061 shipped form/recovery/compatibility facts from exact
-implementation and review evidence, then update category and changelog once.
+Status: updated
+Rationale: Shared verified T061 shipped form/recovery/compatibility and actual
+delivery facts are recorded once in [workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
+the [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md). No private session data is stored.
 
 ## Implementation Evidence (2026-10-06)
 
 The [T061 evidence table](T061_question_form.md#implementation-evidence-2026-10-06)
-maps all nine criteria to behavioral fixtures and pending final delivery gates.
+maps all nine criteria to behavioral fixtures and passing exact native/hosted gates.
 The single 0.3.0 reservation remains applied; no second bump is introduced.
-Implementation stays in development until verified shared integration.
+Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is confirmed below.
+All nine criteria are supported by exact passing evidence; actual main delivery
+and durable shipped-memory reconciliation are recorded below.
+
+## Integration Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+The exact qualified source was pushed to shared development and its remote ref
+verified on 2026-10-06 at 06:37:20 UTC. Independent whole-spec acceptance, frozen
+native Task gates and Linux/macOS/Windows CI 37419726793 passed before this event.
+
+## Main Merge Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+Actual shared main delivery `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed on 2026-10-06 at 06:40:26 UTC and its remote ref verified immediately afterward. The same exact revision was integrated into development at 06:37:20 UTC. GitHub subsequently confirms [PR46](https://github.com/skills-yaml/nib/pull/46) merged at 2026-10-06T06:40:27Z with this exact merge revision. Publication remains separate.
+
+Independent Test-record review approved exact candidate
+`e4c8fe712f9bd2efd5c2d0ae7db81624fed54032` before the unchanged qualified
+implementation advanced to main. Completion records receive fresh independent
+review and full native/hosted verification before their own delivery.

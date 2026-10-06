@@ -478,3 +478,20 @@ version/publication events. Durable governance, isolated Git-status and checkout
 policies remain in decisions.md. T023/T061 implementation/qualification remain
 active; no completion or paid-call authority is inferred for them. T064/T066
 memory is none because their bounded fixture repairs restore existing contracts.
+
+## 2026-10-06 - Verified T061/T067 main delivery
+
+- Type: fact / lifecycle update
+- Source: T061/T067 independently accepted runtime and confirmed development/main events
+- Confidence: high
+- Review: independent exact source, whole-spec acceptance and Test-record reviews; final records require renewed verification
+
+Content:
+
+Appended shipped question forms, exact linked conversational recovery, compatibility,
+retained execution gates and removed interactive commands to facts.md. Recorded
+actual same-revision development/main delivery, the single applied runtime 0.3.0
+reservation with preserved 0.2.0 contract history, and the reconciled catalog of
+77 done / T023 development / two backlog specs. Paid live qualification and public
+archive publication remain separate; no private session data or sample answers
+are stored. Earlier accepted decisions remain preserved.

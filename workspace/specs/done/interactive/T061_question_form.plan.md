@@ -1,7 +1,9 @@
 # T061 Implementation Plan
 
+**Status:** Done — verified shared main delivery and reconciled acceptance.
+
 Owner: [T061](T061_question_form.md)
-State: development
+State: done
 
 ## Ordered Work
 
@@ -83,3 +85,20 @@ CLI assertions after the migrated native surfaces are integrated. Compatibility
 fixtures select an enduring registered status command and native prompt readiness
 marker. Every internal integration slice runs the registered native check/test
 gates; only the complete accepted candidate is promoted to development and main.
+
+## Confirmed Lifecycle Events
+
+Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is confirmed below.
+The exact native and hosted qualification evidence is recorded in T061.
+
+## Main Merge Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+Actual shared main delivery `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed on 2026-10-06 at 06:40:26 UTC and its remote ref verified immediately afterward. The same exact revision was integrated into development at 06:37:20 UTC. GitHub subsequently confirms [PR46](https://github.com/skills-yaml/nib/pull/46) merged at 2026-10-06T06:40:27Z with this exact merge revision. Publication remains separate.
+
+Independent Test-record review approved exact candidate
+`e4c8fe712f9bd2efd5c2d0ae7db81624fed54032` before the unchanged qualified
+implementation advanced to main. Completion records receive fresh independent
+review and full native/hosted verification before their own delivery.

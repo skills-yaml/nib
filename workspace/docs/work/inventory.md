@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@7.0.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-10-05
+- Last reviewed: 2026-10-06
 
 ## Adopted Files
 
@@ -30,8 +30,9 @@ Metadata:
 
 ## Current V7 Inventory
 
-The current catalog contains 75 done specs (including 70 preserved historical
-records), three development specs (T023, T061 and linked T067), and two backlog proposals.
+The current catalog contains 77 done specs (including 70 preserved historical
+records), one development spec (T023) and two backlog proposals.
+T061 and linked T067 are complete after verified main delivery on 2026-10-06.
 T062 and linked T063/T064/T065/T066 are complete after verified main delivery. The complete standard,
 DESIGN.md, blocked/test directories, feature catalog and native gates are adopted.
 Older inventory counts below are historical snapshots, superseded by this section.
@@ -44,10 +45,6 @@ Older inventory counts below are historical snapshots, superseded by this sectio
   selected/full qualification has not passed. The 2026-10-01 decision retains the
   current Anthropic default and fixes continuation. Further paid runs require
   protected approvals, budgets and reviewed evidence.
-- T061 remains in `development/` with its approved question-form contract.
-  Runtime implementation is active through linked T067 at the fresh atomic
-  nib-question-form0.3.0 reservation from published0.2.0. T061 retains released
-  accepted-contract-only0.2.0 membership; T067 owns all new runtime scope.
 - FT-020 is in `done/`. Protected Windows Job owner/DACL and macOS reaper preflight
   shipped; `production()` stays fail-closed on Windows and macOS. Current v1
   production delegation remains Linux+bwrap only until a later native qualification
@@ -96,6 +93,19 @@ Workspace regression gates and frozen canonical verification before final delive
 Publication is a separate event; the already-published shared version is 0.2.0.
 No paid live qualification was performed by this migration.
 
+## Current T061 Delivery Evidence
+
+The same qualified source `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was delivered
+to development on 2026-10-06 at 06:37:20 UTC and main at 06:40:26 UTC, with both
+remote refs confirmed. Whole-spec independent acceptance, frozen native Task
+verification and [CI 37419726793](https://github.com/skills-yaml/nib/actions/runs/37419726793)
+passed, including Linux/macOS/Windows full suites, exact optimized-binary identity,
+native interaction smokes and 84.48% Linux coverage. T061/T067 reconcile every
+criterion, member paths and shipped memory; final records require renewed exact
+review and verification before delivery. The single runtime target is 0.3.0;
+T061's published 0.2.0 membership preserves contract-documentation history only.
+No paid LLM qualification was performed. Public archive publication is separate.
+
 ## Historical 2026-09-02 Validation
 
 On 2026-09-02, local `task verify` passed 1,062 library tests, 86 CLI tests,
@@ -128,9 +138,14 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 75 specs are in `done/`, T023/T061/T067 are in `development/`, and
+- Lifecycle: 77 specs are in `done/`, T023 alone is in `development/`, and
   FT-021/FT-022 remain in `backlog/`. `workspace/specs/README.md` is the authoritative per-spec
   index.
+- Question forms: legacy single calls and sets of up to eight share described choices,
+  visible custom editors, proposal rows, whole-call discussion and interruption.
+  Persisted obligations bind exact operation/plan/invocation identities; conversation
+  can recover the linked operation without bypassing tool approval or verification.
+  `/plan` and `/questions` are removed from interactive commands; runtime plan state remains.
 - Project documentation: fixed local standards/library roots are loaded read-only with
   deterministic ordering, symlink rejection, traversal/file/byte caps, and aggregate
   model-context accounting.
