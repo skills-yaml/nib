@@ -5,7 +5,7 @@ Metadata:
 - Adopted standard: workspace-docs@7.0.0
 - Status: current inventory
 - Owner: project
-- Last reviewed: 2026-10-05
+- Last reviewed: 2026-10-06
 
 ## Adopted Files
 
@@ -31,7 +31,7 @@ Metadata:
 ## Current V7 Inventory
 
 The current catalog contains 75 done specs (including 70 preserved historical
-records), three development specs (T023, T061 and linked T067), and two backlog proposals.
+records), one development spec (T023), two test specs (T061 and linked T067), and two backlog proposals.
 T062 and linked T063/T064/T065/T066 are complete after verified main delivery. The complete standard,
 DESIGN.md, blocked/test directories, feature catalog and native gates are adopted.
 Older inventory counts below are historical snapshots, superseded by this section.
@@ -44,10 +44,12 @@ Older inventory counts below are historical snapshots, superseded by this sectio
   selected/full qualification has not passed. The 2026-10-01 decision retains the
   current Anthropic default and fixes continuation. Further paid runs require
   protected approvals, budgets and reviewed evidence.
-- T061 remains in `development/` with its approved question-form contract.
-  Runtime implementation is active through linked T067 at the fresh atomic
-  nib-question-form0.3.0 reservation from published0.2.0. T061 retains released
-  accepted-contract-only0.2.0 membership; T067 owns all new runtime scope.
+- T061 and linked T067 are in `test/` after verified shared development integration
+  of `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` on 2026-10-06 at 06:37:20 UTC.
+  Independent whole-spec acceptance, frozen native verification and all-platform
+  CI 37419726793 passed. Main delivery and shipped-memory reconciliation are pending.
+  T061 retains released accepted-contract-only 0.2.0 membership; T067 owns the
+  single applied runtime 0.3.0 target. Publication remains separate.
 - FT-020 is in `done/`. Protected Windows Job owner/DACL and macOS reaper preflight
   shipped; `production()` stays fail-closed on Windows and macOS. Current v1
   production delegation remains Linux+bwrap only until a later native qualification
@@ -128,7 +130,7 @@ read and no paid request was made.
   historical/future T006 ideas, not shipped behavior.
 - External chat: provider adapters own authentication, listeners, and replies; nib's
   boundary is the normalized gateway in `src/integrations/gateway.rs`.
-- Lifecycle: 75 specs are in `done/`, T023/T061/T067 are in `development/`, and
+- Lifecycle: 75 specs are in `done/`, T023 is in `development/`, T061/T067 are in `test/`, and
   FT-021/FT-022 remain in `backlog/`. `workspace/specs/README.md` is the authoritative per-spec
   index.
 - Project documentation: fixed local standards/library roots are loaded read-only with

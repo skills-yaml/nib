@@ -1,10 +1,12 @@
 # T061: Question Form
 
-**Status:** Development — question-form contract accepted on 2026-09-30;
+**Status:** Test — implementation integrated into shared development.
 
-State: development
+State: test
 Primary Feature: interactive
-revised by the user on 2026-10-01; implementation started by user request on 2026-10-05.
+
+Contract accepted on 2026-09-30, revised by the user on 2026-10-01;
+implementation started by user request on 2026-10-05.
 
 **Related:**
 [T047: User Interaction Harmonization](../../done/interactive/T047_user_interaction_harmonization.md),
@@ -428,7 +430,8 @@ public development manifest was checked at commit
 `3cc4550b7d807f39a5fecf07196ee2b703503b24`; it reports 0.2.0. The production
 rolling release remains 0.1.0. No versioned 0.3.0 tag is occupied. Prior released
 `nib-next` evidence preserves T061's documentation-only history; its active member
-path and minor impact remain frozen publication history. The linked
+membership and minor impact remain preserved publication history; canonical member
+paths follow lifecycle transitions. The linked
 [T067 runtime implementation](T067_question_form_runtime_implementation.md) owns the
 new 0.3.0 runtime membership without rewriting the released target, aggregate
 impact, or claiming question-form implementation in 0.2.0.
@@ -436,14 +439,14 @@ impact, or claiming question-form implementation in 0.2.0.
 Stable acceptance identifiers AC-1 through AC-9 refer in order to the nine
 acceptance criteria above. The adjacent plan orders foundation, surface adapters,
 conversational recovery, independent review, frozen gates, development integration,
-main delivery and final lifecycle reconciliation. Implementation remains in
-this development state until actual shared integration is verified.
+main delivery and final lifecycle reconciliation. The confirmed shared integration event below establishes the test state.
 
 ## Implementation Evidence (2026-10-06)
 
-The integrated prerequisite lanes implement the accepted contract; shared
-development/main delivery and final acceptance are still pending. Evidence below
-supports source review without claiming a lifecycle transition.
+The independently accepted combined implementation is integrated into shared
+development. Main delivery and final lifecycle reconciliation are pending.
+
+Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is pending.
 
 | Criteria | Observable evidence |
 | --- | --- |
@@ -453,9 +456,45 @@ supports source review without claiming a lifecycle transition.
 | AC-6 | Guarded recovery tests exercise exact run/plan/invocation identity, restart, partial reuse, revised discussed obligations, ambiguous origins and concurrent plan replacement. |
 | AC-7 | Interactive registration/help/completion and CLI fixtures exclude the removed commands; status retains saved one-step plan detail and verification diagnostics. |
 | AC-8 | Schema, private outcome transport, leased persistence and agent admission fixtures reject malformed calls and preserve tool approval, verification and dependency gates. |
-| AC-9 | Author task check passed; focused interaction (302), agent-context (200) and runtime end-to-end (54) cases passed. Documentation validation passed five integrity tests and native workspace validators; frozen combined/native qualification and hosted delivery evidence remain pending. |
+| AC-9 | Frozen exact-source task verify passed (1,335 library tests, 106 CLI tests, every integration suite including 54 runtime cases, and doctests); focused interaction (302), agent-context (201), and all five documentation checks passed. Native optimized-binary, PTY and managed-process qualification passed. CI 37419726793 passed Linux/macOS/Windows on the same clean exact source revision, with 84.48% Linux line coverage (104,572/123,780; required 80%). |
 
 Independent source spec-compliance review preceded quality/security/integrity/interface
 review on checkpoint `e8e2c8dd58ced7e1ccb386fe837b6f3fee7ed0d7`; neither found a
-confirmed defect. Final records and the strengthened status fixture receive renewed
-exact review before integration. No paid LLM qualification was run.
+confirmed defect. Subsequent HTTP fixture, ConPTY prompt and plain-worker portability repairs
+received renewed independent exact review and passing native integration gates.
+Whole-spec AC-1 through AC-9 acceptance was independently approved for internal
+integration `f8b09bf5c26ab2ce6f7ef0b5f119abf83a38b782`, whose tree is identical to
+the qualified shared candidate. No paid LLM qualification was run.
+
+## Exact Qualification and Delivery Evidence
+
+Qualified source: `a3b99632ae8cb452d5bfaff5555a3728999e8ba5`;
+clean tree: `6fee5b368b59753947cd7ea54fe2de1490000bdd`.
+Native frozen gates passed in order: `task verify`, `task test:interactive`,
+`task test:agent-context`, `task docs:check`, `task qualify:llm-release`,
+`task smoke:interactive:binary`, and `task smoke:managed-process`.
+The optimized executable SHA-256 stayed
+`28afddd240901ba0e9fa60a5493b29cedb0c4d427e5451e5374dec4a15673b3f`
+through the native smoke gates. All hosted qualifiers report this exact source
+revision and a clean worktree in
+[CI 37419726793](https://github.com/skills-yaml/nib/actions/runs/37419726793).
+
+| Platform | Qualified executable SHA-256 |
+| --- | --- |
+| Linux | `a60d41e563170f765afedb61b8d4df7d73b6b19ae9b3ab2d73cb067868074eb2` |
+| macOS | `28d012b4eda2d3a75cc93d1d71ecb206a5342e233e71cc918200c01834d3290e` |
+| Windows | `2f190b86acf713d6143382c6dd39b1c3c8bffa1e16a018fcd4252ed3ee7f101c` |
+
+The Windows gate includes the unchanged live-input Esc reconciliation regression.
+A native 1 MiB main-thread regression and worker-unwind test verify that routing
+polls the agent on its existing 4 MiB worker and cancels it when routing unwinds.
+Development/main branch publication remains a separate event from public archives.
+
+## Integration Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+The exact qualified source was pushed to shared development and its remote ref
+verified on 2026-10-06 at 06:37:20 UTC. Independent whole-spec acceptance, frozen
+native Task gates and Linux/macOS/Windows CI 37419726793 passed before this event.

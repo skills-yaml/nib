@@ -1,6 +1,6 @@
 # T067: T061 Question Form Runtime Implementation
 
-State: development
+State: test
 Primary Feature: interactive
 
 ## Problem
@@ -82,6 +82,16 @@ implementation and review evidence, then update category and changelog once.
 ## Implementation Evidence (2026-10-06)
 
 The [T061 evidence table](T061_question_form.md#implementation-evidence-2026-10-06)
-maps all nine criteria to behavioral fixtures and pending final delivery gates.
+maps all nine criteria to behavioral fixtures and passing exact native/hosted gates.
 The single 0.3.0 reservation remains applied; no second bump is introduced.
-Implementation stays in development until verified shared integration.
+Confirmed shared development integration `a3b99632ae8cb452d5bfaff5555a3728999e8ba5` was pushed and its remote ref verified on 2026-10-06 at 06:37:20 UTC. Main delivery is pending.
+Main acceptance and memory reconciliation remain pending.
+
+## Integration Evidence
+
+Revision: a3b99632ae8cb452d5bfaff5555a3728999e8ba5
+Outcome: passed
+
+The exact qualified source was pushed to shared development and its remote ref
+verified on 2026-10-06 at 06:37:20 UTC. Independent whole-spec acceptance, frozen
+native Task gates and Linux/macOS/Windows CI 37419726793 passed before this event.

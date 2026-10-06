@@ -83,3 +83,13 @@ main delivery or publication is claimed. Full acceptance and shipped memory
 facts remain pending in T061/T067 until those events are verified.
 
 Peer integration contains reviewed source revision `3b8140c6e020d7d28cf88b9201906b2b19c78b1a`. The internal integration ref advances only after native gates pass; this is not evidence of test or production release.
+
+## Whole-Spec Qualification and Shared Development Event
+
+Independent whole-spec acceptance approved all nine criteria on internal
+integration f8b09bf5c26ab2ce6f7ef0b5f119abf83a38b782. Its tree matches qualified
+source a3b99632ae8cb452d5bfaff5555a3728999e8ba5. All required frozen native
+Task gates and CI 37419726793 passed on that source, including Linux/macOS/Windows
+optimized qualifiers and native smokes, and 84.48% Linux line coverage.
+Shared development was pushed and its exact remote ref verified on
+2026-10-06 at 06:37:20 UTC. Main delivery is pending; publication is separate.

@@ -84,7 +84,7 @@
       "owner": "nib-release",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T061_question_form.md",
+        "workspace/specs/test/interactive/T061_question_form.md",
         "workspace/specs/done/workspace-governance/T062_workspace_docs_v7_upgrade.md",
         "workspace/specs/done/tools-sandbox/T063_isolated_read_only_git_status.md"
       ],
@@ -101,9 +101,9 @@
       "owner": "t061-prep",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T067_question_form_runtime_implementation.md"
+        "workspace/specs/test/interactive/T067_question_form_runtime_implementation.md"
       ],
-      "evidence": "User-authorized T061 runtime implementation starts on 2026-10-05. The atomic shared reservation uses minor 0.3.0 from published development 0.2.0 (manifest commit 3cc4550b7d807f39a5fecf07196ee2b703503b24). The designated preparation owner applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before implementation/integration artifacts. Production remains 0.1.0; application of 0.3.0 is not publication. No independent target is occupied. Linked T067 owns the complete T061 runtime implementation while T061 preserves its published accepted-contract minor membership in nib-next."
+      "evidence": "User-authorized T061 runtime implementation starts on 2026-10-05. The atomic shared reservation uses minor 0.3.0 from published development 0.2.0 (manifest commit 3cc4550b7d807f39a5fecf07196ee2b703503b24). The designated preparation owner applies the bump once to Cargo.toml, Cargo.lock and skills.yaml before implementation/integration artifacts. Production remains 0.1.0; application of 0.3.0 is not publication. No independent target is occupied. Linked T067 owns the complete T061 runtime implementation while T061 preserves its published accepted-contract minor membership in nib-next. Verified shared development integration a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:37:20 UTC follows independent whole-spec acceptance, frozen native gates and Linux/macOS/Windows CI 37419726793. Main delivery and publication are separate pending events."
     }
   ]
 }
