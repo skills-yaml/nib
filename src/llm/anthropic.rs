@@ -20,14 +20,21 @@ use super::{LlmClient, LlmStream};
 
 const ANTHROPIC_TRANSPORT: &str = "anthropic_messages";
 
+struct AnthropicContinuationContext {
+    scope: Option<LlmRequestScope>,
+    messages: Vec<Value>,
+    include_default_system: bool,
+}
+
 struct AnthropicTurnState {
-    assistant_content: Vec<Value>,
+    messages: Vec<Value>,
     calls: Vec<(ToolInvocationId, ProviderCallId)>,
+    include_default_system: bool,
 }
 
 fn anthropic_continuation(
     model: &str,
-    scope: Option<LlmRequestScope>,
+    mut context: AnthropicContinuationContext,
     assistant_content: Vec<Value>,
     calls: &[ToolCallRequest],
 ) -> Result<ProviderContinuation, String> {
@@ -40,23 +47,32 @@ fn anthropic_continuation(
                 .ok_or_else(|| "Anthropic tool call is missing its provider call ID".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let encoded_bytes = serde_json::to_vec(&assistant_content)
+    context
+        .messages
+        .push(json!({"role": "assistant", "content": assistant_content}));
+    let item_count = context
+        .messages
+        .iter()
+        .map(|message| message["content"].as_array().map_or(0, Vec::len))
+        .sum();
+    let encoded_bytes = serde_json::to_vec(&context.messages)
         .map_err(|error| format!("failed to measure Anthropic continuation: {error}"))?
         .len();
     ProviderContinuation::new(
         "anthropic",
         model,
         ANTHROPIC_TRANSPORT,
-        scope,
+        context.scope,
         calls
             .iter()
             .map(|(invocation_id, _)| *invocation_id)
             .collect(),
-        assistant_content.len(),
+        item_count,
         encoded_bytes,
         AnthropicTurnState {
-            assistant_content,
+            messages: context.messages,
             calls,
+            include_default_system: context.include_default_system,
         },
     )
 }
@@ -65,8 +81,8 @@ fn into_anthropic_messages(
     continuation: ProviderContinuation,
     model: &str,
     scope: Option<&LlmRequestScope>,
-) -> Result<Vec<Value>, String> {
-    let (state, outputs): (AnthropicTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
+) -> Result<(Vec<Value>, bool), String> {
+    let (mut state, outputs): (AnthropicTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume("anthropic", model, ANTHROPIC_TRANSPORT, scope)?;
     let mut results = Vec::with_capacity(state.calls.len());
     for (invocation_id, call_id) in state.calls {
@@ -80,10 +96,18 @@ fn into_anthropic_messages(
             "is_error": output.classification().is_error(),
         }));
     }
-    Ok(vec![
-        json!({"role": "assistant", "content": state.assistant_content}),
-        json!({"role": "user", "content": results}),
-    ])
+    state
+        .messages
+        .push(json!({"role": "user", "content": results}));
+    // Tool results are encoded as strings on the wire; include their escaping
+    // and message wrappers in the cumulative private-history byte budget.
+    let bytes = serde_json::to_vec(&state.messages)
+        .map_err(|error| format!("failed to measure Anthropic continuation: {error}"))?
+        .len();
+    if bytes > crate::llm::types::MAX_CONTINUATION_BYTES {
+        return Err("Anthropic continuation exceeds the byte limit".to_string());
+    }
+    Ok((state.messages, state.include_default_system))
 }
 
 pub struct AnthropicClient {
@@ -156,13 +180,14 @@ impl AnthropicClient {
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(continuation) = continuation {
-            messages.extend(into_anthropic_messages(
-                continuation,
-                &self.model,
-                scope.as_ref(),
-            )?);
-        }
+        let inherited_default_system = if let Some(continuation) = continuation {
+            let (history, include_default_system) =
+                into_anthropic_messages(continuation, &self.model, scope.as_ref())?;
+            messages.extend(history);
+            Some(include_default_system)
+        } else {
+            None
+        };
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_output_tokens.unwrap_or(4096),
@@ -172,7 +197,7 @@ impl AnthropicClient {
             tool_choice == ToolChoice::Required && tools.is_some_and(|tools| !tools.is_empty());
         match system {
             Some(system) => body["system"] = json!(system),
-            None if !qualification_tool_turn => {
+            None if inherited_default_system.unwrap_or(!qualification_tool_turn) => {
                 body["system"] = json!("You are nib, an AI agent.");
             }
             None => {}
@@ -186,11 +211,8 @@ impl AnthropicClient {
         if stream {
             body["stream"] = json!(true);
         }
-        if max_output_tokens.is_some() && tools.is_none() {
-            // Bounded text turns cannot also run adaptive thinking: thinking
-            // tokens share max_tokens, and Opus 5-class models think by default.
-            body["thinking"] = json!({"type": "disabled"});
-        }
+        // max_tokens caps thinking plus text. Preserve the provider's thinking
+        // default: newer models require it even for bounded text requests.
         if let Some(tools) = tools {
             body["tools"] = json!(tools
                 .iter()
@@ -204,6 +226,44 @@ impl AnthropicClient {
             }
         }
         Ok(body)
+    }
+
+    fn prepare_request(
+        &self,
+        request: LlmRequest<'_>,
+        stream: bool,
+    ) -> Result<(Value, AnthropicContinuationContext), String> {
+        let scope = request.scope.clone();
+        let explicit_system = request
+            .messages
+            .iter()
+            .any(|message| message.role == crate::llm::LlmMessageRole::System);
+        let base_count = request
+            .messages
+            .iter()
+            .filter(|message| message.role != crate::llm::LlmMessageRole::System)
+            .count();
+        let body = self.request_body(request, stream)?;
+        // Retain every earlier native assistant/result pair. Signed thinking
+        // validates its conversation prefix, including preceding tool turns.
+        let messages = body["messages"]
+            .as_array()
+            .expect("request messages are an array")
+            .iter()
+            .skip(base_count)
+            .cloned()
+            .collect();
+        // Required qualification turns omit nib's fallback system prompt.
+        // Retain that choice when the next turn switches back to Auto.
+        let include_default_system = !explicit_system && body.get("system").is_some();
+        Ok((
+            body,
+            AnthropicContinuationContext {
+                scope,
+                messages,
+                include_default_system,
+            },
+        ))
     }
 
     fn error_context(
@@ -253,9 +313,8 @@ impl LlmClient for AnthropicClient {
         )
         .map_err(|error| self.request_error(error))?;
         validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
-        let scope = request.scope.clone();
-        let body = self
-            .request_body(request, false)
+        let (body, continuation_context) = self
+            .prepare_request(request, false)
             .map_err(|error| self.request_error(error))?;
 
         let retry_capabilities = crate::llm::registry::retry_capabilities(
@@ -329,12 +388,11 @@ impl LlmClient for AnthropicClient {
                         .with_retry_attempts(retry_attempts)
                 })?;
             response.continuation = Some(
-                anthropic_continuation(&self.model, scope, assistant_content, calls).map_err(
-                    |error| {
+                anthropic_continuation(&self.model, continuation_context, assistant_content, calls)
+                    .map_err(|error| {
                         self.protocol_error(error)
                             .with_retry_attempts(retry_attempts)
-                    },
-                )?,
+                    })?,
             );
         }
         response.attempts = retry_attempts;
@@ -350,9 +408,8 @@ impl LlmClient for AnthropicClient {
         )
         .map_err(|error| self.request_error(error))?;
         validate_anthropic_request(&request).map_err(|error| self.request_error(error))?;
-        let continuation_scope = request.scope.clone();
-        let body = self
-            .request_body(request, true)
+        let (body, continuation_context) = self
+            .prepare_request(request, true)
             .map_err(|error| self.request_error(error))?;
 
         let retry_capabilities = crate::llm::registry::retry_capabilities(
@@ -533,7 +590,7 @@ impl LlmClient for AnthropicClient {
                         parser,
                         reason,
                         &model,
-                        continuation_scope,
+                        continuation_context,
                         match usage.finish() {
                             Ok(usage) => usage,
                             Err(error) => {
@@ -796,7 +853,7 @@ fn complete_anthropic_stream(
     mut parser: AnthropicStreamParser,
     finish_reason: LlmFinishReason,
     model: &str,
-    scope: Option<LlmRequestScope>,
+    context: AnthropicContinuationContext,
     usage: Option<LlmUsage>,
 ) -> Result<LlmResponse, String> {
     let tool_calls = tool_calls.finish_with_call_ids(parser.take_call_ids())?;
@@ -808,7 +865,7 @@ fn complete_anthropic_stream(
         let assistant_content = parser.native_content.finish(&tool_calls)?;
         Some(anthropic_continuation(
             model,
-            scope,
+            context,
             assistant_content,
             &tool_calls,
         )?)
@@ -1287,7 +1344,11 @@ mod tests {
         })];
         let mut continuation = anthropic_continuation(
             "claude-test",
-            Some(scope.clone()),
+            AnthropicContinuationContext {
+                scope: Some(scope.clone()),
+                messages: Vec::new(),
+                include_default_system: false,
+            },
             assistant_content,
             std::slice::from_ref(&call),
         )
@@ -1298,7 +1359,8 @@ mod tests {
             )
             .unwrap();
 
-        let messages = into_anthropic_messages(continuation, "claude-test", Some(&scope)).unwrap();
+        let (messages, _) =
+            into_anthropic_messages(continuation, "claude-test", Some(&scope)).unwrap();
         assert_eq!(messages[1]["content"][0]["is_error"], true);
         assert_eq!(messages[1]["content"][0]["content"], "{\"success\":true}");
     }
@@ -1433,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_request_disables_thinking_only_on_capped_text_turns() {
+    fn anthropic_request_preserves_thinking_defaults_and_output_caps() {
         let client = test_client("https://api.anthropic.com/v1/messages".to_string());
         let messages = [LlmMessage::user("call")];
         let tools = [ToolDefinition::new(
@@ -1473,13 +1535,21 @@ mod tests {
         assert_eq!(ordinary_tool["system"], "You are nib, an AI agent.");
         assert!(ordinary_tool.get("output_config").is_none());
         assert!(ordinary_tool.get("tool_choice").is_none());
-        let text_only = client
-            .request_body(
-                LlmRequest::new(&messages, None).with_max_output_tokens(512),
-                false,
-            )
-            .expect("valid Anthropic text request");
-        assert_eq!(text_only["thinking"]["type"], "disabled");
+        for streamed in [false, true] {
+            let text_only = client
+                .request_body(
+                    LlmRequest::new(&messages, None).with_max_output_tokens(512),
+                    streamed,
+                )
+                .expect("valid Anthropic text request");
+            assert!(text_only.get("thinking").is_none());
+            assert_eq!(text_only["max_tokens"], 512);
+            let unbounded = client
+                .request_body(LlmRequest::new(&messages, None), streamed)
+                .unwrap();
+            assert!(unbounded.get("thinking").is_none());
+            assert_eq!(unbounded["max_tokens"], 4096);
+        }
     }
 
     #[test]

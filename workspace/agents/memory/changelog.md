@@ -549,6 +549,130 @@ Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
 
+## 2026-10-06 - Production 0.3.1 release
+
+- Type: fact
+- Source: [Production release run 37468381524](https://github.com/skills-yaml/nib/actions/runs/37468381524), inspected public manifest and downloaded archives
+- Confidence: high
+- Review: Independent exact-source and publication-evidence review before handoff
+- Supersedes: Earlier current-production 0.1.0 snapshots; development publication history retained
+
+Content:
+
+User-requested production 0.3.1 was published at 2026-10-06T16:43:51Z from exact `61e166e2038a895996cc709aad78d066ba979eba` through the protected release workflow. The public `prod-latest` manifest SHA-256 is `da3e76a8ed6f152cc7fc1c1334f50e153ac1f7485f535a636168752328ed5138`. All four native archives and all four checksum files were downloaded and verified against the manifest and uploaded-asset metadata. The downloaded Linux binary passed the offline redirected/native-PTY interaction smoke with exact prod version/commit identity, clean-source eligibility, privacy and terminal restoration. Independent exact-source review, frozen native gates, all-platform CI and all four production builds passed before publication approval.
+
+This publishes the existing 0.3.1 target without another bump or runtime/model/prompt change. T023 remains open for protected live-provider acceptance; no paid call or live-provider pass is inferred from this production release.
+
+## 2026-10-06 - Public catalog refresh and provider-controlled Anthropic thinking
+
+- Type: fact
+- Source: user + T069 and current first-party provider documentation
+- Confidence: high
+- Review: Independent exact-candidate review required before handoff
+- Supersedes: Older bundled picker defaults; historical T023 evidence retained
+
+Content:
+
+T069 refreshes the advisory catalog from public sources inspected on 2026-10-06:
+OpenAI GPT-6.1 Sol, Anthropic Claude Opus 5.5 (direct API `claude-opus-5-5`),
+Google Gemini 3.8 Flash and Grok 4.7 become bundled defaults; OpenRouter uses its
+separately verified canonical IDs, including dotted Anthropic versions. Explicit
+user model selections and picker overrides remain authoritative.
+
+Bounded Anthropic text requests retain the provider's thinking default because
+Opus 5.5 cannot disable thinking. The existing max_tokens ceiling bounds total
+thinking plus text, and exhaustion remains a failure without executable tool
+authority. Native thinking, signatures and redacted blocks stay private and
+unchanged during tool continuation. Successive tool batches retain every earlier
+native assistant/result pair to preserve signed prefixes; cumulative history is
+bounded by 256 items and 4 MiB with fail-closed limits. Native continuation
+also retains the original fallback-system-prompt choice when a Required tool
+turn continues with Auto. Offline matrix fixtures account for curated models and
+separately approved IDs; actual qualification still requires canonical catalog
+visibility. This catalog refresh does not alter T023's
+protected selected model matrix or OpenRouter allowlist, and no paid generation
+or live qualification is inferred. Shared integration, main delivery and
+publication remain separately evidenced events.
+
+## 2026-10-07 - Three-major-generation catalog retention
+
+- Type: preference
+- Source: user clarification and T070 implementation
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: none
+
+Recorded the user's three-major-generation retention preference in
+[preferences.md](preferences.md). The curated catalog grows from 25 to 103 entries
+using available exact text/tool IDs, preserves upgraded defaults and existing
+configuration overrides, and documents retired generations and Gemini 2.5 account
+restrictions. T070 shares the already-applied unreleased 0.3.2 catalog patch;
+no paid qualification, integration, main delivery or publication is inferred.
+
+## 2026-10-07 - Two-major-generation retention and OpenRouter Mistral
+
+- Type: preference
+- Source: user revision and additional Mistral request
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Three-major-generation catalog retention preference
+
+Appended the revised preference to [preferences.md](preferences.md). T071 removes
+eight GPT 4 suggestions from OpenAI/OpenRouter, preserves explicit selections and
+existing defaults, and adds thirteen source-verified Mistral text/tool IDs through
+OpenRouter. The resulting catalog has 108 entries, including 63 OpenRouter entries.
+The protected qualification allowlist remains unchanged. T071 shares the applied
+unreleased 0.3.2 catalog patch; no additional bump, paid qualification, integration,
+main delivery or publication is inferred. T070's earlier evidence remains history.
+
+## 2026-10-07 - Latest-major-generation catalog retention
+
+- Type: preference
+- Source: user revision and T072
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Two-major-generation catalog retention preference
+
+Appended the revised preference to [preferences.md](preferences.md). T072 removes
+44 older suggestions from the two-generation candidate, retaining 64 catalog
+entries, including 36 OpenRouter routes and ten Mistral suggestions. Defaults,
+explicit older selections and protected qualification fixtures remain unchanged.
+The offline accounting fixture still includes its separately approved GPT 5 route
+outside the picker window. T072 shares the applied unreleased 0.3.2 catalog patch;
+no further bump, paid qualification, integration, main delivery or publication is
+inferred. T070 and T071 retain their historical source and verification records.
+
+## 2026-10-08 - Provider-specific catalog selection
+
+- Type: preference
+- Source: user revision and T073
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Uniform latest-major-generation retention for OpenAI/Grok/Gemini
+
+Appended the revised preference to [preferences.md](preferences.md). T073 includes
+the seven documented general direct GPT 5.6+ canonical IDs and corresponding
+OpenRouter base routes. Explicit user clarification excludes Cyber and Pro. Grok retains 4.7/4.6/4.5; Gemini retains the requested
+four ordinary Flash releases, with no newer eligible release found on 2026-10-08.
+The catalog contains 57 entries, including 33 OpenRouter routes and ten Mistral
+suggestions. Defaults, explicit selections, other families and protected qualification
+fixtures are preserved. T073 shares the applied unreleased 0.3.2 patch, without
+another bump or inferred paid qualification, integration, main merge or publication.
+
+## 2026-10-08 - Shared catalog and sandbox release scope unresolved
+
+- Type: open-question
+- Source: merge preparation and independent shared-version review
+- Confidence: high
+- Review: 2026-10-08
+- Supersedes: none
+
+Recorded the consequential release-scope question in [open-questions.md](open-questions.md).
+T080 has raised the shared reservation from the catalog's previously applied 0.3.2
+patch to minor 0.4.0. PR #51 and its clean delivery candidate pass independent review,
+full local verification and Linux/macOS CI, but integration waits for scope and
+reservation reconciliation. No merge, publication or paid qualification is inferred.
+
 ## 2026-10-08 - T080 phase 1 sandbox mount plan decision
 
 - Type: changelog
@@ -560,6 +684,40 @@ Development publication was independently verified on 2026-10-06: Release Artifa
 Content:
 
 Recorded the read-only Git metadata and trusted-layout mount plan decision in decisions.md after the independent review approved phase 1.
+
+## 2026-10-08 - Catalog and sandbox release scope resolved
+
+- Type: changelog
+- Source: user sync request; remote development 045e0e2 and combined release ledger
+- Confidence: high
+- Review: independent exact-candidate review pending
+- Supersedes: 2026-10-08 Catalog and sandbox release scope
+
+Content:
+
+Synchronization combines the catalog/Anthropic work with T080 phase 1 already
+in shared development. The single nib-catalog-refresh release uses minor 0.4.0
+from 0.3.1 and includes T069-T073 plus T080; native mirrors and membership are
+reconciled without a separate 0.3.2 release or another version bump. Further
+T080 phases, T023 live qualification, main delivery and publication remain
+separate. Combined review and verification precede the synchronization push.
+
+## 2026-10-08 - Shared 0.4.0 catalog and sandbox integration
+
+- Type: fact
+- Source: verified remote development 81c37a1908ec1032809e97cdf0b0b39d5253603b; release ledger and T069-T073 integration records
+- Confidence: high
+- Review: independent exact spec-compliance and correctness review approved 81c37a1; fresh complete native gates passed
+- Supersedes: catalog integration-pending snapshots and catalog/sandbox release-scope question
+
+Content:
+
+The catalog and Anthropic continuation work is integrated with T080 phase 1
+in shared development under the single minor 0.4.0 release. The release ledger
+includes T069-T073 in test and T080 in development; native mirrors use the
+same target without another bump. T073 governs the final catalog selection.
+T080's later phases, main delivery, publication of this combined revision
+and T023 live-provider acceptance remain separate.
 
 ## 2026-10-08 - T081 interrupted-plan decision
 

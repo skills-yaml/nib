@@ -1510,3 +1510,18 @@ exist.
 
 Status: pending
 Rationale: Live qualification and its final durable compatibility outcome remain unresolved; this migration does not run paid tests.
+
+## 2026-10-06 Catalog Upgrade Boundary
+
+The user subsequently requested the bundled catalog upgrade and explicitly included
+the bounded Anthropic compatibility repair in
+[T069](../../test/llm-providers/T069_current_model_catalog_refresh.md). Its local candidate changes the
+Anthropic picker/default to direct API ID `claude-opus-5-5` and stops forcing
+thinking off on capped text requests. This newer authorization supersedes the
+2026-10-01 instruction to retain the older bundled default for that investigation;
+it does not replace the selected qualification model `claude-opus-5` or erase its
+refusal evidence. The protected selected matrix and OpenRouter allowlist remain
+unchanged. Canary still follows the registry default independently, so a future
+authorized canary uses the refreshed model after T069 delivery. Token ceilings,
+approvals and qualification criteria remain authoritative; public catalog
+inspection and offline fixtures establish no live-provider pass.

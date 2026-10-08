@@ -459,3 +459,65 @@ T068's native Anthropic streamed continuation repair reached shared development 
 Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
+
+## 2026-10-06 - Production 0.3.1 release
+
+- Type: fact
+- Source: [Production release run 37468381524](https://github.com/skills-yaml/nib/actions/runs/37468381524), inspected public manifest and downloaded archives
+- Confidence: high
+- Review: Independent exact-source and publication-evidence review before handoff
+- Supersedes: Earlier current-production 0.1.0 snapshots; development publication history retained
+
+Content:
+
+User-requested production 0.3.1 was published at 2026-10-06T16:43:51Z from exact `61e166e2038a895996cc709aad78d066ba979eba` through the protected release workflow. The public `prod-latest` manifest SHA-256 is `da3e76a8ed6f152cc7fc1c1334f50e153ac1f7485f535a636168752328ed5138`. All four native archives and all four checksum files were downloaded and verified against the manifest and uploaded-asset metadata. The downloaded Linux binary passed the offline redirected/native-PTY interaction smoke with exact prod version/commit identity, clean-source eligibility, privacy and terminal restoration. Independent exact-source review, frozen native gates, all-platform CI and all four production builds passed before publication approval.
+
+This publishes the existing 0.3.1 target without another bump or runtime/model/prompt change. T023 remains open for protected live-provider acceptance; no paid call or live-provider pass is inferred from this production release.
+
+## 2026-10-06 - Public catalog refresh and provider-controlled Anthropic thinking
+
+- Type: fact
+- Source: user + T069 and current first-party provider documentation
+- Confidence: high
+- Review: Independent exact-candidate review required before handoff
+- Supersedes: Older bundled picker defaults; historical T023 evidence retained
+
+Content:
+
+T069 refreshes the advisory catalog from public sources inspected on 2026-10-06:
+OpenAI GPT-6.1 Sol, Anthropic Claude Opus 5.5 (direct API `claude-opus-5-5`),
+Google Gemini 3.8 Flash and Grok 4.7 become bundled defaults; OpenRouter uses its
+separately verified canonical IDs, including dotted Anthropic versions. Explicit
+user model selections and picker overrides remain authoritative.
+
+Bounded Anthropic text requests retain the provider's thinking default because
+Opus 5.5 cannot disable thinking. The existing max_tokens ceiling bounds total
+thinking plus text, and exhaustion remains a failure without executable tool
+authority. Native thinking, signatures and redacted blocks stay private and
+unchanged during tool continuation. Successive tool batches retain every earlier
+native assistant/result pair to preserve signed prefixes; cumulative history is
+bounded by 256 items and 4 MiB with fail-closed limits. Native continuation
+also retains the original fallback-system-prompt choice when a Required tool
+turn continues with Auto. Offline matrix fixtures account for curated models and
+separately approved IDs; actual qualification still requires canonical catalog
+visibility. This catalog refresh does not alter T023's
+protected selected model matrix or OpenRouter allowlist, and no paid generation
+or live qualification is inferred. Shared integration, main delivery and
+publication remain separately evidenced events.
+
+## 2026-10-08 - Shared 0.4.0 catalog and sandbox integration
+
+- Type: fact
+- Source: verified remote development 81c37a1908ec1032809e97cdf0b0b39d5253603b; release ledger and T069-T073 integration records
+- Confidence: high
+- Review: independent exact spec-compliance and correctness review approved 81c37a1; fresh complete native gates passed
+- Supersedes: catalog integration-pending snapshots and catalog/sandbox release-scope question
+
+Content:
+
+The catalog and Anthropic continuation work is integrated with T080 phase 1
+in shared development under the single minor 0.4.0 release. The release ledger
+includes T069-T073 in test and T080 in development; native mirrors use the
+same target without another bump. T073 governs the final catalog selection.
+T080's later phases, main delivery, publication of this combined revision
+and T023 live-provider acceptance remain separate.

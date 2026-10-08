@@ -98,3 +98,39 @@ and spend limits still apply to each new run. Canary continuation failures,
 including Anthropic's final refusal, remain unresolved; selected and full
 exact-revision qualification remain open. Retain the current Anthropic default
 and investigate the continuation failure under the user-approved direction.
+
+## 2026-10-08 - Catalog and sandbox release scope
+
+- Type: open-question
+- Source: user merge request, latest atomic shared reservation and independent review
+- Confidence: high
+- Review: 2026-10-08 exact delivery and shared-version review
+- Supersedes: none
+
+Content:
+
+The catalog/Anthropic delivery candidate in [PR #51](https://github.com/skills-yaml/nib/pull/51)
+uses the previously applied 0.3.2 patch. T080's in-progress sandbox work subsequently
+joined `nib-catalog-refresh` and raised its atomic shared reservation to minor 0.4.0.
+Resolve whether delivery combines T080 or separates the catalog/Anthropic changes,
+then reconcile ownership, release membership and native versions before integration.
+The current catalog candidate has independent approval, complete clean local gates
+and Linux/macOS CI; these do not override the changed reservation or establish a merge.
+T080 is not yet handed off, and T023 live qualification remains unresolved.
+
+## 2026-10-08 - Catalog and sandbox release scope resolved
+
+- Type: open-question resolution
+- Source: user sync request; remote development 045e0e2 and combined release ledger
+- Confidence: high
+- Review: independent exact-candidate review pending
+- Supersedes: 2026-10-08 Catalog and sandbox release scope
+
+Content:
+
+Synchronization combines the catalog/Anthropic work with T080 phase 1 already
+in shared development. The single nib-catalog-refresh release uses minor 0.4.0
+from 0.3.1 and includes T069-T073 plus T080; native mirrors and membership are
+reconciled without a separate 0.3.2 release or another version bump. Further
+T080 phases, T023 live qualification, main delivery and publication remain
+separate. Combined review and verification precede the synchronization push.

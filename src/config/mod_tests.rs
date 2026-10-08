@@ -112,7 +112,18 @@ api_key = "fixture"
 #[test]
 fn available_models_use_bundled_defaults_and_keep_selected_custom_models() {
     let bundled = LlmConfig::default().get_available_models(Some("openai"));
-    assert_eq!(bundled, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+    assert_eq!(
+        bundled,
+        [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ]
+    );
 
     let configured = LlmConfig {
         active_provider: Some("openai".to_string()),
@@ -129,11 +140,40 @@ fn available_models_use_bundled_defaults_and_keep_selected_custom_models() {
         configured.get_available_models(None),
         [
             "gateway/future-model",
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
         ]
     );
+}
+
+#[test]
+fn selected_model_outside_bundled_catalog_remains_visible() {
+    for selected in ["gpt-5.5", "gpt-4.1"] {
+        let configured = LlmConfig {
+            active_provider: Some("openai".to_string()),
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderEntry {
+                    model: selected.to_string(),
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        };
+        let models = configured.get_available_models(None);
+        assert_eq!(models[0], selected);
+        assert_eq!(models[1], "gpt-6.1-sol");
+        assert_eq!(models.iter().filter(|model| *model == selected).count(), 1);
+        assert!(!LlmConfig::default()
+            .get_available_models(Some("openai"))
+            .iter()
+            .any(|model| model == selected));
+    }
 }
 
 #[test]

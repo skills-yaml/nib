@@ -487,3 +487,14 @@ security review of the mount plan and permission engine is mandatory.
 Status: pending
 Rationale: Phase 1's sandbox decision (read-only Git metadata, trusted-layout
 mounts) is recorded in decisions.md and changelog.md (2026-10-08). User decisions D1-D6 (in-place default after checkpoints, `ask` default, network on, a shared folder without a lock, the Claude Code branch and commit rules, and host-side commit/push) and the sandbox mount-plan contract are durable decisions. They are recorded in project memory when each phase is verified.
+
+## Phase 1 Shared Integration (2026-10-08)
+
+[PR52](https://github.com/skills-yaml/nib/pull/52) merged phase 1 into shared
+`development` at `045e0e21d6e51488fcfcc544e2fceb35f0eb2d3d` on
+2026-10-08T16:38:49Z. This confirms only the sandbox mount-plan phase.
+T080 remains in development while its remaining phases and full acceptance
+criteria are unresolved; this event does not establish main delivery or
+publication. Synchronization combines that phase with T069-T073 under the
+same applied minor 0.4.0 release and preserves the independent reviewed
+sandbox implementation. Combined review and native gates precede the push.
