@@ -323,5 +323,10 @@ async fn git_status_reports_managed_worktree_under_home() {
     let status = output["status"].as_str().unwrap();
     assert!(status.contains("nib/session/s1"), "{status}");
     assert!(status.contains("tracked.txt"), "{status}");
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    let nested = git_status(&worktree.join("src"))
+        .await
+        .expect("status from a worktree subdirectory");
+    assert!(nested["status"].as_str().unwrap().contains("tracked.txt"));
     assert_eq!(before, std::fs::read(project.join(".git/index")).unwrap());
 }

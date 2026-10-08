@@ -261,11 +261,7 @@ async fn project_mounts_keep_protections_over_allow_write() {
     let home = root.path().join("home");
     let (project, worktree) = project_fixture(&home);
     let _home = HomeGuard::set(home.as_os_str());
-    for allowed in [
-        project.clone(),
-        root.path().canonicalize().unwrap(),
-        project.join(".git"),
-    ] {
+    for allowed in [project.clone(), project.join(".git")] {
         let boundaries = BoundaryConfig {
             allow_write: vec![allowed.to_string_lossy().to_string()],
             ..BoundaryConfig::default()
@@ -280,10 +276,92 @@ async fn project_mounts_keep_protections_over_allow_write() {
                 READ_ONLY,
             ),
             denied("printf 'gitdir: /tmp/evil' > .git", READ_ONLY),
+            denied("cat \"$HOME/private.txt\"", "no such file"),
             "printf ok > allowed.txt".to_string(),
         ]
         .join(" && ");
         let output = run(&worktree, &command, &boundaries).await;
+        assert_success(&output);
+    }
+}
+
+#[test]
+#[serial]
+fn project_mounts_reject_allow_write_covering_home() {
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (_project, worktree) = project_fixture(&home);
+    let _home = HomeGuard::set(home.as_os_str());
+    for allowed in [home.clone(), root.path().to_path_buf()] {
+        let boundaries = BoundaryConfig {
+            allow_write: vec![allowed.to_string_lossy().to_string()],
+            ..BoundaryConfig::default()
+        };
+        let error = build_bwrap_args("true", &worktree, &boundaries, "restricted")
+            .expect_err("home-covering writable path");
+        assert!(error.contains("private home directory"), "{error}");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn project_mounts_protect_unmanaged_worktree_pointer() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, _worktree) = project_fixture(&home);
+    let outside = root.path().join("outside-worktree");
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "other",
+            outside.to_str().unwrap(),
+        ],
+    );
+    let pointer = std::fs::read_to_string(outside.join(".git")).unwrap();
+    let _home = HomeGuard::set(home.as_os_str());
+    let command = [
+        denied("printf 'gitdir: /tmp/evil' > .git", READ_ONLY),
+        denied("mv .git .git-old", BUSY_OR_READ_ONLY),
+        "printf edit > edited.txt".to_string(),
+    ]
+    .join(" && ");
+    let output = run(&outside, &command, &BoundaryConfig::default()).await;
+    assert_success(&output);
+    assert_eq!(
+        std::fs::read_to_string(outside.join(".git")).unwrap(),
+        pointer
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn project_mounts_hide_ancestor_state_outside_home() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let (project, _worktree) = project_fixture(&root.path().join("workspace"));
+    let nested = project.join("vendor/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+    let _home = HomeGuard::set(home.as_os_str());
+    let secret = format!("cat {}/.nib/config.toml", project.display());
+    for cwd in [nested.clone(), project.clone(), project.join("vendor")] {
+        let output = run(
+            &cwd,
+            &denied(&secret, "no such file"),
+            &BoundaryConfig::default(),
+        )
+        .await;
         assert_success(&output);
     }
 }

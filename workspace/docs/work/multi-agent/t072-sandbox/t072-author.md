@@ -54,8 +54,17 @@ Implement the claimed scope.
 
 ## Validation
 
-Pending: focused `project_mounts` and `git_status` fixtures with
-`NIB_REQUIRE_BWRAP_TESTS=1`, then `task check` and `task verify`.
+- Candidate ab46461: focused fixtures passed, but independent security review
+  rejected it. Findings: C1 commondir/fsmonitor host execution through a
+  writable `.git`; C2 parent-rename bypass; H1 `allow_write` re-exposing
+  `.nib`; H2 writable worktree pointer; M1 incomplete `core.hooksPath`
+  resolution; M2 main-checkout integrity.
+- Candidate 872e6cd: all Git metadata is read-only mount points, and masks and
+  Git mounts are applied after `allow_write`. `test:sandbox-mounts` (10)
+  and `git_status` (11) pass with `NIB_REQUIRE_BWRAP_TESTS=1`, as do
+  `task check` and `task docs:check`. A full library run on ab46461 showed 3
+  delegation failures under parallel tests and swap pressure; all 3 pass
+  serially. Re-review is pending.
 
 ## Blockers and Dependencies
 
@@ -64,7 +73,7 @@ membership at integration.
 
 ## Next Step
 
-Run the focused fixtures, then self-review and request independent review.
+Address the re-review, then freeze the candidate and run `task verify`.
 
 ## Handoff
 

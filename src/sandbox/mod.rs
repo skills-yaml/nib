@@ -972,11 +972,12 @@ fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), Strin
             "Read-only Git status could not isolate the private HOME directory".to_string(),
         );
     }
-    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
-    if !args
-        .windows(3)
-        .any(|triple| triple == ["--ro-bind", cwd_str, cwd_str])
-    {
+    if !args.windows(3).any(|triple| {
+        triple[0] == "--ro-bind"
+            && triple[1] == triple[2]
+            && triple[1] != "/"
+            && cwd.starts_with(&triple[1])
+    }) {
         return Err("Read-only Git status has no exact repository binding".to_string());
     }
     if args.iter().any(|argument| argument == "--bind") {
@@ -1062,6 +1063,15 @@ fn build_bwrap_args_with_mode(
         if allowed_path == cwd {
             continue;
         }
+        if home
+            .as_ref()
+            .is_some_and(|home| home.starts_with(&allowed_path))
+        {
+            return Err(format!(
+                "configured writable path {} contains the private home directory",
+                allowed_path.display()
+            ));
+        }
         let allowed_str = allowed_path.to_str().ok_or_else(|| {
             format!(
                 "writable path is not valid UTF-8: {}",
@@ -1077,8 +1087,9 @@ fn build_bwrap_args_with_mode(
 
     // State masks and read-only Git metadata come last so no writable bind,
     // including configured allow_write paths, can expose them again.
-    if let Some(project) = &project {
-        project.append_protections(&mut args, cwd, writable)?;
+    match &project {
+        Some(project) => project.append_protections(&mut args, cwd, writable)?,
+        None => project_mounts::append_fallback_protections(&mut args, cwd)?,
     }
 
     args.extend([

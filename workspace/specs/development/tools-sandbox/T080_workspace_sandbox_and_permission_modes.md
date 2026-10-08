@@ -114,6 +114,21 @@ Rules for every level:
 
   Masks and Git protections come after `allow_write`, so no configured path
   can expose nib state or make Git metadata writable.
+- **Further rules from re-review of `872e6cd`:**
+  - An `allow_write` entry that is `$HOME` or one of its ancestors is
+    rejected, because it would replace the home mask.
+  - Every `.nib` directory among the working directory's ancestors is
+    masked, including a project outside `$HOME` reached from a nested
+    repository.
+  - In the fallback plan (no trusted project), a `.git` entry at the working
+    directory, such as an unmanaged linked worktree, submodule or separate
+    Git directory, is bound read-only and a symlink fails closed.
+  - Read-only Git status works from a subdirectory of a managed worktree.
+- **Visible to the sandbox by design:** a managed session can read the main
+  checkout, including untracked files such as `.env` and any credentials
+  embedded in `.git/config` remote URLs. Projects that keep secrets in the
+  checkout should rely on `ask` mode, or on `read-only` with `network = "off"`
+  (D4 mitigations).
 - **Trusted mount sources.** Sources are derived only from the canonical
   working directory and nib's fixed layout:
   - the nearest ancestor with a real `.git` directory; or
@@ -362,8 +377,10 @@ Each phase is independently reviewable and keeps `task verify` green.
   place cannot silently overwrite each other.
 - [ ] AC-6e: With two nib sessions active in one folder, each status line shows
   the other. A crashed session disappears after the heartbeat timeout.
-- [ ] AC-6c: `allow_write` entries that cover the project, an ancestor or
-  `.git` cannot expose `.nib` or make Git metadata writable.
+- [ ] AC-6c: `allow_write` entries that cover the project or `.git` cannot
+  expose `.nib` or make Git metadata writable. Entries covering `$HOME` are
+  rejected. Ancestor `.nib` directories stay hidden from nested repositories,
+  and unmanaged worktree pointers stay read-only.
 - [ ] AC-6f: Editing never creates a branch or commit. A commit happens only
   after an explicit request or approval. On the default or a protected branch,
   a `nib/<topic>` branch is created first and reported. On another branch, the

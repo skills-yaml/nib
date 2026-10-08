@@ -84,11 +84,12 @@ impl ProjectMounts {
         cwd: &Path,
         writable: bool,
     ) -> Result<(), String> {
-        append_state_mask(args, &self.state())?;
+        let workspace = self.workspace(cwd);
+        // The managed worktree lives inside the project state mask; bind it
+        // again between the outer and inner masks.
+        let rebind = self.is_managed().then_some(mode(writable));
+        append_state_masks(args, cwd, &workspace, rebind)?;
         if self.is_managed() {
-            // The managed worktree lives inside the state mask; bind it again.
-            push_mount(args, mode(writable), &self.workspace(cwd))?;
-            append_state_mask(args, &self.worktree.join(".nib"))?;
             protect_git_entry(args, &self.worktree.join(".git"))?;
         }
         protect_git_entry(args, &self.root.join(".git"))?;
@@ -105,6 +106,52 @@ impl ProjectMounts {
             cwd.to_path_buf()
         }
     }
+}
+
+/// Protections for working directories without a trusted project: hide every
+/// ancestor nib state directory and keep a `.git` entry at the working
+/// directory (for example the pointer file of an unmanaged linked worktree,
+/// a submodule or a separate Git directory) read-only.
+pub(super) fn append_fallback_protections(
+    args: &mut Vec<String>,
+    cwd: &Path,
+) -> Result<(), String> {
+    append_state_masks(args, cwd, cwd, None)?;
+    protect_git_entry(args, &cwd.join(".git"))
+}
+
+/// Masks every `.nib` directory among the working directory's ancestors.
+/// Masks outside the workspace come first; when `rebind` is set the workspace
+/// is bound again in that mode before the masks inside it are applied.
+fn append_state_masks(
+    args: &mut Vec<String>,
+    cwd: &Path,
+    workspace: &Path,
+    rebind: Option<&str>,
+) -> Result<(), String> {
+    let states: Vec<PathBuf> = cwd
+        .ancestors()
+        .map(|ancestor| ancestor.join(".nib"))
+        .filter(|state| std::fs::symlink_metadata(state).is_ok())
+        .collect();
+    for state in states
+        .iter()
+        .rev()
+        .filter(|state| !state.starts_with(workspace))
+    {
+        append_state_mask(args, state)?;
+    }
+    if let Some(kind) = rebind {
+        push_mount(args, kind, workspace)?;
+    }
+    for state in states
+        .iter()
+        .rev()
+        .filter(|state| state.starts_with(workspace))
+    {
+        append_state_mask(args, state)?;
+    }
+    Ok(())
 }
 
 fn mode(writable: bool) -> &'static str {
