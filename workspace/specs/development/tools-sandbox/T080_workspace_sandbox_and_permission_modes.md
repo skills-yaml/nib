@@ -140,6 +140,9 @@ Rules for every level:
     repository root is bound onto itself, so the repository cannot be renamed
     away and recreated. `allow_write` areas are scanned and protected like
     the workspace.
+  - An `allow_write` path inside a `.nib` directory that contains the
+    workspace stays hidden, for example a sibling session under
+    `<root>/.nib/worktrees`. This fails safe.
   - Accepted residual risk: repositories or `.nib` directories that the
     sandbox creates itself, nested ones beyond the scan bounds, and symlinked
     nested `.nib` directories are not protected. Repositories the agent
@@ -482,4 +485,5 @@ security review of the mount plan and permission engine is mandatory.
 ## Memory Impact
 
 Status: pending
-Rationale: User decisions D1-D6 (in-place default after checkpoints, `ask` default, network on, a shared folder without a lock, the Claude Code branch and commit rules, and host-side commit/push) and the sandbox mount-plan contract are durable decisions. They are recorded in project memory when each phase is verified.
+Rationale: Phase 1's sandbox decision (read-only Git metadata, trusted-layout
+mounts) is recorded in decisions.md and changelog.md (2026-10-08). User decisions D1-D6 (in-place default after checkpoints, `ask` default, network on, a shared folder without a lock, the Claude Code branch and commit rules, and host-side commit/push) and the sandbox mount-plan contract are durable decisions. They are recorded in project memory when each phase is verified.

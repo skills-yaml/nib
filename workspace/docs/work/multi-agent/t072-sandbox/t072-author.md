@@ -54,17 +54,19 @@ Implement the claimed scope.
 
 ## Validation
 
-- Candidate ab46461: focused fixtures passed, but independent security review
-  rejected it. Findings: C1 commondir/fsmonitor host execution through a
-  writable `.git`; C2 parent-rename bypass; H1 `allow_write` re-exposing
-  `.nib`; H2 writable worktree pointer; M1 incomplete `core.hooksPath`
-  resolution; M2 main-checkout integrity.
-- Candidate 872e6cd: all Git metadata is read-only mount points, and masks and
-  Git mounts are applied after `allow_write`. `test:sandbox-mounts` (10)
-  and `git_status` (11) pass with `NIB_REQUIRE_BWRAP_TESTS=1`, as do
-  `task check` and `task docs:check`. A full library run on ab46461 showed 3
-  delegation failures under parallel tests and swap pressure; all 3 pass
-  serially. Re-review is pending.
+- Phase 1 went through five independent review rounds on these candidates,
+  each fixing the previous round's findings:
+  - ab46461: rejected (C1, C2, H1, H2, M1, M2, L1);
+  - 872e6cd: R1-R5;
+  - 191536b: N1-N4;
+  - 492e42a: P1-P3;
+  - 1b51d24: approved.
+- Focused gates on 1b51d24 passed with `NIB_REQUIRE_BWRAP_TESTS=1`:
+  - `test:sandbox-mounts`: 18;
+  - `git_status`: 11;
+  - sandbox module: 137;
+  - `task check` and `task docs:check`.
+- Final `task verify` is pending on the frozen candidate.
 
 ## Blockers and Dependencies
 
@@ -73,7 +75,8 @@ membership at integration.
 
 ## Next Step
 
-Address the re-review, then freeze the candidate and run `task verify`.
+Freeze the candidate, run `task verify`, then hand off for peer landing and
+shared `development` integration.
 
 ## Handoff
 
