@@ -8,7 +8,7 @@
   generations per provider family. Point releases do not count as separate major
   generations. Keep fewer generations when older models are unavailable; preserve
   current defaults and configured selections.
-- Reference: [T070](../../specs/development/llm-providers/T070_three_generation_model_catalog.md).
+- Reference: [T070](../../specs/test/llm-providers/T070_three_generation_model_catalog.md).
 
 ## 2026-10-07 - Revised catalog retention and OpenRouter Mistral
 
@@ -19,7 +19,7 @@
   generations per provider family, including Mistral families through OpenRouter.
   Point releases remain one generation. Preserve defaults and explicit selected
   models, including selections outside the bundled retention window.
-- Reference: [T071](../../specs/development/llm-providers/T071_two_generation_model_catalog.md).
+- Reference: [T071](../../specs/test/llm-providers/T071_two_generation_model_catalog.md).
 
 ## 2026-10-07 - Latest-major-generation catalog retention
 
@@ -30,7 +30,7 @@
   generation per existing provider family, including Mistral through OpenRouter.
   Point releases remain within the same generation. Preserve current defaults
   and explicit selections outside the bundled retention window.
-- Reference: [T072](../../specs/development/llm-providers/T072_latest_generation_model_catalog.md).
+- Reference: [T072](../../specs/test/llm-providers/T072_latest_generation_model_catalog.md).
 
 ## 2026-10-08 - Provider-specific catalog selection
 
@@ -44,4 +44,4 @@
   their latest major generation. Preserve defaults and explicit selections.
 - Clarification: The user explicitly chose three newest general Grok releases and
   general OpenAI models only; exclude Cyber, Pro and Grok Build suggestions.
-- Reference: [T073](../../specs/development/llm-providers/T073_provider_specific_model_selection.md).
+- Reference: [T073](../../specs/test/llm-providers/T073_provider_specific_model_selection.md).

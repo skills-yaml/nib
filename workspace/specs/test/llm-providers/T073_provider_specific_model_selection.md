@@ -1,17 +1,18 @@
 # T073: Provider-Specific Model Selection
 
-State: development
+State: test
 Primary Feature: llm-providers
 
-Status rationale: On 2026-10-08 the user replaced uniform generation retention
-with explicit OpenAI, Grok and Gemini selections. The exact local candidate
-passed independent review and all required native verification gates.
-Shared integration, main delivery and publication need
-separate observed evidence.
+Status rationale: Confirmed shared development integration at `81c37a1908ec1032809e97cdf0b0b39d5253603b`
+was re-read after the successful synchronization push on 2026-10-08T17:02:18Z.
+Independent exact-candidate review and task verify/docs:check/check:all-targets
+passed. Shared release is minor 0.4.0; T073 supersedes earlier retention
+contracts. Main delivery, publication and T023 live qualification remain
+separate.
 
 Related: [T072](T072_latest_generation_model_catalog.md),
 [T069](T069_current_model_catalog_refresh.md) and
-[T023](T023_live_llm_provider_model_integration_qualification.md).
+[T023](../../development/llm-providers/T023_live_llm_provider_model_integration_qualification.md).
 
 ## Problem and Scope
 
@@ -175,3 +176,24 @@ Earlier 0.3.2 statements record the superseded pre-integration reservation.
 Combined exact review and native gates are pending; no catalog shared
 integration, main delivery, publication or live-provider qualification is
 inferred from this local reconciliation.
+
+## Shared Integration Evidence (2026-10-08)
+
+Outcome: passed
+
+The synchronization push advanced remote `development` from `045e0e2` to
+`81c37a1908ec1032809e97cdf0b0b39d5253603b`. The remote ref was re-read at
+2026-10-08T17:02:18Z and matched that exact reviewed combined revision.
+Independent spec-compliance and correctness review approved the candidate
+after the two documentation findings were fixed. Fresh serial `task verify`,
+`task docs:check`, `task check:all-targets` and `git diff --check` passed
+before pushing. Verification used debug-symbol-free build profiles after the
+earlier filesystem-capacity failure; test assertions and coverage of the
+complete non-ignored suite were preserved.
+
+This observed shared integration establishes test state under minor 0.4.0.
+T073 governs the final catalog selection; earlier retention proposals remain
+preserved as superseded history. This record does not establish main delivery,
+publication, paid qualification or completion of later T080 phases. The
+subsequent lifecycle-record change renews independent review and affected
+documentation, governance and static checks; runtime inputs remain unchanged.

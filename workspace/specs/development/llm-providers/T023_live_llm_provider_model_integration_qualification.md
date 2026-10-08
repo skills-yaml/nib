@@ -1515,7 +1515,7 @@ Rationale: Live qualification and its final durable compatibility outcome remain
 
 The user subsequently requested the bundled catalog upgrade and explicitly included
 the bounded Anthropic compatibility repair in
-[T069](T069_current_model_catalog_refresh.md). Its local candidate changes the
+[T069](../../test/llm-providers/T069_current_model_catalog_refresh.md). Its local candidate changes the
 Anthropic picker/default to direct API ID `claude-opus-5-5` and stops forcing
 thinking off on capped text requests. This newer authorization supersedes the
 2026-10-01 instruction to retain the older bundled default for that investigation;

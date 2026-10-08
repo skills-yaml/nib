@@ -701,3 +701,20 @@ from 0.3.1 and includes T069-T073 plus T080; native mirrors and membership are
 reconciled without a separate 0.3.2 release or another version bump. Further
 T080 phases, T023 live qualification, main delivery and publication remain
 separate. Combined review and verification precede the synchronization push.
+
+## 2026-10-08 - Shared 0.4.0 catalog and sandbox integration
+
+- Type: fact
+- Source: verified remote development 81c37a1908ec1032809e97cdf0b0b39d5253603b; release ledger and T069-T073 integration records
+- Confidence: high
+- Review: independent exact spec-compliance and correctness review approved 81c37a1; fresh complete native gates passed
+- Supersedes: catalog integration-pending snapshots and catalog/sandbox release-scope question
+
+Content:
+
+The catalog and Anthropic continuation work is integrated with T080 phase 1
+in shared development under the single minor 0.4.0 release. The release ledger
+includes T069-T073 in test and T080 in development; native mirrors use the
+same target without another bump. T073 governs the final catalog selection.
+T080's later phases, main delivery, publication of this combined revision
+and T023 live-provider acceptance remain separate.
