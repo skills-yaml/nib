@@ -121,9 +121,13 @@ implemented:
   interrupted one, that a waiting plan survives a cancelled side request and
   a gated request, that only the bound run can clear its plan, and that the
   model receives the declared verification ids end to end.
-- **Pre-existing, out of scope.** Cancelling any run still marks the open
-  plan's current step `Cancelled`. That marking no longer leads to clearing
-  a plan the run did not bind.
+- **Second re-review (`7c62fc2`).** "Waits on the user" now uses the same
+  rules as question recovery: plan admission plus recoverable question
+  records (`plan_has_recoverable_question`). Cancelling the run that asked a
+  question therefore clears its plan instead of leaving an unrecoverable trap
+  (AC-2). Cancellation marks only the plan the cancelled run bound, so a
+  cancelled side request leaves a waiting question resumable. A test proves
+  that `resume` reopens the form afterwards (AC-3).
 
 ## Implementation Evidence
 

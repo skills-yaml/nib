@@ -258,7 +258,8 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
         Ok(_) => {
             if let Some(cancellation) = cancellation {
                 if cancellation.is_cancelled() {
-                    reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
+                    reconcile_cancelled_run(&cancellation_store, session_id, &run_id, &stream_tx)
+                        .await
                 } else {
                     let mut running = Box::pin(run_agent_operation(
                         runtime,
@@ -280,7 +281,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                                 running.await
                             } else {
                                 drop(running);
-                                reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
+                                reconcile_cancelled_run(&cancellation_store, session_id, &run_id, &stream_tx).await
                             }
                         },
                         result = &mut running => result,

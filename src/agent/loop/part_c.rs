@@ -1170,7 +1170,10 @@ async fn cancellation_marks_running_verification_cancelled_without_passing_it() 
         .save(&mut session)
         .expect("persist running verification");
 
-    let summary = reconcile_cancelled_run(&store, &session.id, &None)
+    let plan_id = session.plan.as_ref().expect("plan").id.clone();
+    record_run_plan_binding(&store, &session.id, "cancelled-run", &plan_id)
+        .expect("bind plan to the cancelled run");
+    let summary = reconcile_cancelled_run(&store, &session.id, "cancelled-run", &None)
         .await
         .expect("reconcile cancellation");
 
@@ -1500,6 +1503,13 @@ async fn waiting_plan_survives_cancelled_and_gated_side_requests() {
     let plan_id = plan.id.clone();
     session.plan = Some(plan);
     let invocation_id = crate::tools::ToolInvocationId::new();
+    let question_run = "question-run";
+    session.events.push(crate::session::SessionEvent {
+        index: session.events.len(),
+        kind: "run_started".to_string(),
+        details: serde_json::json!({"run_id": question_run}),
+        timestamp: Some(chrono::Utc::now()),
+    });
     let question_event_index = session.events.len();
     session.events.push(crate::session::SessionEvent {
         index: question_event_index,
@@ -1522,9 +1532,19 @@ async fn waiting_plan_survives_cancelled_and_gated_side_requests() {
             question_event_index,
             reason: Some("left unanswered".to_string()),
             outcome: Some("left_unanswered".to_string()),
+            run_id: Some(question_run.to_string()),
             ..Default::default()
         });
+    session.events.push(crate::session::SessionEvent {
+        index: session.events.len(),
+        kind: "run_terminal".to_string(),
+        details: serde_json::json!({"run_id": question_run, "outcome": "waiting_for_user_input"}),
+        timestamp: Some(chrono::Utc::now()),
+    });
     store.save(&mut session).unwrap();
+    assert!(crate::interactive::plan_has_recoverable_question(
+        &store.load(&session.id).unwrap()
+    ));
 
     let cancellation = CancellationSignal::new();
     cancellation.cancel();
@@ -1558,10 +1578,22 @@ async fn waiting_plan_survives_cancelled_and_gated_side_requests() {
         Some(plan_id.as_str())
     );
     assert!(persisted.has_unresolved_clarification(Some(&plan_id)));
+    assert!(persisted.plan.as_ref().unwrap().outcome.is_none());
     assert!(!persisted
         .events
         .iter()
         .any(|event| event.kind == "plan_invalidated"));
+    // The waiting question still reopens through ordinary question recovery.
+    let effect = crate::interactive::recover_question_conversation(&store, &session.id, "resume")
+        .expect("question recovery")
+        .expect("recovery effect");
+    assert!(
+        matches!(
+            effect,
+            crate::interactive::QuestionRecoveryEffect::OpenForm(_)
+        ),
+        "{effect:?}"
+    );
 }
 
 /// T081: only the run that bound a plan can clear it.
