@@ -297,6 +297,11 @@ fn detached_terminal_redacts_profile_and_config_secrets_before_persistence() {
     assert!(stdout.contains("[REDACTED]"));
     assert!(!stdout.contains(secret));
     assert!(!stdout.contains(config_secret));
+    // T080: strict bwrap hides nib state, so the configuration is not even
+    // readable; unsandboxed platforms still prove redaction above.
+    if cfg!(target_os = "linux") && std::env::var_os("NIB_REQUIRE_BWRAP_TESTS").is_some() {
+        assert!(stdout.contains("config hidden"), "{stdout}");
+    }
 
     let store = SessionStore::for_project(root.path()).expect("profile sessions");
     let session_path = store.sessions_dir().join(format!(
