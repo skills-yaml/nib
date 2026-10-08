@@ -177,8 +177,9 @@ Combined exact review and native gates are pending; no catalog shared
 integration, main delivery, publication or live-provider qualification is
 inferred from this local reconciliation.
 
-## Shared Integration Evidence (2026-10-08)
+## Integration Evidence
 
+Revision: 81c37a1908ec1032809e97cdf0b0b39d5253603b
 Outcome: passed
 
 The synchronization push advanced remote `development` from `045e0e2` to
