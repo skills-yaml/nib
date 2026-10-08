@@ -176,7 +176,10 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "session disappeared before run resource setup".to_string())?,
     );
-    let compaction_request = cfg.mode == "compact";
+    // T081 clears interrupted plans only for interactive chat requests, the
+    // only route the planning gate guards. Compaction never changes plans;
+    // subagents, background tasks and CLI runs keep failed plans for review.
+    let clears_plans = cfg.interactive_request && cfg.mode != "compact";
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -191,7 +194,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
             append_session_event(session, "run_started", json!({"run_id": run_id.clone()}));
             // Plans interrupted before T081 cleared them at termination are
             // cleared now, so they cannot trap this request.
-            if !compaction_request {
+            if clears_plans {
                 clear_legacy_interrupted_plan(session);
             }
             Ok(())
@@ -311,7 +314,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, &outcome)?;
-            if !explicit_compaction {
+            if clears_plans {
                 clear_after_run_logged(&cancellation_store, session_id, &run_id, &outcome);
             }
             Ok(summary)
@@ -325,7 +328,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, "local_error")?;
-            if admitted && !explicit_compaction {
+            if admitted && clears_plans {
                 clear_after_run_logged(&cancellation_store, session_id, &run_id, "local_error");
             }
             Err(error)

@@ -129,6 +129,17 @@ implemented:
   cancelled side request leaves a waiting question resumable. A test proves
   that `resume` reopens the form afterwards (AC-3).
 
+## Scope Refinement From Verification (2026-10-08)
+
+`task verify` on `047dd8d` showed that subagent child runs also cleared their
+failed plans, which delegation tests inspect. The user's decision concerns
+interrupted *interaction*, and the planning gate only guards interactive chat
+requests. Clearing is therefore limited to interactive requests
+(`interactive_request`, chat and TUI execute mode) outside compaction.
+Subagents, background and scheduled tasks and CLI runs keep their failed
+plans for review, as before. Tests for non-interactive runs keep their
+original expectations as evidence of the unchanged behavior.
+
 ## Implementation Evidence
 
 - Single exit: `run_agent_loop_with_runtime_and_recovery` clears after

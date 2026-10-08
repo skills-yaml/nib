@@ -788,11 +788,9 @@ async fn mixed_question_batch_is_rejected_before_any_side_effect() {
         .tool_calls
         .iter()
         .all(|call| call.tool_name.as_deref() != Some("run_terminal")));
-    // T081: the rejected batch interrupted the run, so its plan is cleared.
-    assert!(loaded.plan.is_none());
-    assert!(loaded.events.iter().any(|event| {
-        event.kind == "plan_invalidated" && event.details["reason"] == "interrupted"
-    }));
+    // T081 clears plans only for interactive chat requests; this run is not
+    // interactive, so its interrupted plan is kept for review.
+    assert_eq!(loaded.plan.as_ref().unwrap().steps[0].status, "Blocked");
     loaded.validate_message_sequence().unwrap();
 }
 
@@ -836,13 +834,11 @@ async fn failed_terminal_observation_cannot_be_resolved_by_model_text_alone() {
     assert!(terminal.error.as_deref().is_some_and(|error| {
         error.contains("recoverable stderr") && error.contains("command exited with 7")
     }));
-    // T081: the blocked plan is cleared after the run and audited.
-    assert!(loaded.plan.is_none());
-    assert!(loaded.events.iter().any(|event| {
-        event.kind == "plan_invalidated"
-            && event.details["reason"] == "interrupted"
-            && event.details["plan_outcome"] == "blocked_step_unresolved"
-    }));
+    // T081 clears plans only for interactive chat requests; this run is not
+    // interactive, so its interrupted plan is kept for review.
+    let plan = loaded.plan.as_ref().expect("blocked plan");
+    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
+    assert_eq!(plan.outcome.as_deref(), Some("blocked_step_unresolved"));
     assert!(loaded.events.iter().any(|event| {
         event.kind == "step_completion_rejected"
             && event.details["reason"] == "blocked_step_unresolved"
@@ -1088,14 +1084,15 @@ async fn cancellation_interrupts_blocked_approval_and_reconciles_the_session() {
     let persisted = store.load(&session_id).expect("cancelled session");
     assert!(summary.last_message.is_none());
     assert_eq!(persisted.messages, messages_before_cancel);
-    // T081: an interrupted plan is cleared and audited instead of kept.
-    assert!(persisted.plan.is_none());
-    assert!(persisted.events.iter().any(|event| {
-        event.kind == "plan_invalidated"
-            && event.details["reason"] == "interrupted"
-            && event.details["outcome"] == "cancelled_by_user"
-            && event.details["plan_outcome"] == "cancelled_by_user"
-    }));
+    // T081 clears plans only for interactive chat requests; this run is not
+    // interactive, so its interrupted plan is kept for review.
+    let plan = persisted.plan.as_ref().expect("generated plan");
+    assert_eq!(plan.outcome.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(plan.steps[plan.current_step_index].status, "Cancelled");
+    assert_eq!(
+        plan.steps[plan.current_step_index].outcome.as_deref(),
+        Some("cancelled_by_user")
+    );
     persisted.validate_message_sequence().unwrap();
     let cancellation_event = persisted
         .events
