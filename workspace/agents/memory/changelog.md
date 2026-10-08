@@ -548,3 +548,15 @@ Appended the verified T068 codec delivery, exact acceptance/gate evidence, uncha
 Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
+
+## 2026-10-08 - T080 phase 1 sandbox mount plan decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent security review approved 1b51d24
+- Supersedes: none
+
+Content:
+
+Recorded the read-only Git metadata and trusted-layout mount plan decision in decisions.md after the independent review approved phase 1.

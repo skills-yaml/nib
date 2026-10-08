@@ -1,6 +1,10 @@
 //! Hybrid sandbox: executable bwrap isolation with a documented direct fallback.
 
 pub mod process;
+mod project_mounts;
+#[cfg(test)]
+#[path = "project_mounts_tests.rs"]
+mod project_mounts_tests;
 pub(crate) mod protected_owner;
 #[cfg(windows)]
 #[doc(hidden)]
@@ -955,11 +959,12 @@ fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), Strin
         allow_write: Vec::new(),
         network: "disabled".to_string(),
     };
-    let mut args = build_bwrap_args(
+    let args = build_bwrap_args_with_mode(
         "exec git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short --branch",
         cwd,
         &boundaries,
         "restricted",
+        false,
     )?;
     let home_str = home.to_str().ok_or("private HOME is not valid UTF-8")?;
     if !args.windows(2).any(|pair| pair == ["--tmpfs", home_str]) {
@@ -967,12 +972,14 @@ fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), Strin
             "Read-only Git status could not isolate the private HOME directory".to_string(),
         );
     }
-    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
-    let binding = args
-        .windows(3)
-        .position(|triple| triple == ["--bind", cwd_str, cwd_str])
-        .ok_or("Read-only Git status has no exact repository binding")?;
-    args[binding] = "--ro-bind".to_string();
+    if !args.windows(3).any(|triple| {
+        triple[0] == "--ro-bind"
+            && triple[1] == triple[2]
+            && triple[1] != "/"
+            && cwd.starts_with(&triple[1])
+    }) {
+        return Err("Read-only Git status has no exact repository binding".to_string());
+    }
     if args.iter().any(|argument| argument == "--bind") {
         return Err("Read-only Git status cannot include writable bindings".to_string());
     }
@@ -983,7 +990,19 @@ fn build_bwrap_args(
     command: &str,
     cwd: &Path,
     boundaries: &BoundaryConfig,
+    profile: &str,
+) -> Result<Vec<String>, String> {
+    build_bwrap_args_with_mode(command, cwd, boundaries, profile, true)
+}
+
+/// Builds the bwrap arguments. `writable` selects whether the working tree and
+/// common Git directory are writable; read-only callers get no writable binds.
+fn build_bwrap_args_with_mode(
+    command: &str,
+    cwd: &Path,
+    boundaries: &BoundaryConfig,
     _profile: &str,
+    writable: bool,
 ) -> Result<Vec<String>, String> {
     let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
     let mut args = vec![
@@ -1006,20 +1025,22 @@ fn build_bwrap_args(
     }
 
     let home_isolation = append_home_isolation(&mut args, cwd)?;
-    args.extend([
-        "--bind".to_string(),
-        cwd_str.to_string(),
-        cwd_str.to_string(),
-        "--chdir".to_string(),
-        cwd_str.to_string(),
-    ]);
-    if !home_isolation.hidden {
-        append_credential_masks(&mut args, cwd);
+    let home = std::env::var_os("HOME").and_then(|home| PathBuf::from(home).canonicalize().ok());
+    let project = project_mounts::ProjectMounts::resolve(cwd, home.as_deref());
+    match &project {
+        Some(project) => project.append_binds(&mut args, cwd, writable)?,
+        None => args.extend([
+            if writable { "--bind" } else { "--ro-bind" }.to_string(),
+            cwd_str.to_string(),
+            cwd_str.to_string(),
+            "--chdir".to_string(),
+            cwd_str.to_string(),
+        ]),
     }
-    if let Some(cargo_home) = &home_isolation.cargo_home {
-        append_cargo_credential_masks(&mut args, cargo_home)?;
+    if !writable && !boundaries.allow_write.is_empty() {
+        return Err("read-only sandbox commands cannot include writable paths".to_string());
     }
-
+    let mut allowed_paths = Vec::new();
     for allowed in &boundaries.allow_write {
         let requested = PathBuf::from(allowed);
         let requested = if requested.is_absolute() {
@@ -1036,6 +1057,15 @@ fn build_bwrap_args(
         if allowed_path == cwd {
             continue;
         }
+        if home
+            .as_ref()
+            .is_some_and(|home| home.starts_with(&allowed_path))
+        {
+            return Err(format!(
+                "configured writable path {} contains the private home directory",
+                allowed_path.display()
+            ));
+        }
         let allowed_str = allowed_path.to_str().ok_or_else(|| {
             format!(
                 "writable path is not valid UTF-8: {}",
@@ -1047,6 +1077,30 @@ fn build_bwrap_args(
             allowed_str.to_string(),
             allowed_str.to_string(),
         ]);
+        allowed_paths.push(allowed_path);
+    }
+
+    // State masks, read-only Git metadata and finally credential masks come
+    // last so no writable bind, including configured allow_write paths and
+    // the workspace re-binds of the mount plan, can expose them again.
+    let hidden_home = home.as_deref().filter(|_| home_isolation.hidden);
+    match &project {
+        Some(project) => {
+            project.append_protections(&mut args, cwd, writable, hidden_home, &allowed_paths)?
+        }
+        None => project_mounts::append_fallback_protections(
+            &mut args,
+            cwd,
+            writable,
+            hidden_home,
+            &allowed_paths,
+        )?,
+    }
+    if !home_isolation.hidden {
+        append_credential_masks(&mut args, cwd);
+    }
+    if let Some(cargo_home) = &home_isolation.cargo_home {
+        append_cargo_credential_masks(&mut args, cargo_home)?;
     }
 
     args.extend([

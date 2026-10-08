@@ -298,6 +298,11 @@ tasks:
     cmds:
       - 'cargo test --lib git_status -- --test-threads=1'
 
+  test:sandbox-mounts:
+    desc: Verify the project-aware sandbox mount plan and protected Git surfaces
+    cmds:
+      - 'cargo test --lib project_mounts -- --test-threads=1'
+
   test:task-contract:
     desc: Validate Task composition and strict Rust lint policy
     cmds:
