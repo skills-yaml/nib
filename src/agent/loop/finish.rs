@@ -1180,6 +1180,7 @@ pub(crate) fn clears_unfinished_plan(outcome: &str) -> bool {
             | "unresolved_clarification"
             | "planning_required_active_plan"
             | "planning_required_active_run"
+            | "plan_binding_changed"
     ) && (is_agent_failure_outcome(outcome)
         || matches!(
             outcome,
@@ -1241,7 +1242,53 @@ pub(crate) fn recorded_plan_interruption(plan: &crate::session::Plan) -> Option<
         .filter(|outcome| clears_unfinished_plan(outcome))
 }
 
-/// Clears the session's unfinished plan after a run ends with `outcome`.
+/// Records that `run_id` bound `plan_id` as the plan it executes, so only that
+/// run's interruption can clear it. Repeated bindings of the same plan by the
+/// same run are recorded once.
+pub(crate) fn record_run_plan_binding(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    plan_id: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            if run_bound_plan(session, run_id).as_deref() != Some(plan_id) {
+                append_session_event(
+                    session,
+                    "run_plan_bound",
+                    json!({"run_id": run_id, "plan_id": plan_id}),
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("failed to record run plan binding: {error}"))
+}
+
+/// The plan most recently bound by `run_id`, if any.
+pub(crate) fn run_bound_plan(session: &Session, run_id: &str) -> Option<String> {
+    session.events.iter().rev().find_map(|event| {
+        if event.kind != "run_plan_bound"
+            || event.details.get("run_id").and_then(Value::as_str) != Some(run_id)
+        {
+            return None;
+        }
+        event
+            .details
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// Whether `plan_id` waits on the user through a clarification or question
+/// form, which must survive any unrelated interruption.
+fn plan_waits_on_user(session: &Session, plan_id: &str) -> bool {
+    session.has_unresolved_clarification(Some(plan_id))
+}
+
+/// Clears the session's unfinished plan after a run ends with `outcome`, but
+/// only when it is the plan this run bound and it does not wait on the user.
 pub(crate) fn clear_interrupted_plan_after_run(
     store: &SessionStore,
     session_id: &str,
@@ -1253,6 +1300,14 @@ pub(crate) fn clear_interrupted_plan_after_run(
     }
     store
         .update_session(session_id, |session| {
+            let Some(plan_id) = session.plan.as_ref().map(|plan| plan.id.clone()) else {
+                return Ok(false);
+            };
+            if run_bound_plan(session, run_id).as_deref() != Some(plan_id.as_str())
+                || plan_waits_on_user(session, &plan_id)
+            {
+                return Ok(false);
+            }
             Ok(clear_interrupted_plan_in_session(
                 session,
                 outcome,
@@ -1260,6 +1315,29 @@ pub(crate) fn clear_interrupted_plan_after_run(
             ))
         })
         .map_err(|error| format!("failed to clear interrupted plan: {error}"))
+}
+
+/// One-time migration for sessions created before T081, which recorded no run
+/// plan bindings: clears a plan whose recorded outcome is an interruption,
+/// unless it waits on the user. Returns whether a plan was cleared.
+pub(crate) fn clear_legacy_interrupted_plan(session: &mut Session) -> bool {
+    if session
+        .events
+        .iter()
+        .any(|event| event.kind == "run_plan_bound")
+    {
+        return false;
+    }
+    let Some(plan) = session.plan.as_ref() else {
+        return false;
+    };
+    let Some(outcome) = recorded_plan_interruption(plan) else {
+        return false;
+    };
+    if plan_waits_on_user(session, &plan.id) {
+        return false;
+    }
+    clear_interrupted_plan_in_session(session, &outcome, None)
 }
 
 pub(crate) fn is_agent_failure_outcome(outcome: &str) -> bool {

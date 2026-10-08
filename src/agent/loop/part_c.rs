@@ -1428,3 +1428,221 @@ async fn blocked_plan_from_an_earlier_run_does_not_trap_the_next_request() {
             && event.details["previous_plan_id"] == plan_id.as_str()
     }));
 }
+
+fn t081_plan(outcome: Option<&str>) -> crate::session::Plan {
+    let mut plan = pending_plan("finish the original plan", "do the original work");
+    plan.approve();
+    if let Some(outcome) = outcome {
+        plan.outcome = Some(outcome.to_string());
+        plan.steps[0].status = "Blocked".to_string();
+        plan.steps[0].outcome = Some(outcome.to_string());
+    }
+    plan
+}
+
+async fn t081_request(dir: &std::path::Path, session_id: &str, goal: &str) -> AgentRunSummary {
+    run_agent_loop(
+        dir.to_path_buf(),
+        session_id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 5,
+            auto_approve: true,
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("request runs")
+}
+
+/// T081 M1: the fixture really reaches the planning gate when an unfinished
+/// plan that was not interrupted stays open, and the same request is not
+/// trapped once the plan's interruption is recorded.
+#[tokio::test]
+async fn planning_gate_fires_for_open_plans_and_not_for_interrupted_ones() {
+    let goal = crate::llm::mock::PLANNING_GATE_FIXTURE_GOAL;
+    for (outcome, gated) in [(None, true), (Some("tool_execution_failed"), false)] {
+        let dir = tempdir().unwrap();
+        save_config(dir.path(), &mock_config()).unwrap();
+        let store = SessionStore::for_project(dir.path()).unwrap();
+        let mut session = store.create_session();
+        let plan = t081_plan(outcome);
+        let plan_id = plan.id.clone();
+        session.plan = Some(plan);
+        store.save(&mut session).unwrap();
+
+        let summary = t081_request(dir.path(), &session.id, goal).await;
+        let persisted = store.load(&session.id).unwrap();
+        assert_eq!(
+            summary.outcome == "planning_required_active_plan",
+            gated,
+            "{outcome:?}: {}",
+            summary.outcome
+        );
+        let kept = persisted
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.id == plan_id);
+        assert_eq!(kept, gated, "{outcome:?}");
+    }
+}
+
+/// T081 AC-3 / M2: a plan waiting on a question survives a cancelled side
+/// request and a later request; the question stays answerable.
+#[tokio::test]
+async fn waiting_plan_survives_cancelled_and_gated_side_requests() {
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let mut session = store.create_session();
+    let plan = t081_plan(None);
+    let plan_id = plan.id.clone();
+    session.plan = Some(plan);
+    let invocation_id = crate::tools::ToolInvocationId::new();
+    let question_event_index = session.events.len();
+    session.events.push(crate::session::SessionEvent {
+        index: question_event_index,
+        kind: "question_required".to_string(),
+        details: serde_json::json!({
+            "invocation_id": invocation_id,
+            "question": "Which target?",
+            "options": ["alpha", "beta"],
+        }),
+        timestamp: Some(chrono::Utc::now()),
+    });
+    session
+        .clarifications
+        .push(crate::session::ClarificationRecord {
+            invocation_id,
+            plan_id: Some(plan_id.clone()),
+            question: "Which target?".to_string(),
+            options: vec!["alpha".to_string(), "beta".to_string()],
+            status: crate::session::ClarificationStatus::Unresolved,
+            question_event_index,
+            reason: Some("left unanswered".to_string()),
+            outcome: Some("left_unanswered".to_string()),
+            ..Default::default()
+        });
+    store.save(&mut session).unwrap();
+
+    let cancellation = CancellationSignal::new();
+    cancellation.cancel();
+    let cancelled = run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        "a side question",
+        AgentLoopConfig {
+            max_steps: 5,
+            auto_approve: true,
+            interactive_request: true,
+            cancellation: Some(cancellation),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled side request");
+    assert_eq!(cancelled.outcome, "cancelled_by_user");
+
+    let gated = t081_request(
+        dir.path(),
+        &session.id,
+        crate::llm::mock::PLANNING_GATE_FIXTURE_GOAL,
+    )
+    .await;
+    assert_eq!(gated.outcome, "planning_required_active_plan");
+
+    let persisted = store.load(&session.id).unwrap();
+    assert_eq!(
+        persisted.plan.as_ref().map(|plan| plan.id.as_str()),
+        Some(plan_id.as_str())
+    );
+    assert!(persisted.has_unresolved_clarification(Some(&plan_id)));
+    assert!(!persisted
+        .events
+        .iter()
+        .any(|event| event.kind == "plan_invalidated"));
+}
+
+/// T081: only the run that bound a plan can clear it.
+#[test]
+fn clearing_requires_the_plan_bound_by_the_run() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let mut session = store.create_session();
+    let plan = t081_plan(None);
+    let plan_id = plan.id.clone();
+    session.plan = Some(plan);
+    store.save(&mut session).unwrap();
+
+    assert!(!clear_interrupted_plan_after_run(
+        &store,
+        &session.id,
+        "run-a",
+        "tool_execution_failed"
+    )
+    .unwrap());
+    record_run_plan_binding(&store, &session.id, "run-b", &plan_id).unwrap();
+    assert!(!clear_interrupted_plan_after_run(
+        &store,
+        &session.id,
+        "run-a",
+        "tool_execution_failed"
+    )
+    .unwrap());
+    assert!(!clear_interrupted_plan_after_run(
+        &store,
+        &session.id,
+        "run-b",
+        "plan_binding_changed"
+    )
+    .unwrap());
+    assert!(clear_interrupted_plan_after_run(
+        &store,
+        &session.id,
+        "run-b",
+        "tool_execution_failed"
+    )
+    .unwrap());
+    assert!(store.load(&session.id).unwrap().plan.is_none());
+}
+
+/// T081 AC-4 / M2: the model receives the rejection reason and the declared
+/// verification ids, and the run is not ended by the rejection itself.
+#[tokio::test]
+async fn undeclared_verification_reaches_the_model_with_declared_ids() {
+    let goal = crate::llm::mock::UNDECLARED_VERIFICATION_FIXTURE_GOAL;
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let mut session = store.create_session();
+    let mut plan = pending_plan(goal, goal);
+    plan.approve();
+    session.plan = Some(plan);
+    store.save(&mut session).unwrap();
+
+    let summary = run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 4,
+            auto_approve: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("run reconciles");
+    assert_ne!(summary.outcome, "tool_execution_failed");
+
+    let saved = store.load(&session.id).unwrap();
+    let observation = saved
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.content.clone())
+        .find(|content| content.contains("verification binding was rejected"))
+        .expect("provider-facing rejection");
+    assert!(observation.contains("review-task-check"), "{observation}");
+    assert!(observation.contains("declared: none"), "{observation}");
+}

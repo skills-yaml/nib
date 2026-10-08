@@ -57,6 +57,13 @@ impl MockLlmClient {
 
 // Keep the canonical `LlmError` shape used by `LlmClient`; boxing only these
 // internal helpers would add an adapter-specific error boundary.
+/// Goal whose first step cites an undeclared verification id (T081 fixtures).
+pub(crate) const UNDECLARED_VERIFICATION_FIXTURE_GOAL: &str =
+    "t081 undeclared verification fixture";
+
+/// Goal that makes the answer-only route request planning (T081 fixtures).
+pub(crate) const PLANNING_GATE_FIXTURE_GOAL: &str = "t081 planning gate fixture";
+
 #[allow(clippy::result_large_err)]
 fn mock_tool_response(
     calls: Vec<ToolCallRequest>,
@@ -249,6 +256,18 @@ impl LlmClient for MockLlmClient {
         let is_planner =
             tools.is_some_and(|tools| tools.iter().any(|tool| tool.name() == "submit_plan"));
 
+        // T081 fixture: the answer-only route asks for the normal planning path,
+        // which is the only route to the active-plan planning gate.
+        let is_answer_route =
+            tools.is_some_and(|tools| tools.iter().any(|tool| tool.name() == "request_plan"));
+        if is_answer_route && last.contains(PLANNING_GATE_FIXTURE_GOAL) {
+            return mock_tool_response(
+                vec![ToolCallRequest::new("request_plan", json!({}))],
+                scope,
+                false,
+            );
+        }
+
         // Keep the release PTY failure/recovery probe deterministic and entirely
         // offline. The fault is available only under the explicit smoke environment
         // and one exact fixture goal; ordinary Mock callers cannot trigger it.
@@ -364,6 +383,16 @@ impl LlmClient for MockLlmClient {
                         ToolCallRequest::new("record_probe_a", json!({"probe": "a"})),
                         ToolCallRequest::new("record_probe_b", json!({"probe": "b"})),
                     ],
+                    scope,
+                    true,
+                );
+            }
+            if last.contains(UNDECLARED_VERIFICATION_FIXTURE_GOAL) {
+                return mock_tool_response(
+                    vec![ToolCallRequest::new(
+                        "grep",
+                        json!({"pattern": "t081", "verification_id": "review-task-check"}),
+                    )],
                     scope,
                     true,
                 );

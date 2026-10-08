@@ -527,7 +527,7 @@ fn stream_end_maps_local_error_instead_of_showing_the_token() {
     assert!(!activities[0].body.contains("local_error"));
     assert_eq!(
             stream_end_status_line("local_error"),
-            "[stream ended] Run stopped. The session was saved. Inspect /status, then retry or run nib doctor. Any unfinished plan was cleared; describe the next request in the chat."
+            "[stream ended] Run stopped. The session was saved. Inspect /status, then retry or run nib doctor."
         );
     let report = user_visible_stop_report("local_error", "sess-1");
     assert!(report.starts_with("Run stopped."));

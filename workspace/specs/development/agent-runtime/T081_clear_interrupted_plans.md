@@ -44,8 +44,11 @@ cleared, and the user can ask for a new plan through the chat.
    includes the rejection reason and the step's declared verification ids, for
    example `verification "review-task-check" is not declared on step 0;
    declared: [...]`.
-5. The terminal status line says the plan was cleared and that the user can
-   describe the next request in chat.
+5. `/continue` on a cleared plan explains that it was cleared and why. The
+   planning-gate message names the remaining ways forward: the pending
+   question, `/continue <plan-id>` or `/new`. A generic "plan was cleared"
+   note on every stop line was dropped in review, because it would also
+   appear when no plan was cleared.
 
 ## Exclusions and Compatibility
 
@@ -97,6 +100,30 @@ cleared, and the user can ask for a new plan through the chat.
 4. Update tests that expected interrupted plans to persist; add fixtures for
    the outcome matrix, the legacy blocked-plan session, `/continue` and
    verification errors.
+
+## Review Revision (2026-10-08)
+
+Independent review of `86a9cb2` required the following changes, now
+implemented:
+- **H1.** Clear only the plan this run bound. Each run records
+  `run_plan_bound` (run id, plan id) when it routes to or generates a plan,
+  and the exit clear requires that binding. A plan that waits on the user
+  (any unresolved clarification or question form, including one whose run
+  was cancelled) is never cleared. `plan_binding_changed` never clears.
+- **H2.** Explicit compaction never clears plans, eagerly or lazily.
+- **Legacy migration.** The start-of-run clear applies only to sessions with
+  no `run_plan_bound` events (created before T081), and skips plans that wait
+  on the user.
+- **L3.** A failure to clear is logged and audited (`plan_clear_failed`) and
+  never discards the run's result.
+- **M1 and M2.** A mock answer-route fixture drives the real planning gate.
+  Tests now prove that the gate fires for an open plan and not for an
+  interrupted one, that a waiting plan survives a cancelled side request and
+  a gated request, that only the bound run can clear its plan, and that the
+  model receives the declared verification ids end to end.
+- **Pre-existing, out of scope.** Cancelling any run still marks the open
+  plan's current step `Cancelled`. That marking no longer leads to clearing
+  a plan the run did not bind.
 
 ## Implementation Evidence
 
