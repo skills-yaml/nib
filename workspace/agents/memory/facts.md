@@ -460,6 +460,20 @@ Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
 
+## 2026-10-06 - Production 0.3.1 release
+
+- Type: fact
+- Source: [Production release run 37468381524](https://github.com/skills-yaml/nib/actions/runs/37468381524), inspected public manifest and downloaded archives
+- Confidence: high
+- Review: Independent exact-source and publication-evidence review before handoff
+- Supersedes: Earlier current-production 0.1.0 snapshots; development publication history retained
+
+Content:
+
+User-requested production 0.3.1 was published at 2026-10-06T16:43:51Z from exact `61e166e2038a895996cc709aad78d066ba979eba` through the protected release workflow. The public `prod-latest` manifest SHA-256 is `da3e76a8ed6f152cc7fc1c1334f50e153ac1f7485f535a636168752328ed5138`. All four native archives and all four checksum files were downloaded and verified against the manifest and uploaded-asset metadata. The downloaded Linux binary passed the offline redirected/native-PTY interaction smoke with exact prod version/commit identity, clean-source eligibility, privacy and terminal restoration. Independent exact-source review, frozen native gates, all-platform CI and all four production builds passed before publication approval.
+
+This publishes the existing 0.3.1 target without another bump or runtime/model/prompt change. T023 remains open for protected live-provider acceptance; no paid call or live-provider pass is inferred from this production release.
+
 ## 2026-10-06 - Public catalog refresh and provider-controlled Anthropic thinking
 
 - Type: fact

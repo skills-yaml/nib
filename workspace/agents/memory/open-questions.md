@@ -98,3 +98,22 @@ and spend limits still apply to each new run. Canary continuation failures,
 including Anthropic's final refusal, remain unresolved; selected and full
 exact-revision qualification remain open. Retain the current Anthropic default
 and investigate the continuation failure under the user-approved direction.
+
+## 2026-10-08 - Catalog and sandbox release scope
+
+- Type: open-question
+- Source: user merge request, latest atomic shared reservation and independent review
+- Confidence: high
+- Review: 2026-10-08 exact delivery and shared-version review
+- Supersedes: none
+
+Content:
+
+The catalog/Anthropic delivery candidate in [PR #51](https://github.com/skills-yaml/nib/pull/51)
+uses the previously applied 0.3.2 patch. T080's in-progress sandbox work subsequently
+joined `nib-catalog-refresh` and raised its atomic shared reservation to minor 0.4.0.
+Resolve whether delivery combines T080 or separates the catalog/Anthropic changes,
+then reconcile ownership, release membership and native versions before integration.
+The current catalog candidate has independent approval, complete clean local gates
+and Linux/macOS CI; these do not override the changed reservation or establish a merge.
+T080 is not yet handed off, and T023 live qualification remains unresolved.
