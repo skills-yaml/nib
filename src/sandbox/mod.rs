@@ -1075,10 +1075,10 @@ fn build_bwrap_args_with_mode(
         ]);
     }
 
-    // Executable Git surfaces are protected last so no writable bind,
+    // State masks and read-only Git metadata come last so no writable bind,
     // including configured allow_write paths, can expose them again.
-    if let (true, Some(project)) = (writable, &project) {
-        project.append_git_protections(&mut args, cwd)?;
+    if let Some(project) = &project {
+        project.append_protections(&mut args, cwd, writable)?;
     }
 
     args.extend([

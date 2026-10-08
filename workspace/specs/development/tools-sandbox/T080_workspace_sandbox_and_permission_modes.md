@@ -67,7 +67,7 @@ requirements:
 | Level | Filesystem | Network |
 | --- | --- | --- |
 | `read-only` | Whole project readable. No writes except a private temp directory. | off |
-| `workspace-write` (default) | Workspace writable, including `.git`. Re-mounted read-only: the executable Git surfaces (below) and `.nib/` preference files. | on (user decision D4) |
+| `workspace-write` (default) | Workspace writable. All Git metadata (`.git` and a worktree's `.git` pointer) is read-only; Git writes go through host-side tools (section 7). `.nib/` is hidden. | on (user decision D4) |
 | `full-access` | No sandbox, as with current `internal` direct execution. Requires an explicit choice and shows a warning badge. | on |
 
 Rules for every level:
@@ -75,33 +75,45 @@ Rules for every level:
 - `$HOME` is masked except the workspace path, the toolchains already mounted
   (cargo, rustup, task) and explicitly configured extra paths.
 - `.nib` runtime state and credentials are never visible (tmpfs mask).
-- **Executable Git surfaces** are re-mounted read-only to close the sandbox
-  escape where an agent plants code that later runs unsandboxed during the
-  user's own Git commands:
-  - `<common>/hooks`;
-  - the resolved `core.hooksPath` target, even when it is a tracked directory
-    in the workspace such as `.husky`;
-  - `<common>/config`, `<common>/config.worktree`,
-    `<common>/worktrees/<id>/config.worktree` and `<common>/info/`.
-  - every writable configuration file reachable through `include.path` or
-    `includeIf.*.path` (nested up to depth 10). Included files can set hooks,
-    fsmonitor or aliases just like the main file.
+- **Git metadata is read-only in every level.** The common `.git` and, in a
+  managed worktree, its `.git` pointer file are bound read-only onto
+  themselves after every writable bind. Git reads (`status`, `log`, `diff`,
+  `show`, `blame`) work. Git writes (`add`, `commit`, `checkout`, `stash`,
+  `config`, `submodule update`) fail inside the sandbox and go through the
+  approved host-side Git tools of section 7 (phase 2).
 
-  Paths that do not exist are covered by an empty `--tmpfs` followed by
-  `--remount-ro`, so they cannot be created. Tracked files the user later
-  executes on purpose (`Taskfile.yml`, `Makefile`, `.envrc`) remain
-  editable, as in Claude Code and Codex. This residual risk is mitigated by
-  prompts and diffs, not by the sandbox.
+  *Revision 2026-10-08, from independent review of `ab46461`:* the first
+  candidate made `.git` writable and re-mounted a block-list of executable
+  surfaces read-only (hooks, config, info, modules, `core.hooksPath`,
+  includes). The reviewer demonstrated host code execution through
+  `commondir` redirection to an attacker repository with an `fsmonitor` hook,
+  and showed that renaming a protected path's parent (`mv .git .git-old`, or
+  `mv .husky`) defeated every read-only re-mount. Any writable `.git` also let
+  sessions move the user's branches and stage into the main checkout's index.
+  A block-list cannot make a writable `.git` safe, so Git metadata is now
+  entirely read-only, and every protected path is its own mount point so it
+  cannot be renamed away.
+- **Residual risk, accepted and documented.** Tracked files that tools later
+  execute stay editable, as in Claude Code and Codex: `Taskfile.yml`,
+  `Makefile`, `.envrc`, husky's tracked `.husky/*` hook scripts, pre-commit's
+  `.pre-commit-config.yaml` with `language: system`, `lefthook.yml`, and
+  configuration files that the user's own Git configuration includes from the
+  workspace. The mitigations are `ask` mode, diffs and the visible mode
+  badge. The sandbox does not mitigate them.
 - Every tool-command sandbox, including commands run by subagent workers,
   uses one mount plan (`src/sandbox/project_mounts.rs`). Its order is fixed
   and tested:
   1. home mask;
   2. read-only project;
-  3. working tree and common Git directory;
-  4. `.nib` state mask;
-  5. a managed-worktree working directory re-bound inside the mask;
-  6. configured `allow_write`;
-  7. protected Git surfaces, last, so `allow_write` cannot re-expose them.
+  3. workspace (the working directory in the main checkout, or the whole
+     managed worktree);
+  4. configured `allow_write`;
+  5. `.nib` state masks;
+  6. the managed worktree re-bound inside the mask;
+  7. read-only `.git` and `.git` pointer mounts.
+
+  Masks and Git protections come after `allow_write`, so no configured path
+  can expose nib state or make Git metadata writable.
 - **Trusted mount sources.** Sources are derived only from the canonical
   working directory and nib's fixed layout:
   - the nearest ancestor with a real `.git` directory; or
@@ -109,8 +121,9 @@ Rules for every level:
 
   They are never derived from the sandbox-writable `.git` pointer file. Unmanaged
   linked worktrees, `$HOME` itself and its ancestors are never mounted as
-  projects. A working directory inside nib state, or a symlinked protected Git
-  path or `.nib`, fails closed.
+  projects. A working directory inside nib state, a symlinked `.nib` or a
+  symlinked Git metadata path fails closed. No host paths are created by the
+  plan.
 - `git_status` uses the same plan in read-only form.
 
 ### 3. Permission modes
@@ -320,9 +333,11 @@ Each phase is independently reviewable and keeps `task verify` green.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: In `workspace-write`, git read and write commands (`status`, `log`,
-  `add`, `commit`) work in place and in worktrees. Writing `.git/hooks/*` or
-  `.git/config` fails. `<project>/.nib` runtime and credential files are
+- [ ] AC-1: In `workspace-write`, Git read commands (`status`, `log`, `diff`)
+  work in place and in managed worktrees under `$HOME`. Every write to Git
+  metadata fails with a read-only error: hooks, config, `commondir`, refs,
+  rebase state, the worktree `.git` pointer, and renaming or removing `.git`.
+  Git writes are available only through the phase 2 host-side tools. `<project>/.nib` runtime and credential files are
   unreadable from every tool-command sandbox. `$HOME` stays masked.
 - [ ] AC-2: A rewritten `.git` pointer, or a symlink in the workspace,
   cannot expose paths outside the mount plan (adversarial fixtures).
@@ -347,9 +362,8 @@ Each phase is independently reviewable and keeps `task verify` green.
   place cannot silently overwrite each other.
 - [ ] AC-6e: With two nib sessions active in one folder, each status line shows
   the other. A crashed session disappears after the heartbeat timeout.
-- [ ] AC-6c: Writing any executable Git surface (hooks, a `core.hooksPath`
-  target such as `.husky`, config, `config.worktree`, `info/`) fails from
-  the sandbox, including when the path did not exist before.
+- [ ] AC-6c: `allow_write` entries that cover the project, an ancestor or
+  `.git` cannot expose `.nib` or make Git metadata writable.
 - [ ] AC-6f: Editing never creates a branch or commit. A commit happens only
   after an explicit request or approval. On the default or a protected branch,
   a `nib/<topic>` branch is created first and reported. On another branch, the

@@ -109,114 +109,120 @@ fn assert_success(output: &std::process::Output) {
     );
 }
 
-#[tokio::test]
-#[serial]
-async fn project_mounts_enable_git_in_managed_worktree_under_home() {
-    if !strict_available() {
-        return;
-    }
-    let root = tempdir().unwrap();
-    let home = root.path().join("home");
-    let (project, worktree) = project_fixture(&home);
-    let _home = HomeGuard::set(home.as_os_str());
-    let command = format!(
-        r#"
-        git status --short --branch | grep -q 'nib/session/s1' &&
-        git log --oneline -1 | grep -q fixture &&
-        printf change > edited.txt && git add edited.txt &&
-        git -c user.name=Agent -c user.email=agent@example.invalid commit --quiet -m agent &&
-        test "$(cat {project}/README.md)" = 'main checkout' &&
-        ! printf x > {project}/README.md &&
-        ! cat {project}/.nib/config.toml &&
-        ! cat "$HOME/private.txt"
-        "#,
-        project = project.display()
-    );
-    let output = run(&worktree, &command, &BoundaryConfig::default()).await;
-    assert_success(&output);
-    git(&project, &["log", "--oneline", "-1", "nib/session/s1"]);
-    assert_eq!(
-        std::fs::read_to_string(project.join("README.md")).unwrap(),
-        "main checkout\n"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn project_mounts_protect_executable_git_surfaces() {
-    if !strict_available() {
-        return;
-    }
-    let root = tempdir().unwrap();
-    let home = root.path().join("home");
-    let (project, worktree) = project_fixture(&home);
-    git(&project, &["config", "core.hooksPath", ".husky"]);
-    std::fs::remove_dir_all(project.join(".git/info")).ok();
-    let _home = HomeGuard::set(home.as_os_str());
-    let git_dir = project.join(".git");
-    let command = format!(
-        r#"
-        ! printf hook > {git}/hooks/pre-commit &&
-        ! printf '[core]' >> {git}/config &&
-        ! mkdir -p {git}/info/x &&
-        ! printf x > {git}/info/attributes &&
-        ! mkdir -p .husky/x &&
-        ! printf hook > .husky/pre-commit
-        "#,
-        git = git_dir.display()
-    );
-    let output = run(&worktree, &command, &BoundaryConfig::default()).await;
-    assert_success(&output);
-    assert!(!git_dir.join("hooks/pre-commit").exists());
-    assert!(!worktree.join(".husky/pre-commit").exists());
-}
-
-#[tokio::test]
-#[serial]
-async fn project_mounts_keep_protections_over_allow_write() {
-    if !strict_available() {
-        return;
-    }
-    let root = tempdir().unwrap();
-    let home = root.path().join("home");
-    let (project, worktree) = project_fixture(&home);
-    let _home = HomeGuard::set(home.as_os_str());
-    let boundaries = BoundaryConfig {
-        allow_write: vec![project.join(".git").to_string_lossy().to_string()],
-        ..BoundaryConfig::default()
-    };
-    let command = format!(
-        "! printf hook > {}/hooks/pre-commit",
-        project.join(".git").display()
-    );
-    let output = run(&worktree, &command, &boundaries).await;
-    assert_success(&output);
-}
-
-#[tokio::test]
-#[serial]
-async fn project_mounts_ignore_rewritten_git_pointer() {
-    if !strict_available() {
-        return;
-    }
-    let root = tempdir().unwrap();
-    let home = root.path().join("home");
-    let (_project, worktree) = project_fixture(&home);
-    let secret = home.join("secret-gitdir");
-    std::fs::create_dir_all(&secret).unwrap();
-    std::fs::write(secret.join("token"), "pointer-secret").unwrap();
-    std::fs::write(
-        worktree.join(".git"),
-        format!("gitdir: {}\n", secret.display()),
+/// Runs `command` and requires its stderr to mention `expected`, so a
+/// negative check cannot pass for an unrelated reason.
+fn denied(command: &str, expected: &str) -> String {
+    format!(
+        "{{ ! out=$( ( {command} ) 2>&1 ) && printf '%s' \"$out\" | grep -qiE '{expected}'; }}"
     )
-    .unwrap();
+}
+
+const READ_ONLY: &str = "read-only file system";
+const BUSY_OR_READ_ONLY: &str = "busy|read-only file system";
+
+#[tokio::test]
+#[serial]
+async fn project_mounts_enable_git_reads_in_managed_worktree_under_home() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, worktree) = project_fixture(&home);
     let _home = HomeGuard::set(home.as_os_str());
-    let command = format!(
-        "! cat {secret}/token && ! git status --short",
-        secret = secret.display()
-    );
+    let command = [
+        "git status --short --branch | grep -q 'nib/session/s1'".to_string(),
+        "git log --oneline -1 | grep -q fixture".to_string(),
+        "printf change > edited.txt".to_string(),
+        "git status --short | grep -q edited.txt".to_string(),
+        "git diff --stat HEAD >/dev/null".to_string(),
+        format!(
+            "test \"$(cat {}/README.md)\" = 'main checkout'",
+            project.display()
+        ),
+        denied(
+            &format!("printf x > {}/README.md", project.display()),
+            READ_ONLY,
+        ),
+        denied(
+            &format!("cat {}/.nib/config.toml", project.display()),
+            "no such file",
+        ),
+        denied("cat \"$HOME/private.txt\"", "no such file"),
+        denied("git add edited.txt", READ_ONLY),
+    ]
+    .join(" && ");
     let output = run(&worktree, &command, &BoundaryConfig::default()).await;
     assert_success(&output);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("edited.txt")).unwrap(),
+        "change"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn project_mounts_keep_main_git_metadata_read_only() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, worktree) = project_fixture(&home);
+    let _home = HomeGuard::set(home.as_os_str());
+    let git = project.join(".git");
+    let git = git.display();
+    let command = [
+        denied(&format!("printf hook > {git}/hooks/pre-commit"), READ_ONLY),
+        denied(&format!("printf '[core]' >> {git}/config"), READ_ONLY),
+        denied(&format!("printf ../evil > {git}/commondir"), READ_ONLY),
+        denied(
+            &format!("printf ../evil > {git}/worktrees/s1/commondir"),
+            READ_ONLY,
+        ),
+        denied(&format!("printf x > {git}/refs/heads/main"), READ_ONLY),
+        denied(&format!("mkdir {git}/rebase-merge"), READ_ONLY),
+    ]
+    .join(" && ");
+    let output = run(&worktree, &command, &BoundaryConfig::default()).await;
+    assert_success(&output);
+    assert!(!project.join(".git/hooks/pre-commit").exists());
+    assert!(!project.join(".git/commondir").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn project_mounts_prevent_replacing_git_metadata() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, worktree) = project_fixture(&home);
+    let _home = HomeGuard::set(home.as_os_str());
+    let pointer = std::fs::read_to_string(worktree.join(".git")).unwrap();
+    let command = [
+        denied("printf 'gitdir: /tmp/evil' > .git", READ_ONLY),
+        denied("mv .git .git-old", BUSY_OR_READ_ONLY),
+        denied("rm -f .git", BUSY_OR_READ_ONLY),
+    ]
+    .join(" && ");
+    let output = run(&worktree, &command, &BoundaryConfig::default()).await;
+    assert_success(&output);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".git")).unwrap(),
+        pointer
+    );
+
+    let in_place = [
+        denied("mv .git .git-old", BUSY_OR_READ_ONLY),
+        denied("mv .nib .nib-old", BUSY_OR_READ_ONLY),
+    ]
+    .join(" && ");
+    let output = run(&project, &in_place, &BoundaryConfig::default()).await;
+    assert_success(&output);
+    assert!(project.join(".git/HEAD").is_file());
+    assert!(project.join(".nib/config.toml").is_file());
 }
 
 #[tokio::test]
@@ -229,13 +235,14 @@ async fn project_mounts_hide_state_in_place() {
     let home = root.path().join("home");
     let (project, _worktree) = project_fixture(&home);
     let _home = HomeGuard::set(home.as_os_str());
-    let command = r#"
-        ! cat .nib/config.toml &&
-        printf edit > in-place.txt &&
-        git status --short | grep -q in-place.txt &&
-        ! printf hook > .git/hooks/pre-commit
-    "#;
-    let output = run(&project, command, &BoundaryConfig::default()).await;
+    let command = [
+        denied("cat .nib/config.toml", "no such file"),
+        "printf edit > in-place.txt".to_string(),
+        "git status --short | grep -q in-place.txt".to_string(),
+        denied("printf hook > .git/hooks/pre-commit", READ_ONLY),
+    ]
+    .join(" && ");
+    let output = run(&project, &command, &BoundaryConfig::default()).await;
     assert_success(&output);
     assert_eq!(
         std::fs::read_to_string(project.join("in-place.txt")).unwrap(),
@@ -246,41 +253,76 @@ async fn project_mounts_hide_state_in_place() {
         .contains("fixture-secret"));
 }
 
+#[tokio::test]
+#[serial]
+async fn project_mounts_keep_protections_over_allow_write() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, worktree) = project_fixture(&home);
+    let _home = HomeGuard::set(home.as_os_str());
+    for allowed in [
+        project.clone(),
+        root.path().canonicalize().unwrap(),
+        project.join(".git"),
+    ] {
+        let boundaries = BoundaryConfig {
+            allow_write: vec![allowed.to_string_lossy().to_string()],
+            ..BoundaryConfig::default()
+        };
+        let command = [
+            denied(
+                &format!("cat {}/.nib/config.toml", project.display()),
+                "no such file",
+            ),
+            denied(
+                &format!("printf hook > {}/.git/hooks/pre-commit", project.display()),
+                READ_ONLY,
+            ),
+            denied("printf 'gitdir: /tmp/evil' > .git", READ_ONLY),
+            "printf ok > allowed.txt".to_string(),
+        ]
+        .join(" && ");
+        let output = run(&worktree, &command, &boundaries).await;
+        assert_success(&output);
+    }
+}
+
 #[test]
 #[serial]
 fn project_mounts_reject_working_directory_inside_state() {
     let root = tempdir().unwrap();
     let home = root.path().join("home");
-    let (project, _worktree) = project_fixture(&home);
+    let (project, worktree) = project_fixture(&home);
+    std::fs::create_dir_all(worktree.join(".nib/profiles")).unwrap();
     let _home = HomeGuard::set(home.as_os_str());
-    let error = build_bwrap_args(
-        "true",
-        &project.join(".nib"),
-        &BoundaryConfig::default(),
-        "restricted",
-    )
-    .expect_err("state working directory");
-    assert!(error.contains("nib runtime state"), "{error}");
+    for cwd in [project.join(".nib"), worktree.join(".nib/profiles")] {
+        let error = build_bwrap_args("true", &cwd, &BoundaryConfig::default(), "restricted")
+            .expect_err("state working directory");
+        assert!(error.contains("nib runtime state"), "{error}");
+    }
 }
 
 #[cfg(unix)]
 #[test]
 #[serial]
-fn project_mounts_fail_closed_on_symlinked_hooks() {
+fn project_mounts_fail_closed_on_symlinked_state() {
     let root = tempdir().unwrap();
     let home = root.path().join("home");
-    let (project, worktree) = project_fixture(&home);
-    let hooks = project.join(".git/hooks");
-    std::fs::remove_dir_all(&hooks).unwrap();
-    std::os::unix::fs::symlink(root.path(), &hooks).unwrap();
+    let (project, _worktree) = project_fixture(&home);
+    let elsewhere = root.path().join("elsewhere-state");
+    std::fs::rename(project.join(".nib"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, project.join(".nib")).unwrap();
     let _home = HomeGuard::set(home.as_os_str());
-    let error = build_bwrap_args("true", &worktree, &BoundaryConfig::default(), "restricted")
-        .expect_err("symlinked hooks");
+    let error = build_bwrap_args("true", &project, &BoundaryConfig::default(), "restricted")
+        .expect_err("symlinked state");
     assert!(error.contains("symbolic link"), "{error}");
 }
 
 #[test]
-fn project_mounts_resolve_managed_worktree_to_project() {
+fn project_mounts_order_protections_after_workspace() {
     let root = tempdir().unwrap();
     let home = root.path().join("home");
     let (project, worktree) = project_fixture(&home);
@@ -290,20 +332,27 @@ fn project_mounts_resolve_managed_worktree_to_project() {
     let mounts = ProjectMounts::resolve(&nested, Some(&home)).expect("managed project");
     let mut args = Vec::new();
     mounts.append_binds(&mut args, &nested, true).unwrap();
-    let project = project.to_string_lossy().to_string();
-    let state = format!("{project}/.nib");
-    let git_dir = format!("{project}/.git");
-    let nested = nested.to_string_lossy().to_string();
+    mounts.append_protections(&mut args, &nested, true).unwrap();
+    let text = |path: &Path| path.to_string_lossy().to_string();
+    let (project_text, worktree_text) = (text(&project), text(&worktree));
+    let state = format!("{project_text}/.nib");
+    let git_dir = format!("{project_text}/.git");
+    let pointer = format!("{worktree_text}/.git");
     let position = |needle: &[&str]| {
         args.windows(needle.len())
-            .position(|window| window == needle)
+            .rposition(|window| window == needle)
             .unwrap_or_else(|| panic!("missing {needle:?} in {args:?}"))
     };
-    let project_bind = position(&["--ro-bind", &project, &project]);
-    let git_bind = position(&["--bind", &git_dir, &git_dir]);
+    let project_bind = position(&["--ro-bind", &project_text, &project_text]);
     let state_mask = position(&["--tmpfs", &state]);
-    let cwd_bind = position(&["--bind", &nested, &nested]);
-    assert!(project_bind < git_bind && git_bind < state_mask && state_mask < cwd_bind);
+    let worktree_bind = position(&["--bind", &worktree_text, &worktree_text]);
+    let pointer_bind = position(&["--ro-bind", &pointer, &pointer]);
+    let git_bind = position(&["--ro-bind", &git_dir, &git_dir]);
+    assert!(project_bind < state_mask && state_mask < worktree_bind);
+    assert!(worktree_bind < pointer_bind && worktree_bind < git_bind);
+    assert!(!args
+        .windows(3)
+        .any(|window| window[0] == "--bind" && window[1] == git_dir));
 }
 
 #[test]
@@ -341,35 +390,5 @@ fn project_mounts_ignore_unmanaged_linked_worktrees() {
     assert_eq!(
         ProjectMounts::resolve(&outside.canonicalize().unwrap(), Some(&home)),
         None
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn project_mounts_protect_writable_included_config() {
-    if !strict_available() {
-        return;
-    }
-    let root = tempdir().unwrap();
-    let home = root.path().join("home");
-    let (project, worktree) = project_fixture(&home);
-    std::fs::write(project.join("shared.gitconfig"), "[core]\n").unwrap();
-    std::fs::write(worktree.join("nested.gitconfig"), "[core]\n").unwrap();
-    std::fs::write(
-        project.join("shared.gitconfig"),
-        format!(
-            "[include]\n\tpath = {}\n",
-            worktree.join("nested.gitconfig").display()
-        ),
-    )
-    .unwrap();
-    git(&project, &["config", "include.path", "../shared.gitconfig"]);
-    let _home = HomeGuard::set(home.as_os_str());
-    let command = "! printf '[core]\\n\\thooksPath = /tmp\\n' >> nested.gitconfig";
-    let output = run(&worktree, command, &BoundaryConfig::default()).await;
-    assert_success(&output);
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("nested.gitconfig")).unwrap(),
-        "[core]\n"
     );
 }
