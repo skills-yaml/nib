@@ -1,6 +1,10 @@
 //! Hybrid sandbox: executable bwrap isolation with a documented direct fallback.
 
 pub mod process;
+mod project_mounts;
+#[cfg(test)]
+#[path = "project_mounts_tests.rs"]
+mod project_mounts_tests;
 pub(crate) mod protected_owner;
 #[cfg(windows)]
 #[doc(hidden)]
@@ -955,11 +959,12 @@ fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), Strin
         allow_write: Vec::new(),
         network: "disabled".to_string(),
     };
-    let mut args = build_bwrap_args(
+    let args = build_bwrap_args_with_mode(
         "exec git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short --branch",
         cwd,
         &boundaries,
         "restricted",
+        false,
     )?;
     let home_str = home.to_str().ok_or("private HOME is not valid UTF-8")?;
     if !args.windows(2).any(|pair| pair == ["--tmpfs", home_str]) {
@@ -968,11 +973,12 @@ fn read_only_git_status_args(cwd: &Path) -> Result<(Vec<String>, PathBuf), Strin
         );
     }
     let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
-    let binding = args
+    if !args
         .windows(3)
-        .position(|triple| triple == ["--bind", cwd_str, cwd_str])
-        .ok_or("Read-only Git status has no exact repository binding")?;
-    args[binding] = "--ro-bind".to_string();
+        .any(|triple| triple == ["--ro-bind", cwd_str, cwd_str])
+    {
+        return Err("Read-only Git status has no exact repository binding".to_string());
+    }
     if args.iter().any(|argument| argument == "--bind") {
         return Err("Read-only Git status cannot include writable bindings".to_string());
     }
@@ -983,7 +989,19 @@ fn build_bwrap_args(
     command: &str,
     cwd: &Path,
     boundaries: &BoundaryConfig,
+    profile: &str,
+) -> Result<Vec<String>, String> {
+    build_bwrap_args_with_mode(command, cwd, boundaries, profile, true)
+}
+
+/// Builds the bwrap arguments. `writable` selects whether the working tree and
+/// common Git directory are writable; read-only callers get no writable binds.
+fn build_bwrap_args_with_mode(
+    command: &str,
+    cwd: &Path,
+    boundaries: &BoundaryConfig,
     _profile: &str,
+    writable: bool,
 ) -> Result<Vec<String>, String> {
     let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
     let mut args = vec![
@@ -1006,13 +1024,18 @@ fn build_bwrap_args(
     }
 
     let home_isolation = append_home_isolation(&mut args, cwd)?;
-    args.extend([
-        "--bind".to_string(),
-        cwd_str.to_string(),
-        cwd_str.to_string(),
-        "--chdir".to_string(),
-        cwd_str.to_string(),
-    ]);
+    let home = std::env::var_os("HOME").and_then(|home| PathBuf::from(home).canonicalize().ok());
+    let project = project_mounts::ProjectMounts::resolve(cwd, home.as_deref());
+    match &project {
+        Some(project) => project.append_binds(&mut args, cwd, writable)?,
+        None => args.extend([
+            if writable { "--bind" } else { "--ro-bind" }.to_string(),
+            cwd_str.to_string(),
+            cwd_str.to_string(),
+            "--chdir".to_string(),
+            cwd_str.to_string(),
+        ]),
+    }
     if !home_isolation.hidden {
         append_credential_masks(&mut args, cwd);
     }
@@ -1020,6 +1043,9 @@ fn build_bwrap_args(
         append_cargo_credential_masks(&mut args, cargo_home)?;
     }
 
+    if !writable && !boundaries.allow_write.is_empty() {
+        return Err("read-only sandbox commands cannot include writable paths".to_string());
+    }
     for allowed in &boundaries.allow_write {
         let requested = PathBuf::from(allowed);
         let requested = if requested.is_absolute() {
@@ -1047,6 +1073,12 @@ fn build_bwrap_args(
             allowed_str.to_string(),
             allowed_str.to_string(),
         ]);
+    }
+
+    // Executable Git surfaces are protected last so no writable bind,
+    // including configured allow_write paths, can expose them again.
+    if let (true, Some(project)) = (writable, &project) {
+        project.append_git_protections(&mut args, cwd)?;
     }
 
     args.extend([
