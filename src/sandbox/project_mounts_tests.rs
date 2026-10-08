@@ -409,7 +409,7 @@ fn project_mounts_order_protections_after_workspace() {
     let mut args = Vec::new();
     mounts.append_binds(&mut args, &nested, true).unwrap();
     mounts
-        .append_protections(&mut args, &nested, true, Some(&home))
+        .append_protections(&mut args, &nested, true, Some(&home), &[])
         .unwrap();
     let text = |path: &Path| path.to_string_lossy().to_string();
     let (project_text, worktree_text) = (text(&project), text(&worktree));
@@ -547,6 +547,9 @@ async fn project_mounts_protect_nested_projects_below_workspace() {
     std::fs::create_dir_all(&home).unwrap();
     let work = root.path().join("work");
     let (project, _worktree) = project_fixture(&work);
+    let inner = work.join("group/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "--quiet"]);
     let _home = HomeGuard::set(home.as_os_str());
     let name = project.file_name().unwrap().to_string_lossy().to_string();
     let command = [
@@ -557,6 +560,9 @@ async fn project_mounts_protect_nested_projects_below_workspace() {
             BUSY_OR_READ_ONLY,
         ),
         format!("printf edit > {name}/edited.txt"),
+        denied(&format!("mv {name} renamed"), BUSY_OR_READ_ONLY),
+        denied("mv group group-old", BUSY_OR_READ_ONLY),
+        denied("printf '[core]' >> group/inner/.git/config", READ_ONLY),
     ]
     .join(" && ");
     let output = run(
@@ -603,5 +609,68 @@ async fn project_mounts_keep_cargo_credentials_masked_over_allow_write() {
         Some(value) => std::env::set_var("CARGO_HOME", value),
         None => std::env::remove_var("CARGO_HOME"),
     }
+    assert_success(&output);
+}
+
+/// P1: workspace re-binds must not undo credential masks.
+#[tokio::test]
+#[serial]
+async fn project_mounts_keep_cargo_credentials_masked_after_rebind() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = root.path().join("work");
+    let cargo_home = work.join(".cargo");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::write(
+        cargo_home.join("credentials.toml"),
+        "token = \"cargo-secret\"\n",
+    )
+    .unwrap();
+    let _home = HomeGuard::set(home.as_os_str());
+    let previous = std::env::var_os("CARGO_HOME");
+    std::env::set_var("CARGO_HOME", &cargo_home);
+    let output = run(
+        &work.canonicalize().unwrap(),
+        "test ! -s \"$CARGO_HOME/credentials.toml\"",
+        &BoundaryConfig::default(),
+    )
+    .await;
+    match previous {
+        Some(value) => std::env::set_var("CARGO_HOME", value),
+        None => std::env::remove_var("CARGO_HOME"),
+    }
+    assert_success(&output);
+}
+
+/// P3: allow_write areas get the same nested protections as the workspace.
+#[tokio::test]
+#[serial]
+async fn project_mounts_protect_projects_inside_allow_write() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (_project, worktree) = project_fixture(&home);
+    let other = home.join("other");
+    let (other_project, _other_worktree) = project_fixture(&other);
+    let _home = HomeGuard::set(home.as_os_str());
+    let boundaries = BoundaryConfig {
+        allow_write: vec![other.to_string_lossy().to_string()],
+        ..BoundaryConfig::default()
+    };
+    let path = other_project.display();
+    let command = [
+        format!("printf ok > {}/allowed.txt", other.display()),
+        denied(&format!("cat {path}/.nib/config.toml"), "no such file"),
+        denied(&format!("printf '[core]' >> {path}/.git/config"), READ_ONLY),
+        denied(&format!("mv {path} {path}-old"), BUSY_OR_READ_ONLY),
+    ]
+    .join(" && ");
+    let output = run(&worktree, &command, &boundaries).await;
     assert_success(&output);
 }

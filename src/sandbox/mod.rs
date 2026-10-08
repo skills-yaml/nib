@@ -1040,6 +1040,7 @@ fn build_bwrap_args_with_mode(
     if !writable && !boundaries.allow_write.is_empty() {
         return Err("read-only sandbox commands cannot include writable paths".to_string());
     }
+    let mut allowed_paths = Vec::new();
     for allowed in &boundaries.allow_write {
         let requested = PathBuf::from(allowed);
         let requested = if requested.is_absolute() {
@@ -1076,21 +1077,30 @@ fn build_bwrap_args_with_mode(
             allowed_str.to_string(),
             allowed_str.to_string(),
         ]);
+        allowed_paths.push(allowed_path);
     }
 
-    // Credential masks, state masks and read-only Git metadata come last so
-    // no writable bind, including configured allow_write paths, can expose
-    // them again.
+    // State masks, read-only Git metadata and finally credential masks come
+    // last so no writable bind, including configured allow_write paths and
+    // the workspace re-binds of the mount plan, can expose them again.
+    let hidden_home = home.as_deref().filter(|_| home_isolation.hidden);
+    match &project {
+        Some(project) => {
+            project.append_protections(&mut args, cwd, writable, hidden_home, &allowed_paths)?
+        }
+        None => project_mounts::append_fallback_protections(
+            &mut args,
+            cwd,
+            writable,
+            hidden_home,
+            &allowed_paths,
+        )?,
+    }
     if !home_isolation.hidden {
         append_credential_masks(&mut args, cwd);
     }
     if let Some(cargo_home) = &home_isolation.cargo_home {
         append_cargo_credential_masks(&mut args, cargo_home)?;
-    }
-    let hidden_home = home.as_deref().filter(|_| home_isolation.hidden);
-    match &project {
-        Some(project) => project.append_protections(&mut args, cwd, writable, hidden_home)?,
-        None => project_mounts::append_fallback_protections(&mut args, cwd, writable, hidden_home)?,
     }
 
     args.extend([

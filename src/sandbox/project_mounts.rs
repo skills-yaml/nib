@@ -84,15 +84,17 @@ impl ProjectMounts {
         cwd: &Path,
         writable: bool,
         hidden_home: Option<&Path>,
+        allowed: &[PathBuf],
     ) -> Result<(), String> {
         let workspace = self.workspace(cwd);
-        let plan = MaskPlan {
+        let plan = MaskPlan::new(
             cwd,
-            workspace: &workspace,
-            visible_root: &self.root,
-            scan_roots: &[&self.root, &workspace],
+            &workspace,
+            mode(writable),
+            std::slice::from_ref(&self.root),
+            allowed,
             hidden_home,
-        };
+        );
         // The managed worktree lives inside the project state mask; bind it
         // again between the outer and inner masks.
         plan.append(args, self.is_managed().then_some(mode(writable)))?;
@@ -125,14 +127,9 @@ pub(super) fn append_fallback_protections(
     cwd: &Path,
     writable: bool,
     hidden_home: Option<&Path>,
+    allowed: &[PathBuf],
 ) -> Result<(), String> {
-    let plan = MaskPlan {
-        cwd,
-        workspace: cwd,
-        visible_root: cwd,
-        scan_roots: &[cwd],
-        hidden_home,
-    };
+    let plan = MaskPlan::new(cwd, cwd, mode(writable), &[], allowed, hidden_home);
     plan.append(args, Some(mode(writable)))?;
     protect_git_entry(args, &cwd.join(".git"))
 }
@@ -148,21 +145,52 @@ const NESTED_SCAN_LIMIT: usize = 4096;
 
 struct MaskPlan<'a> {
     cwd: &'a Path,
-    /// Writable area; masks inside it follow its (re-)bind.
+    /// Primary writable area; it is re-bound inside the masks that contain it.
     workspace: &'a Path,
-    /// Bound area that stays visible even when it is under the hidden home.
-    visible_root: &'a Path,
+    /// Bound areas that stay visible even when they are under the hidden home.
+    visible_roots: Vec<PathBuf>,
     /// Trees searched for nested `.nib` directories and `.git` entries.
-    scan_roots: &'a [&'a Path],
+    scan_roots: Vec<PathBuf>,
+    /// Writable areas and their bind mode: the workspace and `allow_write`.
+    writable_areas: Vec<(PathBuf, &'static str)>,
     hidden_home: Option<&'a Path>,
 }
 
-impl MaskPlan<'_> {
-    /// Masks every reachable `.nib` directory (ancestors of the working
-    /// directory and nested ones near the scan roots), outer masks first.
-    /// When `rebind` is set the workspace is bound again in that mode before
-    /// the masks inside it. Existing nested Git metadata inside the workspace
-    /// is then bound read-only.
+impl<'a> MaskPlan<'a> {
+    /// Builds a plan for `workspace` (bound in `kind`), the read-only
+    /// `extra_roots` that are also scanned and visible, and the configured
+    /// `allow_write` paths, which are treated as further writable areas.
+    fn new(
+        cwd: &'a Path,
+        workspace: &'a Path,
+        kind: &'static str,
+        extra_roots: &[PathBuf],
+        allowed: &[PathBuf],
+        hidden_home: Option<&'a Path>,
+    ) -> Self {
+        let mut roots: Vec<PathBuf> = extra_roots.to_vec();
+        roots.push(workspace.to_path_buf());
+        roots.extend(allowed.iter().cloned());
+        let mut writable_areas = vec![(workspace.to_path_buf(), kind)];
+        writable_areas.extend(allowed.iter().map(|path| (path.clone(), "--bind")));
+        Self {
+            cwd,
+            workspace,
+            visible_roots: roots.clone(),
+            scan_roots: roots,
+            writable_areas,
+            hidden_home,
+        }
+    }
+
+    /// Hides every reachable `.nib` directory and keeps existing nested Git
+    /// metadata in writable areas read-only. Order:
+    /// 1. masks that contain the workspace;
+    /// 2. the workspace re-bind (`rebind`);
+    /// 3. every directory between a writable area and a nested repository
+    ///    root, bound onto itself so it cannot be renamed and recreated;
+    /// 4. all other masks;
+    /// 5. nested `.git` entries bound read-only.
     fn append(&self, args: &mut Vec<String>, rebind: Option<&str>) -> Result<(), String> {
         let mut states: Vec<PathBuf> = self
             .cwd
@@ -171,43 +199,71 @@ impl MaskPlan<'_> {
             .filter(|state| std::fs::symlink_metadata(state).is_ok())
             .collect();
         let mut nested_git = Vec::new();
-        for root in self.scan_roots {
+        for root in &self.scan_roots {
             scan_nested(root, &mut states, &mut nested_git);
         }
         states.retain(|state| self.is_visible(state));
         states.sort();
         states.dedup();
-        for state in states
+        nested_git.retain(|git| self.writable_area(git).is_some());
+        nested_git.sort();
+        nested_git.dedup();
+
+        let (containing, other): (Vec<_>, Vec<_>) = states
             .iter()
-            .filter(|state| !state.starts_with(self.workspace))
-        {
+            .partition(|state| self.workspace.starts_with(state));
+        for state in containing {
             append_state_mask(args, state)?;
         }
         if let Some(kind) = rebind {
             push_mount(args, kind, self.workspace)?;
         }
-        for state in states
-            .iter()
-            .filter(|state| state.starts_with(self.workspace))
-        {
+        for (directory, kind) in self.repository_parents(&nested_git) {
+            push_mount(args, kind, &directory)?;
+        }
+        for state in other {
             append_state_mask(args, state)?;
         }
-        nested_git.sort();
-        nested_git.dedup();
-        for git in nested_git
-            .iter()
-            .filter(|git| git.starts_with(self.workspace))
-        {
+        for git in &nested_git {
             push_mount(args, "--ro-bind", git)?;
         }
         Ok(())
     }
 
-    /// Paths under the masked home are invisible unless they are inside the
+    /// The innermost writable area containing `path`, with its bind mode.
+    fn writable_area(&self, path: &Path) -> Option<&(PathBuf, &'static str)> {
+        self.writable_areas
+            .iter()
+            .filter(|(area, _)| path.starts_with(area) && path != area)
+            .max_by_key(|(area, _)| area.components().count())
+    }
+
+    /// Directories from just below each nested repository's writable area
+    /// down to the repository root, parents first.
+    fn repository_parents(&self, nested_git: &[PathBuf]) -> Vec<(PathBuf, &'static str)> {
+        let mut directories = Vec::new();
+        for git in nested_git {
+            let Some((area, kind)) = self.writable_area(git) else {
+                continue;
+            };
+            for directory in git.ancestors().skip(1) {
+                if directory == area || !directory.starts_with(area) {
+                    break;
+                }
+                directories.push((directory.to_path_buf(), *kind));
+            }
+        }
+        directories.sort();
+        directories.dedup();
+        directories
+    }
+
+    /// Paths under the masked home are invisible unless they are inside a
     /// bound area, so they need no mask (and a symlink there is harmless).
     fn is_visible(&self, path: &Path) -> bool {
-        self.hidden_home
-            .is_none_or(|home| !path.starts_with(home) || path.starts_with(self.visible_root))
+        self.hidden_home.is_none_or(|home| {
+            !path.starts_with(home) || self.visible_roots.iter().any(|root| path.starts_with(root))
+        })
     }
 }
 

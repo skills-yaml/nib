@@ -135,6 +135,11 @@ Rules for every level:
   - Ancestor `.nib` entries inside the masked `$HOME` and outside the bound
     area are skipped, because they are already invisible.
   - Credential masks are applied after `allow_write`.
+  - Re-review of `492e42a`: credential masks are applied after the plan's
+    workspace re-binds. Every directory between a writable area and a nested
+    repository root is bound onto itself, so the repository cannot be renamed
+    away and recreated. `allow_write` areas are scanned and protected like
+    the workspace.
   - Accepted residual risk: repositories or `.nib` directories that the
     sandbox creates itself, nested ones beyond the scan bounds, and symlinked
     nested `.nib` directories are not protected. Repositories the agent
