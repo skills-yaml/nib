@@ -672,3 +672,32 @@ T080 has raised the shared reservation from the catalog's previously applied 0.3
 patch to minor 0.4.0. PR #51 and its clean delivery candidate pass independent review,
 full local verification and Linux/macOS CI, but integration waits for scope and
 reservation reconciliation. No merge, publication or paid qualification is inferred.
+
+## 2026-10-08 - T080 phase 1 sandbox mount plan decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent security review approved 1b51d24
+- Supersedes: none
+
+Content:
+
+Recorded the read-only Git metadata and trusted-layout mount plan decision in decisions.md after the independent review approved phase 1.
+
+## 2026-10-08 - Catalog and sandbox release scope resolved
+
+- Type: changelog
+- Source: user sync request; remote development 045e0e2 and combined release ledger
+- Confidence: high
+- Review: independent exact-candidate review pending
+- Supersedes: 2026-10-08 Catalog and sandbox release scope
+
+Content:
+
+Synchronization combines the catalog/Anthropic work with T080 phase 1 already
+in shared development. The single nib-catalog-refresh release uses minor 0.4.0
+from 0.3.1 and includes T069-T073 plus T080; native mirrors and membership are
+reconciled without a separate 0.3.2 release or another version bump. Further
+T080 phases, T023 live qualification, main delivery and publication remain
+separate. Combined review and verification precede the synchronization push.

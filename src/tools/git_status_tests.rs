@@ -283,3 +283,50 @@ while True:
     flush()
     flush()
 ";
+
+/// T080: managed session worktrees live under `<project>/.nib/worktrees`, and
+/// the project is normally inside `$HOME`. Status must reach the common Git
+/// directory while every other home path and nib state stay hidden.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial_test::serial]
+async fn git_status_reports_managed_worktree_under_home() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = home.join("project");
+    std::fs::create_dir_all(project.join(".nib")).unwrap();
+    init(&project);
+    std::fs::write(project.join("tracked.txt"), "initial\n").unwrap();
+    std::fs::write(project.join(".gitignore"), ".nib/\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "--quiet", "-m", "fixture"]);
+    std::fs::write(project.join(".nib/config.toml"), "api_key = \"secret\"\n").unwrap();
+    let worktree = project.join(".nib/worktrees/sessions/s1");
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "nib/session/s1",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let _home = super::tests::EnvironmentGuard::set("HOME", home.to_str().unwrap());
+    modify_tracked(&worktree);
+    let before = std::fs::read(project.join(".git/index")).unwrap();
+    let output = git_status(&worktree).await.expect("isolated linked status");
+    let status = output["status"].as_str().unwrap();
+    assert!(status.contains("nib/session/s1"), "{status}");
+    assert!(status.contains("tracked.txt"), "{status}");
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    let nested = git_status(&worktree.join("src"))
+        .await
+        .expect("status from a worktree subdirectory");
+    assert!(nested["status"].as_str().unwrap().contains("tracked.txt"));
+    assert_eq!(before, std::fs::read(project.join(".git/index")).unwrap());
+}

@@ -117,3 +117,20 @@ then reconcile ownership, release membership and native versions before integrat
 The current catalog candidate has independent approval, complete clean local gates
 and Linux/macOS CI; these do not override the changed reservation or establish a merge.
 T080 is not yet handed off, and T023 live qualification remains unresolved.
+
+## 2026-10-08 - Catalog and sandbox release scope resolved
+
+- Type: open-question resolution
+- Source: user sync request; remote development 045e0e2 and combined release ledger
+- Confidence: high
+- Review: independent exact-candidate review pending
+- Supersedes: 2026-10-08 Catalog and sandbox release scope
+
+Content:
+
+Synchronization combines the catalog/Anthropic work with T080 phase 1 already
+in shared development. The single nib-catalog-refresh release uses minor 0.4.0
+from 0.3.1 and includes T069-T073 plus T080; native mirrors and membership are
+reconciled without a separate 0.3.2 release or another version bump. Further
+T080 phases, T023 live qualification, main delivery and publication remain
+separate. Combined review and verification precede the synchronization push.

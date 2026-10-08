@@ -126,7 +126,7 @@ the Anthropic repair, user changes, historical records and shared version.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | patch | nib-catalog-refresh | Compatible advisory catalog-policy revision sharing the unreleased applied 0.3.2 patch from 0.3.1; atomic reservation rechecked before implementation, no additional bump. |
+| nib | patch | nib-catalog-refresh | Compatible advisory catalog-policy revision sharing the unreleased applied 0.3.2 patch from 0.3.1; atomic reservation rechecked before implementation, no additional bump. Superseded at combined synchronization by the shared minor 0.4.0 target with T080; this compatible member remains patch impact and applies no additional bump. |
 
 ## Memory Impact
 
@@ -163,3 +163,15 @@ workspace and static checks; the other 27 reviewed inputs retain their hashes.
 
 No shared integration, main delivery or publication is observed; state remains
 development.
+
+## Shared Release Reconciliation (2026-10-08)
+
+T080 phase 1 is already integrated into remote development at `045e0e2`.
+The user-requested synchronization combines that work with the catalog and
+Anthropic changes, retaining shared release `nib-catalog-refresh` at minor
+0.4.0 from 0.3.1. The release ledger includes all five catalog specs and T080;
+Cargo.toml, Cargo.lock and skills.yaml retain the same applied 0.4.0 target.
+Earlier 0.3.2 statements record the superseded pre-integration reservation.
+Combined exact review and native gates are pending; no catalog shared
+integration, main delivery, publication or live-provider qualification is
+inferred from this local reconciliation.

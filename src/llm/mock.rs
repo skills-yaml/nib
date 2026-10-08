@@ -409,7 +409,7 @@ impl LlmClient for MockLlmClient {
                     vec![ToolCallRequest::new(
                         "run_terminal",
                         json!({
-                            "command": "sleep 1; printf '%s\\n' \"$NIB_DURABLE_TOKEN\"; cat ../../../config.toml",
+                            "command": "sleep 1; printf '%s\\n' \"$NIB_DURABLE_TOKEN\"; cat ../../../config.toml 2>/dev/null || printf 'config hidden\\n'",
                             "background": true,
                             "affected_paths": ["."]
                         }),

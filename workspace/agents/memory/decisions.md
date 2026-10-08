@@ -581,3 +581,32 @@ raw upstream SHA-256 hashes remain authoritative. Governance does not normalize
 or rewrite imported bytes. The forced-CRLF full-governance fixture retains an
 ordinary-text conversion control and rejects removed protection and modified
 source bytes. Windows and macOS check canonical governance before long suites.
+
+## 2026-10-08 - Sandbox Git metadata is read-only; project mounts are trusted-layout only
+
+- Type: decision
+- Source: T080 phase 1 and five rounds of independent security review
+- Confidence: high
+- Review: independent exact-candidate security review approved 1b51d24
+- Supersedes: T063's accepted limitation that masked linked-worktree metadata may fail Git status
+
+Content:
+
+Tool-command sandboxes never make Git metadata writable. A writable `.git`
+cannot be secured with a block-list: review demonstrated host code execution
+through `commondir` redirection to an fsmonitor hook, and bypasses through
+renaming a protected path's parent. The mount plan
+(`src/sandbox/project_mounts.rs`) mounts the trusted project read-only and the
+workspace in the requested mode. It then applies these protections after
+every other bind, including `allow_write`:
+- masks every reachable `.nib`;
+- binds the common `.git`, worktree `.git` pointers and existing nested `.git`
+  entries read-only, with repository parents as mount points;
+- applies credential masks last.
+
+Mount sources come only from the canonical working directory and nib's fixed
+`.nib/worktrees/<kind>/<name>` layout, never from a `.git` pointer's contents.
+`$HOME` and its ancestors are never a project or an `allow_write` entry. Git
+reads work inside the sandbox; Git writes go through approved host-side tools
+(T080 phase 2). Tracked files that tools later execute, and repositories the
+agent creates, are accepted residual risk mitigated by `ask` mode and diffs.

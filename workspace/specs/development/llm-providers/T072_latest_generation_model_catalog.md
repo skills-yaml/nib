@@ -113,7 +113,7 @@ repair, historical records and the shared applied version.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | patch | nib-catalog-refresh | Compatible curated-suggestion policy revision, sharing T069/T070/T071's unreleased applied 0.3.2 patch from 0.3.1; atomic reservation rechecked before implementation, no additional bump. |
+| nib | patch | nib-catalog-refresh | Compatible curated-suggestion policy revision, sharing T069/T070/T071's unreleased applied 0.3.2 patch from 0.3.1; atomic reservation rechecked before implementation, no additional bump. Superseded at combined synchronization by the shared minor 0.4.0 target with T080; this compatible member remains patch impact and applies no additional bump. |
 
 ## Memory Impact
 
@@ -155,3 +155,15 @@ Renew independent exact-candidate review and affected Workspace, documentation
 and static gates. Native hash comparison must prove the other 26 reviewed inputs
 unchanged before reusing their full-suite evidence. Shared integration, main
 delivery and publication remain unobserved; the spec stays development.
+
+## Shared Release Reconciliation (2026-10-08)
+
+T080 phase 1 is already integrated into remote development at `045e0e2`.
+The user-requested synchronization combines that work with the catalog and
+Anthropic changes, retaining shared release `nib-catalog-refresh` at minor
+0.4.0 from 0.3.1. The release ledger includes all five catalog specs and T080;
+Cargo.toml, Cargo.lock and skills.yaml retain the same applied 0.4.0 target.
+Earlier 0.3.2 statements record the superseded pre-integration reservation.
+Combined exact review and native gates are pending; no catalog shared
+integration, main delivery, publication or live-provider qualification is
+inferred from this local reconciliation.
