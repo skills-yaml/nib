@@ -112,9 +112,7 @@ fn assert_success(output: &std::process::Output) {
 /// Runs `command` and requires its stderr to mention `expected`, so a
 /// negative check cannot pass for an unrelated reason.
 fn denied(command: &str, expected: &str) -> String {
-    format!(
-        "{{ ! out=$( ( {command} ) 2>&1 ) && printf '%s' \"$out\" | grep -qiE '{expected}'; }}"
-    )
+    format!("{{ ! out=$( ( {command} ) 2>&1 ) && printf '%s' \"$out\" | grep -qiE '{expected}'; }}")
 }
 
 const READ_ONLY: &str = "read-only file system";
