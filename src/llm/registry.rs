@@ -801,6 +801,154 @@ mod tests {
     }
 
     #[test]
+    fn bundled_catalog_respects_provider_specific_selections() {
+        for (provider, expected) in [
+            (
+                "openai",
+                vec![
+                    "gpt-6.1-sol",
+                    "gpt-6-astra",
+                    "gpt-6-luna",
+                    "gpt-6-sol",
+                    "gpt-5.6-sol",
+                    "gpt-5.6-terra",
+                    "gpt-5.6-luna",
+                ],
+            ),
+            (
+                "google",
+                vec![
+                    "gemini-3.8-flash",
+                    "gemini-3.7-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash",
+                ],
+            ),
+            ("grok", vec!["grok-4.7", "grok-4.6", "grok-4.5"]),
+        ] {
+            assert_eq!(provider_descriptor(provider).unwrap().models(), expected);
+        }
+        let router = provider_descriptor("openrouter").unwrap();
+        assert_eq!(router.models().len(), 33);
+        let router_openai = router
+            .models()
+            .iter()
+            .filter(|id| id.starts_with("openai/"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            router_openai,
+            [
+                "openai/gpt-6.1-sol",
+                "openai/gpt-6-astra",
+                "openai/gpt-6-luna",
+                "openai/gpt-6-sol",
+                "openai/gpt-5.6-sol",
+                "openai/gpt-5.6-terra",
+                "openai/gpt-5.6-luna",
+            ]
+        );
+        for (provider, prefix) in [("google", "google/"), ("grok", "x-ai/")] {
+            let expected = provider_descriptor(provider)
+                .unwrap()
+                .models()
+                .iter()
+                .map(|id| format!("{prefix}{id}"))
+                .collect::<Vec<_>>();
+            let actual = router
+                .models()
+                .iter()
+                .filter(|id| id.starts_with(prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+        for descriptor in PROVIDERS {
+            assert_eq!(descriptor.models()[0], descriptor.default_model());
+            assert!(descriptor.models().iter().all(|id| !id.contains(":batch")));
+            if descriptor.id == "openai" || descriptor.id == "openrouter" {
+                assert!(descriptor
+                    .models()
+                    .iter()
+                    .filter(|id| descriptor.id == "openai" || id.starts_with("openai/"))
+                    .all(|id| !id.ends_with("-pro") && !id.ends_with("-cyber")));
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_catalog_preserves_other_latest_generation_families() {
+        let representatives: &[(&str, usize, &[&str])] = &[
+            ("anthropic", 6, &["claude-opus-5-5", "claude-fable-5"]),
+            (
+                "openrouter",
+                33,
+                &[
+                    "deepseek/deepseek-v4.1-flash",
+                    "deepseek/deepseek-v4-pro",
+                    "deepseek/deepseek-v4-flash",
+                    "mistralai/mistral-large-4-0",
+                    "mistralai/mistral-medium-3-5",
+                    "mistralai/mistral-medium-3.1",
+                    "mistralai/mistral-medium-3",
+                    "mistralai/mistral-small-2603",
+                    "mistralai/codestral-2508",
+                    "mistralai/devstral-2512",
+                    "mistralai/ministral-14b-2512",
+                    "mistralai/ministral-8b-2512",
+                    "mistralai/ministral-3b-2512",
+                ],
+            ),
+            ("meta", 3, &["muse-spark-1.1", "muse-spark-1.3"]),
+            ("mock", 1, &["mock-model"]),
+        ];
+        for (provider, count, models) in representatives {
+            let descriptor = provider_descriptor(provider).expect("known provider");
+            assert_eq!(descriptor.models().len(), *count);
+            for model in *models {
+                assert!(descriptor.models().iter().any(|id| id == model));
+            }
+        }
+        let excluded_prefixes: &[(&str, &[&str])] = &[
+            ("openai", &["gpt-5.5", "gpt-5.4", "gpt-4"]),
+            (
+                "anthropic",
+                &[
+                    "claude-opus-4",
+                    "claude-sonnet-4",
+                    "claude-haiku-4",
+                    "claude-3",
+                ],
+            ),
+            (
+                "openrouter",
+                &[
+                    "openai/gpt-5.5",
+                    "openai/gpt-5.4",
+                    "openai/gpt-4",
+                    "anthropic/claude-opus-4",
+                    "anthropic/claude-sonnet-4",
+                    "anthropic/claude-haiku-4",
+                    "deepseek/deepseek-v3",
+                    "deepseek/deepseek-chat",
+                    "mistralai/mistral-large-2512",
+                    "mistralai/mistral-large-2407",
+                    "mistralai/mistral-small-3",
+                ],
+            ),
+        ];
+        for (provider, prefixes) in excluded_prefixes {
+            for prefix in *prefixes {
+                assert!(!provider_descriptor(provider)
+                    .unwrap()
+                    .models()
+                    .iter()
+                    .any(|id| id.starts_with(prefix)));
+            }
+        }
+    }
+
+    #[test]
     fn model_catalog_rejects_unknown_schema_and_duplicate_models() {
         let unknown_schema =
             DEFAULT_MODELS_TOML.replacen("schema_version = 1", "schema_version = 2", 1);
@@ -808,12 +956,10 @@ mod tests {
             .expect_err("unknown schema")
             .contains("unsupported model catalog schema"));
 
-        let duplicate = DEFAULT_MODELS_TOML.replacen(
-            "models = [\"gpt-5.6-sol\", \"gpt-5.6-terra\", \"gpt-5.6-luna\"]",
-            "models = [\"gpt-5.6-sol\", \"gpt-5.6-sol\"]",
-            1,
-        );
-        assert!(parse_model_catalog(&duplicate)
+        let mut duplicate = parse_model_catalog(DEFAULT_MODELS_TOML).expect("bundled catalog");
+        let models = &mut duplicate.providers.get_mut("openai").unwrap().models;
+        models.push(models[0].clone());
+        assert!(validate_model_catalog(&duplicate)
             .expect_err("duplicate model")
             .contains("duplicate model identifier"));
     }

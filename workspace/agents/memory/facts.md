@@ -459,3 +459,34 @@ T068's native Anthropic streamed continuation repair reached shared development 
 Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
+
+## 2026-10-06 - Public catalog refresh and provider-controlled Anthropic thinking
+
+- Type: fact
+- Source: user + T069 and current first-party provider documentation
+- Confidence: high
+- Review: Independent exact-candidate review required before handoff
+- Supersedes: Older bundled picker defaults; historical T023 evidence retained
+
+Content:
+
+T069 refreshes the advisory catalog from public sources inspected on 2026-10-06:
+OpenAI GPT-6.1 Sol, Anthropic Claude Opus 5.5 (direct API `claude-opus-5-5`),
+Google Gemini 3.8 Flash and Grok 4.7 become bundled defaults; OpenRouter uses its
+separately verified canonical IDs, including dotted Anthropic versions. Explicit
+user model selections and picker overrides remain authoritative.
+
+Bounded Anthropic text requests retain the provider's thinking default because
+Opus 5.5 cannot disable thinking. The existing max_tokens ceiling bounds total
+thinking plus text, and exhaustion remains a failure without executable tool
+authority. Native thinking, signatures and redacted blocks stay private and
+unchanged during tool continuation. Successive tool batches retain every earlier
+native assistant/result pair to preserve signed prefixes; cumulative history is
+bounded by 256 items and 4 MiB with fail-closed limits. Native continuation
+also retains the original fallback-system-prompt choice when a Required tool
+turn continues with Auto. Offline matrix fixtures account for curated models and
+separately approved IDs; actual qualification still requires canonical catalog
+visibility. This catalog refresh does not alter T023's
+protected selected model matrix or OpenRouter allowlist, and no paid generation
+or live qualification is inferred. Shared integration, main delivery and
+publication remain separately evidenced events.

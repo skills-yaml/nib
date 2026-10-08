@@ -548,3 +548,99 @@ Appended the verified T068 codec delivery, exact acceptance/gate evidence, uncha
 Content:
 
 Development publication was independently verified on 2026-10-06: Release Artifacts 37459973513 completed successfully, including all four native archive builds and publication. The public development-latest nib-release.json binds version 0.3.1 to exact revision 9762df5c10727889adff072045fcd8a8c1369dff, published at 2026-10-06T12:10:32Z. Its manifest SHA-256 is f83f51f5635cda345bbd58e153d144e49d1127c5c25bfcc5c532c76f9e43ceea; all four archive sizes and SHA-256 digests match GitHub uploaded-asset metadata. Released means development-channel publication; production was separately inspected at 0.1.0, revision 15123a3ef275458efc87200400219aeacc3e9ea9. No second bump or production rollout is implied.
+
+## 2026-10-06 - Public catalog refresh and provider-controlled Anthropic thinking
+
+- Type: fact
+- Source: user + T069 and current first-party provider documentation
+- Confidence: high
+- Review: Independent exact-candidate review required before handoff
+- Supersedes: Older bundled picker defaults; historical T023 evidence retained
+
+Content:
+
+T069 refreshes the advisory catalog from public sources inspected on 2026-10-06:
+OpenAI GPT-6.1 Sol, Anthropic Claude Opus 5.5 (direct API `claude-opus-5-5`),
+Google Gemini 3.8 Flash and Grok 4.7 become bundled defaults; OpenRouter uses its
+separately verified canonical IDs, including dotted Anthropic versions. Explicit
+user model selections and picker overrides remain authoritative.
+
+Bounded Anthropic text requests retain the provider's thinking default because
+Opus 5.5 cannot disable thinking. The existing max_tokens ceiling bounds total
+thinking plus text, and exhaustion remains a failure without executable tool
+authority. Native thinking, signatures and redacted blocks stay private and
+unchanged during tool continuation. Successive tool batches retain every earlier
+native assistant/result pair to preserve signed prefixes; cumulative history is
+bounded by 256 items and 4 MiB with fail-closed limits. Native continuation
+also retains the original fallback-system-prompt choice when a Required tool
+turn continues with Auto. Offline matrix fixtures account for curated models and
+separately approved IDs; actual qualification still requires canonical catalog
+visibility. This catalog refresh does not alter T023's
+protected selected model matrix or OpenRouter allowlist, and no paid generation
+or live qualification is inferred. Shared integration, main delivery and
+publication remain separately evidenced events.
+
+## 2026-10-07 - Three-major-generation catalog retention
+
+- Type: preference
+- Source: user clarification and T070 implementation
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: none
+
+Recorded the user's three-major-generation retention preference in
+[preferences.md](preferences.md). The curated catalog grows from 25 to 103 entries
+using available exact text/tool IDs, preserves upgraded defaults and existing
+configuration overrides, and documents retired generations and Gemini 2.5 account
+restrictions. T070 shares the already-applied unreleased 0.3.2 catalog patch;
+no paid qualification, integration, main delivery or publication is inferred.
+
+## 2026-10-07 - Two-major-generation retention and OpenRouter Mistral
+
+- Type: preference
+- Source: user revision and additional Mistral request
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Three-major-generation catalog retention preference
+
+Appended the revised preference to [preferences.md](preferences.md). T071 removes
+eight GPT 4 suggestions from OpenAI/OpenRouter, preserves explicit selections and
+existing defaults, and adds thirteen source-verified Mistral text/tool IDs through
+OpenRouter. The resulting catalog has 108 entries, including 63 OpenRouter entries.
+The protected qualification allowlist remains unchanged. T071 shares the applied
+unreleased 0.3.2 catalog patch; no additional bump, paid qualification, integration,
+main delivery or publication is inferred. T070's earlier evidence remains history.
+
+## 2026-10-07 - Latest-major-generation catalog retention
+
+- Type: preference
+- Source: user revision and T072
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Two-major-generation catalog retention preference
+
+Appended the revised preference to [preferences.md](preferences.md). T072 removes
+44 older suggestions from the two-generation candidate, retaining 64 catalog
+entries, including 36 OpenRouter routes and ten Mistral suggestions. Defaults,
+explicit older selections and protected qualification fixtures remain unchanged.
+The offline accounting fixture still includes its separately approved GPT 5 route
+outside the picker window. T072 shares the applied unreleased 0.3.2 catalog patch;
+no further bump, paid qualification, integration, main delivery or publication is
+inferred. T070 and T071 retain their historical source and verification records.
+
+## 2026-10-08 - Provider-specific catalog selection
+
+- Type: preference
+- Source: user revision and T073
+- Confidence: high
+- Review: independent exact-candidate review required
+- Supersedes: Uniform latest-major-generation retention for OpenAI/Grok/Gemini
+
+Appended the revised preference to [preferences.md](preferences.md). T073 includes
+the seven documented general direct GPT 5.6+ canonical IDs and corresponding
+OpenRouter base routes. Explicit user clarification excludes Cyber and Pro. Grok retains 4.7/4.6/4.5; Gemini retains the requested
+four ordinary Flash releases, with no newer eligible release found on 2026-10-08.
+The catalog contains 57 entries, including 33 OpenRouter routes and ten Mistral
+suggestions. Defaults, explicit selections, other families and protected qualification
+fixtures are preserved. T073 shares the applied unreleased 0.3.2 patch, without
+another bump or inferred paid qualification, integration, main merge or publication.

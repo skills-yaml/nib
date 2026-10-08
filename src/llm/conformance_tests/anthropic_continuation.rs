@@ -5,7 +5,7 @@ const THOUGHT: &str = "private-thinking-sentinel";
 const SIGNATURE: &str = "opaque-signature-sentinel";
 const REDACTED: &str = "encrypted-redacted-sentinel";
 
-fn native_blocks() -> Vec<Value> {
+pub(super) fn native_blocks() -> Vec<Value> {
     vec![
         json!({"type": "thinking", "thinking": THOUGHT, "signature": SIGNATURE, "provider_metadata": {"opaque": "private-metadata-sentinel"}}),
         json!({"type": "redacted_thinking", "data": REDACTED}),
@@ -20,7 +20,7 @@ fn event(wire: &mut String, kind: &str, data: Value) {
     wire.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
 }
 
-fn native_stream(blocks: &[Value]) -> String {
+pub(super) fn native_stream(blocks: &[Value]) -> String {
     let mut wire = String::new();
     event(
         &mut wire,
@@ -83,6 +83,18 @@ fn native_stream(blocks: &[Value]) -> String {
     wire
 }
 
+pub(super) fn assert_private_thinking_redacted(projected: &str) {
+    for private in [
+        THOUGHT,
+        SIGNATURE,
+        REDACTED,
+        "omitted-thinking-signature",
+        "private-metadata-sentinel",
+    ] {
+        assert!(!projected.contains(private));
+    }
+}
+
 async fn captured_continuation(streamed: bool, blocks: &[Value], error_result: bool) -> Value {
     let first = ScriptedHttpResponse::new(
         "200 OK",
@@ -104,46 +116,44 @@ async fn captured_continuation(streamed: bool, blocks: &[Value], error_result: b
             .to_string(),
     );
     let (endpoint, requests) = serve_sequence(vec![first, final_response]);
-    let client = ConformanceAdapter::Anthropic.client(endpoint);
+    let model = crate::llm::registry::provider_descriptor("anthropic")
+        .unwrap()
+        .default_model();
+    let client = crate::llm::anthropic::AnthropicClient::with_base_url(
+        model.to_string(),
+        vec![ACTIVE_CONFORMANCE_KEY.to_string()],
+        endpoint,
+    )
+    .unwrap();
     let messages = [LlmMessage::user("inspect synthetic slots")];
     let tools = ["probe_alpha", "probe_beta"].map(|name| ToolDefinition::new(name, "Inspect one synthetic slot", json!({"type": "object", "properties": {"slot": {"type": "integer"}}, "required": ["slot"]})).unwrap());
     let scope = LlmRequestScope::new("native-session", "native-run").unwrap();
     let response = if streamed {
         let mut stream = client
-            .stream(LlmRequest::new(&messages, Some(&tools)).with_scope(scope.clone()))
+            .stream(
+                LlmRequest::new(&messages, Some(&tools))
+                    .with_scope(scope.clone())
+                    .with_max_output_tokens(512),
+            )
             .await
             .unwrap();
         let mut events = Vec::new();
         while let Some(event) = stream.recv_private().await {
             events.push(event.unwrap());
         }
-        let projected = format!("{events:?}");
-        for private in [
-            THOUGHT,
-            SIGNATURE,
-            REDACTED,
-            "omitted-thinking-signature",
-            "private-metadata-sentinel",
-        ] {
-            assert!(!projected.contains(private));
-        }
+        assert_private_thinking_redacted(&format!("{events:?}"));
         stream.finish().await.unwrap()
     } else {
         client
-            .complete(LlmRequest::new(&messages, Some(&tools)).with_scope(scope.clone()))
+            .complete(
+                LlmRequest::new(&messages, Some(&tools))
+                    .with_scope(scope.clone())
+                    .with_max_output_tokens(512),
+            )
             .await
             .unwrap()
     };
-    let debug = format!("{response:?}");
-    for private in [
-        THOUGHT,
-        SIGNATURE,
-        REDACTED,
-        "omitted-thinking-signature",
-        "private-metadata-sentinel",
-    ] {
-        assert!(!debug.contains(private));
-    }
+    assert_private_thinking_redacted(&format!("{response:?}"));
     assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
     let mut continuation = response.continuation.unwrap();
     for call in response.tool_calls.unwrap().into_iter().rev() {
@@ -158,14 +168,22 @@ async fn captured_continuation(streamed: bool, blocks: &[Value], error_result: b
         .complete(
             LlmRequest::new(&messages, Some(&tools))
                 .with_scope(scope)
+                .with_max_output_tokens(512)
                 .with_continuation(Some(continuation)),
         )
         .await
         .unwrap();
     assert_eq!(final_response.content.as_deref(), Some("receipt"));
-    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let first = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let first: Value = serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(first["model"], model);
+    assert_eq!(first["max_tokens"], 512);
+    assert!(first.get("thinking").is_none());
     let second = requests.recv_timeout(Duration::from_secs(5)).unwrap();
-    serde_json::from_str(second.split_once("\r\n\r\n").unwrap().1).unwrap()
+    let second: Value = serde_json::from_str(second.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(second["max_tokens"], 512);
+    assert!(second.get("thinking").is_none());
+    second
 }
 
 #[tokio::test]

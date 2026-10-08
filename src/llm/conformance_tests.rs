@@ -1,5 +1,9 @@
+#[path = "conformance_tests/anthropic_bounded.rs"]
+mod anthropic_bounded;
 #[path = "conformance_tests/anthropic_continuation.rs"]
 mod anthropic_continuation;
+#[path = "conformance_tests/anthropic_history.rs"]
+mod anthropic_history;
 
 use super::*;
 use crate::config::{LlmConfig, ProviderEntry};

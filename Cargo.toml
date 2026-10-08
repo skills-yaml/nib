@@ -1,6 +1,6 @@
 [package]
 name = "nib"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Local-first AI agent with persistent plans, gated tools, and auditable execution."
 license = "MIT"

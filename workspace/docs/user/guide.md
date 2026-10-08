@@ -125,10 +125,10 @@ active_provider = "openai"
 context_length = 128000
 
 [llm.providers.openai]
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 # Optional replacement for nib's bundled /model suggestions. Model selection is not
 # restricted to this list, and the selected model is always shown in the picker.
-models = ["gpt-5.6-sol", "gpt-5.6-terra", "my-gateway/model"]
+models = ["gpt-6.1-sol", "gpt-6-astra", "my-gateway/model"]
 api_key = "replace-or-use-OPENAI_API_KEY"
 api_keys = []
 api = "responses"              # responses | chat_completions
@@ -213,18 +213,61 @@ request_timeout_secs = 30
 MODE = "production"
 ```
 
-The bundled provider catalog is maintained in `src/llm/default_models.toml`. Its
-verified defaults and picker suggestions are:
+The bundled provider catalog is maintained in `src/llm/default_models.toml`.
+Selections follow provider-specific rules: general OpenAI 5.6 and newer, the latest three
+general Grok releases, and Gemini Flash 3.8/3.7/3.6/3.5. Other families retain
+their latest major generation. Defaults and retained ordering are preserved.
 
-| Provider | Default | Bundled suggestions |
-| --- | --- | --- |
-| OpenAI | `gpt-5.6-sol` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` |
-| Anthropic | `claude-opus-5` | `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
-| Google Gemini | `gemini-3.6-flash` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` |
-| xAI Grok | `grok-4.5` | `grok-4.5`, `grok-4.3`, `grok-build-0.1` |
-| OpenRouter | `openai/gpt-5.6-sol` | `openai/gpt-5.6-sol`, `anthropic/claude-opus-5`, `google/gemini-3.6-flash`, `x-ai/grok-4.5`, `deepseek/deepseek-v4.1-flash` |
-| Meta | `muse-spark-1.1` | `muse-spark-1.1` |
-| Mock | `mock-model` | `mock-model` |
+| Provider | Default | Suggestions | Selection |
+| --- | --- | --- | --- |
+| OpenAI | `gpt-6.1-sol` | 7 | General GPT 5.6 and newer |
+| Anthropic | `claude-opus-5-5` | 6 | Claude 5 |
+| Google Gemini | `gemini-3.8-flash` | 4 | Flash 3.8, 3.7, 3.6, 3.5 |
+| xAI Grok | `grok-4.7` | 3 | Grok 4.7, 4.6, 4.5 |
+| OpenRouter | `openai/gpt-6.1-sol` | 33 | The same vendor selections; DeepSeek V4 and Mistral below |
+| Meta | `muse-spark-1.1` | 3 | Muse Spark 1 (1.3, 1.2, 1.1) |
+| Mock | `mock-model` | 1 | Local deterministic adapter |
+
+The [complete exact-ID catalog](../../../src/llm/default_models.toml) contains
+57 suggestions. OpenAI, Gemini, Grok and all retained OpenRouter routes were
+rechecked on **2026-10-08**; direct Anthropic and Meta retain their **2026-10-07**
+source dates. Public catalog presence does not establish account access or live
+qualification.
+
+The [official OpenAI catalog](https://developers.openai.com/api/docs/models.md)
+lists the seven general GPT 5.6+ models retained here: GPT 5.6 Sol/Terra/Luna,
+GPT 6 Astra/Sol/Luna and GPT 6.1 Sol. OpenRouter uses the corresponding seven
+verified base routes. OpenAI Cyber and Pro variants are excluded from these suggestions
+under the general-models-only selection.
+
+Use Responses for direct GPT-6.1 Sol tool calling. Direct GPT-6 Sol and GPT-6
+Luna support Chat Completions tool calling only with `reasoning_effort = "none"`;
+Responses supports their normal tool use. See the official
+[6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+[6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) and
+[6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) pages.
+
+The latest-model check found no newer ordinary Gemini Flash than 3.8 in the
+[model catalog](https://ai.google.dev/gemini-api/docs/models) or
+[release notes](https://ai.google.dev/gemini-api/docs/changelog). The four listed
+Flash releases remain the complete selection. Grok 4.7, 4.6 and 4.5 are the
+newest three general releases; Build predates 4.5 and is omitted.
+
+Meta's hosted Muse Spark catalog has one major generation; Llama models are not
+direct Meta API suggestions. Router availability is verified independently from
+first-party APIs.
+
+OpenRouter includes 10 Mistral suggestions: Large 4, Small 4, Medium 3,
+Ministral 3, Devstral 2, and Codestral 2508. Medium 3.5/3.1/3 are point releases
+within one major generation; Codestral 2508 is a dated release. Exact IDs were
+checked against [OpenRouter's public catalog](https://openrouter.ai/api/v1/models)
+and [Mistral's model overview](https://docs.mistral.ai/models). Some Mistral routes
+remain listed after direct Mistral API deprecation or retirement; these suggestions
+use the existing OpenRouter provider and do not expand its paid qualification
+allowlist.
+
+Older OpenAI models, unselected Gemini variants and Grok Build remain usable when
+explicitly configured. A configured replacement list also remains authoritative.
 
 The list is advisory rather than an allowlist. Omit `models` to inherit the bundled
 suggestions, set it to an ordered list to replace them for that provider, or set it to
@@ -236,6 +279,20 @@ model in OpenRouter's [coding usage collection](https://openrouter.ai/collection
 Its inclusion is a picker suggestion, not a live qualification result or an entry in
 the separately reviewed OpenRouter test allowlist.
 
+The live qualification selected-model matrix and protected OpenRouter allowlist
+retain their separately approved exact IDs. A picker refresh does not change them
+or qualify the new defaults.
+
+Anthropic requests leave thinking to the provider, including Opus 5.5, which requires
+thinking. nib does not force thinking off on bounded text requests. An explicit
+`max_output_tokens` limit remains the total output ceiling, including provider
+thinking; a small limit can end the response before usable text is produced.
+Truncated or refused responses fail instead of authorizing tools or silently
+increasing that limit. Across successive tool batches, nib privately retains
+earlier native assistant and tool-result turns, preserving signed thinking
+prefixes. Accumulated continuation history is bounded to 256 items and 4 MiB;
+exceeding either limit stops the request.
+
 `terminal.backend` is `local` in this release. `profiles.default` selects a workspace
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
 network settings apply only to sandboxed terminal processes, not LLM HTTP, web tools,
@@ -244,6 +301,8 @@ skill installation, or MCP child-process startup.
 #### OpenAI API mode
 
 New official OpenAI entries created by `nib auth` select `api = "responses"`.
+The bundled GPT-6.1 Sol and GPT-6 alternatives require Responses for reasoning
+with function tools.
 Existing entries without `api` continue to use `chat_completions`; nib does not rewrite
 them automatically. Grok, OpenRouter, Meta, and custom OpenAI-compatible gateways retain
 the T021 Chat Completions compatibility default unless their entry explicitly selects

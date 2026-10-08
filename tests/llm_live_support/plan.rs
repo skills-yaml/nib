@@ -1486,19 +1486,28 @@ expires_at = "2027-02-06"
         .unwrap();
         let mut full = settings(LiveMode::Full);
         full.providers = NETWORK_PROVIDERS.iter().map(ToString::to_string).collect();
-        full.limits.max_logical_requests = 104;
-        full.limits.max_attempts = 312;
-        full.limits.max_total_output_tokens = 6_656;
+        full.limits.max_logical_requests = 160;
+        full.limits.max_attempts = 480;
+        full.limits.max_total_output_tokens = 10_240;
 
         let plans = NETWORK_PROVIDERS
             .iter()
             .map(|provider| {
                 let descriptor = provider_descriptor(provider).unwrap();
-                let models = descriptor
+                let mut models = descriptor
                     .models()
                     .iter()
                     .map(|id| model(id, Some(true), Some(true)))
-                    .collect();
+                    .collect::<Vec<_>>();
+                // Picker suggestions and separately approved qualification IDs
+                // need not match. The synthetic live catalog contains both.
+                if *provider == "openrouter" {
+                    for id in allowlist.entries.keys() {
+                        if !models.iter().any(|entry| entry.id == *id) {
+                            models.push(model(id, Some(true), Some(true)));
+                        }
+                    }
+                }
                 build_plan(&full, &snapshot(provider, models), &allowlist, None)
             })
             .collect::<Result<Vec<_>, _>>()
@@ -1510,15 +1519,15 @@ expires_at = "2027-02-06"
                 .iter()
                 .map(|plan| plan.accounting.len())
                 .sum::<usize>(),
-            20
+            56
         );
         assert_eq!(
             plans.iter().map(|plan| plan.profiles.len()).sum::<usize>(),
-            26
+            40
         );
-        assert_eq!(matrix.logical_requests, 104);
-        assert_eq!(matrix.maximum_attempts, 312);
-        assert_eq!(matrix.maximum_output_tokens, 6_656);
+        assert_eq!(matrix.logical_requests, 160);
+        assert_eq!(matrix.maximum_attempts, 480);
+        assert_eq!(matrix.maximum_output_tokens, 10_240);
         assert_eq!(matrix.projected_cost_usd, Some(0.0));
     }
 }
