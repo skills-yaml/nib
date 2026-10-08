@@ -788,7 +788,11 @@ async fn mixed_question_batch_is_rejected_before_any_side_effect() {
         .tool_calls
         .iter()
         .all(|call| call.tool_name.as_deref() != Some("run_terminal")));
-    assert_eq!(loaded.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    // T081: the rejected batch interrupted the run, so its plan is cleared.
+    assert!(loaded.plan.is_none());
+    assert!(loaded.events.iter().any(|event| {
+        event.kind == "plan_invalidated" && event.details["reason"] == "interrupted"
+    }));
     loaded.validate_message_sequence().unwrap();
 }
 
@@ -832,9 +836,13 @@ async fn failed_terminal_observation_cannot_be_resolved_by_model_text_alone() {
     assert!(terminal.error.as_deref().is_some_and(|error| {
         error.contains("recoverable stderr") && error.contains("command exited with 7")
     }));
-    let plan = loaded.plan.as_ref().expect("blocked plan");
-    assert_eq!(plan.steps[plan.current_step_index].status, "Blocked");
-    assert_eq!(plan.outcome.as_deref(), Some("blocked_step_unresolved"));
+    // T081: the blocked plan is cleared after the run and audited.
+    assert!(loaded.plan.is_none());
+    assert!(loaded.events.iter().any(|event| {
+        event.kind == "plan_invalidated"
+            && event.details["reason"] == "interrupted"
+            && event.details["plan_outcome"] == "blocked_step_unresolved"
+    }));
     assert!(loaded.events.iter().any(|event| {
         event.kind == "step_completion_rejected"
             && event.details["reason"] == "blocked_step_unresolved"
@@ -1080,13 +1088,14 @@ async fn cancellation_interrupts_blocked_approval_and_reconciles_the_session() {
     let persisted = store.load(&session_id).expect("cancelled session");
     assert!(summary.last_message.is_none());
     assert_eq!(persisted.messages, messages_before_cancel);
-    let plan = persisted.plan.as_ref().expect("generated plan");
-    assert_eq!(plan.outcome.as_deref(), Some("cancelled_by_user"));
-    assert_eq!(plan.steps[plan.current_step_index].status, "Cancelled");
-    assert_eq!(
-        plan.steps[plan.current_step_index].outcome.as_deref(),
-        Some("cancelled_by_user")
-    );
+    // T081: an interrupted plan is cleared and audited instead of kept.
+    assert!(persisted.plan.is_none());
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "plan_invalidated"
+            && event.details["reason"] == "interrupted"
+            && event.details["outcome"] == "cancelled_by_user"
+            && event.details["plan_outcome"] == "cancelled_by_user"
+    }));
     persisted.validate_message_sequence().unwrap();
     let cancellation_event = persisted
         .events
@@ -1312,4 +1321,110 @@ async fn question_execution_and_audit_persist_only_the_public_projection() {
         }
     }
     assert_public_strings_are_bounded(&public_value);
+}
+
+/// T081: which terminal outcomes clear an unfinished plan.
+#[test]
+fn interrupted_outcomes_clear_unfinished_plans_but_waiting_plans_survive() {
+    for outcome in [
+        "tool_execution_failed",
+        "blocked_step_unresolved",
+        "cancelled_by_user",
+        "local_error",
+        "turn_limit_reached",
+        "plan_approval_denied",
+        "llm_stream_failed: timeout",
+    ] {
+        assert!(clears_unfinished_plan(outcome), "{outcome}");
+    }
+    for outcome in [
+        "completed",
+        "plan_ready",
+        "step_completed",
+        "unresolved_clarification",
+        "waiting_for_user_input",
+        "provider_continuation_interrupted",
+        "planning_required_active_plan",
+        "planning_required_active_run",
+    ] {
+        assert!(!clears_unfinished_plan(outcome), "{outcome}");
+    }
+
+    let dir = tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let mut session = store.create_session();
+    let mut plan = pending_plan("keep waiting plan", "ask the user");
+    plan.approve();
+    let plan_id = plan.id.clone();
+    session.plan = Some(plan);
+    assert!(!clear_interrupted_plan_in_session(
+        &mut session,
+        "unresolved_clarification",
+        None
+    ));
+    assert_eq!(
+        session.plan.as_ref().map(|plan| plan.id.clone()),
+        Some(plan_id.clone())
+    );
+    assert!(clear_interrupted_plan_in_session(
+        &mut session,
+        "tool_execution_failed",
+        Some("run-1")
+    ));
+    assert!(session.plan.is_none());
+    let event = session
+        .events
+        .iter()
+        .find(|event| event.kind == "plan_invalidated")
+        .expect("audit event");
+    assert_eq!(event.details["reason"], "interrupted");
+    assert_eq!(event.details["outcome"], "tool_execution_failed");
+    assert_eq!(event.details["run_id"], "run-1");
+    assert_eq!(event.details["previous_plan_id"], plan_id.as_str());
+}
+
+/// T081 AC-1: a plan left Blocked by an earlier run (the session shape that
+/// trapped users in "Existing plan is still open") is cleared at the next run,
+/// and the next chat request is not rejected by the planning gate.
+#[tokio::test]
+async fn blocked_plan_from_an_earlier_run_does_not_trap_the_next_request() {
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let mut session = store.create_session();
+    let mut plan = pending_plan("review repo", "inspect and validate");
+    plan.approve();
+    plan.outcome = Some("tool_execution_failed".to_string());
+    plan.steps[0].status = "Blocked".to_string();
+    plan.steps[0].outcome = Some("tool_execution_failed".to_string());
+    let plan_id = plan.id.clone();
+    session.plan = Some(plan);
+    store.save(&mut session).expect("blocked plan fixture");
+
+    let summary = run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        "continue",
+        AgentLoopConfig {
+            max_steps: 5,
+            auto_approve: true,
+            interactive_request: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("next request runs");
+    assert_ne!(summary.outcome, "planning_required_active_plan");
+
+    let persisted = store.load(&session.id).expect("session");
+    assert!(persisted
+        .plan
+        .as_ref()
+        .is_none_or(|plan| plan.id != plan_id));
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "plan_invalidated"
+            && event.details["reason"] == "interrupted"
+            && event.details["outcome"] == "tool_execution_failed"
+            && event.details["previous_plan_id"] == plan_id.as_str()
+    }));
 }

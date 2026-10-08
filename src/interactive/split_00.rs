@@ -1399,10 +1399,10 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
         "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /status and resolve its blocker."),
         "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /status and run or repair the exact check."),
         "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /status before requesting more work."),
-        "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the same plan."),
-        "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the same plan."),
+        "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the request."),
+        "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the request."),
         "tool_scope_outside_worktree" => ("Tool path outside project", "A proposed tool targeted a path outside the active worktree. Choose a project path and retry."),
-        "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning. Finish or resolve the current plan, or start a new session."),
+        "planning_required_active_plan" => ("Existing plan is waiting for you", "This request needs planning while the current plan waits for your answer or approval. Answer the pending prompt, or start a new session with /new."),
         "planning_required_active_run" => ("Run is still active", "Wait for reconciliation or cancel the active run before starting another request."),
         "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /status before continuing."),
         "plan_approval_denied" => ("Plan approval declined", "No plan actions were run. Revise the request or start a new plan."),
@@ -1432,17 +1432,33 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
     TerminalOutcomeMessage { title, detail }
 }
 
+/// Extra guidance when an interrupted run cleared any unfinished plan (T081).
+fn cleared_plan_note(outcome: &str) -> &'static str {
+    if crate::agent::r#loop::clears_unfinished_plan(outcome) {
+        " Any unfinished plan was cleared; describe the next request in the chat."
+    } else {
+        ""
+    }
+}
+
 pub fn user_visible_stop_report(outcome: &str, session_id: &str) -> String {
     let message = terminal_outcome_message(outcome);
     format!(
-        "{}. {}\nSession: {session_id}",
-        message.title, message.detail
+        "{}. {}{}\nSession: {session_id}",
+        message.title,
+        message.detail,
+        cleared_plan_note(outcome)
     )
 }
 
 pub fn stream_end_status_line(outcome: &str) -> String {
     let message = terminal_outcome_message(outcome);
-    format!("[stream ended] {}. {}", message.title, message.detail)
+    format!(
+        "[stream ended] {}. {}{}",
+        message.title,
+        message.detail,
+        cleared_plan_note(outcome)
+    )
 }
 
 pub fn active_interaction_consumer(state: &InteractionState) -> InteractionConsumer {

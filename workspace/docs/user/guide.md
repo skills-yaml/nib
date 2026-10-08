@@ -506,6 +506,11 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
 - `/continue <plan-id>` optionally continues that exact plan without retyping its goal.
   Answering saved questions or saying `resume` in ordinary conversation also recovers
   the interrupted operation; sets still require Submit.
+- When a run is interrupted (a tool, model or approval failure, a run limit, or
+  cancellation), its unfinished plan is cleared. The stop message says so; describe
+  the next request in the chat to plan again. Plans waiting for your answer, and plans
+  whose model connection was interrupted mid-response, are kept. `/continue` on a
+  cleared plan explains that it was cleared.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a

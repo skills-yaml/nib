@@ -560,3 +560,15 @@ Development publication was independently verified on 2026-10-06: Release Artifa
 Content:
 
 Recorded the read-only Git metadata and trusted-layout mount plan decision in decisions.md after the independent review approved phase 1.
+
+## 2026-10-08 - T081 interrupted-plan decision
+
+- Type: changelog
+- Source: T081
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the user's decision to clear interrupted plans in decisions.md.

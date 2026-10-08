@@ -188,6 +188,11 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 ));
             }
             append_session_event(session, "run_started", json!({"run_id": run_id.clone()}));
+            // Plans interrupted before T081 cleared them at termination are
+            // cleared now, so they cannot trap this request.
+            if let Some(outcome) = session.plan.as_ref().and_then(recorded_plan_interruption) {
+                clear_interrupted_plan_in_session(session, &outcome, None);
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -245,6 +250,8 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
     let stream_tx = cfg.stream_tx.clone();
     let stream_sensitive_values = runtime.nib_cfg.public_session_sensitive_values();
     let cancellation_store = runtime.session_store.clone();
+    // Requests rejected at admission never ran, so they interrupt no plan.
+    let admitted = recovery_result.is_ok();
     let run_result = match recovery_result {
         Err(error) => Err(error),
         Ok(_) => {
@@ -302,6 +309,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, &outcome)?;
+            clear_interrupted_plan_after_run(&cancellation_store, session_id, &run_id, &outcome)?;
             Ok(summary)
         }
         (Err(error), Ok(())) => {
@@ -313,6 +321,14 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, "local_error")?;
+            if admitted {
+                clear_interrupted_plan_after_run(
+                    &cancellation_store,
+                    session_id,
+                    &run_id,
+                    "local_error",
+                )?;
+            }
             Err(error)
         }
         (Ok(_), Err(error)) => Err(error.to_string()),

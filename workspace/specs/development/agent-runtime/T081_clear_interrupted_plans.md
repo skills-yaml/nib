@@ -1,7 +1,7 @@
 # T081: Clear Interrupted Plans and Explain Verification Rejections
 
-**Status:** Backlog
-State: backlog
+**Status:** Development. Implementation started on 2026-10-08 at the user's request.
+State: development
 Primary Feature: agent-runtime
 
 ## Problem and Authority
@@ -84,6 +84,35 @@ cleared, and the user can ask for a new plan through the chat.
 - [ ] AC-6: `task verify` passes. Guide, catalog, versions and memory are
   reconciled. A review is required because this changes the workload model.
 
+## Implementation Plan
+
+1. Classify terminal outcomes that clear an unfinished plan
+   (`clears_unfinished_plan`): agent failures, cancellation, `local_error` and
+   unresponsive shutdown. Keep plans for `unresolved_clarification`,
+   `provider_continuation_interrupted` and the planning gates.
+2. Clear the plan at the single run exit (`entry.rs`) for admitted runs, and
+   clear plans recorded as interrupted before T081 at the next run start.
+3. Explain `/continue` on a cleared plan, update the gate and stop messages, and
+   list declared verification ids in rejection errors.
+4. Update tests that expected interrupted plans to persist; add fixtures for
+   the outcome matrix, the legacy blocked-plan session, `/continue` and
+   verification errors.
+
+## Implementation Evidence
+
+- Single exit: `run_agent_loop_with_runtime_and_recovery` clears after
+  `runtime_terminal_event` (admitted runs only), recording
+  `plan_invalidated` with `reason: interrupted`, `outcome`, `run_id`, the
+  previous plan id and goal, `approved`, the step index and count, and
+  `plan_outcome`.
+- Legacy sessions: plans whose `plan.outcome` or blocked step outcome is an
+  interruption are cleared at the next `run_started`. This is the exact shape
+  of session `21914944` (`tool_execution_failed`, step 0 `Blocked`).
+- AC-4: a verification rejection is an ordinary failed tool result
+  (`approval_source: verification`). Only approval denials or repeated
+  identical failures end the run, so the model can retry with a declared id
+  from the new error text.
+
 ## Validation Gates
 
 Focused agent-loop and interactive tests, then `task check`, `task verify`,
@@ -101,9 +130,9 @@ accepted by the user decision. Rollback restores the prior gate.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Backlog proposal; expected patch reserved at development start. Changes interrupted-plan lifecycle to unblock chat; no persisted schema change. |
+| nib | patch | nib-catalog-refresh | Compatible interrupted-plan lifecycle change; reuses the already-applied shared 0.4.0 target (aggregate minor from T080); no second bump. |
 
 ## Memory Impact
 
-Status: none
-Rationale: Backlog proposal; the durable decision is classified as pending at development start and recorded when implemented.
+Status: updated
+Rationale: Appended the user's interrupted-plan decision to [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md) and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md) on 2026-10-08.

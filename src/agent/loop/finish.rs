@@ -1168,6 +1168,100 @@ pub(crate) fn is_llm_failure_outcome(outcome: &str) -> bool {
         )
 }
 
+/// Terminal outcomes after which an unfinished plan is cleared (T081). An
+/// interrupted plan must not trap later chat requests; the user describes the
+/// next request instead. Plans that wait on the user (clarifications), plans
+/// whose provider continuation is resumable, and the planning gates that did
+/// not run the plan are kept.
+pub(crate) fn clears_unfinished_plan(outcome: &str) -> bool {
+    !matches!(
+        outcome,
+        "provider_continuation_interrupted"
+            | "unresolved_clarification"
+            | "planning_required_active_plan"
+            | "planning_required_active_run"
+    ) && (is_agent_failure_outcome(outcome)
+        || matches!(
+            outcome,
+            "cancelled_by_user" | "local_error" | "unresponsive_worker_shutdown"
+        ))
+}
+
+/// Removes an unfinished plan after an interrupting terminal `outcome`,
+/// recording the abandoned plan in a `plan_invalidated` event. Returns whether
+/// a plan was cleared.
+pub(crate) fn clear_interrupted_plan_in_session(
+    session: &mut Session,
+    outcome: &str,
+    run_id: Option<&str>,
+) -> bool {
+    let unfinished = session
+        .plan
+        .as_ref()
+        .is_some_and(|plan| !plan.is_complete());
+    if !unfinished || !clears_unfinished_plan(outcome) {
+        return false;
+    }
+    let prior = session
+        .plan
+        .take()
+        .expect("plan was present while clearing an interrupted plan");
+    append_session_event(
+        session,
+        "plan_invalidated",
+        json!({
+            "reason": "interrupted",
+            "outcome": outcome,
+            "run_id": run_id,
+            "previous_plan_id": (!prior.id.trim().is_empty()).then_some(prior.id),
+            "previous_goal": (!prior.goal.trim().is_empty()).then_some(prior.goal),
+            "approved": prior.approved,
+            "current_step_index": prior.current_step_index,
+            "step_count": prior.steps.len(),
+            "plan_outcome": prior.outcome,
+        }),
+    );
+    true
+}
+
+/// The interrupting outcome already recorded on an unfinished plan by a run
+/// that ended before plans were cleared at termination.
+pub(crate) fn recorded_plan_interruption(plan: &crate::session::Plan) -> Option<String> {
+    if plan.is_complete() {
+        return None;
+    }
+    let blocked_step = plan
+        .steps
+        .get(plan.current_step_index)
+        .filter(|step| step.status == "Blocked")
+        .and_then(|step| step.outcome.clone());
+    plan.outcome
+        .clone()
+        .or(blocked_step)
+        .filter(|outcome| clears_unfinished_plan(outcome))
+}
+
+/// Clears the session's unfinished plan after a run ends with `outcome`.
+pub(crate) fn clear_interrupted_plan_after_run(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    outcome: &str,
+) -> Result<bool, String> {
+    if !clears_unfinished_plan(outcome) {
+        return Ok(false);
+    }
+    store
+        .update_session(session_id, |session| {
+            Ok(clear_interrupted_plan_in_session(
+                session,
+                outcome,
+                Some(run_id),
+            ))
+        })
+        .map_err(|error| format!("failed to clear interrupted plan: {error}"))
+}
+
 pub(crate) fn is_agent_failure_outcome(outcome: &str) -> bool {
     is_llm_failure_outcome(outcome)
         || matches!(

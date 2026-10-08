@@ -610,3 +610,27 @@ Mount sources come only from the canonical working directory and nib's fixed
 reads work inside the sandbox; Git writes go through approved host-side tools
 (T080 phase 2). Tracked files that tools later execute, and repositories the
 agent creates, are accepted residual risk mitigated by `ask` mode and diffs.
+
+## 2026-10-08 - Interrupted plans are cleared; chat plans again
+
+- Type: decision
+- Source: user decision recorded in T081
+- Confidence: high
+- Review: independent review required before delivery (workload model)
+- Supersedes: keeping blocked or cancelled plans active after their run ends
+
+Content:
+
+When a run ends with an interrupting outcome, its unfinished plan is removed
+and a `plan_invalidated` event (`reason: interrupted`) records the abandoned
+plan for audit. Interrupting outcomes are agent failures, cancellation,
+`local_error` and unresponsive shutdown. The user then describes the next
+request in chat, so the planning gate cannot trap them.
+
+Kept plans:
+- plans waiting on the user (`unresolved_clarification`);
+- resumable provider continuations;
+- requests rejected at admission or by the planning gates.
+
+Plans recorded as interrupted before this change are cleared at the next run
+start.

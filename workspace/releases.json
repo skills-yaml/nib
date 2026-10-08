@@ -131,9 +131,10 @@
       "owner": "t069-author",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md"
+        "workspace/specs/development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md",
+        "workspace/specs/development/agent-runtime/T081_clear_interrupted_plans.md"
       ],
-      "evidence": "Shared peer reservation nib-catalog-refresh (T069 catalog work, patch 0.3.2) was joined by T080 on 2026-10-08 at the user's direction; the atomic reserve aggregated impact to minor and returned target 0.4.0 from published 0.3.1. The release owner t069-author applies the bump once; T080 applies no second bump. This branch records the T080 membership; T069 members are merged at integration. T080's branch applies the identical shared 0.4.0 target to Cargo.toml, Cargo.lock and skills.yaml so its development candidate is self-consistent; this is the same single release bump, merged with the owner's application at integration."
+      "evidence": "Shared peer reservation nib-catalog-refresh (T069 catalog work, patch 0.3.2) was joined by T080 on 2026-10-08 at the user's direction; the atomic reserve aggregated impact to minor and returned target 0.4.0 from published 0.3.1. The release owner t069-author applies the bump once; T080 applies no second bump. This branch records the T080 membership; T069 members are merged at integration. T080's branch applies the identical shared 0.4.0 target to Cargo.toml, Cargo.lock and skills.yaml so its development candidate is self-consistent; this is the same single release bump, merged with the owner's application at integration. T081 joined the already-applied shared target on 2026-10-08 (patch member; aggregate stays minor); no second bump."
     }
   ]
 }

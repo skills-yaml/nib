@@ -36,7 +36,11 @@ async fn worktree_preflight_failure_reconciles_without_running_proposed_tool() {
         .events
         .iter()
         .any(|event| matches!(event.kind.as_str(), "tool_attempted" | "tool_started")));
-    assert_eq!(saved.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    // T081: the failed preflight interrupted the run, so its plan is cleared.
+    assert!(saved.plan.is_none());
+    assert!(saved.events.iter().any(|event| {
+        event.kind == "plan_invalidated" && event.details["reason"] == "interrupted"
+    }));
     assert!(saved.events.iter().any(|event| {
         event.kind == "local_preflight_failed"
             && event.details["stage"] == "managed_worktree"
