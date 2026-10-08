@@ -36,9 +36,14 @@ Implement the claimed scope.
 
 ## Validation
 
-Agent, interactive, session and TUI library tests (393), the four new T081
-fixtures, `task check` and `task docs:check` pass. Independent review and
-`task verify` are pending.
+- Independent review went through three rounds:
+  - 86a9cb2: approved with fixes (H1 run binding, H2 compaction, M1/M2
+    tests, L1-L4);
+  - 7c62fc2: approved with fixes (the cancel-with-pending-question trap and
+    cancel marking an unbound plan);
+  - eac013c: approved with no required changes.
+- Agent, interactive, session, TUI and LLM library tests (583), `task check`
+  and `task docs:check` pass. `task verify` runs on the frozen candidate.
 
 ## Blockers and Dependencies
 
@@ -46,7 +51,7 @@ None.
 
 ## Next Step
 
-Independent review, then `task verify` and a PR into `development`.
+`task verify`, then a PR into `development`.
 
 ## Handoff
 
