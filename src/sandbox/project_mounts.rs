@@ -77,18 +77,25 @@ impl ProjectMounts {
     /// Appends the state masks and read-only Git mounts, then `--chdir`.
     /// Runs after every other bind, including configured `allow_write`
     /// paths, so no configuration can expose nib state or make Git metadata
-    /// writable again.
+    /// writable again. `hidden_home` is the masked home directory, if any.
     pub(super) fn append_protections(
         &self,
         args: &mut Vec<String>,
         cwd: &Path,
         writable: bool,
+        hidden_home: Option<&Path>,
     ) -> Result<(), String> {
         let workspace = self.workspace(cwd);
+        let plan = MaskPlan {
+            cwd,
+            workspace: &workspace,
+            visible_root: &self.root,
+            scan_roots: &[&self.root, &workspace],
+            hidden_home,
+        };
         // The managed worktree lives inside the project state mask; bind it
         // again between the outer and inner masks.
-        let rebind = self.is_managed().then_some(mode(writable));
-        append_state_masks(args, cwd, &workspace, rebind)?;
+        plan.append(args, self.is_managed().then_some(mode(writable)))?;
         if self.is_managed() {
             protect_git_entry(args, &self.worktree.join(".git"))?;
         }
@@ -108,50 +115,135 @@ impl ProjectMounts {
     }
 }
 
-/// Protections for working directories without a trusted project: hide every
-/// ancestor nib state directory and keep a `.git` entry at the working
-/// directory (for example the pointer file of an unmanaged linked worktree,
-/// a submodule or a separate Git directory) read-only.
+/// Protections for working directories without a trusted project: hide nib
+/// state above and below the working directory, keep existing Git metadata in
+/// it read-only, and re-bind the working directory in case an ancestor mask
+/// covered it (for example a session worktree of a project whose own `.git`
+/// is a file).
 pub(super) fn append_fallback_protections(
     args: &mut Vec<String>,
     cwd: &Path,
+    writable: bool,
+    hidden_home: Option<&Path>,
 ) -> Result<(), String> {
-    append_state_masks(args, cwd, cwd, None)?;
+    let plan = MaskPlan {
+        cwd,
+        workspace: cwd,
+        visible_root: cwd,
+        scan_roots: &[cwd],
+        hidden_home,
+    };
+    plan.append(args, Some(mode(writable)))?;
     protect_git_entry(args, &cwd.join(".git"))
 }
 
-/// Masks every `.nib` directory among the working directory's ancestors.
-/// Masks outside the workspace come first; when `rebind` is set the workspace
-/// is bound again in that mode before the masks inside it are applied.
-fn append_state_masks(
-    args: &mut Vec<String>,
-    cwd: &Path,
-    workspace: &Path,
-    rebind: Option<&str>,
-) -> Result<(), String> {
-    let states: Vec<PathBuf> = cwd
-        .ancestors()
-        .map(|ancestor| ancestor.join(".nib"))
-        .filter(|state| std::fs::symlink_metadata(state).is_ok())
-        .collect();
-    for state in states
-        .iter()
-        .rev()
-        .filter(|state| !state.starts_with(workspace))
-    {
-        append_state_mask(args, state)?;
+/// Directory names never descended into while looking for nested state and
+/// repositories: they are large dependency or build trees.
+const SKIPPED_DIRECTORIES: [&str; 5] = [".git", ".nib", "node_modules", "target", ".venv"];
+/// Depth below each scan root searched for nested `.nib` and `.git` entries.
+const NESTED_SCAN_DEPTH: usize = 3;
+/// Upper bound on directories visited per scan root, keeping command start-up
+/// cheap in very wide trees.
+const NESTED_SCAN_LIMIT: usize = 4096;
+
+struct MaskPlan<'a> {
+    cwd: &'a Path,
+    /// Writable area; masks inside it follow its (re-)bind.
+    workspace: &'a Path,
+    /// Bound area that stays visible even when it is under the hidden home.
+    visible_root: &'a Path,
+    /// Trees searched for nested `.nib` directories and `.git` entries.
+    scan_roots: &'a [&'a Path],
+    hidden_home: Option<&'a Path>,
+}
+
+impl MaskPlan<'_> {
+    /// Masks every reachable `.nib` directory (ancestors of the working
+    /// directory and nested ones near the scan roots), outer masks first.
+    /// When `rebind` is set the workspace is bound again in that mode before
+    /// the masks inside it. Existing nested Git metadata inside the workspace
+    /// is then bound read-only.
+    fn append(&self, args: &mut Vec<String>, rebind: Option<&str>) -> Result<(), String> {
+        let mut states: Vec<PathBuf> = self
+            .cwd
+            .ancestors()
+            .map(|ancestor| ancestor.join(".nib"))
+            .filter(|state| std::fs::symlink_metadata(state).is_ok())
+            .collect();
+        let mut nested_git = Vec::new();
+        for root in self.scan_roots {
+            scan_nested(root, &mut states, &mut nested_git);
+        }
+        states.retain(|state| self.is_visible(state));
+        states.sort();
+        states.dedup();
+        for state in states
+            .iter()
+            .filter(|state| !state.starts_with(self.workspace))
+        {
+            append_state_mask(args, state)?;
+        }
+        if let Some(kind) = rebind {
+            push_mount(args, kind, self.workspace)?;
+        }
+        for state in states
+            .iter()
+            .filter(|state| state.starts_with(self.workspace))
+        {
+            append_state_mask(args, state)?;
+        }
+        nested_git.sort();
+        nested_git.dedup();
+        for git in nested_git
+            .iter()
+            .filter(|git| git.starts_with(self.workspace))
+        {
+            push_mount(args, "--ro-bind", git)?;
+        }
+        Ok(())
     }
-    if let Some(kind) = rebind {
-        push_mount(args, kind, workspace)?;
+
+    /// Paths under the masked home are invisible unless they are inside the
+    /// bound area, so they need no mask (and a symlink there is harmless).
+    fn is_visible(&self, path: &Path) -> bool {
+        self.hidden_home
+            .is_none_or(|home| !path.starts_with(home) || path.starts_with(self.visible_root))
     }
-    for state in states
-        .iter()
-        .rev()
-        .filter(|state| state.starts_with(workspace))
-    {
-        append_state_mask(args, state)?;
+}
+
+/// Collects real `.nib` directories and `.git` entries below `root` (not
+/// `root` itself) down to [`NESTED_SCAN_DEPTH`]. Symbolic links are neither
+/// followed nor collected.
+fn scan_nested(root: &Path, states: &mut Vec<PathBuf>, git: &mut Vec<PathBuf>) {
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((directory, depth)) = pending.pop() {
+        visited += 1;
+        if visited > NESTED_SCAN_LIMIT {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let nested = directory != root;
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == ".nib" && file_type.is_dir() && nested {
+                states.push(path);
+            } else if name == ".git" && (file_type.is_dir() || file_type.is_file()) && nested {
+                git.push(path);
+            } else if file_type.is_dir()
+                && depth + 1 < NESTED_SCAN_DEPTH
+                && !SKIPPED_DIRECTORIES.iter().any(|skipped| name == *skipped)
+            {
+                pending.push((path, depth + 1));
+            }
+        }
     }
-    Ok(())
 }
 
 fn mode(writable: bool) -> &'static str {

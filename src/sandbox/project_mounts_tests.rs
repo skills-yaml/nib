@@ -408,7 +408,9 @@ fn project_mounts_order_protections_after_workspace() {
     let mounts = ProjectMounts::resolve(&nested, Some(&home)).expect("managed project");
     let mut args = Vec::new();
     mounts.append_binds(&mut args, &nested, true).unwrap();
-    mounts.append_protections(&mut args, &nested, true).unwrap();
+    mounts
+        .append_protections(&mut args, &nested, true, Some(&home))
+        .unwrap();
     let text = |path: &Path| path.to_string_lossy().to_string();
     let (project_text, worktree_text) = (text(&project), text(&worktree));
     let state = format!("{project_text}/.nib");
@@ -467,4 +469,139 @@ fn project_mounts_ignore_unmanaged_linked_worktrees() {
         ProjectMounts::resolve(&outside.canonicalize().unwrap(), Some(&home)),
         None
     );
+}
+
+/// N1: a nib project whose own checkout is a linked worktree resolves to the
+/// fallback plan; its session worktree must stay usable inside the state mask.
+#[tokio::test]
+#[serial]
+async fn project_mounts_fallback_keeps_session_of_linked_project_usable() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    for base in [home.join("inside"), root.path().join("outside")] {
+        let (main, _worktree) = project_fixture(&base);
+        let linked = base.join("linked-project");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir_all(linked.join(".nib")).unwrap();
+        std::fs::write(linked.join(".nib/config.toml"), "api_key = \"linked\"\n").unwrap();
+        let session = linked.join(".nib/worktrees/sessions/s2");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "s2",
+                session.to_str().unwrap(),
+            ],
+        );
+        let _home = HomeGuard::set(home.as_os_str());
+        let command = [
+            "printf edit > edited.txt".to_string(),
+            denied(
+                &format!("cat {}/.nib/config.toml", linked.display()),
+                "no such file",
+            ),
+            denied("printf 'gitdir: /tmp/evil' > .git", READ_ONLY),
+        ]
+        .join(" && ");
+        let output = run(
+            &session.canonicalize().unwrap(),
+            &command,
+            &BoundaryConfig::default(),
+        )
+        .await;
+        assert_success(&output);
+        assert_eq!(
+            std::fs::read_to_string(session.join("edited.txt")).unwrap(),
+            "edit"
+        );
+    }
+}
+
+/// N2: a working directory above several projects must not expose their nib
+/// state or make their Git metadata writable.
+#[tokio::test]
+#[serial]
+async fn project_mounts_protect_nested_projects_below_workspace() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = root.path().join("work");
+    let (project, _worktree) = project_fixture(&work);
+    let _home = HomeGuard::set(home.as_os_str());
+    let name = project.file_name().unwrap().to_string_lossy().to_string();
+    let command = [
+        denied(&format!("cat {name}/.nib/config.toml"), "no such file"),
+        denied(&format!("printf '[core]' >> {name}/.git/config"), READ_ONLY),
+        denied(
+            &format!("mv {name}/.git {name}/.git-old"),
+            BUSY_OR_READ_ONLY,
+        ),
+        format!("printf edit > {name}/edited.txt"),
+    ]
+    .join(" && ");
+    let output = run(
+        &work.canonicalize().unwrap(),
+        &command,
+        &BoundaryConfig::default(),
+    )
+    .await;
+    assert_success(&output);
+}
+
+/// N4: credential masks are applied after allow_write.
+#[tokio::test]
+#[serial]
+async fn project_mounts_keep_cargo_credentials_masked_over_allow_write() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (_project, worktree) = project_fixture(&home);
+    let opt = root.path().join("opt");
+    let cargo_home = opt.join("cargo");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::write(
+        cargo_home.join("credentials.toml"),
+        "token = \"cargo-secret\"\n",
+    )
+    .unwrap();
+    let _home = HomeGuard::set(home.as_os_str());
+    let previous = std::env::var_os("CARGO_HOME");
+    std::env::set_var("CARGO_HOME", &cargo_home);
+    let boundaries = BoundaryConfig {
+        allow_write: vec![opt.to_string_lossy().to_string()],
+        ..BoundaryConfig::default()
+    };
+    let output = run(
+        &worktree,
+        "test ! -s \"$CARGO_HOME/credentials.toml\"",
+        &boundaries,
+    )
+    .await;
+    match previous {
+        Some(value) => std::env::set_var("CARGO_HOME", value),
+        None => std::env::remove_var("CARGO_HOME"),
+    }
+    assert_success(&output);
 }

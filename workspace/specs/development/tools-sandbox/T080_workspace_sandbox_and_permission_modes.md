@@ -124,6 +124,22 @@ Rules for every level:
     directory, such as an unmanaged linked worktree, submodule or separate
     Git directory, is bound read-only and a symlink fails closed.
   - Read-only Git status works from a subdirectory of a managed worktree.
+- **Further rules from re-review of `191536b`:**
+  - The fallback plan re-binds its working directory after the ancestor
+    masks. Session worktrees of a project whose own `.git` is a file stay
+    usable.
+  - Existing nested `.nib` directories (masked) and `.git` entries (bound
+    read-only) are protected below the project and workspace. The scan is
+    bounded: depth 3, at most 4096 directories, and it skips `node_modules`,
+    `target` and `.venv`.
+  - Ancestor `.nib` entries inside the masked `$HOME` and outside the bound
+    area are skipped, because they are already invisible.
+  - Credential masks are applied after `allow_write`.
+  - Accepted residual risk: repositories or `.nib` directories that the
+    sandbox creates itself, nested ones beyond the scan bounds, and symlinked
+    nested `.nib` directories are not protected. Repositories the agent
+    creates carry agent-authored configuration, the same trust class as
+    other tracked files the user later runs.
 - **Visible to the sandbox by design:** a managed session can read the main
   checkout, including untracked files such as `.env` and any credentials
   embedded in `.git/config` remote URLs. Projects that keep secrets in the
