@@ -534,6 +534,15 @@ Review of `1db1a28` (approved with fixes), and the resolutions:
 - **F6.** The push refspec is pinned.
 - **F7.** The change check runs before branching, and a failed commit
   returns to the original branch and deletes the new one.
+- **Re-review of `d04deb5`, R1.** The preview is computed at the exact
+  directory the tool runs in (`git_execution_root`, mirroring
+  `ensure_worktree`): the session worktree, or a note that none exists yet.
+  It is never computed in the main checkout. **L1.** URL credentials are
+  stripped only from the authority. **L2, accepted residual risk.** A
+  pinentry that gpg-agent starts through `GPG_TTY` runs outside Git's
+  session and can still draw on the terminal. **L3, accepted.** Changes
+  made between the preview and the commit are not shown, and the group kill
+  after exit could in theory hit a reused group id.
 - **F8, accepted.**
   - The protected-branch list (`main`, `master`, `origin/HEAD`'s branch) is
     fixed rather than configurable.

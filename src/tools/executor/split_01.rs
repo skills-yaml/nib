@@ -1186,6 +1186,29 @@ impl ToolExecutor {
             .map(|source| self.redact_text(&source));
     }
 
+    /// The directory a Git tool will run in, chosen exactly as
+    /// `ensure_worktree` does: the session's managed worktree, the main
+    /// checkout without a session or inside a linked worktree project, or
+    /// `None` when the session worktree does not exist yet.
+    fn git_execution_root(
+        &self,
+        call: &ToolCall,
+        session_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, String> {
+        let effective_root = self.resolve_scope(call)?;
+        let Some(session_id) = session_id.or(call.session_id.as_deref()) else {
+            return Ok(Some(effective_root));
+        };
+        if self.project_root.join(".git").is_file() {
+            return Ok(Some(effective_root));
+        }
+        crate::integrations::worktree::with_validated_session_worktree(
+            &self.project_root,
+            session_id,
+            |path| Ok(path.to_path_buf()),
+        )
+    }
+
     pub(crate) async fn ensure_worktree(
         &mut self,
         required: bool,
@@ -1357,7 +1380,7 @@ impl ToolExecutor {
             session_id,
             "effective tool metadata and risk classification require interactive approval",
         );
-        self.prompt_approval(call, level, context).await
+        self.prompt_approval(call, level, context, session_id).await
     }
 
     /// Decisions that need no prompt once rules have been applied: read-only
@@ -1425,7 +1448,7 @@ impl ToolExecutor {
             reason,
         );
         context.remember_exact = None;
-        let mut decision = self.prompt_approval(call, level, context).await;
+        let mut decision = self.prompt_approval(call, level, context, session_id).await;
         decision.remember_command = None;
         decision
     }
@@ -1479,22 +1502,29 @@ impl ToolExecutor {
         call: &ToolCall,
         level: PermissionLevel,
         mut context: ApprovalContext,
+        session_id: Option<&str>,
     ) -> ApprovalDecision {
         if matches!(call.tool_name.as_str(), "git_commit" | "git_push") {
-            if let Ok(root) = self.resolve_scope(call) {
-                let secrets = self.redaction_secrets();
-                let preview = crate::tools::git_tools::approval_preview(
-                    &call.tool_name,
-                    &call.arguments,
-                    &root,
-                )
-                .await;
-                if !preview.is_empty() {
-                    context.details = preview
-                        .iter()
-                        .map(|line| redact_text_with_secrets(line, &secrets))
-                        .collect();
+            let preview = match self.git_execution_root(call, session_id) {
+                Ok(Some(root)) => {
+                    crate::tools::git_tools::approval_preview(
+                        &call.tool_name,
+                        &call.arguments,
+                        &root,
+                    )
+                    .await
                 }
+                Ok(None) => vec![
+                    "This session has no worktree yet; one will be created from the current commit, so there is nothing of this session's to commit or push.".to_string(),
+                ],
+                Err(_) => Vec::new(),
+            };
+            if !preview.is_empty() {
+                let secrets = self.redaction_secrets();
+                context.details = preview
+                    .iter()
+                    .map(|line| redact_text_with_secrets(line, &secrets))
+                    .collect();
             }
         }
         loop {

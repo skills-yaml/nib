@@ -458,11 +458,20 @@ pub(crate) async fn git_push(args: &Value, cwd: &Path) -> Result<Value, String> 
 
 /// Removes `user:password@` from a URL so previews never show credentials.
 pub(crate) fn without_credentials(url: &str) -> String {
-    match (url.find("://"), url.rfind('@')) {
-        (Some(scheme), Some(at)) if at > scheme + 3 => {
-            format!("{}{}", &url[..scheme + 3], &url[at + 1..])
-        }
-        _ => url.to_string(),
+    let Some(scheme) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme + 3;
+    let authority_end = url[authority_start..]
+        .find('/')
+        .map_or(url.len(), |offset| authority_start + offset);
+    match url[authority_start..authority_end].rfind('@') {
+        Some(at) => format!(
+            "{}{}",
+            &url[..authority_start],
+            &url[authority_start + at + 1..]
+        ),
+        None => url.to_string(),
     }
 }
 

@@ -1867,3 +1867,117 @@ async fn terminal_git_writes_are_redirected_to_git_tools() {
     assert!(error.contains("use the git_commit tool"), "{error}");
     assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+fn fixture_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("fixture git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// T080 phase 2b review R1: the commit preview describes the checkout the
+/// commit runs in (the session worktree), not the main checkout.
+#[tokio::test]
+#[serial_test::serial]
+async fn git_commit_preview_describes_the_session_worktree() {
+    let root = tempfile::tempdir().expect("root");
+    let root = root.path().canonicalize().expect("canonical root");
+    fixture_git(&root, &["init", "--quiet", "--initial-branch", "main"]);
+    fixture_git(&root, &["config", "user.name", "Fixture"]);
+    fixture_git(&root, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(root.join("README.md"), "start\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".nib/\n").unwrap();
+    fixture_git(&root, &["add", "."]);
+    fixture_git(&root, &["commit", "--quiet", "-m", "start"]);
+
+    let capture = Arc::new(ContextCapturingApprovalHandler::default());
+    let mut executor = ToolExecutor::new(root.clone(), ExecutionConfig::default())
+        .with_approval_handler(capture.clone());
+    let worktree = executor
+        .ensure_worktree(true, &root, Some("preview-session"))
+        .await
+        .expect("session worktree")
+        .expect("worktree path");
+    std::fs::write(worktree.join("feature.txt"), "session change\n").unwrap();
+    std::fs::write(root.join("main-only.txt"), "main checkout change\n").unwrap();
+
+    let commit = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "git_commit".to_string(),
+        arguments: json!({"message": "Add feature"}),
+        session_id: Some("preview-session".to_string()),
+        project_root: Some(root.clone()),
+    };
+    let context = executor.approval_context(
+        &commit,
+        PermissionLevel::Destructive,
+        ToolRisk::Destructive,
+        &root,
+        &executor.execution_config,
+        true,
+        Some("preview-session"),
+        "commit requires approval",
+    );
+    executor
+        .prompt_approval(
+            &commit,
+            PermissionLevel::Destructive,
+            context,
+            Some("preview-session"),
+        )
+        .await;
+    let details = capture
+        .context
+        .lock()
+        .expect("context lock")
+        .clone()
+        .expect("captured context")
+        .details
+        .join("\n");
+    assert!(details.contains("feature.txt"), "{details}");
+    assert!(!details.contains("main-only.txt"), "{details}");
+    assert!(details.contains("Branch: nib/session/"), "{details}");
+
+    let fresh = ToolCall {
+        session_id: Some("fresh-session".to_string()),
+        ..commit.clone()
+    };
+    let context = executor.approval_context(
+        &fresh,
+        PermissionLevel::Destructive,
+        ToolRisk::Destructive,
+        &root,
+        &executor.execution_config,
+        true,
+        Some("fresh-session"),
+        "commit requires approval",
+    );
+    executor
+        .prompt_approval(
+            &fresh,
+            PermissionLevel::Destructive,
+            context,
+            Some("fresh-session"),
+        )
+        .await;
+    let details = capture
+        .context
+        .lock()
+        .expect("context lock")
+        .clone()
+        .expect("captured context")
+        .details
+        .join("\n");
+    assert!(details.contains("no worktree yet"), "{details}");
+}

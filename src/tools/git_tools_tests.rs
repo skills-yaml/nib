@@ -315,4 +315,8 @@ async fn approval_previews_show_changes_and_commits() {
         without_credentials("git@example.invalid:repo.git"),
         "git@example.invalid:repo.git"
     );
+    assert_eq!(
+        without_credentials("https://user:pass@host.invalid/path@v2"),
+        "https://host.invalid/path@v2"
+    );
 }
