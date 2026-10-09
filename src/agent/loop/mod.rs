@@ -8,8 +8,7 @@ use crate::context::budget::{
 };
 use crate::context::skills::{Skill, SkillPolicyEffect};
 use crate::context::{
-    assemble_runtime_context_sections, attachment_context_sections, select_profile_skill_selection,
-    RuntimeContextSection,
+    assemble_runtime_context_sections, attachment_context_sections, RuntimeContextSection,
 };
 use crate::llm::{
     LlmClient, LlmError, LlmErrorClass, LlmErrorPhase, LlmRequest, LlmRequestScope, LlmResponse,

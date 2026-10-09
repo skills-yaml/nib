@@ -718,3 +718,21 @@ includes T069-T073 in test and T080 in development; native mirrors use the
 same target without another bump. T073 governs the final catalog selection.
 T080's later phases, main delivery, publication of this combined revision
 and T023 live-provider acceptance remain separate.
+
+## 2026-10-09 - Progressive skill management
+
+- Type: fact
+- Source: T083 implementation and regression fixtures
+- Confidence: high
+- Review: independent security and interface review required before delivery
+
+Content:
+
+Nib shares one bounded catalog between listing and runtime discovery, including
+repository `.agents/skills` folders and linked SKM skills. Turns advertise metadata;
+explicit `$name`, configured/profile activation or `load_skill` loads instructions.
+Activated bodies remain complete in prompts, and activation records session usage
+before installing restrictions and hooks. Disabled controls suppress profile and
+configured activation; explicit requests for disabled skills report an error.
+Implicit-disabled skills require explicit selection. Supporting files are bounded
+regular reads beneath an activated root. Discovery refreshes each user turn.

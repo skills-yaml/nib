@@ -7,6 +7,9 @@ impl ToolExecutor {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
         let resolved = resolve_execution_config(&project_root, execution_config);
         Self {
+            skill_context_budget: 128_000,
+            skill_catalog: None,
+            active_skills: Vec::new(),
             question_outcome_invocation: None,
             session_store: None,
             implicit_session_id: None,
@@ -154,6 +157,15 @@ impl ToolExecutor {
 
     pub async fn get_tools_schema(&self) -> Vec<Value> {
         let mut schemas = tools_json_schema();
+        if self.skill_catalog.is_some() {
+            for name in ["load_skill", "read_skill_resource"] {
+                let metadata = get_tool_metadata(name).expect("skill tool registered");
+                schemas.push(json!({"type":"function", "function":{
+                    "name": metadata.name, "description": metadata.description,
+                    "parameters": metadata.input_schema,
+                }}));
+            }
+        }
         if let Some(mcp) = &self.mcp_manager {
             if let Ok(mcp_tools) = mcp.list_tools().await {
                 schemas.extend(mcp_tools.into_iter().map(|tool| {
@@ -702,7 +714,12 @@ impl ToolExecutor {
             .flatten();
         let (terminal_output_callback, terminal_projection) =
             self.redacted_terminal_output_projection(terminal_capture_limit);
-        let outcome = if call.tool_name == "merge_subagent_worktree" {
+        let outcome = if matches!(
+            call.tool_name.as_str(),
+            "load_skill" | "read_skill_resource"
+        ) {
+            self.execute_skill_tool(&call.tool_name, &dispatch_arguments, effective_session)
+        } else if call.tool_name == "merge_subagent_worktree" {
             self.execute_subagent_merge(&dispatch_arguments, &effective_root, effective_session)
                 .await
         } else if is_mcp_tool {

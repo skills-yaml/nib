@@ -290,14 +290,14 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
     spec(
         "skills",
         &[],
-        "/skills [list|install <url_or_path>|remove <name>]",
+        "/skills [list|use <name>|clear|enable <name>|disable <name>|install <url_or_path>|remove <name>]",
         "Manage installed skills",
         InteractiveArgumentSchema::Skills,
         InteractiveMutability::Configuration,
         InteractiveWorkerPolicy::RequiresIdle,
         InteractiveCompletionSpec {
-            candidates: &["list", "install", "remove"],
-            argument_after: &["install", "remove"],
+            candidates: &["list", "install", "remove", "use", "clear", "enable", "disable"],
+            argument_after: &["install", "remove", "use", "enable", "disable"],
         },
     ),
     spec(
@@ -696,6 +696,7 @@ pub(crate) fn find_command_spec(token: &str) -> Option<&'static InteractiveComma
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillCommand {
     List,
+    Manage { action: String, name: String },
     Install { source: String },
     Remove { name: String },
 }

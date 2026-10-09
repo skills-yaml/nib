@@ -24,8 +24,31 @@ fn metadata(
     }
 }
 
+fn skill_tool(name: &str, description: &str, resource: bool) -> ToolMetadata {
+    let mut properties = json!({"skill": {"type":"string", "minLength":1,"maxLength":4096,
+        "description":"Skill name or exact manifest path from the available catalog."}});
+    let mut required = vec!["skill"];
+    if resource {
+        properties["path"] = json!({"type":"string","minLength":1,"maxLength":1024,
+            "description":"Relative file path beneath an activated skill directory."});
+        required.push("path");
+    }
+    let mut entry = metadata(
+        name,
+        description,
+        PermissionLevel::ReadOnly,
+        false,
+        false,
+        json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
+    );
+    entry.mcp_exposable = false;
+    entry
+}
+
 static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|| {
     let tools = vec![
+        skill_tool("load_skill", "Activate a discovered skill before using its workflow; read its full instructions and install its policies and hooks.", false),
+        skill_tool("read_skill_resource", "Read a bounded UTF-8 supporting file beneath an activated skill directory.", true),
         metadata(
             "read_file",
             "Read a bounded section of a scoped UTF-8 file using a zero-based line range.",

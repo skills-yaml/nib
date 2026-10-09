@@ -23,6 +23,7 @@ use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use uuid::Uuid;
 
+mod skills;
 mod split_00;
 mod split_01;
 mod split_02;

@@ -392,6 +392,18 @@ pub struct SkillsConfig {
     pub enabled: bool,
     #[serde(default = "default_skill_paths")]
     pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub config: Vec<SkillConfig>,
+    #[serde(default)]
+    pub active: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillConfig {
+    pub path: PathBuf,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 impl Default for SkillsConfig {
@@ -399,6 +411,8 @@ impl Default for SkillsConfig {
         Self {
             enabled: true,
             paths: default_skill_paths(),
+            config: Vec::new(),
+            active: Vec::new(),
         }
     }
 }
@@ -966,6 +980,26 @@ impl NibConfig {
         }
         if self.daemons.cron_enabled && self.daemons.interval_seconds == 0 {
             issues.push("daemons.interval_seconds must be greater than zero".to_string());
+        }
+        if self.skills.config.len() > MAX_SKILL_PATHS
+            || self.skills.active.len() > MAX_ACTIVE_SKILLS
+        {
+            issues.push("skill controls or active selection exceed configured limits".to_string());
+        }
+        if self.skills.config.iter().any(|entry| {
+            entry.path.as_os_str().is_empty()
+                || path_bytes(&entry.path) > MAX_PATH_BYTES
+                || path_contains_nul(&entry.path)
+        }) || self
+            .skills
+            .active
+            .iter()
+            .any(|entry| entry.is_empty() || entry.len() > MAX_PATH_BYTES || entry.contains('\0'))
+        {
+            issues.push(
+                "skill controls and active selectors require bounded non-empty paths without NUL"
+                    .to_string(),
+            );
         }
         if self.skills.paths.len() > MAX_SKILL_PATHS {
             issues.push(format!(

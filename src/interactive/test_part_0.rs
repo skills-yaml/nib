@@ -1007,7 +1007,15 @@ fn completion_is_bounded_case_insensitive_and_uses_registry_metadata() {
             .iter()
             .map(|item| item.insertion.as_str())
             .collect::<Vec<_>>(),
-        vec!["/skills list", "/skills install ", "/skills remove "]
+        vec![
+            "/skills list",
+            "/skills install ",
+            "/skills remove ",
+            "/skills use ",
+            "/skills clear",
+            "/skills enable ",
+            "/skills disable "
+        ]
     );
     assert!(parse_interactive_command("/skills list").is_ok());
     for incomplete in ["/skills install ", "/skills remove "] {

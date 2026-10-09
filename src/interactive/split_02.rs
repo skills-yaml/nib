@@ -1055,12 +1055,14 @@ pub(crate) fn parse_skill_command(arguments: &[String]) -> Result<SkillCommand, 
         return Ok(SkillCommand::List);
     }
     match arguments {
+        [command] if command == "clear" => Ok(SkillCommand::Manage { action: command.clone(), name: String::new() }),
+        [command, name] if matches!(command.as_str(), "use" | "enable" | "disable") => Ok(SkillCommand::Manage { action: command.clone(), name: name.clone() }),
         [command, source] if command == "install" => Ok(SkillCommand::Install {
             source: source.clone(),
         }),
         [command, name] if command == "remove" => Ok(SkillCommand::Remove { name: name.clone() }),
         _ => Err(
-            "usage: /skills list | /skills install <url_or_path> | /skills remove <name>"
+            "usage: /skills list | /skills use <name> | /skills clear | /skills enable <name> | /skills disable <name> | /skills install <url_or_path> | /skills remove <name>"
                 .to_string(),
         ),
     }
@@ -1224,6 +1226,9 @@ pub fn execute_interactive_command_in_state(
             project_root,
             &model,
         )?)),
+        InteractiveCommand::Skills(SkillCommand::Manage { action, name }) => Ok(
+            InteractiveEffect::Output(skill_cmd::manage_skill(project_root, &action, &name)?),
+        ),
         InteractiveCommand::Skills(SkillCommand::List) => Ok(InteractiveEffect::Output(
             skill_cmd::format_installed_skills(project_root)?,
         )),

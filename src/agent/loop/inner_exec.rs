@@ -28,7 +28,8 @@ match state {
                     .iter()
                     .filter(|request| request.name == "ask_question")
                     .count();
-                if question_count > 0 && tool_calls.len() != 1 {
+                let skill_load_count = tool_calls.iter().filter(|request| request.name == "load_skill").count();
+                if (question_count > 0 || skill_load_count > 0) && tool_calls.len() != 1 {
                     state = transition_state(
                         &store,
                         session_id,
@@ -414,8 +415,10 @@ match state {
                     .iter()
                     .filter(|request| request.name == "ask_question")
                     .count();
-                if question_count > 0 && tool_calls.len() != 1 {
-                    let error = "ask_question must be the only tool call in its batch";
+                let skill_load_count = tool_calls.iter().filter(|request| request.name == "load_skill").count();
+                if (question_count > 0 || skill_load_count > 0) && tool_calls.len() != 1 {
+                    let error = if skill_load_count > 0 { "load_skill must be the only tool call in its batch; read its instructions before dependent actions" }
+                        else { "ask_question must be the only tool call in its batch" };
                     let observations = tool_calls
                         .iter()
                         .map(|request| {
@@ -454,7 +457,7 @@ match state {
                             session_id,
                             "tool_batch_rejected",
                             json!({
-                                "reason": "mixed_question_batch",
+                                "reason": if skill_load_count > 0 { "mixed_skill_load_batch" } else { "mixed_question_batch" },
                                 "tool_calls": tool_calls.iter().map(|call| json!({
                                     "invocation_id": call.invocation_id,
                                     "name": call.name,
@@ -710,6 +713,9 @@ match state {
                             )
                             .await
                     };
+                    if result.success && request.name == "load_skill" {
+                        context_sections.skills = executor.skill_context(nib_cfg.llm.context_length);
+                    }
                     tool_call_count += 1;
                     let (mutated_content, mut worktree_identity) =
                         if result.success || verification_started {

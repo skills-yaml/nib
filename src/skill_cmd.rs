@@ -53,6 +53,14 @@ pub enum SkillCommands {
         /// Local SKILL.md/directory, raw HTTP URL, or Git repository URL
         source: String,
     },
+    /// Enable a discovered skill without reinstalling it
+    Enable { name: String },
+    /// Disable a discovered skill without deleting it
+    Disable { name: String },
+    /// Select a discovered workflow for subsequent turns
+    Use { name: String },
+    /// Clear workflows selected with skill use
+    Clear,
     /// Remove a globally installed skill
     Remove {
         /// Name of the skill to remove
@@ -66,11 +74,29 @@ pub struct InstalledSkill {
     pub description: String,
     pub path: PathBuf,
     pub location: &'static str,
+    pub enabled: bool,
+    pub allow_implicit: bool,
 }
 
 pub fn run_skill_cmd(args: &SkillArgs, project_root: &Path) -> Result<(), String> {
     match &args.command {
         SkillCommands::List => list_skills(project_root),
+        SkillCommands::Enable { name } => {
+            println!("{}", manage_skill(project_root, "enable", name)?);
+            Ok(())
+        }
+        SkillCommands::Disable { name } => {
+            println!("{}", manage_skill(project_root, "disable", name)?);
+            Ok(())
+        }
+        SkillCommands::Use { name } => {
+            println!("{}", manage_skill(project_root, "use", name)?);
+            Ok(())
+        }
+        SkillCommands::Clear => {
+            println!("{}", manage_skill(project_root, "clear", "")?);
+            Ok(())
+        }
         SkillCommands::Install { source } => {
             let target = install_skill(source)?;
             println!("Installed skill at {}", target.display());
@@ -97,8 +123,13 @@ pub fn format_installed_skills(project_root: &Path) -> Result<String, String> {
     }
     for skill in skills {
         output.push_str(&format!(
-            "\n  [{}] {} - {}",
-            skill.location, skill.name, skill.description
+            "\n  [{}] {} - {}\n    path: {} (enabled: {}, implicit: {})",
+            skill.location,
+            skill.name,
+            skill.description,
+            skill.path.display(),
+            skill.enabled,
+            skill.allow_implicit
         ));
     }
     Ok(output)
@@ -114,38 +145,110 @@ fn global_skills_dir() -> Result<PathBuf, String> {
 }
 
 pub fn installed_skills(project_root: &Path) -> Result<Vec<InstalledSkill>, String> {
-    let global = global_skills_dir()?;
-    let roots = vec![
-        global.clone(),
-        project_root.join(".nib").join("skills"),
-        project_root.join(".skills"),
-        project_root.join("skills"),
-    ];
-    let paths = nib::context::skills::find_skills_in_paths_strict(&roots)
-        .map_err(|error| format!("failed to discover installed skills: {error}"))?;
-    let mut installed = Vec::with_capacity(paths.len());
-    for path in paths {
-        let skill = nib::context::skills::parse_skill_file(&path).map_err(|error| {
-            format!("failed to load installed skill {}: {error}", path.display())
-        })?;
-        installed.push(InstalledSkill {
-            name: skill.frontmatter.name,
-            description: skill.frontmatter.description,
-            location: if path.starts_with(&global) {
+    let (catalog, _) = project_skill_catalog(project_root)?;
+    let global = global_skills_dir()?.canonicalize().ok();
+    let mut installed = catalog
+        .entries
+        .into_iter()
+        .map(|entry| InstalledSkill {
+            name: entry.metadata.name,
+            description: entry.metadata.description,
+            location: if global
+                .as_ref()
+                .is_some_and(|root| entry.canonical_path.starts_with(root))
+            {
                 "global"
             } else {
                 "local"
             },
-            path,
-        });
-    }
-    installed.sort_by(|left, right| {
-        left.location
-            .cmp(right.location)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.path.cmp(&right.path))
+            path: entry.path,
+            enabled: entry.enabled,
+            allow_implicit: entry.allow_implicit,
+        })
+        .collect::<Vec<_>>();
+    installed.sort_by(|a, b| {
+        a.location
+            .cmp(b.location)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
     });
     Ok(installed)
+}
+
+fn catalog_for_config(
+    project_root: &Path,
+    config: &nib::config::NibConfig,
+) -> Result<nib::context::skill_catalog::SkillCatalog, String> {
+    let profiles = nib::profile::ProfileRegistry::load(project_root, &config.profiles)
+        .map_err(|error| error.to_string())?;
+    let profile = profiles
+        .for_workspace(project_root)
+        .unwrap_or_else(|| profiles.default_profile());
+    nib::context::skill_catalog::SkillCatalog::discover(project_root, config, profile)
+}
+
+pub fn project_skill_catalog(
+    project_root: &Path,
+) -> Result<
+    (
+        nib::context::skill_catalog::SkillCatalog,
+        nib::config::NibConfig,
+    ),
+    String,
+> {
+    let config =
+        nib::config::load_nib_config_full(project_root).map_err(|error| error.to_string())?;
+    Ok((catalog_for_config(project_root, &config)?, config))
+}
+
+pub fn manage_skill(project_root: &Path, action: &str, selector: &str) -> Result<String, String> {
+    nib::config::update_nib_config(project_root, |config| {
+        if action == "clear" {
+            config.skills.active.clear();
+            return Ok(());
+        }
+        let mut catalog = catalog_for_config(project_root, config)?;
+        // Disabled entries remain visible and selectable for re-enabling.
+        if action == "enable" {
+            for entry in &mut catalog.entries {
+                entry.enabled = true;
+            }
+        }
+        let entry = catalog.resolve(selector)?;
+        let path = entry.path.clone();
+        let identity = &entry.canonical_path;
+        match action {
+            "enable" | "disable" => {
+                config.skills.config.retain(|control| {
+                    let declared = if control.path.is_absolute() {
+                        control.path.clone()
+                    } else {
+                        project_root.join(&control.path)
+                    };
+                    declared.canonicalize().ok().as_ref() != Some(identity)
+                });
+                config.skills.config.push(nib::config::SkillConfig {
+                    path: path.clone(),
+                    enabled: action == "enable",
+                });
+                if action == "disable" {
+                    config.skills.active.retain(|active| {
+                        active != &entry.metadata.name
+                            && Path::new(active).canonicalize().ok().as_ref() != Some(identity)
+                    });
+                }
+            }
+            "use" => {
+                config.skills.active = vec![path.to_string_lossy().to_string()];
+            }
+            _ => return Err("unknown skill management action".into()),
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "Skill selection updated ({action}). Changes apply on the next user turn."
+    ))
 }
 
 fn safe_skill_name(name: &str) -> Result<String, String> {
@@ -259,6 +362,19 @@ fn prepare_git_source_with_limits(
             let relative = nib::context::skills::validated_skill_resource_path(configured)
                 .map_err(|error| format!("invalid SKILL.md: {error}"))?;
             resources.insert(relative);
+        }
+        let mut policy_probe = git_command();
+        policy_probe
+            .current_dir(&checkout)
+            .args(["cat-file", "-e", "HEAD:agents/openai.yaml"]);
+        let policy_exists = run_bounded_command_with_staging(
+            &mut policy_probe,
+            "git inspect skill invocation policy",
+            SKILL_COMMAND_TIMEOUT,
+            Some((&checkout, limits)),
+        )?;
+        if policy_exists.status.success() {
+            resources.insert(PathBuf::from("agents/openai.yaml"));
         }
         if !resources.is_empty() {
             let mut resource_checkout = git_command();
@@ -964,6 +1080,10 @@ fn copy_selected_skill(
             .map(|reference| reference.path.clone()),
     );
     resources.extend(skill.assets.iter().cloned());
+    let invocation_policy = root.join("agents/openai.yaml");
+    if invocation_policy.exists() {
+        resources.insert(PathBuf::from("agents/openai.yaml"));
+    }
     if resources.len() > MAX_INSTALLED_ENTRIES {
         return Err(format!(
             "skill installation exceeds the {MAX_INSTALLED_ENTRIES}-entry limit"

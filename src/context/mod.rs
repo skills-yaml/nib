@@ -11,6 +11,8 @@ pub mod budget;
 pub mod compression;
 mod help;
 pub mod project_docs;
+pub mod skill_catalog;
+mod skill_io;
 pub mod skills;
 pub mod snapshot;
 
@@ -388,35 +390,50 @@ pub fn select_profile_skill_selection(
     if !config.skills.enabled {
         return Ok(skills::SkillSelection::default());
     }
-    let mut files = skills::find_skills(project_root);
-    let mut configured_paths = config
-        .skills
-        .paths
-        .iter()
-        .map(|path| {
-            if path.is_absolute() {
-                path.clone()
-            } else {
-                project_root.join(path)
-            }
-        })
-        .collect::<Vec<_>>();
-    configured_paths.extend(profile.skill_paths().iter().cloned());
-    configured_paths.push(profile.managed_skills_dir().to_path_buf());
-    files.extend(skills::find_skills_in_paths(&configured_paths));
-    files.sort();
-    files.dedup_by(|left, right| {
-        left.canonicalize().unwrap_or_else(|_| left.clone())
-            == right.canonicalize().unwrap_or_else(|_| right.clone())
-    });
+    let catalog = skill_catalog::SkillCatalog::discover(project_root, config, profile)?;
+    selection_from_catalog(&catalog, config, profile, goal)
+}
 
-    skills::select_skill_files(
-        files,
-        goal,
-        profile.active_skills(),
-        config.llm.context_length,
-    )
-    .map_err(|error| error.to_string())
+pub fn selection_from_catalog(
+    catalog: &skill_catalog::SkillCatalog,
+    config: &crate::config::NibConfig,
+    profile: &crate::profile::Profile,
+    goal: &str,
+) -> Result<skills::SkillSelection, String> {
+    let configured = profile
+        .active_skills()
+        .iter()
+        .chain(config.skills.active.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected = catalog.explicit_selection(goal, &configured)?;
+    let required = selected
+        .iter()
+        .map(|skill| compression::approximate_tokens(&skills::render_skill_content(skill)))
+        .sum::<usize>();
+    if required > config.llm.context_length {
+        return Err("explicit skills exceed llm.context_length".into());
+    }
+    Ok(skills::SkillSelection {
+        records: selected
+            .iter()
+            .map(|skill| skills::SkillSelectionRecord {
+                skill_name: skill.frontmatter.name.clone(),
+                reason: if profile
+                    .active_skills()
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&skill.frontmatter.name))
+                {
+                    "profile active skill"
+                } else {
+                    "explicit skill invocation"
+                }
+                .to_string(),
+                source: skills::SkillSelectionSource::Configured,
+            })
+            .collect(),
+        skills: selected,
+    })
 }
 
 pub fn assemble_runtime_context(
@@ -489,12 +506,19 @@ pub fn assemble_profile_context(project_root: &Path, task: Option<&str>) -> Resu
     } else {
         crate::session::memory::MemoryStoreData::default()
     };
-    Ok(assemble_runtime_context(
-        profile.root_path(),
-        goal,
-        &active_skills,
-        &memory,
-    ))
+    let mut context =
+        assemble_runtime_context_sections(profile.root_path(), goal, &active_skills, &memory);
+    if config.skills.enabled {
+        let catalog = skill_catalog::SkillCatalog::discover(project_root, &config, profile)?;
+        context.skills.insert(
+            0,
+            RuntimeContextSection {
+                label: "Available skill catalog".into(),
+                content: catalog.prompt(config.llm.context_length),
+            },
+        );
+    }
+    Ok(context.render())
 }
 
 #[cfg(test)]

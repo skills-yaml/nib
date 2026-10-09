@@ -208,7 +208,7 @@ enum Commands {
     #[command(name = "mcp-stdio-relay", hide = true)]
     McpStdioRelay,
 
-    /// Manage skills (list, install, remove)
+    /// Discover, select, enable, disable, install, or remove skills
     Skill(skill_cmd::SkillArgs),
 
     /// Manage MCP servers (list, add, remove)

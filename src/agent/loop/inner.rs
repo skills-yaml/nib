@@ -131,7 +131,19 @@ pub(crate) async fn run_agent_loop_inner(
         inner: untracked_llm,
         resources: resources.clone(),
     });
-    let skill_selection = select_profile_skill_selection(&project_root, &nib_cfg, &profile, goal)?;
+    let skill_catalog = if nib_cfg.skills.enabled {
+        Some(crate::context::skill_catalog::SkillCatalog::discover(
+            &project_root,
+            &nib_cfg,
+            &profile,
+        )?)
+    } else {
+        None
+    };
+    let skill_selection = match skill_catalog.as_ref() {
+        Some(catalog) => crate::context::selection_from_catalog(catalog, &nib_cfg, &profile, goal)?,
+        None => crate::context::skills::SkillSelection::default(),
+    };
     let active_skills = &skill_selection.skills;
     let policy_rules = skill_policy_rules(active_skills);
     let after_tool_hooks = skill_after_tool_hooks(active_skills);
@@ -153,6 +165,15 @@ pub(crate) async fn run_agent_loop_inner(
         };
         let mut answer_context =
             assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
+        if let Some(catalog) = skill_catalog.as_ref() {
+            answer_context.skills.insert(
+                0,
+                RuntimeContextSection {
+                    label: "Available skill catalog".into(),
+                    content: catalog.prompt(nib_cfg.llm.context_length),
+                },
+            );
+        }
         if let Some(session) = store
             .load_result(session_id)
             .map_err(|error| format!("failed to load answer-only attachments: {error}"))?
@@ -227,6 +248,11 @@ pub(crate) async fn run_agent_loop_inner(
         .with_deferred_background_start(true)
         .with_policy_rules(policy_rules)
         .with_after_tool_hooks(after_tool_hooks);
+    if let Some(catalog) = skill_catalog.clone() {
+        executor = executor
+            .with_skill_catalog(catalog, active_skills.clone())
+            .with_skill_context_budget(nib_cfg.llm.context_length);
+    }
     if let Some(stream_tx) = cfg.stream_tx.clone() {
         let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(64);
         executor = executor.with_terminal_output_sender(terminal_tx);
@@ -300,6 +326,7 @@ pub(crate) async fn run_agent_loop_inner(
     };
     let mut context_sections =
         assemble_runtime_context_sections(&project_root, goal, active_skills, &memory);
+    context_sections.skills = executor.skill_context(nib_cfg.llm.context_length);
     let mut instruction_root = project_root.clone();
     let mut instruction_scopes = vec![instruction_root.clone()];
     if let Ok(Some(session)) = store.load_result(session_id) {
