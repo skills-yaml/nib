@@ -783,30 +783,8 @@ fn open_stable_skill_file_with_hook(
     Ok(file)
 }
 
-#[cfg(any(unix, windows))]
 fn open_skill_file_without_following_links(path: &Path) -> std::io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_skill_file_without_following_links(_path: &Path) -> std::io::Result<fs::File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "stable no-follow skill reads are not supported on this platform",
-    ))
+    super::skill_io::open_regular_file(path)
 }
 
 #[cfg(unix)]
@@ -830,6 +808,30 @@ fn verify_unix_metadata_identity(
     _right: &fs::Metadata,
 ) -> Result<(), SkillError> {
     Ok(())
+}
+
+/// Bounded, no-link read used by skill catalog and activated resource capabilities.
+pub fn read_skill_resource_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let parent = path.parent().ok_or("skill resource has no parent")?;
+    verify_skill_directory_components(parent, "skill resource")
+        .map_err(|error| error.to_string())?;
+    let file = open_stable_skill_file(path, |metadata| {
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+            return Err(SkillError::InvalidResource(
+                "skill resource type or byte limit".into(),
+            ));
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("skill resource exceeds byte limit".into());
+    }
+    Ok(bytes)
 }
 
 fn validate_skill_reference_metadata(

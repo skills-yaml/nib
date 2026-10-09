@@ -126,6 +126,13 @@ tasks:
       - task: check
       - task: test
 
+  test:skills:
+    desc: Verify skill discovery, activation, resources, and command controls
+    cmds:
+      - cargo test --lib context::skill -- --test-threads=1
+      - cargo test --lib tools::executor::skills -- --test-threads=1
+      - cargo test --lib skill_cmd::tests -- --test-threads=1
+
   test:llm-conformance:
     desc: Run credential-free provider-neutral LLM adapter conformance tests
     cmds:

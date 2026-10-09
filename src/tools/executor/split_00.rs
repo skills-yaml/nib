@@ -800,6 +800,9 @@ impl StdinApprovalHandler {
 }
 
 pub struct ToolExecutor {
+    pub(crate) skill_context_budget: usize,
+    pub(crate) skill_catalog: Option<crate::context::skill_catalog::SkillCatalog>,
+    pub(crate) active_skills: Vec<crate::context::skills::Skill>,
     pub(crate) question_outcome_invocation: Option<crate::tools::ToolInvocationId>,
     pub session_store: Option<SessionStore>,
     pub(crate) implicit_session_id: Option<String>,

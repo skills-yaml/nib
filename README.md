@@ -103,7 +103,7 @@ task build
    - `/session` - Preview and resume a persisted session
    - `/continue <plan-id>` - Explicitly continue that exact recovered plan
    - `/clear` - Start a fresh session
-   - `/skills` - Manage installed skills
+   - `/skills` - Discover, select, enable, disable, install, or remove skills
    - `/mcp` - Manage MCP servers
    - `/quit` - Exit the session
 
@@ -132,6 +132,22 @@ Mutating work remains on a `nib/session/*` worktree branch until you review and 
 it. Plans are informational and continue without a separate approval prompt.
 `nib run --yes` bypasses eligible interactive tool prompts, but never explicit deny
 policies or execution boundaries, and should be limited to already trusted environments.
+
+### Skills
+
+Nib discovers repository `.agents/skills` folders (including SKM symlinks), user
+`~/.agents/skills`, configured/profile roots and existing nib skill locations.
+The model sees a bounded catalog of names, descriptions and paths, then loads
+relevant instructions with `load_skill` and supporting files with
+`read_skill_resource`. Explicitly invoke a workflow with `$skill-name` in your
+request, or select one for subsequent turns with `/skills use skill-name`.
+
+Use `/skills list`, `/skills enable skill-name`, `/skills disable skill-name`,
+and `/skills clear` in plain or TUI mode. The shell equivalents are
+`nib skill list|use|enable|disable|clear`. Existing install/remove commands remain.
+Duplicate names require the exact manifest path shown in the listing. Changes
+apply on the next user turn. Skill restrictions, hooks and usage remain audited.
+
 
 ### Upgrading legacy delegation state
 

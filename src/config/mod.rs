@@ -35,8 +35,8 @@ pub use split_00::{
     load_config_with_source, load_nib_config_full, load_nib_config_full_with_source, save_config,
 };
 pub use split_00::{
-    AgentConfig, ApprovalsConfig, ProfileConfig, ProfilesConfig, SkillsConfig, TerminalConfig,
-    WorkloadConfig,
+    AgentConfig, ApprovalsConfig, ProfileConfig, ProfilesConfig, SkillConfig, SkillsConfig,
+    TerminalConfig, WorkloadConfig,
 };
 pub use split_00::{
     BoundaryConfig, CompressionConfig, DaemonsConfig, ExecutionConfig, LLMConfigFile, MemoryConfig,

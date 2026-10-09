@@ -2150,21 +2150,83 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
 }
 
 #[tokio::test]
+async fn mixed_skill_load_batches_stop_without_executing_either_tool() {
+    let root = git_repository();
+    let responses = (0..3)
+        .map(|index| {
+            failure_fixture_tool_turn(
+                &format!("mixed-{index}"),
+                vec![
+                    ("load_skill", json!({"skill": "review-fixture"})),
+                    (
+                        "run_terminal",
+                        json!({
+                            "command": "echo fixture-key > mixed-side-effect.txt",
+                            "affected_paths": ["mixed-side-effect.txt"]
+                        }),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "repeated_tool_failure");
+    assert_eq!(summary.tool_call_count, 0);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_batch_rejected")
+            .count(),
+        3
+    );
+    assert!(persisted.tool_calls.is_empty());
+    assert!(!root.path().join("mixed-side-effect.txt").exists());
+    let worktrees = root.path().join(".nib/worktrees");
+    if worktrees.exists() {
+        let sessions = worktrees.join("sessions");
+        let entries = if sessions.exists() {
+            std::fs::read_dir(&sessions)
+                .expect("inspect rejected-batch session worktrees")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read rejected-batch session worktree entries")
+        } else {
+            Vec::new()
+        };
+        assert!(
+            entries.is_empty(),
+            "rejected mixed batch created a session worktree: {entries:?}"
+        );
+    }
+    assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("fixture-key"));
+}
+
+#[tokio::test]
 async fn explicit_policy_denial_stops_without_a_model_retry() {
     let root = git_repository();
     let skill_directory = root.path().join(".nib/skills/resourceful-denial");
     std::fs::create_dir_all(&skill_directory).unwrap();
     std::fs::write(skill_directory.join("SKILL.md"), "---\nname: resourceful-denial\ndescription: Restrict resourceful fixture reads\ntags: [resourceful]\nconstraints:\n  deny_tools: [read_file]\n---\nDo not read files.\n").unwrap();
-    let responses = vec![failure_fixture_tool_turn(
-        "denied",
-        vec![("read_file", json!({"path": "note.txt"}))],
-    )];
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "select-skill",
+            vec![("load_skill", json!({"skill":"resourceful-denial"}))],
+        ),
+        failure_fixture_tool_turn("denied", vec![("read_file", json!({"path":"note.txt"}))]),
+    ];
     let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
     assert_eq!(summary.outcome, "tool_execution_failed");
-    assert_eq!(summary.tool_call_count, 1);
-    assert_eq!(requests.len(), 1);
+    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(persisted.active_skills, ["resourceful-denial"]);
+    assert!(!requests[0].to_string().contains("Do not read files."));
+    assert!(requests[1].to_string().contains("Do not read files."));
     assert_eq!(
-        persisted.tool_calls[0].result.as_ref().unwrap()["approval"]["source"],
+        persisted.tool_calls[1].result.as_ref().unwrap()["approval"]["source"],
         "policy"
     );
     assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
@@ -3823,6 +3885,7 @@ Do not inspect the repository without an explicit decision.
     )
     .expect("skill fixture");
     let mut config = mock_runtime_config();
+    config.skills.active = vec!["gated-read".into()];
     save_nib_config_full(root.path(), &mut config).expect("runtime config");
     let store = SessionStore::for_project(root.path()).expect("session store");
     let session = store.create_session_with_id("denied-session");
@@ -4845,4 +4908,56 @@ async fn missing_terminal_scope_preserves_independent_batch_reads() {
         .messages
         .iter()
         .any(|message| message.content.contains("increase llm.context_length")));
+}
+
+#[tokio::test]
+async fn progressive_skill_activation_and_resource_read_are_audited_end_to_end() {
+    let root = git_repository();
+    let folder = root.path().join(".agents/skills/review-fixture");
+    std::fs::create_dir_all(folder.join("references")).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: review-fixture\ndescription: Inspect scoped source evidence\n---\nACTIVATED_WORKFLOW_MARKER\nRead references/guide.md.\n").unwrap();
+    std::fs::write(
+        folder.join("references/guide.md"),
+        "RESOURCE_WORKFLOW_MARKER",
+    )
+    .unwrap();
+    let responses = vec![
+        failure_fixture_tool_turn(
+            "activate",
+            vec![("load_skill", json!({"skill":"review-fixture"}))],
+        ),
+        failure_fixture_tool_turn(
+            "resource",
+            vec![(
+                "read_skill_resource",
+                json!({"skill":"review-fixture","path":"references/guide.md"}),
+            )],
+        ),
+        failure_fixture_text_turn(),
+    ];
+    let (summary, persisted, requests) = run_failure_fixture(root.path(), responses, None).await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(persisted.skill_usage.len(), 1);
+    assert_eq!(persisted.active_skills, ["review-fixture"]);
+    assert!(!requests[0]
+        .to_string()
+        .contains("ACTIVATED_WORKFLOW_MARKER"));
+    assert!(requests[0].to_string().contains("review-fixture"));
+    assert!(requests[1]
+        .to_string()
+        .contains("ACTIVATED_WORKFLOW_MARKER"));
+    assert!(requests[2].to_string().contains("RESOURCE_WORKFLOW_MARKER"));
+    assert_eq!(
+        persisted.tool_calls[0].tool_name.as_deref(),
+        Some("load_skill")
+    );
+    assert_eq!(
+        persisted.tool_calls[1].tool_name.as_deref(),
+        Some("read_skill_resource")
+    );
+    assert!(persisted
+        .tool_calls
+        .iter()
+        .all(|call| call.result.as_ref().unwrap()["success"] == true));
 }

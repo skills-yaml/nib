@@ -196,6 +196,30 @@ fn directory_install_copies_only_bounded_declared_resources() {
 }
 
 #[test]
+fn directory_install_preserves_implicit_invocation_policy() {
+    let source = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    fs::create_dir(source.path().join("agents")).unwrap();
+    fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: explicit-only\n---\nInstructions\n",
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    )
+    .unwrap();
+    let installed = install_skill_to(source.path().to_str().unwrap(), global.path()).unwrap();
+    assert!(installed.join("agents/openai.yaml").is_file());
+    let catalog =
+        nib::context::skill_catalog::SkillCatalog::from_roots(&[global.path().into()], &[])
+            .unwrap();
+    assert!(!catalog.entries[0].allow_implicit);
+    assert!(catalog.load("explicit-only", false).is_err());
+}
+
+#[test]
 fn missing_directory_validation_does_not_create_source_components() {
     let source = tempdir().expect("source tempdir");
     let missing = source.path().join("missing/nested");
@@ -796,6 +820,9 @@ fn installed_skills_classifies_global_and_project_local_roots() {
 fn installed_skills_are_sorted_by_location_name_and_path() {
     let global = tempdir().expect("global");
     let project = tempdir().expect("project");
+    let home = tempdir().expect("isolated home");
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
     let previous = std::env::var_os("NIB_SKILLS_DIR");
     std::env::set_var("NIB_SKILLS_DIR", global.path());
     create_skill(global.path(), "zeta-global");
@@ -806,6 +833,7 @@ fn installed_skills_are_sorted_by_location_name_and_path() {
     let installed = installed_skills(project.path());
 
     restore_env("NIB_SKILLS_DIR", previous);
+    restore_env("HOME", previous_home);
     let installed = installed.expect("list installed skills");
     let order = installed
         .iter()
@@ -994,4 +1022,48 @@ fn http_manifest_failure_is_reported_without_installing() {
     server.join().expect("server thread");
     assert!(error.contains("failed to download skill"));
     assert!(fs::read_dir(global.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn management_controls_and_selection_share_the_runtime_catalog() {
+    let root = tempdir().expect("project");
+    let skill_dir = root.path().join(".agents/skills/test-review");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: test-review\ndescription: Review code\n---\nReview body\n",
+    )
+    .unwrap();
+    assert!(installed_skills(root.path())
+        .unwrap()
+        .iter()
+        .any(|skill| skill.name == "test-review"));
+    manage_skill(root.path(), "use", "test-review").unwrap();
+    let (catalog, config) = project_skill_catalog(root.path()).unwrap();
+    assert_eq!(config.skills.active.len(), 1);
+    assert_eq!(
+        catalog
+            .explicit_selection("", &config.skills.active)
+            .unwrap()
+            .len(),
+        1
+    );
+    manage_skill(root.path(), "disable", "test-review").unwrap();
+    let (catalog, config) = project_skill_catalog(root.path()).unwrap();
+    assert!(config.skills.active.is_empty());
+    assert!(catalog.load("test-review", true).is_err());
+    manage_skill(root.path(), "enable", "test-review").unwrap();
+    assert!(project_skill_catalog(root.path())
+        .unwrap()
+        .0
+        .load("test-review", true)
+        .is_ok());
+    manage_skill(root.path(), "use", "test-review").unwrap();
+    manage_skill(root.path(), "clear", "").unwrap();
+    assert!(project_skill_catalog(root.path())
+        .unwrap()
+        .1
+        .skills
+        .active
+        .is_empty());
 }

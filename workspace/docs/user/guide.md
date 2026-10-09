@@ -604,7 +604,7 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   session. Command text, prompts, results, errors, and work from other sessions are not
   exposed.
 - `/providers` lists configured providers.
-- `/skills list|install|remove` manages skills.
+- `/skills list|use|clear|enable|disable|install|remove` manages skills.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
 - `queue: <text>` stores a follow-up for the next turn. While a turn is running,
@@ -846,50 +846,83 @@ completion, and management capabilities are shared.
 
 ### Skills
 
-A skill is a directory containing a `SKILL.md` with YAML frontmatter. Skills can be
-project-local under `.nib/skills/` or installed globally under
-`~/.config/nib/skills/`.
-
-To create a project skill, add `.nib/skills/my-skill/SKILL.md`:
+A skill is a directory containing `SKILL.md` with YAML frontmatter. Create a
+repository workflow at `.agents/skills/my-skill/SKILL.md`:
 
 ```markdown
 ---
 name: my-skill
-description: Explain when this skill should be used
-tags: [example]
+description: Explain precisely when this workflow is relevant
 ---
 Give the agent clear steps and project-specific checks here.
 ```
 
-`/skills` lists installed project and global skills in an interactive session;
-`nib skill list` does the same from a shell. `/skill` and `/skills create` are not
-commands. Use `nib skill install ./path/to/my-skill` when you want to install an
-existing local skill globally.
+Discovery scans `.agents/skills` from the working directory to the Git root,
+`~/.agents/skills`, `/etc/nib/skills`, configured `skills.paths`, profile
+`skill_paths`, and managed profile skills. Legacy `.nib/skills`, `.skills`,
+`skills`, user nib/Grok and registry roots remain supported. SKM-linked skill
+folders are resolved and canonical targets deduplicated. Manifest and resource
+files must be regular files; resource links and traversal outside a skill root
+are rejected. Changed manifests, invocation policies or link targets require a
+fresh user turn before activation. Discovery is bounded and reports errors
+rather than silently returning an incomplete inventory.
+
+Nib initially advertises names, descriptions and manifest paths within an approximate 2% token budget (using four bytes per token) of the
+configured context window. Descriptions are shortened and omissions produce a
+warning. Nearby repository roots take precedence over user roots when the
+catalog budget is limited, including when repository folders are linked.
+The model chooses relevant workflows and calls `load_skill` before
+following their instructions. Full bodies are not injected by keyword matching.
+Read supporting files with `read_skill_resource`; each UTF-8 read is limited to
+32 KiB beneath an activated skill folder. General `read_file` scope is unchanged.
+
+Explicitly invoke a skill with `$my-skill` in your request. Profile `active_skills`
+and selections made with `/skills use` load at turn start. Duplicate names require
+an exact manifest path from the listing; `/skills use <path>` supports that case.
+Selection persists in project config until replaced or cleared. `/skills clear`
+clears selections made by `/skills use`, while profile selections remain explicit.
 
 ```bash
 nib skill list
+nib skill use my-skill
+nib skill clear
+nib skill disable my-skill
+nib skill enable my-skill
 nib skill install ./path/to/skill
 nib skill install ./path/to/SKILL.md
 nib skill install https://github.com/example/skill.git
 nib skill remove skill-name
 ```
 
-Install and remove operate on the global directory; set `NIB_SKILLS_DIR` to override
-it. Discovery also checks `.grok/skills`, `.agents/skills`, configured `skills.paths`,
-and profile `skill_paths`. A non-empty profile `active_skills` list selects those
-skills explicitly instead of tag matching.
+Plain and TUI modes share `/skills list`, `/skills use <name-or-path>`,
+`/skills clear`, `/skills enable <name-or-path>`, `/skills disable <name-or-path>`,
+`/skills install <source>` and `/skills remove <name>`. Listing includes disabled
+entries and implicit invocation status. Enable/disable writes per-manifest
+controls without deleting files:
 
-`nib skill list` is strict: it fails with a contextual error when a discovered
-manifest is malformed or the bounded scan cannot prove that the inventory is complete.
+```toml
+[[skills.config]]
+path = ".agents/skills/my-skill/SKILL.md"
+enabled = false
+```
 
-Skill tags select relevant instructions. Structured constraints can deny a tool or
-force approval for commands; post-tool hooks remain subject to the same executor and
-approval policy. Installation publishes only `SKILL.md` and its declared references
-and assets; resource count, path depth, per-file bytes, and aggregate bytes are
-bounded. Git sources use a time-bounded, noninteractive partial checkout of those
-declared paths. Remote skills are not signed or checksummed, and installation remains
-an explicit CLI action outside the tool sandbox. Review the source, `SKILL.md`,
-constraints, and hooks before installation.
+Optional `agents/openai.yaml` can set `policy.allow_implicit_invocation: false`.
+That skill requires `$name`, profile selection or `/skills use`; the model cannot
+activate it implicitly. Discovery refreshes between user turns, including after
+installation or configuration changes. Disabling suppresses configured and profile
+activation; explicitly requesting a disabled skill with `$name` reports an error.
+Activated instruction bodies remain complete; a turn fails if they cannot fit the
+context window. Legacy frontmatter-declared references still load on activation;
+other supporting files are read on demand.
+
+Activation persists usage and installs structured restrictions and after-tool
+hooks before succeeding. Hooks retain ordinary terminal approval and audit.
+Skill instructions never override user scope, runtime permissions or explicit
+policy denies. Install/remove operate on `~/.config/nib/skills`, overridden by
+`NIB_SKILLS_DIR`. Installation preserves optional `agents/openai.yaml`, the manifest and declared references
+and assets within existing count, depth and byte bounds. Remote installation
+remains an explicit CLI action; review skill instructions, constraints and hooks.
+Local creation is ordinary authoring; `/skills create` is not a command.
 
 ### MCP
 

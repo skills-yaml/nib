@@ -458,7 +458,11 @@ fn render_runtime_context(
     });
     let project_docs = unique_sections(&context.project_docs);
     let attachments = unique_sections(&context.attachments);
-    let skills = unique_sections(&context.skills);
+    let skills = unique_sections(&context.skills)
+        .into_iter()
+        .filter(|section| !section.label.starts_with("Skill: "))
+        .collect::<Vec<_>>();
+    let required_skills = render_required_skills(context);
     let memory = unique_sections(&context.memory);
     let workload = unique_sections(&context.workload);
     let mut groups = vec![
@@ -551,6 +555,17 @@ fn render_runtime_context(
             let rendered = render_group(title, sections, chars, minimum_section_chars);
             (!rendered.is_empty()).then_some(rendered)
         })
+        .chain((!required_skills.is_empty()).then_some(required_skills))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_required_skills(context: &RuntimeContextSections) -> String {
+    context
+        .skills
+        .iter()
+        .filter(|section| section.label.starts_with("Skill: "))
+        .map(|section| format!("### {}\n{}", section.label, section.content))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -1098,6 +1113,35 @@ mod tests {
         let planning = planner.messages[0]["content"].as_str().unwrap();
         assert!(planning.contains(crate::agent::instructions::PLANNING));
         assert!(!planning.contains(crate::agent::instructions::EXECUTION));
+    }
+
+    #[test]
+    fn activated_skill_instructions_are_complete_or_prompt_is_rejected() {
+        let mut context = hostile_context();
+        context.skills = vec![RuntimeContextSection {
+            label: "Skill: required".into(),
+            content: format!(
+                "SKILL_START\n{}\nSKILL_END",
+                "required instruction\n".repeat(200)
+            ),
+        }];
+        let session = hostile_session();
+        let request = |window| RuntimePromptRequest {
+            context: &context,
+            session: &session,
+            current_step: None,
+            tools: None,
+            mode: "execute",
+            project_root: Path::new("/workspace/nib"),
+            tool_use_enforcement: false,
+            context_length: window,
+        };
+        let input = build_bounded_runtime_input(request(20_000)).unwrap();
+        assert!(input.messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(&context.skills[0].content));
+        assert!(build_bounded_runtime_input(request(1_000)).is_err());
     }
 
     #[test]
