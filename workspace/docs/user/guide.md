@@ -850,7 +850,9 @@ rather than silently returning an incomplete inventory.
 
 Nib initially advertises names, descriptions and manifest paths within an approximate 2% token budget (using four bytes per token) of the
 configured context window. Descriptions are shortened and omissions produce a
-warning. The model chooses relevant workflows and calls `load_skill` before
+warning. Nearby repository roots take precedence over user roots when the
+catalog budget is limited, including when repository folders are linked.
+The model chooses relevant workflows and calls `load_skill` before
 following their instructions. Full bodies are not injected by keyword matching.
 Read supporting files with `read_skill_resource`; each UTF-8 read is limited to
 32 KiB beneath an activated skill folder. General `read_file` scope is unchanged.

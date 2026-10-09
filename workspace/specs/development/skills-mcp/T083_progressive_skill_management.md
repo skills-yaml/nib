@@ -23,7 +23,8 @@ legacy nib/Grok roots. Resolve linked skill folders with bounded traversal,
 canonical target deduplication and load-time identity revalidation; do not allow
 resource symlinks or arbitrary filesystem reads. Duplicate names remain separate
 catalog entries and require an exact catalog path for ambiguous activation.
-Expose names/descriptions/paths to the model with a bounded catalog; load bodies
+Preserve nearby repository root priority even when canonical link targets sort
+after user skills. Expose names/descriptions/paths with a bounded catalog; load bodies
 only for explicit `$name`, profile activation, or the `load_skill` tool. Remove
 the three-skill automatic keyword limit from the runtime selection path.
 `read_skill_resource` reads bounded regular files beneath an activated skill root.
@@ -84,15 +85,19 @@ Rationale: Record the shared skill discovery and progressive activation contract
 ## Implementation Evidence
 
 - AC-1/AC-2: Catalog fixtures cover repository ancestry, linked-folder canonical
-  deduplication, name ambiguity, metadata-only prompts and explicit activation.
+  deduplication, repository priority despite canonical target spelling, name ambiguity, metadata-only prompts and explicit activation.
   The built CLI lists all 20 repository `.agents/skills` entries.
 - AC-3/AC-4: Executor and command fixtures prove authoritative activation audit,
   installed restrictions, bounded resource reads, enable/disable persistence and
   implicit policy; descriptor-relative reads reject relative links and parent swaps.
-- AC-5: `task test:skills` passes 73 tests; `task test:runtime-e2e` passes 56 tests,
+- AC-5: `task test:skills` passes 75 tests; `task test:runtime-e2e` passes 56 tests,
   including progressive activation/resource reads and mixed-load side-effect guards.
   Full-body-or-reject budget coverage passed in the broader library run.
 - Independent spec-compliance and security/quality review approved the code
   candidate. Final complete verification remains required before handoff.
 - This is local implementation evidence. No shared test integration, main merge,
   publication or native Windows/macOS qualification is inferred.
+
+The complete native `task verify` passed at f054d03 before the repository-priority
+fix. Both new priority regressions and all focused skill tests pass; complete
+verification is renewed against the final candidate before handoff.

@@ -532,7 +532,8 @@ and T023 live-provider acceptance remain separate.
 Content:
 
 Nib shares one bounded catalog between listing and runtime discovery, including
-repository `.agents/skills` folders and linked SKM skills. Turns advertise metadata;
+repository `.agents/skills` folders and linked SKM skills. Bounded catalogs keep
+repository root precedence even when link targets sort after user skills. Turns advertise metadata;
 explicit `$name`, configured/profile activation or `load_skill` loads instructions.
 Activated bodies remain complete in prompts, and activation records session usage
 before installing restrictions and hooks. Disabled controls suppress profile and

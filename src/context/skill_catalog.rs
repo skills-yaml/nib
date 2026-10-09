@@ -260,7 +260,9 @@ impl SkillCatalog {
                 policy_digest,
             });
         }
-        entries.sort_by(|a, b| a.canonical_path.cmp(&b.canonical_path));
+        // Keep root precedence: nearby repository workflows must survive a
+        // bounded prompt before unrelated user roots. Each root is sorted by
+        // discovery; canonical target spelling must not reorder folder links.
         Ok(Self { entries })
     }
 

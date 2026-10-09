@@ -32,10 +32,11 @@ integration reference is not delivery evidence. Shared 0.4.0 reservation reused.
 
 ## Validation
 
-`task test:skills`: 73 passed. `task test:runtime-e2e`: 56 passed.
+`task test:skills`: 75 passed. `task test:runtime-e2e`: 56 passed.
 `task docs:check` and native version/governance checks passed. Independent
 spec-compliance and security/quality review approved the implementation.
-Final full verification is pending against the frozen candidate; run it serially
+Complete native `task verify` passed at f054d03. The bounded-catalog priority
+fix has two passing regressions and renewed complete verification is pending; run it serially
 so subprocess tests retain their exact executable. Earlier diagnostics and
 fixture isolation regressions were repaired and covered by the focused gate.
 

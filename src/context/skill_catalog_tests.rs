@@ -178,3 +178,53 @@ fn linked_manifests_resources_and_policy_are_rejected() {
     symlink(&outside, &path).unwrap();
     assert!(SkillCatalog::from_roots(&[path.parent().unwrap().into()], &[]).is_err());
 }
+
+#[test]
+fn bounded_catalog_prioritizes_repository_roots_over_user_path_spelling() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("z-repository");
+    let user = root.path().join("a-user");
+    manifest(&repository, "repo", "repository-workflow");
+    for index in 0..20 {
+        manifest(
+            &user,
+            &format!("user-{index:02}"),
+            &format!("user-workflow-{index:02}"),
+        );
+    }
+    let catalog = SkillCatalog::from_roots(&[repository, user], &[]).unwrap();
+    assert_eq!(catalog.entries[0].metadata.name, "repository-workflow");
+    let prompt = catalog.prompt(9_000);
+    assert!(prompt.contains("repository-workflow"));
+    assert!(prompt.contains("skills omitted"));
+    if let Some(user_position) = prompt.find("user-workflow") {
+        assert!(prompt.find("repository-workflow").unwrap() < user_position);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_repository_skill_keeps_priority_over_its_canonical_target_spelling() {
+    use std::os::unix::fs::symlink;
+    let root = tempdir().unwrap();
+    let repository = root.path().join("repository");
+    let user = root.path().join("a-user");
+    let target = manifest(root.path(), "z-cache/review", "linked-repository-workflow");
+    fs::create_dir(&repository).unwrap();
+    symlink(target.parent().unwrap(), repository.join("review")).unwrap();
+    for index in 0..20 {
+        manifest(
+            &user,
+            &format!("user-{index:02}"),
+            &format!("user-workflow-{index:02}"),
+        );
+    }
+    let catalog =
+        SkillCatalog::from_roots(&[repository, user, root.path().join("z-cache")], &[]).unwrap();
+    assert_eq!(catalog.entries.len(), 21);
+    assert_eq!(
+        catalog.entries[0].metadata.name,
+        "linked-repository-workflow"
+    );
+    assert!(catalog.prompt(9_000).contains("linked-repository-workflow"));
+}
