@@ -145,6 +145,19 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         NO_COMPLETION,
     ),
     spec(
+        "mode",
+        &[],
+        "/mode [ask|accept-edits|plan|auto|policy|default]",
+        "Show or set this session's permission mode (Shift+Tab cycles ask, accept-edits, plan)",
+        InteractiveArgumentSchema::Permissions,
+        InteractiveMutability::Session,
+        InteractiveWorkerPolicy::Allowed,
+        InteractiveCompletionSpec {
+            candidates: &["ask", "accept-edits", "plan", "auto", "policy", "default"],
+            argument_after: &[],
+        },
+    ),
+    spec(
         "permissions",
         &[],
         "/permissions [manual|smart|policy|off]",
@@ -722,6 +735,7 @@ pub enum InteractiveCommand {
     Context { details: bool },
     Providers,
     Permissions { selection: Option<String> },
+    Mode { selection: Option<String> },
     Review,
     Diff,
     Compact,
@@ -750,6 +764,7 @@ impl InteractiveCommand {
             Self::Context { .. } => "context",
             Self::Providers => "providers",
             Self::Permissions { .. } => "permissions",
+            Self::Mode { .. } => "mode",
             Self::Review => "review",
             Self::Diff => "diff",
             Self::Compact => "compact",
@@ -780,6 +795,9 @@ pub fn command_effect_class(command: &InteractiveCommand) -> CommandEffectClass 
         | InteractiveCommand::Context { .. }
         | InteractiveCommand::Ps => CommandEffectClass::ReadOnlyInspection,
         InteractiveCommand::Stop { task_id: Some(_) } => CommandEffectClass::LiveControl,
+        // The session mode is a locked session-record update that applies to
+        // the next run, so it is safe while a run is active.
+        InteractiveCommand::Mode { .. } => CommandEffectClass::Always,
         _ => CommandEffectClass::RequiresIdle,
     }
 }
@@ -1400,10 +1418,10 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
         "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /status and resolve its blocker."),
         "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /status and run or repair the exact check."),
         "turn_limit_reached" | "transition_limit_reached" => ("Run limit reached", "Work may be incomplete. Inspect /status before requesting more work."),
-        "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the same plan."),
-        "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the same plan."),
+        "instruction_context_missing" => ("Project instructions unavailable", "Required instructions could not be loaded. Restore them, then retry the request."),
+        "tool_scope_required" => ("Terminal scope required", "Declare a non-empty affected_paths array of worktree-relative paths for this terminal command, then retry the request."),
         "tool_scope_outside_worktree" => ("Tool path outside project", "A proposed tool targeted a path outside the active worktree. Choose a project path and retry."),
-        "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning. Finish or resolve the current plan, or start a new session."),
+        "planning_required_active_plan" => ("Existing plan is still open", "This request needs planning while an unfinished plan is open. Answer its pending question, resume it with /continue <plan-id> (see /status), or start a new session with /new."),
         "planning_required_active_run" => ("Run is still active", "Wait for reconciliation or cancel the active run before starting another request."),
         "plan_binding_changed" => ("Plan changed during the run", "No further work was admitted. Inspect /status before continuing."),
         "plan_approval_denied" => ("Plan approval declined", "No plan actions were run. Revise the request or start a new plan."),

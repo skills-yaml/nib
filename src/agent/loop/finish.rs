@@ -578,6 +578,7 @@ pub(crate) fn workload_context_sections(
 pub(crate) async fn reconcile_cancelled_run(
     store: &SessionStore,
     session_id: &str,
+    run_id: &str,
     stream_tx: &Option<Sender<StreamEvent>>,
 ) -> Result<AgentRunSummary, String> {
     if store
@@ -589,77 +590,83 @@ pub(crate) async fn reconcile_cancelled_run(
             .try_create_session_with_id(session_id.to_string())
             .map_err(|error| error.to_string())?;
     }
-    let (transitioned_to_reconciliation, tool_call_count, trace) = store
-        .update_session(session_id, |session| {
-            let current_state = last_persisted_state(session);
-            append_session_event(
-                session,
-                "cancel_requested",
-                json!({"reason": "cancelled_by_user", "state": current_state.clone()}),
-            );
-            let transitioned_to_reconciliation =
-                current_state.as_deref() != Some(AgentState::Reconciliation.as_str());
-            if transitioned_to_reconciliation {
+    let (transitioned_to_reconciliation, tool_call_count, trace) =
+        store
+            .update_session(session_id, |session| {
+                let current_state = last_persisted_state(session);
+                append_session_event(
+                    session,
+                    "cancel_requested",
+                    json!({"reason": "cancelled_by_user", "state": current_state.clone()}),
+                );
+                let transitioned_to_reconciliation =
+                    current_state.as_deref() != Some(AgentState::Reconciliation.as_str());
+                if transitioned_to_reconciliation {
+                    append_session_event(
+                        session,
+                        "state_transition",
+                        json!({
+                            "from": current_state.clone(),
+                            "to": AgentState::Reconciliation.as_str(),
+                        }),
+                    );
+                }
+
+                let mut cancelled_verifications = Vec::new();
+                // Only the plan this run executed is marked cancelled; a plan that
+                // waits on the user stays resumable when a side request is cancelled.
+                let bound = run_bound_plan(session, run_id);
+                if let Some(plan) = session.plan.as_mut().filter(|plan| {
+                    !plan.is_complete() && bound.as_deref() == Some(plan.id.as_str())
+                }) {
+                    cancelled_verifications =
+                        plan.cancel_running_verifications("agent run cancelled by user");
+                    plan.outcome = Some("cancelled_by_user".to_string());
+                    if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
+                        if step.status != "Completed" {
+                            step.status = "Cancelled".to_string();
+                            step.outcome = Some("cancelled_by_user".to_string());
+                            step.updated_at = Some(Utc::now());
+                        }
+                    }
+                }
+                if !cancelled_verifications.is_empty() {
+                    append_session_event(
+                        session,
+                        "verification_cancelled",
+                        json!({
+                            "verification_ids": cancelled_verifications,
+                            "reason": "cancelled_by_user",
+                        }),
+                    );
+                }
+                append_session_event(
+                    session,
+                    "reconciliation",
+                    json!({"outcome": "cancelled_by_user", "continue": false}),
+                );
                 append_session_event(
                     session,
                     "state_transition",
                     json!({
-                        "from": current_state.clone(),
-                        "to": AgentState::Reconciliation.as_str(),
+                        "from": AgentState::Reconciliation.as_str(),
+                        "to": AgentState::Done.as_str(),
                     }),
                 );
-            }
-
-            let mut cancelled_verifications = Vec::new();
-            if let Some(plan) = session.plan.as_mut().filter(|plan| !plan.is_complete()) {
-                cancelled_verifications =
-                    plan.cancel_running_verifications("agent run cancelled by user");
-                plan.outcome = Some("cancelled_by_user".to_string());
-                if let Some(step) = plan.steps.get_mut(plan.current_step_index) {
-                    if step.status != "Completed" {
-                        step.status = "Cancelled".to_string();
-                        step.outcome = Some("cancelled_by_user".to_string());
-                        step.updated_at = Some(Utc::now());
-                    }
-                }
-            }
-            if !cancelled_verifications.is_empty() {
-                append_session_event(
-                    session,
-                    "verification_cancelled",
-                    json!({
-                        "verification_ids": cancelled_verifications,
-                        "reason": "cancelled_by_user",
-                    }),
-                );
-            }
-            append_session_event(
-                session,
-                "reconciliation",
-                json!({"outcome": "cancelled_by_user", "continue": false}),
-            );
-            append_session_event(
-                session,
-                "state_transition",
-                json!({
-                    "from": AgentState::Reconciliation.as_str(),
-                    "to": AgentState::Done.as_str(),
-                }),
-            );
-            let trace = session
-                .events
-                .iter()
-                .filter(|event| event.kind == "state_transition")
-                .filter_map(|event| event.details.get("to").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect();
-            Ok((
-                transitioned_to_reconciliation,
-                session.tool_calls.len(),
-                trace,
-            ))
-        })
-        .map_err(|error| format!("failed to reconcile cancelled session: {error}"))?;
+                let trace = session
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "state_transition")
+                    .filter_map(|event| event.details.get("to").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+                Ok((
+                    transitioned_to_reconciliation,
+                    session.tool_calls.len(),
+                    trace,
+                ))
+            })
+            .map_err(|error| format!("failed to reconcile cancelled session: {error}"))?;
 
     if transitioned_to_reconciliation {
         emit(
@@ -1166,6 +1173,180 @@ pub(crate) fn is_llm_failure_outcome(outcome: &str) -> bool {
                 | "configuration_failed"
                 | "answer_only_failed"
         )
+}
+
+/// Terminal outcomes after which an unfinished plan is cleared (T081). An
+/// interrupted plan must not trap later chat requests; the user describes the
+/// next request instead. Plans that wait on the user (clarifications), plans
+/// whose provider continuation is resumable, and the planning gates that did
+/// not run the plan are kept.
+pub(crate) fn clears_unfinished_plan(outcome: &str) -> bool {
+    !matches!(
+        outcome,
+        "provider_continuation_interrupted"
+            | "unresolved_clarification"
+            | "planning_required_active_plan"
+            | "planning_required_active_run"
+            | "plan_binding_changed"
+    ) && (is_agent_failure_outcome(outcome)
+        || matches!(
+            outcome,
+            "cancelled_by_user" | "local_error" | "unresponsive_worker_shutdown"
+        ))
+}
+
+/// Removes an unfinished plan after an interrupting terminal `outcome`,
+/// recording the abandoned plan in a `plan_invalidated` event. Returns whether
+/// a plan was cleared.
+pub(crate) fn clear_interrupted_plan_in_session(
+    session: &mut Session,
+    outcome: &str,
+    run_id: Option<&str>,
+) -> bool {
+    let unfinished = session
+        .plan
+        .as_ref()
+        .is_some_and(|plan| !plan.is_complete());
+    if !unfinished || !clears_unfinished_plan(outcome) {
+        return false;
+    }
+    let prior = session
+        .plan
+        .take()
+        .expect("plan was present while clearing an interrupted plan");
+    append_session_event(
+        session,
+        "plan_invalidated",
+        json!({
+            "reason": "interrupted",
+            "outcome": outcome,
+            "run_id": run_id,
+            "previous_plan_id": (!prior.id.trim().is_empty()).then_some(prior.id),
+            "previous_goal": (!prior.goal.trim().is_empty()).then_some(prior.goal),
+            "approved": prior.approved,
+            "current_step_index": prior.current_step_index,
+            "step_count": prior.steps.len(),
+            "plan_outcome": prior.outcome,
+        }),
+    );
+    true
+}
+
+/// The interrupting outcome already recorded on an unfinished plan by a run
+/// that ended before plans were cleared at termination.
+pub(crate) fn recorded_plan_interruption(plan: &crate::session::Plan) -> Option<String> {
+    if plan.is_complete() {
+        return None;
+    }
+    let blocked_step = plan
+        .steps
+        .get(plan.current_step_index)
+        .filter(|step| step.status == "Blocked")
+        .and_then(|step| step.outcome.clone());
+    plan.outcome
+        .clone()
+        .or(blocked_step)
+        .filter(|outcome| clears_unfinished_plan(outcome))
+}
+
+/// Records that `run_id` bound `plan_id` as the plan it executes, so only that
+/// run's interruption can clear it. Repeated bindings of the same plan by the
+/// same run are recorded once.
+pub(crate) fn record_run_plan_binding(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    plan_id: &str,
+) -> Result<(), String> {
+    store
+        .update_session(session_id, |session| {
+            if run_bound_plan(session, run_id).as_deref() != Some(plan_id) {
+                append_session_event(
+                    session,
+                    "run_plan_bound",
+                    json!({"run_id": run_id, "plan_id": plan_id}),
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("failed to record run plan binding: {error}"))
+}
+
+/// The plan most recently bound by `run_id`, if any.
+pub(crate) fn run_bound_plan(session: &Session, run_id: &str) -> Option<String> {
+    session.events.iter().rev().find_map(|event| {
+        if event.kind != "run_plan_bound"
+            || event.details.get("run_id").and_then(Value::as_str) != Some(run_id)
+        {
+            return None;
+        }
+        event
+            .details
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// Whether the session's plan `plan_id` waits on the user through a question
+/// that recovery can reopen. Such plans survive any interruption; questions
+/// that were cancelled or superseded no longer hold their plan open.
+fn plan_waits_on_user(session: &Session, plan_id: &str) -> bool {
+    session.plan.as_ref().is_some_and(|plan| plan.id == plan_id)
+        && crate::interactive::plan_has_recoverable_question(session)
+}
+
+/// Clears the session's unfinished plan after a run ends with `outcome`, but
+/// only when it is the plan this run bound and it does not wait on the user.
+pub(crate) fn clear_interrupted_plan_after_run(
+    store: &SessionStore,
+    session_id: &str,
+    run_id: &str,
+    outcome: &str,
+) -> Result<bool, String> {
+    if !clears_unfinished_plan(outcome) {
+        return Ok(false);
+    }
+    store
+        .update_session(session_id, |session| {
+            let Some(plan_id) = session.plan.as_ref().map(|plan| plan.id.clone()) else {
+                return Ok(false);
+            };
+            if run_bound_plan(session, run_id).as_deref() != Some(plan_id.as_str())
+                || plan_waits_on_user(session, &plan_id)
+            {
+                return Ok(false);
+            }
+            Ok(clear_interrupted_plan_in_session(
+                session,
+                outcome,
+                Some(run_id),
+            ))
+        })
+        .map_err(|error| format!("failed to clear interrupted plan: {error}"))
+}
+
+/// One-time migration for sessions created before T081, which recorded no run
+/// plan bindings: clears a plan whose recorded outcome is an interruption,
+/// unless it waits on the user. Returns whether a plan was cleared.
+pub(crate) fn clear_legacy_interrupted_plan(session: &mut Session) -> bool {
+    if session
+        .events
+        .iter()
+        .any(|event| event.kind == "run_plan_bound")
+    {
+        return false;
+    }
+    let Some(plan) = session.plan.as_ref() else {
+        return false;
+    };
+    let Some(outcome) = recorded_plan_interruption(plan) else {
+        return false;
+    };
+    if plan_waits_on_user(session, &plan.id) {
+        return false;
+    }
+    clear_interrupted_plan_in_session(session, &outcome, None)
 }
 
 pub(crate) fn is_agent_failure_outcome(outcome: &str) -> bool {

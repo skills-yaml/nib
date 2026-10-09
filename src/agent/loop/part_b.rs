@@ -36,6 +36,8 @@ async fn worktree_preflight_failure_reconciles_without_running_proposed_tool() {
         .events
         .iter()
         .any(|event| matches!(event.kind.as_str(), "tool_attempted" | "tool_started")));
+    // T081 clears plans only for interactive chat requests; this run is not
+    // interactive, so its interrupted plan is kept for review.
     assert_eq!(saved.plan.as_ref().unwrap().steps[0].status, "Blocked");
     assert!(saved.events.iter().any(|event| {
         event.kind == "local_preflight_failed"

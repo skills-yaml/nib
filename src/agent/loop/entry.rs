@@ -176,6 +176,10 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "session disappeared before run resource setup".to_string())?,
     );
+    // T081 clears interrupted plans only for interactive chat requests, the
+    // only route the planning gate guards. Compaction never changes plans;
+    // subagents, background tasks and CLI runs keep failed plans for review.
+    let clears_plans = cfg.interactive_request && cfg.mode != "compact";
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -188,6 +192,11 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 ));
             }
             append_session_event(session, "run_started", json!({"run_id": run_id.clone()}));
+            // Plans interrupted before T081 cleared them at termination are
+            // cleared now, so they cannot trap this request.
+            if clears_plans {
+                clear_legacy_interrupted_plan(session);
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -245,12 +254,15 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
     let stream_tx = cfg.stream_tx.clone();
     let stream_sensitive_values = runtime.nib_cfg.public_session_sensitive_values();
     let cancellation_store = runtime.session_store.clone();
+    // Requests rejected at admission never ran, so they interrupt no plan.
+    let admitted = recovery_result.is_ok();
     let run_result = match recovery_result {
         Err(error) => Err(error),
         Ok(_) => {
             if let Some(cancellation) = cancellation {
                 if cancellation.is_cancelled() {
-                    reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
+                    reconcile_cancelled_run(&cancellation_store, session_id, &run_id, &stream_tx)
+                        .await
                 } else {
                     let mut running = Box::pin(run_agent_operation(
                         runtime,
@@ -272,7 +284,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                                 running.await
                             } else {
                                 drop(running);
-                                reconcile_cancelled_run(&cancellation_store, session_id, &stream_tx).await
+                                reconcile_cancelled_run(&cancellation_store, session_id, &run_id, &stream_tx).await
                             }
                         },
                         result = &mut running => result,
@@ -302,6 +314,9 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, &outcome)?;
+            if clears_plans {
+                clear_after_run_logged(&cancellation_store, session_id, &run_id, &outcome);
+            }
             Ok(summary)
         }
         (Err(error), Ok(())) => {
@@ -313,6 +328,9 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 &resources,
             )?;
             runtime_terminal_event(&cancellation_store, session_id, &run_id, "local_error")?;
+            if admitted && clears_plans {
+                clear_after_run_logged(&cancellation_store, session_id, &run_id, "local_error");
+            }
             Err(error)
         }
         (Ok(_), Err(error)) => Err(error.to_string()),
@@ -347,6 +365,19 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
         emit_terminal_bounded(&stream_tx, StreamEvent::End(summary.outcome.clone())).await;
     }
     result
+}
+
+/// Clears an interrupted plan after the terminal record is written. A failure
+/// here must not discard the run's own result, so it is logged and audited.
+fn clear_after_run_logged(store: &SessionStore, session_id: &str, run_id: &str, outcome: &str) {
+    if let Err(error) = clear_interrupted_plan_after_run(store, session_id, run_id, outcome) {
+        tracing::warn!(session_id, run_id, %error, "interrupted plan was not cleared");
+        let _ = store.record_event(
+            session_id,
+            "plan_clear_failed",
+            json!({"run_id": run_id, "outcome": outcome}),
+        );
+    }
 }
 
 pub(crate) async fn emit_terminal_bounded(

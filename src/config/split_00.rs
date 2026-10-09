@@ -952,9 +952,12 @@ impl NibConfig {
         }
         if !matches!(
             self.approvals.mode.as_str(),
-            "manual" | "smart" | "policy" | "off"
+            "manual" | "smart" | "policy" | "off" | "ask" | "accept-edits" | "plan" | "auto"
         ) {
-            issues.push("approvals.mode must be manual, smart, policy, or off".to_string());
+            issues.push(
+                "approvals.mode must be ask, accept-edits, plan, auto, policy (or manual, smart, off)"
+                    .to_string(),
+            );
         }
         if !self.workload.enabled {
             issues.push("workload.enabled must remain true for auditable execution".to_string());

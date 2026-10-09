@@ -567,6 +567,9 @@ pub(crate) fn fork_session(
             session.skill_usage = source.skill_usage.clone();
             session.display_name = source.display_name.clone();
             session.forked_from = Some(source.id.clone());
+            // A fork keeps its permission mode, except `auto`, which must be
+            // chosen again explicitly.
+            session.permission_mode = source.permission_mode.clone().filter(|mode| mode != "auto");
             session.queued_follow_ups.clear();
             Ok(())
         })
@@ -672,6 +675,99 @@ pub(crate) fn set_approval_mode(project_root: &Path, mode: &str) -> Result<Strin
         bounded_status_value(&mode),
         format_permissions(project_root)?
     ))
+}
+
+/// The permission mode the session's next run uses: the session override set
+/// with Shift+Tab or `/mode`, else the configured `approvals.mode` (T080).
+pub(crate) fn effective_session_permission_mode(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+) -> (crate::tools::models::ApprovalMode, bool) {
+    let session_mode = store
+        .load_result(session_id)
+        .ok()
+        .flatten()
+        .and_then(|session| session.permission_mode)
+        .as_deref()
+        .and_then(crate::tools::executor::permission_mode_from_name);
+    if let Some(mode) = session_mode {
+        return (mode, true);
+    }
+    let configured = load_nib_config_full(project_root)
+        .map(|config| crate::tools::executor::approval_mode_from_config(&config.approvals))
+        .unwrap_or_default();
+    (configured, false)
+}
+
+/// Shows or sets the session permission mode. `default` clears the override.
+pub(crate) fn set_session_permission_mode(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    selection: Option<&str>,
+) -> Result<String, String> {
+    if let Some(selection) = selection {
+        let selection = selection.trim().to_ascii_lowercase();
+        let stored = if selection == "default" {
+            None
+        } else {
+            let mode = crate::tools::executor::permission_mode_from_name(&selection)
+                .ok_or("usage: /mode [ask|accept-edits|plan|auto|policy|default]")?;
+            Some(crate::tools::executor::permission_mode_label(mode).to_string())
+        };
+        store
+            .update_session(session_id, |session| {
+                session.permission_mode = stored.clone();
+                Ok(())
+            })
+            .map_err(|error| format!("failed to set permission mode: {error}"))?;
+    }
+    let (mode, from_session) = effective_session_permission_mode(project_root, store, session_id);
+    let source = if from_session {
+        "this session"
+    } else {
+        "configured default"
+    };
+    let detail = match mode {
+        crate::tools::models::ApprovalMode::Manual => {
+            "asks before file edits and commands that no rule allows"
+        }
+        crate::tools::models::ApprovalMode::Smart => {
+            "applies file edits automatically; commands still ask"
+        }
+        crate::tools::models::ApprovalMode::Plan => {
+            "read-only exploration; changes are refused until you switch modes"
+        }
+        crate::tools::models::ApprovalMode::Off => {
+            "runs everything the sandbox and rules allow without asking"
+        }
+        crate::tools::models::ApprovalMode::Policy => {
+            "project rules decide; unmatched actions ask here and are denied in headless runs"
+        }
+    };
+    Ok(format!(
+        "Permission mode: {} ({source}) - {detail}. Applies from the next request.",
+        crate::tools::executor::permission_mode_label(mode)
+    ))
+}
+
+/// Advances the session permission mode in Shift+Tab order and returns it.
+pub(crate) fn cycle_session_permission_mode(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<crate::tools::models::ApprovalMode, String> {
+    let (current, _) = effective_session_permission_mode(project_root, store, session_id);
+    let next = crate::tools::executor::next_cycled_permission_mode(current);
+    store
+        .update_session(session_id, |session| {
+            session.permission_mode =
+                Some(crate::tools::executor::permission_mode_label(next).to_string());
+            Ok(())
+        })
+        .map_err(|error| format!("failed to set permission mode: {error}"))?;
+    Ok(next)
 }
 
 pub(crate) fn format_permissions(project_root: &Path) -> Result<String, String> {
@@ -976,6 +1072,9 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
             InteractiveCommand::Context { details: true }
         }
         "providers" if arguments.is_empty() => InteractiveCommand::Providers,
+        "mode" => InteractiveCommand::Mode {
+            selection: arguments.first().cloned(),
+        },
         "permissions" => InteractiveCommand::Permissions {
             selection: if arguments.is_empty() {
                 None
@@ -1127,6 +1226,9 @@ pub fn execute_interactive_command_in_state(
         InteractiveCommand::Permissions { selection: None } => {
             Ok(InteractiveEffect::Output(format_permissions(project_root)?))
         }
+        InteractiveCommand::Mode { selection } => Ok(InteractiveEffect::Output(
+            set_session_permission_mode(project_root, store, session_id, selection.as_deref())?,
+        )),
         InteractiveCommand::Permissions {
             selection: Some(mode),
         } => Ok(InteractiveEffect::Output(set_approval_mode(
@@ -1270,6 +1372,26 @@ pub fn execute_interactive_command_in_state(
     }
 }
 
+/// Explains that `plan_id` was cleared after an interrupted run (T081), if
+/// the session recorded that.
+fn cleared_plan_message(session: &crate::session::Session, plan_id: &str) -> Option<String> {
+    session.events.iter().rev().find_map(|event| {
+        let cleared = event.kind == "plan_invalidated"
+            && event.details.get("reason").and_then(serde_json::Value::as_str) == Some("interrupted")
+            && event.details.get("previous_plan_id").and_then(serde_json::Value::as_str) == Some(plan_id);
+        cleared.then(|| {
+            let outcome = event
+                .details
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("interrupted");
+            format!(
+                "plan {plan_id} was cleared after its run was interrupted ({outcome}); describe the next request in the chat"
+            )
+        })
+    })
+}
+
 pub(crate) fn load_continue_plan_effect(
     store: &SessionStore,
     session_id: &str,
@@ -1279,11 +1401,23 @@ pub(crate) fn load_continue_plan_effect(
         .load_result(session_id)
         .map_err(|error| format!("failed to load session {session_id}: {error}"))?
         .ok_or_else(|| format!("session {session_id} was not found"))?;
-    let plan = session
-        .plan
-        .as_ref()
-        .ok_or_else(|| "no active plan is available to continue".to_string())?;
+    let cleared = cleared_plan_message(&session, plan_id);
+    let Some(plan) = session.plan.as_ref() else {
+        return Err(
+            cleared.unwrap_or_else(|| "no active plan is available to continue".to_string())
+        );
+    };
+    if plan.id == plan_id {
+        if let Some(outcome) = crate::agent::r#loop::recorded_plan_interruption(plan) {
+            return Err(format!(
+                "plan {plan_id} was interrupted ({outcome}) and is cleared before the next run; describe the next request in the chat"
+            ));
+        }
+    }
     if plan.id != plan_id {
+        if let Some(cleared) = cleared {
+            return Err(cleared);
+        }
         return Err(format!(
             "plan {plan_id} is not the current session plan {}",
             plan.id

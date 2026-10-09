@@ -1371,13 +1371,15 @@ fn tui_shutdown_cancels_and_joins_a_worker_blocked_on_approval() {
     assert!(pending_approval.is_none());
     assert!(pending_question.is_none());
     let persisted = store.load(&session.id).expect("cancelled session");
-    let plan = persisted.plan.expect("generated plan");
-    assert_eq!(plan.outcome.as_deref(), Some("cancelled_by_user"));
-    assert_eq!(plan.steps[plan.current_step_index].status, "Cancelled");
-    assert_eq!(
-        plan.steps[plan.current_step_index].outcome.as_deref(),
-        Some("cancelled_by_user")
-    );
+    // T081: cancelling the run that asked the question leaves no recoverable
+    // question, so its plan is cleared and audited instead of trapping chat.
+    assert!(persisted.plan.is_none());
+    assert!(persisted.events.iter().any(|event| {
+        event.kind == "plan_invalidated"
+            && event.details["reason"] == "interrupted"
+            && event.details["outcome"] == "cancelled_by_user"
+            && event.details["plan_outcome"] == "cancelled_by_user"
+    }));
     assert!(timeline.live.text.contains("[reconciled] Run cancelled"));
     assert!(!timeline.live.text.contains("[stream ended]"));
     assert_eq!(

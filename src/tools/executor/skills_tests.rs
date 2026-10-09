@@ -128,3 +128,50 @@ async fn skill_tools_are_only_advertised_with_a_catalog_and_not_exposed_by_mcp()
         .any(|tool| tool["function"]["name"] == "load_skill"));
     assert!(!get_tool_metadata("load_skill").unwrap().mcp_exposable);
 }
+
+#[tokio::test]
+async fn skill_activation_and_constraints_survive_session_permission_modes() {
+    for mode in [
+        ApprovalMode::Plan,
+        ApprovalMode::Smart,
+        ApprovalMode::Policy,
+        ApprovalMode::Off,
+    ] {
+        let (root, catalog, store, session) =
+            fixture("---\nname: review\nconstraints:\n  deny_tools: [read_file]\n---\nWorkflow\n");
+        let mut executor = ToolExecutor::new(root.path().into(), ExecutionConfig::default())
+            .with_session_store(store.clone())
+            .with_skill_catalog(catalog, Vec::new())
+            .with_approval_mode(mode);
+        let call = |name: &str, arguments| ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: name.into(),
+            arguments,
+            session_id: Some(session.clone()),
+            project_root: Some(root.path().into()),
+        };
+        let activation = executor
+            .execute(call("load_skill", json!({"skill": "review"})))
+            .await;
+        assert!(activation.success, "{mode:?}: {activation:?}");
+        assert_eq!(store.load(&session).unwrap().skill_usage.len(), 1);
+        let resource = executor
+            .execute(call(
+                "read_skill_resource",
+                json!({"skill": "review", "path": "references/guide.md"}),
+            ))
+            .await;
+        assert!(resource.success, "{mode:?}: {resource:?}");
+        let denied = executor
+            .execute(call(
+                "read_file",
+                json!({"path": ".agents/skills/review/SKILL.md"}),
+            ))
+            .await;
+        assert!(
+            !denied.success,
+            "{mode:?}: skill policy must remain authoritative"
+        );
+        assert!(denied.error.unwrap().contains("denied by policy"));
+    }
+}

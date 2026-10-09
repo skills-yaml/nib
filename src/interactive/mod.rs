@@ -21,6 +21,7 @@ use uuid::Uuid;
 mod question_form;
 mod question_recovery;
 pub use question_form::*;
+pub(crate) use question_recovery::plan_has_recoverable_question;
 mod split_00;
 mod split_01;
 mod split_02;

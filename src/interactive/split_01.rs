@@ -1790,7 +1790,7 @@ impl TuiChrome {
             branch: "main".to_string(),
             model: "mock-model".to_string(),
             context: "ctx ?".to_string(),
-            approval: "manual".to_string(),
+            approval: "ask".to_string(),
             agent_mode: "idle".to_string(),
         }
     }
@@ -1854,7 +1854,14 @@ pub fn format_tui_interaction_chrome(
         window,
         crate::context::snapshot::OccupancyStyle::Compact,
     );
-    let approval = posture.effective_approval_mode.to_string();
+    // The session permission mode (Shift+Tab or /mode) wins over the
+    // configured approval mode; both are shown with permission-mode names.
+    let approval = session
+        .and_then(|session| session.permission_mode.as_deref())
+        .or(Some(posture.effective_approval_mode))
+        .and_then(crate::tools::executor::permission_mode_from_name)
+        .map(|mode| crate::tools::executor::permission_mode_label(mode).to_string())
+        .unwrap_or_else(|| posture.effective_approval_mode.to_string());
     Ok(TuiChrome {
         folder,
         branch,

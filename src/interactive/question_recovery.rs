@@ -115,6 +115,20 @@ fn recoverable_record(session: &Session, record: &crate::session::ClarificationR
         })
 }
 
+/// Whether the session's current plan waits on the user through a question
+/// that question recovery can actually reopen (T081). Plans whose questions
+/// were cancelled or superseded are not waiting, so they cannot trap chat.
+pub(crate) fn plan_has_recoverable_question(session: &Session) -> bool {
+    plan_admission(session).is_ok()
+        && pending_question_forms(session).iter().any(|form| {
+            session
+                .clarifications
+                .iter()
+                .filter(|record| record.invocation_id == form.invocation_id)
+                .all(|record| recoverable_record(session, record))
+        })
+}
+
 fn eligible_forms(
     session: &Session,
     store: &SessionStore,

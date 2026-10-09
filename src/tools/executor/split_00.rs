@@ -678,6 +678,12 @@ pub trait ApprovalHandler: Send + Sync {
 
     async fn handle_approval(&self, call: &ToolCall, level: PermissionLevel) -> ApprovalDecision;
 
+    /// Whether a person can answer prompts. `policy` mode prompts for
+    /// unmatched actions only when this is true and denies otherwise (T080).
+    fn can_prompt(&self) -> bool {
+        false
+    }
+
     async fn handle_approval_with_context(
         &self,
         call: &ToolCall,

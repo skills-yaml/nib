@@ -547,7 +547,7 @@ fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
     assert!(rendered.contains("Ctrl+C"));
     assert!(rendered.contains("never copies or quits"));
     assert!(rendered.contains("> Ask nib anything…"));
-    assert!(rendered.contains("approval manual"));
+    assert!(rendered.contains("mode ask"));
     assert!(rendered.contains("idle"));
     assert_eq!(terminal.get_cursor_position().expect("cursor").x, 2);
 }
@@ -881,7 +881,7 @@ fn header_shows_folder_and_branch_left_and_model_right() {
         branch: "feat/t039".to_string(),
         model: "mock-model".to_string(),
         context: "ctx ~12/100".to_string(),
-        approval: "manual".to_string(),
+        approval: "ask".to_string(),
         agent_mode: "idle".to_string(),
     };
     let line = header_line(&chrome, 80, true);
@@ -995,24 +995,24 @@ fn footer_and_completion_follow_the_current_interaction() {
     let chrome = TuiChrome::fixture();
     assert_eq!(
         footer_line(&chrome, &viewport, 0, WaitingKind::None, None, false),
-        "approval manual · idle"
+        "mode ask · idle"
     );
     let mut running = chrome.clone();
     running.agent_mode = "execute".to_string();
     assert_eq!(
         footer_line(&running, &viewport, 0, WaitingKind::None, None, false),
-        "approval manual · execute"
+        "mode ask · execute"
     );
     assert_eq!(
         footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
-        "queue 2 · approval manual · execute"
+        "queue 2 · mode ask · execute"
     );
     let mut waiting = chrome.clone();
     waiting.agent_mode = "WAITING APPROVAL".to_string();
     assert_eq!(
-            footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
-            "approval manual · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
-        );
+        footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
+        "mode ask · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
+    );
     let mut question = chrome.clone();
     question.agent_mode = "WAITING QUESTION".to_string();
     assert_eq!(
@@ -1022,16 +1022,16 @@ fn footer_and_completion_follow_the_current_interaction() {
     let mut workspace = chrome.clone();
     workspace.agent_mode = "WAITING PERMISSION".to_string();
     assert_eq!(
-            footer_line(
-                &workspace,
-                &viewport,
-                0,
-                WaitingKind::Workspace,
-                None,
-                false
-            ),
-            "approval manual · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
-        );
+        footer_line(
+            &workspace,
+            &viewport,
+            0,
+            WaitingKind::Workspace,
+            None,
+            false
+        ),
+        "mode ask · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
+    );
     assert!(footer_line(
         &chrome,
         &viewport,

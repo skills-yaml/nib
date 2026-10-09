@@ -45,11 +45,18 @@ pub enum PermissionLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
+    /// `ask`: prompt for every change that no rule or classifier allows.
     #[default]
     Manual,
+    /// `accept-edits`: file edits apply automatically; commands still prompt.
     Smart,
+    /// Rules decide; unmatched actions prompt when a person can answer and are
+    /// denied in headless runs.
     Policy,
+    /// `auto`: everything the sandbox and rules allow runs without prompts.
     Off,
+    /// `plan`: read-only exploration; every change is refused (T080).
+    Plan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
