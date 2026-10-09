@@ -495,6 +495,34 @@ resolutions:
   `--output=` file names and `wc --files0-from` can make single-command
   "read-only" Git or `wc` invocations write files or run configured helpers.
 
+**2b implementation (2026-10-09).** The host-side Git tools live in
+`src/tools/git_tools.rs`.
+
+`git_commit`:
+- Arguments are a message and optional workspace-relative paths, validated
+  with literal pathspecs and a `--` separator. Nothing staged is an error.
+- It branches first to `nib/<slug>` (with a numeric suffix on collision)
+  when HEAD is detached or on `main`, `master` or `origin/HEAD`'s branch.
+- It runs on the host with the user's Git environment, with
+  `GIT_TERMINAL_PROMPT=0`.
+- It is level Destructive, so the mode decides: `ask` and `accept-edits`
+  prompt, `plan` refuses, `auto` grants.
+
+`git_push`:
+- The remote must exist (default `origin`), and HEAD must be on a branch.
+  There is no force option and no refspec.
+- It always prompts, even in `auto` or with `--yes`. Only an explicit allow
+  rule skips the prompt, and headless runs deny.
+
+Both tools:
+- They are not offered over nib's MCP server.
+- `git commit` and `git push` in `run_terminal` (including after `-C` or
+  `-c` global options) are redirected to the tools before any approval or
+  sandbox work.
+- Approval-engine helpers (`automatic_decision`,
+  `prompt_without_remembering`) keep `handle_approval` within the module
+  size limit.
+
 Plan mode uses the permission engine rather than the agent's planning mode,
 which no interactive surface selects. This matches Claude Code's read-only
 plan mode.

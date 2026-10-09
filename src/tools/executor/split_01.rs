@@ -1286,19 +1286,20 @@ impl ToolExecutor {
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
         {
-            let mut context = self.approval_context(
-                call,
-                level,
-                risk,
-                effective_root,
-                effective_execution_config,
-                requires_worktree,
-                session_id,
-                &format!("project or tool policy requires approval: {}", rule.reason),
-            );
-            context.remember_exact = None;
-            let mut decision = self.prompt_approval(call, level, context).await;
-            decision.remember_command = None;
+            let mut decision = self
+                .prompt_without_remembering(
+                    call,
+                    level,
+                    risk,
+                    (
+                        effective_root,
+                        effective_execution_config,
+                        requires_worktree,
+                    ),
+                    session_id,
+                    &format!("project or tool policy requires approval: {}", rule.reason),
+                )
+                .await;
             if decision.note.as_deref() == Some("User denied") || decision.note.is_none() {
                 decision.note = Some(rule.reason.clone());
             }
@@ -1323,55 +1324,27 @@ impl ToolExecutor {
                     "git push needs the user's approval in an interactive session",
                 );
             }
-            let mut context = self.approval_context(
-                call,
-                level,
-                risk,
-                effective_root,
-                effective_execution_config,
-                requires_worktree,
-                session_id,
-                "pushing publishes commits to a remote and always needs approval",
-            );
-            context.remember_exact = None;
-            let mut decision = self.prompt_approval(call, level, context).await;
-            decision.remember_command = None;
-            return decision;
+            return self
+                .prompt_without_remembering(
+                    call,
+                    level,
+                    risk,
+                    (
+                        effective_root,
+                        effective_execution_config,
+                        requires_worktree,
+                    ),
+                    session_id,
+                    "pushing publishes commits to a remote and always needs approval",
+                )
+                .await;
         }
         if let Some(decision) = self.remembered_command_grant(call) {
             return decision;
         }
 
-        if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
-            || risk == ToolRisk::ReadOnly
-        {
-            return ApprovalDecision::granted_policy();
-        }
-        if call.tool_name == "run_terminal"
-            && risk == ToolRisk::Safe
-            && self.classifier_auto_approval_allowed(call, level, risk)
-        {
-            return ApprovalDecision::granted_classifier();
-        }
-        if !requires_approval && matches!(risk, ToolRisk::Safe) {
-            return ApprovalDecision::granted_policy();
-        }
-        if self.approval_mode == ApprovalMode::Smart && is_file_edit_tool(&call.tool_name) {
-            return ApprovalDecision {
-                granted: true,
-                source: "mode".to_string(),
-                note: Some("accept-edits mode applies file edits automatically".to_string()),
-                remember_command: None,
-            };
-        }
-        if self.approval_mode == ApprovalMode::Policy && !self.approval_handler.can_prompt() {
-            return ApprovalDecision::denied_by_policy("no matching allow policy");
-        }
-        if self.approval_mode == ApprovalMode::Off {
-            return ApprovalDecision::granted_yolo();
-        }
-        if self.auto_approve {
-            return ApprovalDecision::granted_user();
+        if let Some(decision) = self.automatic_decision(call, level, risk, requires_approval) {
+            return decision;
         }
         let context = self.approval_context(
             call,
@@ -1384,6 +1357,76 @@ impl ToolExecutor {
             "effective tool metadata and risk classification require interactive approval",
         );
         self.prompt_approval(call, level, context).await
+    }
+
+    /// Decisions that need no prompt once rules have been applied: read-only
+    /// and classifier-safe actions, the permission mode's own grants or
+    /// refusals, and `--yes`. `None` means the user must be asked.
+    fn automatic_decision(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        risk: ToolRisk,
+        requires_approval: bool,
+    ) -> Option<ApprovalDecision> {
+        if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
+            || risk == ToolRisk::ReadOnly
+        {
+            return Some(ApprovalDecision::granted_policy());
+        }
+        if call.tool_name == "run_terminal"
+            && risk == ToolRisk::Safe
+            && self.classifier_auto_approval_allowed(call, level, risk)
+        {
+            return Some(ApprovalDecision::granted_classifier());
+        }
+        if !requires_approval && matches!(risk, ToolRisk::Safe) {
+            return Some(ApprovalDecision::granted_policy());
+        }
+        if self.approval_mode == ApprovalMode::Smart && is_file_edit_tool(&call.tool_name) {
+            return Some(ApprovalDecision {
+                granted: true,
+                source: "mode".to_string(),
+                note: Some("accept-edits mode applies file edits automatically".to_string()),
+                remember_command: None,
+            });
+        }
+        if self.approval_mode == ApprovalMode::Policy && !self.approval_handler.can_prompt() {
+            return Some(ApprovalDecision::denied_by_policy(
+                "no matching allow policy",
+            ));
+        }
+        if self.approval_mode == ApprovalMode::Off {
+            return Some(ApprovalDecision::granted_yolo());
+        }
+        self.auto_approve.then(ApprovalDecision::granted_user)
+    }
+
+    /// Prompts with a fixed reason and never offers to remember the grant.
+    async fn prompt_without_remembering(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        risk: ToolRisk,
+        scope: (&Path, &ExecutionConfig, bool),
+        session_id: Option<&str>,
+        reason: &str,
+    ) -> ApprovalDecision {
+        let (effective_root, effective_execution_config, requires_worktree) = scope;
+        let mut context = self.approval_context(
+            call,
+            level,
+            risk,
+            effective_root,
+            effective_execution_config,
+            requires_worktree,
+            session_id,
+            reason,
+        );
+        context.remember_exact = None;
+        let mut decision = self.prompt_approval(call, level, context).await;
+        decision.remember_command = None;
+        decision
     }
 
     pub(crate) fn refuse_hidden_or_closed_command(

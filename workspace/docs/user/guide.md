@@ -569,6 +569,15 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   In `policy` mode, actions no rule allows now ask in chat and the TUI instead of being
   silently denied; headless runs still deny them. Read-only command sequences such as
   `git status; git log` run without approval.
+- Commits and pushes go through two approved tools instead of the terminal, which
+  keeps Git metadata read-only. `git_commit` stages the given paths (or all changes)
+  and commits with your own Git setup: your signing, credential helpers and hooks.
+  On `main`, `master` or the remote's default branch it first creates
+  `nib/<topic>` and reports the branch. It follows the permission mode: it asks in
+  `ask` and `accept-edits`, is refused in `plan`, and runs in `auto`. `git_push` pushes
+  the current branch and sets its upstream. It **always asks**, even in `auto` or
+  with `--yes`, unless you wrote an explicit allow rule, and there is no force option.
+  nib commits or pushes only when you ask it to.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,

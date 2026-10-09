@@ -1,6 +1,6 @@
 //! T080 phase 2b fixtures for host-side Git tools.
 
-use super::git_tools::{branch_slug, git_commit, git_push, terminal_git_write};
+use super::{branch_slug, git_commit, git_push, terminal_git_write};
 use serde_json::json;
 use serial_test::serial;
 use std::path::Path;
@@ -92,8 +92,14 @@ async fn commit_branches_first_on_main_and_commits_in_place_elsewhere() {
         .await
         .expect("commit on main branches first");
     assert_eq!(result["created_branch"], "nib/update-the-readme");
-    assert_eq!(git(repo, &["branch", "--show-current"]), "nib/update-the-readme");
-    assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Update the readme");
+    assert_eq!(
+        git(repo, &["branch", "--show-current"]),
+        "nib/update-the-readme"
+    );
+    assert_eq!(
+        git(repo, &["log", "-1", "--format=%s"]),
+        "Update the readme"
+    );
     assert_eq!(git(repo, &["log", "-1", "--format=%s", "main"]), "start");
 
     std::fs::write(repo.join("notes.txt"), "kept\n").unwrap();
@@ -126,7 +132,11 @@ async fn commit_rejects_unsafe_input_and_empty_changes() {
     repository(repo);
     git(repo, &["switch", "--quiet", "-c", "feature"]);
 
-    for paths in [json!(["../outside"]), json!(["/etc/passwd"]), json!(["--all"])] {
+    for paths in [
+        json!(["../outside"]),
+        json!(["/etc/passwd"]),
+        json!(["--all"]),
+    ] {
         let error = git_commit(&json!({"message": "x", "paths": paths}), repo)
             .await
             .expect_err("unsafe path");
@@ -147,19 +157,32 @@ async fn push_sets_upstream_on_a_local_remote_and_refuses_bad_input() {
     let remote = directory.path().join("remote.git");
     let repo = directory.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    git(directory.path(), &["init", "--quiet", "--bare", remote.to_str().unwrap()]);
+    git(
+        directory.path(),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
     repository(&repo);
-    git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
     git(&repo, &["switch", "--quiet", "-c", "nib/feature"]);
 
     let result = git_push(&json!({}), &repo).await.expect("push");
     assert_eq!(result["branch"], "nib/feature");
     assert_eq!(
-        git(&repo, &["rev-parse", "--abbrev-ref", "nib/feature@{upstream}"]),
+        git(
+            &repo,
+            &["rev-parse", "--abbrev-ref", "nib/feature@{upstream}"]
+        ),
         "origin/nib/feature"
     );
-    assert!(git_push(&json!({"remote": "--force"}), &repo).await.is_err());
-    assert!(git_push(&json!({"remote": "missing"}), &repo).await.is_err());
+    assert!(git_push(&json!({"remote": "--force"}), &repo)
+        .await
+        .is_err());
+    assert!(git_push(&json!({"remote": "missing"}), &repo)
+        .await
+        .is_err());
     git(&repo, &["switch", "--quiet", "--detach"]);
     assert!(git_push(&json!({}), &repo).await.is_err());
 }

@@ -80,9 +80,13 @@ async fn require(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, S
 }
 
 async fn current_branch(cwd: &Path) -> Option<String> {
-    let output = git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"], QUERY_TIMEOUT)
-        .await
-        .ok()?;
+    let output = git(
+        cwd,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        QUERY_TIMEOUT,
+    )
+    .await
+    .ok()?;
     (output.success && !output.stdout.is_empty()).then_some(output.stdout)
 }
 
@@ -182,7 +186,9 @@ fn validate_paths(args: &Value) -> Result<Vec<String>, String> {
             if safe {
                 Ok(path.to_string())
             } else {
-                Err(format!("git_commit path must stay inside the workspace: {path}"))
+                Err(format!(
+                    "git_commit path must stay inside the workspace: {path}"
+                ))
             }
         })
         .collect()
@@ -252,9 +258,9 @@ pub(crate) async fn git_push(args: &Value, cwd: &Path) -> Result<Value, String> 
         .filter(|remote| !remote.is_empty())
         .unwrap_or("origin");
     let valid_remote = !remote.starts_with('-')
-        && remote
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'));
+        && remote.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        });
     if !valid_remote {
         return Err(format!("invalid remote name: {remote}"));
     }
@@ -301,7 +307,10 @@ pub(crate) fn terminal_git_write(command: &str) -> Option<&'static str> {
             continue;
         }
         while let Some(word) = words.get(index) {
-            if matches!(*word, "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace") {
+            if matches!(
+                *word,
+                "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace"
+            ) {
                 index += 2;
             } else if word.starts_with('-') {
                 index += 1;

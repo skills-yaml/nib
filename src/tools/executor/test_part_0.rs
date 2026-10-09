@@ -1813,7 +1813,10 @@ async fn git_tools_follow_modes_and_push_always_asks() {
     for mode in [ApprovalMode::Off, ApprovalMode::Manual, ApprovalMode::Smart] {
         let (executor, prompts) = mode_executor(root.path(), mode, true);
         let executor = executor.with_auto_approve(true);
-        assert!(decide(&executor, root.path(), &push).await.granted, "{mode:?}");
+        assert!(
+            decide(&executor, root.path(), &push).await.granted,
+            "{mode:?}"
+        );
         assert_eq!(
             prompts.prompts.load(std::sync::atomic::Ordering::SeqCst),
             1,

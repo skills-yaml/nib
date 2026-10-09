@@ -761,3 +761,15 @@ Recorded the user's decision to clear interrupted plans in decisions.md.
 Content:
 
 Recorded the permission-mode mapping and policy prompting decision in decisions.md.
+
+## 2026-10-09 - T080 phase 2b host Git tools decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the host-side Git commit and push decision in decisions.md.
