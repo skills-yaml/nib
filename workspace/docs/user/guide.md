@@ -562,7 +562,10 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   file edits automatically while commands still ask; `plan` allows only read-only
   exploration and refuses changes; `auto` runs everything the sandbox and rules allow
   without prompts and is never reached by Shift+Tab. The footer shows the active mode,
-  which applies from the next request; `/mode default` returns to the configured mode.
+  which applies from the next request (during a run it shows `(next request)`);
+  `/mode default` returns to the configured mode. The legacy `smart` preset still
+  behaves like `ask`; choose `accept-edits` for automatic file edits. Plan mode still
+  lets nib ask you questions.
   In `policy` mode, actions no rule allows now ask in chat and the TUI instead of being
   silently denied; headless runs still deny them. Read-only command sequences such as
   `git status; git log` run without approval.

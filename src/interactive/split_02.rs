@@ -567,6 +567,9 @@ pub(crate) fn fork_session(
             session.skill_usage = source.skill_usage.clone();
             session.display_name = source.display_name.clone();
             session.forked_from = Some(source.id.clone());
+            // A fork keeps its permission mode, except `auto`, which must be
+            // chosen again explicitly.
+            session.permission_mode = source.permission_mode.clone().filter(|mode| mode != "auto");
             session.queued_follow_ups.clear();
             Ok(())
         })

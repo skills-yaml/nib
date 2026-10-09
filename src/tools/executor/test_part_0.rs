@@ -1619,7 +1619,7 @@ fn permission_mode_names_parse_label_and_cycle() {
         ("ask", ApprovalMode::Manual),
         ("manual", ApprovalMode::Manual),
         ("accept-edits", ApprovalMode::Smart),
-        ("smart", ApprovalMode::Smart),
+        ("smart", ApprovalMode::Manual),
         ("plan", ApprovalMode::Plan),
         ("auto", ApprovalMode::Off),
         ("off", ApprovalMode::Off),
@@ -1639,4 +1639,154 @@ fn permission_mode_names_parse_label_and_cycle() {
         next_cycled_permission_mode(ApprovalMode::Off),
         ApprovalMode::Manual
     );
+}
+
+fn mode_executor(
+    root: &std::path::Path,
+    mode: ApprovalMode,
+    interactive: bool,
+) -> (ToolExecutor, Arc<PromptCounter>) {
+    let handler = Arc::new(PromptCounter {
+        interactive,
+        prompts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let executor = ToolExecutor::new(root.to_path_buf(), ExecutionConfig::default())
+        .with_approval_handler(handler.clone())
+        .with_approval_mode(mode);
+    (executor, handler)
+}
+
+async fn decide(
+    executor: &ToolExecutor,
+    root: &std::path::Path,
+    call: &ToolCall,
+) -> ApprovalDecision {
+    let metadata = crate::tools::registry::get_tool_metadata(&call.tool_name).expect("tool");
+    let risk = crate::tools::classifier::classify_tool_call(call);
+    let effective = executor.effective_execution_config(metadata.permission_level, risk);
+    executor
+        .handle_approval(
+            call,
+            metadata.permission_level,
+            risk,
+            metadata.requires_approval,
+            metadata.requires_worktree,
+            root,
+            &effective,
+            Some("mode-session"),
+        )
+        .await
+}
+
+fn terminal_call(root: &std::path::Path, command: &str) -> ToolCall {
+    ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "run_terminal".to_string(),
+        arguments: json!({"command": command, "affected_paths": ["."]}),
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.to_path_buf()),
+    }
+}
+
+/// T080 2a review: plan mode refuses changes before allow rules, remembered
+/// grants, `--yes` and classifier auto-approval, and still lets questions run.
+#[tokio::test]
+async fn plan_mode_wins_over_grants_and_allows_questions() {
+    let root = tempfile::tempdir().expect("root");
+    let command = terminal_call(root.path(), "mkdir build-output");
+
+    let allow = PolicyRule {
+        effect: PolicyEffect::Allow,
+        tool_name: "run_terminal".to_string(),
+        argument_contains: None,
+        reason: "fixture allows terminal".to_string(),
+    };
+    let (manual, _) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    let manual = manual.with_policy_rules([allow.clone()]);
+    assert!(decide(&manual, root.path(), &command).await.granted);
+    let (plan, prompts) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    let plan = plan.with_policy_rules([allow]);
+    assert!(!decide(&plan, root.path(), &command).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    crate::interaction_card::remember_invocation(
+        root.path(),
+        &crate::interaction_card::terminal_invocation(&command).expect("invocation"),
+    )
+    .expect("remember");
+    let (manual, prompts) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    let remembered = decide(&manual, root.path(), &command).await;
+    assert!(
+        remembered.granted && remembered.source == "command_prefix",
+        "{remembered:?}"
+    );
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    assert!(!decide(&plan, root.path(), &command).await.granted);
+
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    let plan = plan.with_auto_approve(true);
+    assert!(!decide(&plan, root.path(), &command).await.granted);
+    assert!(
+        !decide(
+            &plan,
+            root.path(),
+            &terminal_call(root.path(), "cargo check")
+        )
+        .await
+        .granted
+    );
+
+    let question = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "ask_question".to_string(),
+        arguments: json!({"question": "Which target?", "options": ["alpha", "beta"]}),
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.path().to_path_buf()),
+    };
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    assert!(decide(&plan, root.path(), &question).await.granted);
+}
+
+/// T080 2a review: the approval pre-check agrees with `handle_approval` in
+/// every mode, so no spurious approval event is emitted.
+#[test]
+fn approval_precheck_matches_each_mode() {
+    let root = tempfile::tempdir().expect("root");
+    let command = terminal_call(root.path(), "mkdir build-output");
+    let patch = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "apply_patch".to_string(),
+        arguments: patch_arguments(),
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.path().to_path_buf()),
+    };
+    for (mode, interactive, command_prompts, patch_prompts) in [
+        (ApprovalMode::Manual, true, true, true),
+        (ApprovalMode::Smart, true, true, false),
+        (ApprovalMode::Plan, true, false, false),
+        (ApprovalMode::Off, true, false, false),
+        (ApprovalMode::Policy, true, true, true),
+        (ApprovalMode::Policy, false, false, false),
+    ] {
+        let (executor, _) = mode_executor(root.path(), mode, interactive);
+        assert_eq!(
+            executor.requires_interactive_approval(&command),
+            command_prompts,
+            "{mode:?} command"
+        );
+        assert_eq!(
+            executor.requires_interactive_approval(&patch),
+            patch_prompts,
+            "{mode:?} patch"
+        );
+    }
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    let plan = plan.with_policy_rules([PolicyRule {
+        effect: PolicyEffect::RequireApproval,
+        tool_name: "run_terminal".to_string(),
+        argument_contains: None,
+        reason: "fixture requires approval".to_string(),
+    }]);
+    assert!(!plan.requires_interactive_approval(&command));
 }

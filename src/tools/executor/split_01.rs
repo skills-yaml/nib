@@ -6,6 +6,21 @@ use super::*;
 pub(crate) const PLAN_MODE_DENIAL: &str =
     "plan mode is read-only; switch with Shift+Tab or /mode ask to make changes";
 
+/// Whether `plan` mode refuses this action. Plan mode allows read-only tools,
+/// plan writing and questions to the user, whose answers it must not discard;
+/// every other action is refused before rules or remembered grants apply.
+pub(crate) fn plan_mode_refuses(
+    mode: ApprovalMode,
+    tool_name: &str,
+    level: PermissionLevel,
+    risk: ToolRisk,
+) -> bool {
+    mode == ApprovalMode::Plan
+        && !matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
+        && risk != ToolRisk::ReadOnly
+        && tool_name != "ask_question"
+}
+
 impl ToolExecutor {
     pub fn new(project_root: PathBuf, execution_config: ExecutionConfig) -> Self {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
@@ -307,6 +322,7 @@ impl ToolExecutor {
         if evaluations
             .iter()
             .any(|rule| rule.effect == PolicyEffect::Deny)
+            || plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk)
         {
             return false;
         }
@@ -1220,9 +1236,7 @@ impl ToolExecutor {
         {
             return decision;
         }
-        let read_only = matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
-            || risk == ToolRisk::ReadOnly;
-        if self.approval_mode == ApprovalMode::Plan && !read_only {
+        if plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk) {
             return ApprovalDecision::denied_by_policy(PLAN_MODE_DENIAL);
         }
         if let Some(rule) = evaluations

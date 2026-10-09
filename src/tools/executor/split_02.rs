@@ -327,8 +327,11 @@ pub(crate) fn approval_mode_from_config(config: &ApprovalsConfig) -> ApprovalMod
 /// (`ask`, `accept-edits`, `plan`, `auto`) are accepted (T080).
 pub(crate) fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "manual" | "ask" => Some(ApprovalMode::Manual),
-        "smart" | "accept-edits" | "accept_edits" => Some(ApprovalMode::Smart),
+        // The legacy `smart` preset always behaved exactly like `manual`;
+        // keeping that avoids silently auto-applying edits for existing
+        // configs. Automatic edits require the explicit `accept-edits`.
+        "manual" | "ask" | "smart" => Some(ApprovalMode::Manual),
+        "accept-edits" | "accept_edits" => Some(ApprovalMode::Smart),
         "policy" => Some(ApprovalMode::Policy),
         "off" | "auto" => Some(ApprovalMode::Off),
         "plan" => Some(ApprovalMode::Plan),
