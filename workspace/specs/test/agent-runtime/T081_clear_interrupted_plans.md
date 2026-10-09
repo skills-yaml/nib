@@ -1,7 +1,7 @@
 # T081: Clear Interrupted Plans and Explain Verification Rejections
 
-**Status:** Development. Implementation started on 2026-10-08 at the user's request.
-State: development
+**Status:** Test. Integrated into shared `development` on 2026-10-09.
+State: test
 Primary Feature: agent-runtime
 
 ## Problem and Authority
@@ -178,3 +178,24 @@ accepted by the user decision. Rollback restores the prior gate.
 
 Status: updated
 Rationale: Appended the user's interrupted-plan decision to [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md) and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md) on 2026-10-08.
+
+## Integration Evidence
+
+Revision: 90e49be0b90df60371d23eb2344378c173662fde
+Outcome: passed
+
+PR 53 merged the exact candidate `f8450d406fc71f8570a8e05d595a6d43544e39aa`
+into `development` at 2026-10-09T08:29:15Z as merge commit
+`90e49be0b90df60371d23eb2344378c173662fde`. The candidate had gone through
+three independent review rounds plus an approved scope delta. A serial
+`task verify` passed on it with `NIB_REQUIRE_BWRAP_TESTS=1`, using
+debug-symbol-free build profiles after the earlier filesystem-capacity
+failure, with no change to test assertions. PR CI passed Linux Validate and
+macOS Tests; the workflow skipped Windows for this event. After the merge,
+`development` was re-read and contained the candidate with no file
+difference.
+
+This observed integration establishes test state within the shared minor
+0.4.0 release. Main delivery, Windows qualification on the combined revision
+and publication remain separate. This lifecycle record renews independent
+review of the affected records.
