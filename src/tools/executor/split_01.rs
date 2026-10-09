@@ -344,14 +344,14 @@ impl ToolExecutor {
         {
             return true;
         }
+        if call.tool_name == "git_push" {
+            return self.approval_handler.can_prompt();
+        }
         if evaluations
             .iter()
             .any(|rule| rule.effect == PolicyEffect::Allow)
         {
             return false;
-        }
-        if call.tool_name == "git_push" {
-            return self.approval_handler.can_prompt();
         }
         if call.tool_name == "run_terminal" {
             let presentation = command_presentation(
@@ -1305,19 +1305,9 @@ impl ToolExecutor {
             }
             return decision;
         }
-        if let Some(rule) = evaluations
-            .iter()
-            .find(|rule| rule.effect == PolicyEffect::Allow)
-        {
-            return ApprovalDecision {
-                granted: true,
-                source: "policy".to_string(),
-                note: Some(rule.reason.clone()),
-                remember_command: None,
-            };
-        }
-        // A push publishes work: it always asks, even in auto mode or with
-        // --yes, unless the user wrote an explicit allow rule (above).
+        // A push publishes work: it always asks, even in auto mode, with
+        // --yes or with allow rules, which workspace instruction files can
+        // contain and an agent could therefore write.
         if call.tool_name == "git_push" {
             if !self.approval_handler.can_prompt() {
                 return ApprovalDecision::denied_by_policy(
@@ -1338,6 +1328,17 @@ impl ToolExecutor {
                     "pushing publishes commits to a remote and always needs approval",
                 )
                 .await;
+        }
+        if let Some(rule) = evaluations
+            .iter()
+            .find(|rule| rule.effect == PolicyEffect::Allow)
+        {
+            return ApprovalDecision {
+                granted: true,
+                source: "policy".to_string(),
+                note: Some(rule.reason.clone()),
+                remember_command: None,
+            };
         }
         if let Some(decision) = self.remembered_command_grant(call) {
             return decision;
@@ -1479,6 +1480,23 @@ impl ToolExecutor {
         level: PermissionLevel,
         mut context: ApprovalContext,
     ) -> ApprovalDecision {
+        if matches!(call.tool_name.as_str(), "git_commit" | "git_push") {
+            if let Ok(root) = self.resolve_scope(call) {
+                let secrets = self.redaction_secrets();
+                let preview = crate::tools::git_tools::approval_preview(
+                    &call.tool_name,
+                    &call.arguments,
+                    &root,
+                )
+                .await;
+                if !preview.is_empty() {
+                    context.details = preview
+                        .iter()
+                        .map(|line| redact_text_with_secrets(line, &secrets))
+                        .collect();
+                }
+            }
+        }
         loop {
             let decision = self
                 .approval_handler

@@ -1,6 +1,8 @@
 //! T080 phase 2b fixtures for host-side Git tools.
 
-use super::{branch_slug, git_commit, git_push, terminal_git_write};
+use super::{
+    approval_preview, branch_slug, git_commit, git_push, terminal_git_write, without_credentials,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::path::Path;
@@ -34,11 +36,23 @@ impl Drop for GitEnvironment {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
-        .output()
-        .expect("fixture git");
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    // Never act on a repository named by an inherited GIT_DIR (for example
+    // when tests run from a Git hook).
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output().expect("fixture git");
     assert!(
         output.status.success(),
         "git {args:?}: {}",
@@ -185,4 +199,120 @@ async fn push_sets_upstream_on_a_local_remote_and_refuses_bad_input() {
         .is_err());
     git(&repo, &["switch", "--quiet", "--detach"]);
     assert!(git_push(&json!({}), &repo).await.is_err());
+}
+
+/// Review F1: nib state is never staged, nested repositories are refused and
+/// explicit paths cannot name nib state.
+#[tokio::test]
+#[serial]
+async fn commit_never_stages_nib_state_or_nested_repositories() {
+    let _environment = GitEnvironment::isolated();
+    let directory = tempfile::tempdir().unwrap();
+    let repo = directory.path();
+    repository(repo);
+    git(repo, &["switch", "--quiet", "-c", "feature"]);
+    std::fs::create_dir_all(repo.join(".nib/profiles")).unwrap();
+    std::fs::write(repo.join(".nib/config.toml"), "api_key = \"secret\"\n").unwrap();
+    std::fs::write(repo.join("work.txt"), "work\n").unwrap();
+
+    git_commit(&json!({"message": "Work"}), repo)
+        .await
+        .expect("commit");
+    let tracked = git(repo, &["ls-files"]);
+    assert!(tracked.contains("work.txt"), "{tracked}");
+    assert!(!tracked.contains(".nib"), "{tracked}");
+
+    let error = git_commit(
+        &json!({"message": "x", "paths": [".nib/config.toml"]}),
+        repo,
+    )
+    .await
+    .expect_err("nib path");
+    assert!(error.contains("nib state"), "{error}");
+
+    let nested = repo.join("vendor/inner");
+    std::fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+    std::fs::write(nested.join("file.txt"), "x\n").unwrap();
+    let error = git_commit(&json!({"message": "vendor"}), repo)
+        .await
+        .expect_err("nested repository");
+    assert!(error.contains("nested repositories"), "{error}");
+}
+
+/// Review F7: nothing changes before the change check, and a failing commit
+/// returns to the original branch and removes the new one.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn failed_commit_rolls_back_the_new_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let _environment = GitEnvironment::isolated();
+    let directory = tempfile::tempdir().unwrap();
+    let repo = directory.path();
+    repository(repo);
+
+    let error = git_commit(&json!({"message": "Empty"}), repo)
+        .await
+        .expect_err("no changes");
+    assert!(error.contains("nothing to commit"), "{error}");
+    assert_eq!(git(repo, &["branch", "--show-current"]), "main");
+
+    let hook = repo.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+    git_commit(&json!({"message": "Rejected by hook"}), repo)
+        .await
+        .expect_err("hook rejects");
+    assert_eq!(git(repo, &["branch", "--show-current"]), "main");
+    assert!(git(repo, &["branch", "--list", "nib/*"]).is_empty());
+}
+
+/// Review F2: the approval preview shows what is committed or pushed, and
+/// never the remote's credentials.
+#[tokio::test]
+#[serial]
+async fn approval_previews_show_changes_and_commits() {
+    let _environment = GitEnvironment::isolated();
+    let directory = tempfile::tempdir().unwrap();
+    let remote = directory.path().join("remote.git");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(
+        directory.path(),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    repository(&repo);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+
+    let preview = approval_preview("git_commit", &json!({"message": "Update readme"}), &repo).await;
+    let text = preview.join("\n");
+    assert!(text.contains("Message: Update readme"), "{text}");
+    assert!(
+        text.contains("Branch: new nib/update-readme (from main)"),
+        "{text}"
+    );
+    assert!(text.contains("README.md"), "{text}");
+
+    git(&repo, &["switch", "--quiet", "-c", "feature"]);
+    git(&repo, &["commit", "--quiet", "-am", "Feature commit"]);
+    let preview = approval_preview("git_push", &json!({}), &repo).await;
+    let text = preview.join("\n");
+    assert!(text.contains("Branch: feature -> origin/feature"), "{text}");
+    assert!(text.contains("Feature commit"), "{text}");
+    assert!(text.contains("start"), "{text}");
+
+    assert_eq!(
+        without_credentials("https://user:token@example.invalid/repo.git"),
+        "https://example.invalid/repo.git"
+    );
+    assert_eq!(
+        without_credentials("git@example.invalid:repo.git"),
+        "git@example.invalid:repo.git"
+    );
 }

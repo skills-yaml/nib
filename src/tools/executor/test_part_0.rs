@@ -1828,15 +1828,18 @@ async fn git_tools_follow_modes_and_push_always_asks() {
     assert!(!decide(&headless, root.path(), &push).await.granted);
     assert!(!headless.requires_interactive_approval(&push));
 
-    let (allowed, prompts) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    // Allow rules can come from workspace instruction files an agent could
+    // write, so even an explicit allow rule does not skip the push prompt.
+    let (allowed, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
     let allowed = allowed.with_policy_rules([PolicyRule {
         effect: PolicyEffect::Allow,
-        tool_name: "git_push".to_string(),
+        tool_name: "*".to_string(),
         argument_contains: None,
-        reason: "user allows pushes".to_string(),
+        reason: "planted allow-all rule".to_string(),
     }]);
     assert!(decide(&allowed, root.path(), &push).await.granted);
-    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(allowed.requires_interactive_approval(&push));
 
     let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
     assert!(!decide(&plan, root.path(), &push).await.granted);

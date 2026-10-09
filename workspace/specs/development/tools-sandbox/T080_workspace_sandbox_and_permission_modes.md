@@ -510,9 +510,35 @@ resolutions:
 
 `git_push`:
 - The remote must exist (default `origin`), and HEAD must be on a branch.
-  There is no force option and no refspec.
-- It always prompts, even in `auto` or with `--yes`. Only an explicit allow
-  rule skips the prompt, and headless runs deny.
+  There is no force option, and the refspec is pinned to the same branch.
+- It always prompts, even in `auto`, with `--yes` or with allow rules.
+  Headless runs deny.
+
+Review of `1db1a28` (approved with fixes), and the resolutions:
+- **F1.** Every commit excludes `.nib` through an `:(exclude,top).nib`
+  pathspec. Explicit paths may not name nib state. Untracked nested
+  repositories are refused.
+- **F2.** Approval prompts carry a redacted preview: for a commit, the
+  message, the branch (or the new `nib/<topic>`), the changes and the diff
+  stat; for a push, the remote with credentials stripped from its URL, the
+  branch and the commits to be published.
+- **F3.** Allow rules can come from workspace instruction files that an
+  agent could edit, so `git_push` ignores allow rules entirely. This
+  supersedes D6's "explicit allow rule" exception.
+- **F4.** Git runs in its own session without a controlling terminal, so
+  terminal prompts fail fast while askpass and agents keep working. Its
+  process group is killed on timeout and after exit, and output is capped
+  while it streams.
+- **F5.** Inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and related
+  variables are removed, in the tool and in the fixtures.
+- **F6.** The push refspec is pinned.
+- **F7.** The change check runs before branching, and a failed commit
+  returns to the original branch and deletes the new one.
+- **F8, accepted.**
+  - The protected-branch list (`main`, `master`, `origin/HEAD`'s branch) is
+    fixed rather than configurable.
+  - `nib run`'s console handler cannot push (fail closed until phase 6).
+  - The approval pre-check does not model the terminal redirect.
 
 Both tools:
 - They are not offered over nib's MCP server.

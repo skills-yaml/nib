@@ -575,9 +575,11 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   On `main`, `master` or the remote's default branch it first creates
   `nib/<topic>` and reports the branch. It follows the permission mode: it asks in
   `ask` and `accept-edits`, is refused in `plan`, and runs in `auto`. `git_push` pushes
-  the current branch and sets its upstream. It **always asks**, even in `auto` or
-  with `--yes`, unless you wrote an explicit allow rule, and there is no force option.
-  nib commits or pushes only when you ask it to.
+  the current branch and sets its upstream. It **always asks**, even in `auto`, with
+  `--yes` or with allow rules, and there is no force option. Both prompts show what
+  you approve: the files and diff stat of a commit, or the remote, branch and commits
+  of a push. Commits never include `.nib` (nib's state) and refuse untracked nested
+  repositories. nib commits or pushes only when you ask it to.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,

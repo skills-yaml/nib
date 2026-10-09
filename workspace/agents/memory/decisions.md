@@ -670,7 +670,11 @@ through `git_commit` and `git_push`. These run on the host with the user's Git
 environment (signing, credential helpers, hooks), after approval and with
 structured arguments only. `git_commit` follows the permission mode and
 creates `nib/<topic>` first on `main`, `master` or the remote's default branch.
-`git_push` always prompts, even in `auto` or with `--yes`, unless an explicit
-allow rule exists; it has no force option and denies in headless runs.
+`git_push` always prompts, even in `auto`, with `--yes` or with allow rules
+(which workspace instruction files can contain); it has no force option and
+denies in headless runs. Commits never stage `.nib` and refuse untracked
+nested repositories. Approval prompts show a redacted preview of what is
+committed or pushed. Git runs without a controlling terminal, and its process
+group is killed on timeout.
 Terminal `git commit` and `git push` are redirected to the tools. Neither tool
 is offered over nib's MCP server.
