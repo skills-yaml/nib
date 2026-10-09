@@ -48,11 +48,11 @@ src/interactive, associated tests, README and user documentation.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Repository and user skills including SKM links are discovered through one shared catalog; canonical duplicates are collapsed, name collisions retained.
-- [ ] AC-2: Model sees bounded metadata and loads relevant bodies on demand; explicit invocation and profiles load deterministically without keyword ranking.
-- [ ] AC-3: Activation installs policies/hooks and authoritative usage; supporting files are bounded to activated roots and arbitrary paths rejected.
-- [ ] AC-4: Enable/disable controls, implicit policy, CLI and plain/TUI selection share behavior; catalog refreshes between turns.
-- [ ] AC-5: Tests cover success, errors, symlinks, ambiguity, drift, budgets, policies and audit; documentation explains compatibility.
+- [x] AC-1: Repository and user skills including SKM links are discovered through one shared catalog; canonical duplicates are collapsed, name collisions retained.
+- [x] AC-2: Model sees bounded metadata and loads relevant bodies on demand; explicit invocation and profiles load deterministically without keyword ranking.
+- [x] AC-3: Activation installs policies/hooks and authoritative usage; supporting files are bounded to activated roots and arbitrary paths rejected.
+- [x] AC-4: Enable/disable controls, implicit policy, CLI and plain/TUI selection share behavior; catalog refreshes between turns.
+- [x] AC-5: Tests cover success, errors, symlinks, ambiguity, drift, budgets, policies and audit; documentation explains compatibility.
 - [ ] AC-6: Independent review and task verify, docs:check and versions:check pass before handoff.
 
 ## Validation Gates
@@ -80,3 +80,19 @@ retain ordinary terminal approval. Rollback restores legacy heuristic selection.
 Status: updated
 Rationale: Record the shared skill discovery and progressive activation contract in [workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
 [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+## Implementation Evidence
+
+- AC-1/AC-2: Catalog fixtures cover repository ancestry, linked-folder canonical
+  deduplication, name ambiguity, metadata-only prompts and explicit activation.
+  The built CLI lists all 20 repository `.agents/skills` entries.
+- AC-3/AC-4: Executor and command fixtures prove authoritative activation audit,
+  installed restrictions, bounded resource reads, enable/disable persistence and
+  implicit policy; descriptor-relative reads reject relative links and parent swaps.
+- AC-5: `task test:skills` passes 73 tests; `task test:runtime-e2e` passes 56 tests,
+  including progressive activation/resource reads and mixed-load side-effect guards.
+  Full-body-or-reject budget coverage passed in the broader library run.
+- Independent spec-compliance and security/quality review approved the code
+  candidate. Final complete verification remains required before handoff.
+- This is local implementation evidence. No shared test integration, main merge,
+  publication or native Windows/macOS qualification is inferred.

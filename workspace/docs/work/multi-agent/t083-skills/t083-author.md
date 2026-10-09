@@ -32,9 +32,12 @@ integration reference is not delivery evidence. Shared 0.4.0 reservation reused.
 
 ## Validation
 
-Type-check and focused context/runtime suites passed before final review fixes.
-Final full gates are pending; initial attempts exposed release/memory metadata
-issues (corrected) and disk exhaustion (rebuildable artifacts cleaned).
+`task test:skills`: 73 passed. `task test:runtime-e2e`: 56 passed.
+`task docs:check` and native version/governance checks passed. Independent
+spec-compliance and security/quality review approved the implementation.
+Final full verification is pending against the frozen candidate; run it serially
+so subprocess tests retain their exact executable. Earlier diagnostics and
+fixture isolation regressions were repaired and covered by the focused gate.
 
 ## Blockers and Dependencies
 
@@ -46,4 +49,5 @@ Complete final verification and independent exact-candidate review.
 
 ## Handoff
 
-Pending.
+Publish only after final gates pass. Shared integration and main delivery are
+separate events; the historical board integration reference remains unchanged.

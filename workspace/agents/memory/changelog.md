@@ -724,7 +724,7 @@ and T023 live-provider acceptance remain separate.
 - Type: fact
 - Source: T083 implementation and regression fixtures
 - Confidence: high
-- Review: independent security and interface review required before delivery
+- Review: independent spec-compliance and security/interface review approved the implementation
 
 Content:
 
