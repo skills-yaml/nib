@@ -2,7 +2,7 @@
 schema_version: 1
 coordination_id: t083-skills
 status: active
-base_revision: c3d1405
+base_revision: c3d14050658ae92c33dbb1398e2a8d213fe8ad84
 updated_at: 2026-10-09T08:49:32Z
 ---
 

@@ -4,7 +4,7 @@ coordination_id: t083-skills
 agent_id: t083-author
 role: implementer
 status: active
-base_revision: c3d1405
+base_revision: c3d14050658ae92c33dbb1398e2a8d213fe8ad84
 task_ref: detached
 branch_authorization: none
 updated_at: 2026-10-09T08:49:32Z
