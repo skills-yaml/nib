@@ -90,6 +90,49 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
             false,
             json!({"type": "object", "properties": {}, "additionalProperties": false}),
         ),
+        // Host-side Git writes (T080 phase 2b). They run outside the sandbox
+        // with the user's Git environment, only after approval, and are not
+        // offered over nib's MCP server.
+        ToolMetadata {
+            mcp_exposable: false,
+            ..metadata(
+                "git_commit",
+                "Commit workspace changes with a message after the user approves. Use only when the user asked to commit. Stages the given workspace-relative paths, or all changes when none are given; on a default or protected branch it first creates a nib/<topic> branch and reports it. Never pass Git flags.",
+                PermissionLevel::Destructive,
+                true,
+                true,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                            "maxItems": 256
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            )
+        },
+        ToolMetadata {
+            mcp_exposable: false,
+            ..metadata(
+                "git_push",
+                "Push the current branch to a configured remote (default origin) and set its upstream. Always asks the user first. Use only when the user asked to push; force pushes are not available.",
+                PermissionLevel::Network,
+                true,
+                true,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "remote": {"type": "string", "minLength": 1, "maxLength": 128}
+                    },
+                    "additionalProperties": false
+                }),
+            )
+        },
         metadata(
             "apply_patch",
             "Validate or apply a unified diff in the session worktree.",

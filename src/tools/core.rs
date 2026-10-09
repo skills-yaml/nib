@@ -94,6 +94,8 @@ pub async fn dispatch(
         "manage_memory" => manage_memory(args, cwd).await,
         "schedule" => schedule(args, cwd).await,
         "ask_question" => ask_question(args, cwd).await,
+        "git_commit" => crate::tools::git_tools::git_commit(args, cwd).await,
+        "git_push" => crate::tools::git_tools::git_push(args, cwd).await,
         other => Err(format!("No implementation for tool: {other}")),
     }
 }

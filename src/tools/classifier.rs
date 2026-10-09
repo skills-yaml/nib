@@ -59,7 +59,8 @@ pub fn classify_tool_call(call: &ToolCall) -> ToolRisk {
             .and_then(|value| value.as_str())
             .map(classify_command)
             .unwrap_or(ToolRisk::RequiresApproval),
-        "search_web" | "read_url_content" => ToolRisk::Network,
+        "search_web" | "read_url_content" | "git_push" => ToolRisk::Network,
+        "git_commit" => ToolRisk::Destructive,
         "apply_patch" | "merge_subagent_worktree" => ToolRisk::Destructive,
         "write_plan" | "spawn_subagent" | "invoke_subagent" | "send_message" | "schedule"
         | "ask_question" => ToolRisk::Safe,

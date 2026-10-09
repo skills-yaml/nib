@@ -1790,3 +1790,74 @@ fn approval_precheck_matches_each_mode() {
     }]);
     assert!(!plan.requires_interactive_approval(&command));
 }
+
+fn git_tool_call(root: &std::path::Path, tool: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: tool.to_string(),
+        arguments,
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.to_path_buf()),
+    }
+}
+
+/// T080 phase 2b: a push always asks, even in auto mode or with --yes,
+/// unless an explicit allow rule exists; headless runs cannot push; plan mode
+/// refuses commits and pushes; commits follow the mode like other changes.
+#[tokio::test]
+async fn git_tools_follow_modes_and_push_always_asks() {
+    let root = tempfile::tempdir().expect("root");
+    let push = git_tool_call(root.path(), "git_push", json!({}));
+    let commit = git_tool_call(root.path(), "git_commit", json!({"message": "x"}));
+
+    for mode in [ApprovalMode::Off, ApprovalMode::Manual, ApprovalMode::Smart] {
+        let (executor, prompts) = mode_executor(root.path(), mode, true);
+        let executor = executor.with_auto_approve(true);
+        assert!(decide(&executor, root.path(), &push).await.granted, "{mode:?}");
+        assert_eq!(
+            prompts.prompts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{mode:?} push must prompt"
+        );
+        assert!(executor.requires_interactive_approval(&push), "{mode:?}");
+    }
+    let (headless, _) = mode_executor(root.path(), ApprovalMode::Off, false);
+    assert!(!decide(&headless, root.path(), &push).await.granted);
+    assert!(!headless.requires_interactive_approval(&push));
+
+    let (allowed, prompts) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    let allowed = allowed.with_policy_rules([PolicyRule {
+        effect: PolicyEffect::Allow,
+        tool_name: "git_push".to_string(),
+        argument_contains: None,
+        reason: "user allows pushes".to_string(),
+    }]);
+    assert!(decide(&allowed, root.path(), &push).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    assert!(!decide(&plan, root.path(), &push).await.granted);
+    assert!(!decide(&plan, root.path(), &commit).await.granted);
+
+    let (ask, prompts) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    assert!(decide(&ask, root.path(), &commit).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (auto, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
+    assert!(decide(&auto, root.path(), &commit).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// T080 phase 2b: a terminal commit or push is redirected to the Git tools
+/// before any approval or sandbox work.
+#[tokio::test]
+async fn terminal_git_writes_are_redirected_to_git_tools() {
+    let root = tempfile::tempdir().expect("root");
+    let (mut executor, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
+    let result = executor
+        .execute(terminal_call(root.path(), "git commit -am wip"), None)
+        .await;
+    assert!(!result.success);
+    let error = result.error.unwrap_or_default();
+    assert!(error.contains("use the git_commit tool"), "{error}");
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

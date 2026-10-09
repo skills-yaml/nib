@@ -338,6 +338,9 @@ impl ToolExecutor {
         {
             return false;
         }
+        if call.tool_name == "git_push" {
+            return self.approval_handler.can_prompt();
+        }
         if call.tool_name == "run_terminal" {
             let presentation = command_presentation(
                 call,
@@ -460,6 +463,29 @@ impl ToolExecutor {
         } else {
             classify_tool_call(&call)
         };
+        // Git writes go through the approved host-side tools (T080 phase 2b);
+        // the sandbox keeps Git metadata read-only.
+        if call.tool_name == "run_terminal" {
+            if let Some(tool) = call
+                .arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(crate::tools::git_tools::terminal_git_write)
+            {
+                return ToolResult {
+                    invocation_id: call.invocation_id,
+                    tool_name: call.tool_name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Git commits and pushes are not run in the terminal; use the {tool} tool, which asks the user and runs with their Git setup"
+                    )),
+                    duration_seconds: start.elapsed().as_secs_f64(),
+                    approval_granted: false,
+                    approval_source: Some("policy".to_string()),
+                };
+            }
+        }
         let effective_execution_config = self.effective_execution_config(level, risk);
         let plan_id = self.resolve_plan_id(effective_session);
 
@@ -1271,6 +1297,29 @@ impl ToolExecutor {
                 note: Some(rule.reason.clone()),
                 remember_command: None,
             };
+        }
+        // A push publishes work: it always asks, even in auto mode or with
+        // --yes, unless the user wrote an explicit allow rule (above).
+        if call.tool_name == "git_push" {
+            if !self.approval_handler.can_prompt() {
+                return ApprovalDecision::denied_by_policy(
+                    "git push needs the user's approval in an interactive session",
+                );
+            }
+            let mut context = self.approval_context(
+                call,
+                level,
+                risk,
+                effective_root,
+                effective_execution_config,
+                requires_worktree,
+                session_id,
+                "pushing publishes commits to a remote and always needs approval",
+            );
+            context.remember_exact = None;
+            let mut decision = self.prompt_approval(call, level, context).await;
+            decision.remember_command = None;
+            return decision;
         }
         if let Some(decision) = self.remembered_command_grant(call) {
             return decision;
