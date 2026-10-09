@@ -718,3 +718,15 @@ includes T069-T073 in test and T080 in development; native mirrors use the
 same target without another bump. T073 governs the final catalog selection.
 T080's later phases, main delivery, publication of this combined revision
 and T023 live-provider acceptance remain separate.
+
+## 2026-10-08 - T081 interrupted-plan decision
+
+- Type: changelog
+- Source: T081
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the user's decision to clear interrupted plans in decisions.md.

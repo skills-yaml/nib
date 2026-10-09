@@ -199,13 +199,14 @@ impl Plan {
             .steps
             .get_mut(step_index)
             .ok_or_else(|| "verification has no active plan step".to_string())?;
+        let declared = declared_obligation_ids(step);
         let obligation = step
             .verification_obligations
             .iter_mut()
             .find(|obligation| obligation.id == obligation_id)
             .ok_or_else(|| {
                 format!(
-                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}; declared: {declared}"
                 )
             })?;
         if obligation.plan_id != self.id || obligation.step_index != Some(step_index) {
@@ -248,13 +249,14 @@ impl Plan {
             .steps
             .get_mut(step_index)
             .ok_or_else(|| "verification has no active plan step".to_string())?;
+        let declared = declared_obligation_ids(step);
         let obligation = step
             .verification_obligations
             .iter_mut()
             .find(|obligation| obligation.id == obligation_id)
             .ok_or_else(|| {
                 format!(
-                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}; declared: {declared}"
                 )
             })?;
         if obligation.invocation_id != Some(invocation_id)
@@ -358,13 +360,14 @@ impl Plan {
             .steps
             .get_mut(step_index)
             .ok_or_else(|| "verification waiver has no active plan step".to_string())?;
+        let declared = declared_obligation_ids(step);
         let obligation = step
             .verification_obligations
             .iter_mut()
             .find(|obligation| obligation.id == obligation_id)
             .ok_or_else(|| {
                 format!(
-                    "verification obligation {obligation_id:?} is not declared on active step {step_index}"
+                    "verification obligation {obligation_id:?} is not declared on active step {step_index}; declared: {declared}"
                 )
             })?;
         if obligation.authority == VerificationAuthority::Project {
@@ -1057,4 +1060,18 @@ pub enum SessionDeleteOutcome {
     Missing,
     Retained,
     Deleted,
+}
+
+/// Lists a step's declared verification obligation ids for error messages, so
+/// a model that cites an unknown id can correct itself (T081).
+fn declared_obligation_ids(step: &PlanStep) -> String {
+    if step.verification_obligations.is_empty() {
+        return "none".to_string();
+    }
+    let ids: Vec<String> = step
+        .verification_obligations
+        .iter()
+        .map(|obligation| format!("{:?}", obligation.id))
+        .collect();
+    format!("[{}]", ids.join(", "))
 }

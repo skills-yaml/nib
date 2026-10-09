@@ -1265,6 +1265,26 @@ pub fn execute_interactive_command_in_state(
     }
 }
 
+/// Explains that `plan_id` was cleared after an interrupted run (T081), if
+/// the session recorded that.
+fn cleared_plan_message(session: &crate::session::Session, plan_id: &str) -> Option<String> {
+    session.events.iter().rev().find_map(|event| {
+        let cleared = event.kind == "plan_invalidated"
+            && event.details.get("reason").and_then(serde_json::Value::as_str) == Some("interrupted")
+            && event.details.get("previous_plan_id").and_then(serde_json::Value::as_str) == Some(plan_id);
+        cleared.then(|| {
+            let outcome = event
+                .details
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("interrupted");
+            format!(
+                "plan {plan_id} was cleared after its run was interrupted ({outcome}); describe the next request in the chat"
+            )
+        })
+    })
+}
+
 pub(crate) fn load_continue_plan_effect(
     store: &SessionStore,
     session_id: &str,
@@ -1274,11 +1294,23 @@ pub(crate) fn load_continue_plan_effect(
         .load_result(session_id)
         .map_err(|error| format!("failed to load session {session_id}: {error}"))?
         .ok_or_else(|| format!("session {session_id} was not found"))?;
-    let plan = session
-        .plan
-        .as_ref()
-        .ok_or_else(|| "no active plan is available to continue".to_string())?;
+    let cleared = cleared_plan_message(&session, plan_id);
+    let Some(plan) = session.plan.as_ref() else {
+        return Err(
+            cleared.unwrap_or_else(|| "no active plan is available to continue".to_string())
+        );
+    };
+    if plan.id == plan_id {
+        if let Some(outcome) = crate::agent::r#loop::recorded_plan_interruption(plan) {
+            return Err(format!(
+                "plan {plan_id} was interrupted ({outcome}) and is cleared before the next run; describe the next request in the chat"
+            ));
+        }
+    }
     if plan.id != plan_id {
+        if let Some(cleared) = cleared {
+            return Err(cleared);
+        }
         return Err(format!(
             "plan {plan_id} is not the current session plan {}",
             plan.id

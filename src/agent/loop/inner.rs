@@ -575,6 +575,9 @@ pub(crate) async fn run_agent_loop_inner(
         state = match state {
             AgentState::Idle => {
                 let (next, plan_id) = route_idle_plan(&store, session_id, &normalized_goal)?;
+                if let Some(plan_id) = plan_id.as_deref() {
+                    record_run_plan_binding(&store, session_id, &run_id, plan_id)?;
+                }
                 active_plan_id = plan_id;
                 transition_state(
                     &store,
@@ -735,6 +738,7 @@ pub(crate) async fn run_agent_loop_inner(
                                 })
                                 .map_err(|error| error.to_string())?;
                             if stored {
+                                record_run_plan_binding(&store, session_id, &run_id, &plan_id)?;
                                 active_plan_id = Some(plan_id);
                                 emit(
                                     &cfg.stream_tx,

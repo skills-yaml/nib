@@ -656,6 +656,7 @@ match state {
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|id| !id.is_empty());
+                    let mut verification_rejection = None;
                     let verification_started = match verification_id {
                         Some(obligation_id) => match begin_plan_verification(
                             &store,
@@ -674,10 +675,11 @@ match state {
                                         json!({
                                             "invocation_id": request.invocation_id,
                                             "verification_id": obligation_id,
-                                            "reason": error,
+                                            "reason": error.clone(),
                                         }),
                                     )
                                     .map_err(|error| error.to_string())?;
+                                verification_rejection = Some(error);
                                 false
                             }
                         },
@@ -689,9 +691,12 @@ match state {
                             tool_name: request.name.clone(),
                             success: false,
                             output: None,
-                            error: Some(
-                                "verification binding was rejected before execution".to_string(),
-                            ),
+                            error: Some(format!(
+                                "verification binding was rejected before execution: {}",
+                                verification_rejection
+                                    .as_deref()
+                                    .unwrap_or("verification could not start")
+                            )),
                             duration_seconds: 0.0,
                             approval_granted: false,
                             approval_source: Some("verification".to_string()),

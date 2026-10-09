@@ -1,7 +1,7 @@
 # T081: Clear Interrupted Plans and Explain Verification Rejections
 
-**Status:** Backlog
-State: backlog
+**Status:** Development. Implementation started on 2026-10-08 at the user's request.
+State: development
 Primary Feature: agent-runtime
 
 ## Problem and Authority
@@ -44,8 +44,11 @@ cleared, and the user can ask for a new plan through the chat.
    includes the rejection reason and the step's declared verification ids, for
    example `verification "review-task-check" is not declared on step 0;
    declared: [...]`.
-5. The terminal status line says the plan was cleared and that the user can
-   describe the next request in chat.
+5. `/continue` on a cleared plan explains that it was cleared and why. The
+   planning-gate message names the remaining ways forward: the pending
+   question, `/continue <plan-id>` or `/new`. A generic "plan was cleared"
+   note on every stop line was dropped in review, because it would also
+   appear when no plan was cleared.
 
 ## Exclusions and Compatibility
 
@@ -84,6 +87,74 @@ cleared, and the user can ask for a new plan through the chat.
 - [ ] AC-6: `task verify` passes. Guide, catalog, versions and memory are
   reconciled. A review is required because this changes the workload model.
 
+## Implementation Plan
+
+1. Classify terminal outcomes that clear an unfinished plan
+   (`clears_unfinished_plan`): agent failures, cancellation, `local_error` and
+   unresponsive shutdown. Keep plans for `unresolved_clarification`,
+   `provider_continuation_interrupted` and the planning gates.
+2. Clear the plan at the single run exit (`entry.rs`) for admitted runs, and
+   clear plans recorded as interrupted before T081 at the next run start.
+3. Explain `/continue` on a cleared plan, update the gate and stop messages, and
+   list declared verification ids in rejection errors.
+4. Update tests that expected interrupted plans to persist; add fixtures for
+   the outcome matrix, the legacy blocked-plan session, `/continue` and
+   verification errors.
+
+## Review Revision (2026-10-08)
+
+Independent review of `86a9cb2` required the following changes, now
+implemented:
+- **H1.** Clear only the plan this run bound. Each run records
+  `run_plan_bound` (run id, plan id) when it routes to or generates a plan,
+  and the exit clear requires that binding. A plan that waits on the user
+  (any unresolved clarification or question form, including one whose run
+  was cancelled) is never cleared. `plan_binding_changed` never clears.
+- **H2.** Explicit compaction never clears plans, eagerly or lazily.
+- **Legacy migration.** The start-of-run clear applies only to sessions with
+  no `run_plan_bound` events (created before T081), and skips plans that wait
+  on the user.
+- **L3.** A failure to clear is logged and audited (`plan_clear_failed`) and
+  never discards the run's result.
+- **M1 and M2.** A mock answer-route fixture drives the real planning gate.
+  Tests now prove that the gate fires for an open plan and not for an
+  interrupted one, that a waiting plan survives a cancelled side request and
+  a gated request, that only the bound run can clear its plan, and that the
+  model receives the declared verification ids end to end.
+- **Second re-review (`7c62fc2`).** "Waits on the user" now uses the same
+  rules as question recovery: plan admission plus recoverable question
+  records (`plan_has_recoverable_question`). Cancelling the run that asked a
+  question therefore clears its plan instead of leaving an unrecoverable trap
+  (AC-2). Cancellation marks only the plan the cancelled run bound, so a
+  cancelled side request leaves a waiting question resumable. A test proves
+  that `resume` reopens the form afterwards (AC-3).
+
+## Scope Refinement From Verification (2026-10-08)
+
+`task verify` on `047dd8d` showed that subagent child runs also cleared their
+failed plans, which delegation tests inspect. The user's decision concerns
+interrupted *interaction*, and the planning gate only guards interactive chat
+requests. Clearing is therefore limited to interactive requests
+(`interactive_request`, chat and TUI execute mode) outside compaction.
+Subagents, background and scheduled tasks and CLI runs keep their failed
+plans for review, as before. Tests for non-interactive runs keep their
+original expectations as evidence of the unchanged behavior.
+
+## Implementation Evidence
+
+- Single exit: `run_agent_loop_with_runtime_and_recovery` clears after
+  `runtime_terminal_event` (admitted runs only), recording
+  `plan_invalidated` with `reason: interrupted`, `outcome`, `run_id`, the
+  previous plan id and goal, `approved`, the step index and count, and
+  `plan_outcome`.
+- Legacy sessions: plans whose `plan.outcome` or blocked step outcome is an
+  interruption are cleared at the next `run_started`. This is the exact shape
+  of session `21914944` (`tool_execution_failed`, step 0 `Blocked`).
+- AC-4: a verification rejection is an ordinary failed tool result
+  (`approval_source: verification`). Only approval denials or repeated
+  identical failures end the run, so the model can retry with a declared id
+  from the new error text.
+
 ## Validation Gates
 
 Focused agent-loop and interactive tests, then `task check`, `task verify`,
@@ -101,9 +172,9 @@ accepted by the user decision. Rollback restores the prior gate.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Backlog proposal; expected patch reserved at development start. Changes interrupted-plan lifecycle to unblock chat; no persisted schema change. |
+| nib | patch | nib-catalog-refresh | Compatible interrupted-plan lifecycle change; reuses the already-applied shared 0.4.0 target (aggregate minor from T080); no second bump. |
 
 ## Memory Impact
 
-Status: none
-Rationale: Backlog proposal; the durable decision is classified as pending at development start and recorded when implemented.
+Status: updated
+Rationale: Appended the user's interrupted-plan decision to [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md) and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md) on 2026-10-08.
