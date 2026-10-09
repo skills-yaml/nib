@@ -1,7 +1,7 @@
 # T083: Progressive Skill Discovery and Management
 
-**Status:** Development
-State: development
+**Status:** Test. Integrated into shared `development` on 2026-10-09.
+State: test
 Primary Feature: skills-mcp
 
 ## Problem and Scope
@@ -95,8 +95,8 @@ Rationale: Record the shared skill discovery and progressive activation contract
   Full-body-or-reject budget coverage passed in the broader library run.
 - Independent spec-compliance and security/quality review approved the code
   candidate 8f34b76; fresh complete native verification passed at that revision.
-- This is local implementation evidence. No shared test integration, main merge,
-  publication or native Windows/macOS qualification is inferred.
+- The original local evidence is supplemented by the confirmed shared integration below.
+  Main merge, publication and native Windows/macOS qualification remain separate.
 
 The complete native `task verify` passed at 8f34b76 after the repository-priority
 fix: 1,389 library tests, 106 CLI tests and all integration targets, including
@@ -104,3 +104,28 @@ fix: 1,389 library tests, 106 CLI tests and all integration targets, including
 only; code, tests, dependencies and Task commands remain identical to that
 reviewed and verified source revision. Renew documentation/governance and
 build-metadata evidence for the handoff commit.
+
+## Integration Evidence
+
+Revision: f83fc3874669e1ca1258381006c7f7434cd6dab6
+Outcome: passed
+
+The user authorized pushing on 2026-10-09. The combined candidate preserves
+T080 session permission overrides and T081 interrupted-plan handling alongside
+T083 skill catalog attachment. The new executor regression covers Manual, Plan,
+Smart, Policy and Off modes and verifies authoritative skill policy denial.
+Independent exact-candidate review approved 68ae478. Complete native `task verify`
+and `task docs:check` passed, including 76 focused skill tests and all runtime
+integration targets. A concurrent push at 6dc6877 was merged; the resulting
+f83fc38 tree exactly matches the reviewed and verified 68ae478 tree, and independent
+review approved that exact merge revision. The normal push to shared development
+succeeded, and the remote branch was re-read at the full revision above.
+
+This observed integration moves T083 to test. Main delivery, publication and
+native Windows/macOS qualification remain separate. The shared release stays
+0.4.0; no additional version bump applies. Documentation-only lifecycle
+reconciliation renews governance and build-metadata checks while retaining
+proven-fresh source verification.
+
+Memory impact of shared integration: updated; record the durable delivery event
+in facts.md and changelog.md.

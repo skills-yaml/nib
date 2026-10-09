@@ -719,25 +719,6 @@ same target without another bump. T073 governs the final catalog selection.
 T080's later phases, main delivery, publication of this combined revision
 and T023 live-provider acceptance remain separate.
 
-## 2026-10-09 - Progressive skill management
-
-- Type: fact
-- Source: T083 implementation and regression fixtures
-- Confidence: high
-- Review: independent spec-compliance and security/interface review approved the implementation
-
-Content:
-
-Nib shares one bounded catalog between listing and runtime discovery, including
-repository `.agents/skills` folders and linked SKM skills. Bounded catalogs keep
-repository root precedence even when link targets sort after user skills. Turns advertise metadata;
-explicit `$name`, configured/profile activation or `load_skill` loads instructions.
-Activated bodies remain complete in prompts, and activation records session usage
-before installing restrictions and hooks. Disabled controls suppress profile and
-configured activation; explicit requests for disabled skills report an error.
-Implicit-disabled skills require explicit selection. Supporting files are bounded
-regular reads beneath an activated root. Discovery refreshes each user turn.
-
 ## 2026-10-08 - T081 interrupted-plan decision
 
 - Type: changelog
@@ -761,6 +742,39 @@ Recorded the user's decision to clear interrupted plans in decisions.md.
 Content:
 
 Recorded the permission-mode mapping and policy prompting decision in decisions.md.
+
+## 2026-10-09 - Progressive skill management
+
+- Type: fact
+- Source: T083 implementation and regression fixtures
+- Confidence: high
+- Review: independent spec-compliance and security/interface review approved the implementation
+
+Content:
+
+Nib shares one bounded catalog between listing and runtime discovery, including
+repository `.agents/skills` folders and linked SKM skills. Bounded catalogs keep
+repository root precedence even when link targets sort after user skills. Turns advertise metadata;
+explicit `$name`, configured/profile activation or `load_skill` loads instructions.
+Activated bodies remain complete in prompts, and activation records session usage
+before installing restrictions and hooks. Disabled controls suppress profile and
+configured activation; explicit requests for disabled skills report an error.
+Implicit-disabled skills require explicit selection. Supporting files are bounded
+regular reads beneath an activated root. Discovery refreshes each user turn.
+
+## 2026-10-09 - T083 shared development integration
+
+- Type: changelog
+- Source: Confirmed remote development revision f83fc3874669e1ca1258381006c7f7434cd6dab6
+- Confidence: high
+- Review: Independent exact-candidate review and complete native task verify
+
+Content:
+
+Progressive skill management is integrated into shared development alongside
+T080 permission modes and T081 interrupted-plan recovery. The remote branch was
+re-read after the normal push. T083 is in test, sharing the already-applied
+0.4.0 release; main delivery and publication remain separate.
 
 ## 2026-10-09 - T080 phase 2b host Git tools decision
 
