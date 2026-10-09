@@ -151,22 +151,31 @@ async fn skill_activation_and_constraints_survive_session_permission_modes() {
             project_root: Some(root.path().into()),
         };
         let activation = executor
-            .execute(call("load_skill", json!({"skill": "review"})))
+            .execute(
+                call("load_skill", json!({"skill": "review"})),
+                Some(&session),
+            )
             .await;
         assert!(activation.success, "{mode:?}: {activation:?}");
         assert_eq!(store.load(&session).unwrap().skill_usage.len(), 1);
         let resource = executor
-            .execute(call(
-                "read_skill_resource",
-                json!({"skill": "review", "path": "references/guide.md"}),
-            ))
+            .execute(
+                call(
+                    "read_skill_resource",
+                    json!({"skill": "review", "path": "references/guide.md"}),
+                ),
+                Some(&session),
+            )
             .await;
         assert!(resource.success, "{mode:?}: {resource:?}");
         let denied = executor
-            .execute(call(
-                "read_file",
-                json!({"path": ".agents/skills/review/SKILL.md"}),
-            ))
+            .execute(
+                call(
+                    "read_file",
+                    json!({"path": ".agents/skills/review/SKILL.md"}),
+                ),
+                Some(&session),
+            )
             .await;
         assert!(
             !denied.success,
