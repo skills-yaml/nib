@@ -2132,3 +2132,28 @@ fn session_permission_mode_command_cycle_and_chrome() {
     assert!(cleared.contains("policy (configured default)"), "{cleared}");
     assert!(store.load(&session.id).unwrap().permission_mode.is_none());
 }
+
+/// T080 2a re-review: a configured `accept-edits` shows as accept-edits, not
+/// as the legacy `smart` (which now means ask).
+#[test]
+fn configured_accept_edits_is_shown_in_the_chrome() {
+    let project = tempdir().expect("project");
+    let mut config = NibConfig::default();
+    config.execution.provider = "internal".to_string();
+    config.approvals.mode = "accept-edits".to_string();
+    config
+        .llm
+        .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+    save_nib_config_full(project.path(), &mut config).expect("config");
+    let store = SessionStore::for_project(project.path()).expect("store");
+    let session = store.try_create_session().expect("session");
+    let persisted = store.load(&session.id).expect("session");
+    let chrome =
+        format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id).unwrap();
+    assert_eq!(chrome.approval, "accept-edits");
+    let shown = set_session_permission_mode(project.path(), &store, &session.id, None).unwrap();
+    assert!(
+        shown.contains("accept-edits (configured default)"),
+        "{shown}"
+    );
+}

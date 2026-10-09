@@ -342,7 +342,9 @@ pub(crate) fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
 pub(crate) fn approval_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Manual => "manual",
-        ApprovalMode::Smart => "smart",
+        // `Smart` is reached only through the explicit `accept-edits` name;
+        // the legacy `smart` preset maps to `Manual` (T080 review).
+        ApprovalMode::Smart => "accept-edits",
         ApprovalMode::Policy => "policy",
         ApprovalMode::Off => "off",
         ApprovalMode::Plan => "plan",
