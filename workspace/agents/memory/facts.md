@@ -540,3 +540,17 @@ before installing restrictions and hooks. Disabled controls suppress profile and
 configured activation; explicit requests for disabled skills report an error.
 Implicit-disabled skills require explicit selection. Supporting files are bounded
 regular reads beneath an activated root. Discovery refreshes each user turn.
+
+## 2026-10-09 - T083 shared development integration
+
+- Type: fact
+- Source: Confirmed remote development revision f83fc3874669e1ca1258381006c7f7434cd6dab6
+- Confidence: high
+- Review: Independent exact-candidate review and complete native task verify
+
+Content:
+
+Progressive skill management is integrated into shared development alongside
+T080 permission modes and T081 interrupted-plan recovery. The remote branch was
+re-read after the normal push. T083 is in test, sharing the already-applied
+0.4.0 release; main delivery and publication remain separate.

@@ -46,10 +46,20 @@ None.
 
 ## Next Step
 
-Deliver the reviewed candidate locally; reconcile shared integration separately.
+Shared development integration is confirmed; main delivery remains separate.
 
 ## Handoff
 
 Implementation, native verification and independent review are complete.
 The atomic board captures the exact handoff head. Shared integration and main
 delivery are separate events; the historical board reference is unchanged.
+
+## Shared Integration
+
+The normal push to shared development succeeded at
+f83fc3874669e1ca1258381006c7f7434cd6dab6 on 2026-10-09, and the remote branch was
+re-read at that revision. Independent review approved the exact candidate;
+its tree matches 68ae478, where complete native task verify and docs:check passed.
+T083 moves to test. The historical coordination board reference remains unchanged;
+this records the actual remote Git integration, not a native board land event.
+Memory: updated with the durable shared integration fact.

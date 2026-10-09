@@ -33,7 +33,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
-| [T083](development/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | development | Local progressive skill implementation independently reviewed and verified at 8f34b76; shared integration and main delivery remain pending. |
+| [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
 | [T080](development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md) | tools-sandbox | development | Phase 1 integrated into shared development at 045e0e21d6e51488fcfcc544e2fceb35f0eb2d3d via PR52 on 2026-10-08T16:38:49Z; later phases remain active under shared minor 0.4.0; full-spec/main delivery not observed. |
