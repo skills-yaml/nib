@@ -107,7 +107,13 @@ pub fn classify_command(command: &str) -> ToolRisk {
     }
 
     if has_shell_composition(command) {
-        return ToolRisk::RequiresApproval;
+        // A sequence or pipeline of read-only commands is itself read-only
+        // (T080), so `git status; git log` does not need approval.
+        return if is_read_only_sequence(command) {
+            ToolRisk::ReadOnly
+        } else {
+            ToolRisk::RequiresApproval
+        };
     }
 
     if references_unscoped_path_or_variable(&words) {
@@ -168,7 +174,35 @@ fn has_shell_composition(command: &str) -> bool {
         || command.contains('<')
         || command.contains('`')
         || command.contains("$(")
-        || command.trim_end().ends_with('&')
+        // Any `&` starts a background job (or `&&`); a lone mid-command `&`
+        // previously slipped through, so `git status & touch x` read as git.
+        || command.contains('&')
+}
+
+/// Whether `command` only chains read-only commands with `;`, `&&`, `||`,
+/// newlines or pipes. Redirection, substitution, background jobs, quoting and
+/// escapes are rejected so that every segment is exactly what runs.
+fn is_read_only_sequence(command: &str) -> bool {
+    if ['>', '<', '`', '\'', '"', '\\', '(', ')', '{', '}']
+        .iter()
+        .any(|forbidden| command.contains(*forbidden))
+        || command.contains('$')
+    {
+        return false;
+    }
+    let without_and = command.replace("&&", "\n").replace("||", "\n");
+    if without_and.contains('&') {
+        return false;
+    }
+    let segments: Vec<&str> = without_and.split(['\n', ';', '|']).map(str::trim).collect();
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            let lower = segment.to_ascii_lowercase();
+            let words = command_words(&lower);
+            !segment.is_empty()
+                && !references_unscoped_path_or_variable(&words)
+                && is_read_only_command(&words)
+        })
 }
 
 fn references_unscoped_path_or_variable(words: &[&str]) -> bool {
@@ -238,6 +272,37 @@ mod tests {
             arguments: json!({"command": command}),
             session_id: None,
             project_root: None,
+        }
+    }
+
+    #[test]
+    fn read_only_sequences_and_pipelines_are_read_only() {
+        for command in [
+            "git status; git log",
+            "git status --short && git diff --stat",
+            "git status || ls",
+            "git log --oneline | wc -l",
+            "git status\ngit log -3",
+        ] {
+            assert_eq!(classify_command(command), ToolRisk::ReadOnly, "{command}");
+        }
+        for command in [
+            "git status; cargo build",
+            "git log | sh",
+            "git status > out.txt",
+            "git status && rm -rf target",
+            "git log & git status",
+            "git status & touch pwned",
+            "ls & cargo build",
+            "git status; git log $HOME",
+            "git status; ls /etc",
+            "git status; ls ..",
+            "git log --format='a;b'",
+            "git status $(echo x)",
+            "git status; ",
+            "git log --output=x; git status",
+        ] {
+            assert_ne!(classify_command(command), ToolRisk::ReadOnly, "{command}");
         }
     }
 

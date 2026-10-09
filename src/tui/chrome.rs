@@ -627,7 +627,7 @@ pub(crate) fn footer_line(
             .unwrap_or_else(|| waiting_keys(waiting))
             .to_string();
     }
-    let mut hint = format!("approval {} · {}", chrome.approval, chrome.agent_mode);
+    let mut hint = format!("mode {} · {}", chrome.approval, chrome.agent_mode);
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {

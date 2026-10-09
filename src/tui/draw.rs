@@ -35,6 +35,9 @@ pub(crate) fn draw_loop(
         let _ = maybe_assign_session_display_name(&store, &active_session_id, goal);
     }
     let mut worker = None;
+    // Permission mode shown when the active run started; a later change via
+    // Shift+Tab or /mode applies only to the next request (T080).
+    let mut run_started_mode: Option<String> = None;
     timeline.bind_run(None);
 
     let mut pending_approval: Option<TuiApprovalRequest> = None;
@@ -220,6 +223,17 @@ pub(crate) fn draw_loop(
             });
             chrome
         };
+        if worker.is_some() {
+            match &run_started_mode {
+                Some(started) if *started != chrome.approval => {
+                    chrome.approval = format!("{} (next request)", chrome.approval);
+                }
+                Some(_) => {}
+                None => run_started_mode = Some(chrome.approval.clone()),
+            }
+        } else {
+            run_started_mode = None;
+        }
         chrome.agent_mode = agent_mode_label(
             if pending_approval.is_some() {
                 WaitingKind::Approval
@@ -849,6 +863,30 @@ pub(crate) fn draw_loop(
                             tui_focus = TuiFocus::Composer;
                         }
                     }
+                }
+                // Shift+Tab cycles the session permission mode (T080):
+                // ask → accept-edits → plan → ask.
+                if (key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)))
+                    && matches!(
+                        interaction_layer,
+                        InteractionLayer::Composer | InteractionLayer::Completion
+                    )
+                    && !completion.is_open()
+                {
+                    match crate::interactive::cycle_session_permission_mode(
+                        project_root,
+                        &store,
+                        &active_session_id,
+                    ) {
+                        Ok(mode) => timeline.push_status(format!(
+                            "Permission mode: {} (applies from the next request)",
+                            crate::tools::executor::permission_mode_label(mode)
+                        )),
+                        Err(error) => timeline.push_status(error),
+                    }
+                    chrome_generation = chrome_generation.saturating_add(1);
+                    continue;
                 }
                 if key.code == KeyCode::Tab
                     && !key.modifiers.contains(KeyModifiers::SHIFT)

@@ -498,7 +498,7 @@ fn tui_chrome_is_compact_while_status_keeps_full_diagnostics() {
     assert!(!chrome.folder.contains(&session.id), "{}", chrome.folder);
     assert!(!chrome.branch.contains(&session.id), "{}", chrome.branch);
     assert_eq!(chrome.model, "mock-model");
-    assert_eq!(chrome.approval, "manual");
+    assert_eq!(chrome.approval, "ask");
     assert!(!chrome.model.contains("transport"));
 
     config
@@ -511,7 +511,7 @@ fn tui_chrome_is_compact_while_status_keeps_full_diagnostics() {
     let resumed = format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id)
         .expect("width-aware chrome");
     assert_eq!(resumed.folder, folder_label(project.path()));
-    assert_eq!(resumed.approval, "manual");
+    assert_eq!(resumed.approval, "ask");
     assert!(
         resumed
             .model
@@ -598,7 +598,7 @@ fn tui_chrome_shows_model_approval_branch_worktree_and_folder() {
         chrome.branch
     );
     assert_eq!(chrome.model, "mock-model");
-    assert_eq!(chrome.approval, "manual");
+    assert_eq!(chrome.approval, "ask");
     assert!(!chrome.context.is_empty());
     assert!(chrome.context.starts_with("ctx"), "{}", chrome.context);
 }
@@ -2080,5 +2080,80 @@ fn terminal_scope_recovery_is_consistent_live_and_reloaded() {
     let status = display_reconciliation_status("tool_scope_required");
     assert!(
         matches!(status, StreamDisplay::Status(text) if text.contains("affected_paths") && !text.contains("context_length"))
+    );
+}
+
+/// T080 phase 2: `/mode` shows and sets the session permission mode, Shift+Tab
+/// cycles it, `default` returns to the configured mode, and the chrome shows
+/// the session mode.
+#[test]
+fn session_permission_mode_command_cycle_and_chrome() {
+    let project = tempdir().expect("project");
+    let mut config = NibConfig::default();
+    config.execution.provider = "internal".to_string();
+    config.approvals.mode = "policy".to_string();
+    config
+        .llm
+        .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+    save_nib_config_full(project.path(), &mut config).expect("config");
+    let store = SessionStore::for_project(project.path()).expect("store");
+    let session = store.try_create_session().expect("session");
+
+    let shown = set_session_permission_mode(project.path(), &store, &session.id, None).unwrap();
+    assert!(shown.contains("policy (configured default)"), "{shown}");
+
+    let set =
+        set_session_permission_mode(project.path(), &store, &session.id, Some("plan")).unwrap();
+    assert!(set.contains("plan (this session)"), "{set}");
+    let persisted = store.load(&session.id).unwrap();
+    assert_eq!(persisted.permission_mode.as_deref(), Some("plan"));
+    let chrome =
+        format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id).unwrap();
+    assert_eq!(chrome.approval, "plan");
+
+    assert_eq!(
+        cycle_session_permission_mode(project.path(), &store, &session.id).unwrap(),
+        crate::tools::models::ApprovalMode::Manual
+    );
+    assert_eq!(
+        cycle_session_permission_mode(project.path(), &store, &session.id).unwrap(),
+        crate::tools::models::ApprovalMode::Smart
+    );
+    assert_eq!(
+        store.load(&session.id).unwrap().permission_mode.as_deref(),
+        Some("accept-edits")
+    );
+
+    assert!(
+        set_session_permission_mode(project.path(), &store, &session.id, Some("yolo")).is_err()
+    );
+    let cleared =
+        set_session_permission_mode(project.path(), &store, &session.id, Some("default")).unwrap();
+    assert!(cleared.contains("policy (configured default)"), "{cleared}");
+    assert!(store.load(&session.id).unwrap().permission_mode.is_none());
+}
+
+/// T080 2a re-review: a configured `accept-edits` shows as accept-edits, not
+/// as the legacy `smart` (which now means ask).
+#[test]
+fn configured_accept_edits_is_shown_in_the_chrome() {
+    let project = tempdir().expect("project");
+    let mut config = NibConfig::default();
+    config.execution.provider = "internal".to_string();
+    config.approvals.mode = "accept-edits".to_string();
+    config
+        .llm
+        .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+    save_nib_config_full(project.path(), &mut config).expect("config");
+    let store = SessionStore::for_project(project.path()).expect("store");
+    let session = store.try_create_session().expect("session");
+    let persisted = store.load(&session.id).expect("session");
+    let chrome =
+        format_tui_interaction_chrome(project.path(), Some(&persisted), &session.id).unwrap();
+    assert_eq!(chrome.approval, "accept-edits");
+    let shown = set_session_permission_mode(project.path(), &store, &session.id, None).unwrap();
+    assert!(
+        shown.contains("accept-edits (configured default)"),
+        "{shown}"
     );
 }

@@ -227,6 +227,15 @@ pub(crate) async fn run_agent_loop_inner(
         .with_deferred_background_start(true)
         .with_policy_rules(policy_rules)
         .with_after_tool_hooks(after_tool_hooks);
+    // A session permission mode (Shift+Tab or /mode) overrides the configured
+    // approvals.mode for this session's runs (T080).
+    if let Some(mode) = session_before_request
+        .permission_mode
+        .as_deref()
+        .and_then(crate::tools::executor::permission_mode_from_name)
+    {
+        executor = executor.with_approval_mode(mode);
+    }
     if let Some(stream_tx) = cfg.stream_tx.clone() {
         let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(64);
         executor = executor.with_terminal_output_sender(terminal_tx);

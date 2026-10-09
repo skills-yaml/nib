@@ -145,6 +145,19 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         NO_COMPLETION,
     ),
     spec(
+        "mode",
+        &[],
+        "/mode [ask|accept-edits|plan|auto|policy|default]",
+        "Show or set this session's permission mode (Shift+Tab cycles ask, accept-edits, plan)",
+        InteractiveArgumentSchema::Permissions,
+        InteractiveMutability::Session,
+        InteractiveWorkerPolicy::Allowed,
+        InteractiveCompletionSpec {
+            candidates: &["ask", "accept-edits", "plan", "auto", "policy", "default"],
+            argument_after: &[],
+        },
+    ),
+    spec(
         "permissions",
         &[],
         "/permissions [manual|smart|policy|off]",
@@ -721,6 +734,7 @@ pub enum InteractiveCommand {
     Context { details: bool },
     Providers,
     Permissions { selection: Option<String> },
+    Mode { selection: Option<String> },
     Review,
     Diff,
     Compact,
@@ -749,6 +763,7 @@ impl InteractiveCommand {
             Self::Context { .. } => "context",
             Self::Providers => "providers",
             Self::Permissions { .. } => "permissions",
+            Self::Mode { .. } => "mode",
             Self::Review => "review",
             Self::Diff => "diff",
             Self::Compact => "compact",
@@ -779,6 +794,9 @@ pub fn command_effect_class(command: &InteractiveCommand) -> CommandEffectClass 
         | InteractiveCommand::Context { .. }
         | InteractiveCommand::Ps => CommandEffectClass::ReadOnlyInspection,
         InteractiveCommand::Stop { task_id: Some(_) } => CommandEffectClass::LiveControl,
+        // The session mode is a locked session-record update that applies to
+        // the next run, so it is safe while a run is active.
+        InteractiveCommand::Mode { .. } => CommandEffectClass::Always,
         _ => CommandEffectClass::RequiresIdle,
     }
 }

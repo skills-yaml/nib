@@ -142,6 +142,10 @@ pub(crate) struct BrokeredPlainQuestionHandler {
 
 #[async_trait::async_trait]
 impl nib::tools::executor::ApprovalHandler for BrokeredPlainApprovalHandler {
+    fn can_prompt(&self) -> bool {
+        true
+    }
+
     async fn handle_approval(
         &self,
         call: &nib::tools::models::ToolCall,
