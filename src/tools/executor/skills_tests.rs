@@ -132,6 +132,7 @@ async fn skill_tools_are_only_advertised_with_a_catalog_and_not_exposed_by_mcp()
 #[tokio::test]
 async fn skill_activation_and_constraints_survive_session_permission_modes() {
     for mode in [
+        ApprovalMode::Manual,
         ApprovalMode::Plan,
         ApprovalMode::Smart,
         ApprovalMode::Policy,
