@@ -39,7 +39,7 @@ plugin marketplace, external connectors or built-in workflow library is added.
 src/context, src/config, src/skill_cmd.rs, src/tools, src/agent/loop,
 src/interactive, associated tests, README and user documentation.
 
-## Ordered Plan
+## Implementation Plan
 
 1. Unify bounded discovery, canonical linked-folder validation, catalog and controls.
 2. Implement explicit selection, bounded metadata prompt and audited activation tools.
@@ -57,7 +57,8 @@ src/interactive, associated tests, README and user documentation.
 
 ## Validation Gates
 
-Affected context, executor, interactive and CLI tests through Task; task check,
+Affected context, executor, interactive and CLI tests through Task, including
+`task test:skills`; task check,
 task verify, task docs:check, task versions:check. Independent security and
 interface review required. Local validation alone retains development state.
 

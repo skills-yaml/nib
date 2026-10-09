@@ -9,6 +9,7 @@ task_ref: detached
 branch_authorization: none
 updated_at: 2026-10-09T08:49:32Z
 scope:
+  - Taskfile.yml
   - Cargo.toml
   - Cargo.lock
   - README.md

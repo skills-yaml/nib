@@ -820,6 +820,9 @@ fn installed_skills_classifies_global_and_project_local_roots() {
 fn installed_skills_are_sorted_by_location_name_and_path() {
     let global = tempdir().expect("global");
     let project = tempdir().expect("project");
+    let home = tempdir().expect("isolated home");
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
     let previous = std::env::var_os("NIB_SKILLS_DIR");
     std::env::set_var("NIB_SKILLS_DIR", global.path());
     create_skill(global.path(), "zeta-global");
@@ -830,6 +833,7 @@ fn installed_skills_are_sorted_by_location_name_and_path() {
     let installed = installed_skills(project.path());
 
     restore_env("NIB_SKILLS_DIR", previous);
+    restore_env("HOME", previous_home);
     let installed = installed.expect("list installed skills");
     let order = installed
         .iter()

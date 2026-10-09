@@ -178,7 +178,7 @@ impl Discovery {
         let manifest = canonical.join("SKILL.md");
         if fs::symlink_metadata(&manifest).is_ok() {
             if self.files.len() >= MAX_SKILLS {
-                return Err("skill discovery exceeds skill count limit".into());
+                return Err("skill discovery was truncated: skill count exceeds 256 limit".into());
             }
             // Only folder links are supported. The manifest itself must be regular.
             bounded_manifest(&manifest)?;
@@ -234,8 +234,12 @@ impl SkillCatalog {
         let mut entries = Vec::new();
         for (path, canonical_path) in discovery.files {
             let before = digest(&canonical_path)?;
-            let metadata =
-                parse_skill_frontmatter_file(&canonical_path).map_err(|error| error.to_string())?;
+            let metadata = parse_skill_frontmatter_file(&canonical_path).map_err(|error| {
+                format!(
+                    "invalid skill manifest {}: {error}",
+                    canonical_path.display()
+                )
+            })?;
             let (allow_implicit, policy_digest) = invocation_policy(&canonical_path)?;
             if digest(&canonical_path)? != before
                 || path.canonicalize().ok().as_ref() != Some(&canonical_path)
