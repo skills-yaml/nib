@@ -181,6 +181,6 @@ async fn skill_activation_and_constraints_survive_session_permission_modes() {
             !denied.success,
             "{mode:?}: skill policy must remain authoritative"
         );
-        assert!(denied.error.unwrap().contains("denied by policy"));
+        assert_eq!(denied.approval_source.as_deref(), Some("policy"));
     }
 }
