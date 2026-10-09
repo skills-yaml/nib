@@ -610,3 +610,21 @@ criteria are unresolved; this event does not establish main delivery or
 publication. Synchronization combines that phase with T069-T073 under the
 same applied minor 0.4.0 release and preserves the independent reviewed
 sandbox implementation. Combined review and native gates precede the push.
+
+## Integration Evidence (per phase)
+
+- **Phase 1** (sandbox mount plan): PR 52 merged the verified candidate
+  `ea2ac61` into `development` as
+  `045e0e21d6e51488fcfcc544e2fceb35f0eb2d3d` on 2026-10-08T16:38:49Z.
+- **Phase 2a** (permission modes): PR 54 merged the verified candidate
+  `0e8ecaf` as `21ccf1dcd4599900a242e889554f0fcd52ca4660` on
+  2026-10-09T20:10:07Z.
+
+For each phase, before the merge:
+- independent exact-candidate review approved it;
+- a serial `task verify` passed with `NIB_REQUIRE_BWRAP_TESTS=1`;
+- PR CI passed Linux Validate and macOS; the workflow skipped Windows.
+
+After each merge, `development` was re-read and contained the candidate
+with no file difference. T080 stays in development until every phase is
+integrated.
