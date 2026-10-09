@@ -573,3 +573,36 @@ fn committed_question_answers_cannot_resume_or_reopen_a_replacement_plan() {
         );
     }
 }
+
+/// T081 AC-5: `/continue` explains that an interrupted plan was cleared.
+#[test]
+fn continue_reports_a_cleared_interrupted_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let mut session = store.create_session();
+    let mut plan = crate::session::Plan::new(
+        "review repo",
+        vec![crate::session::PlanStep {
+            description: "inspect".to_string(),
+            status: "Pending".to_string(),
+            outcome: None,
+            attempts: 0,
+            updated_at: None,
+            verification_obligations: Vec::new(),
+            content_generation: 0,
+        }],
+    );
+    plan.approve();
+    let plan_id = plan.id.clone();
+    session.plan = Some(plan);
+    assert!(crate::agent::r#loop::clear_interrupted_plan_in_session(
+        &mut session,
+        "tool_execution_failed",
+        None
+    ));
+    store.save(&mut session).unwrap();
+    let error = load_continue_plan_effect(&store, &session.id, &plan_id)
+        .expect_err("cleared plan cannot continue");
+    assert!(error.contains("was cleared"), "{error}");
+    assert!(error.contains("tool_execution_failed"), "{error}");
+}

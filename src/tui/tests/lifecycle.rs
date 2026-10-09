@@ -1045,7 +1045,7 @@ fn transcript_viewport_keeps_manual_row_on_append_and_submit_repins() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("approval manual"));
+    assert!(rendered.contains("mode ask"));
     assert!(rendered.contains("row-31"));
 }
 

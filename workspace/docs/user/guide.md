@@ -556,6 +556,19 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   repeated-question counters. Inspection is local and read-only, including while a
   run is active or an approval/question owns the prompt (TUI: F2 then `/context`).
 - `/model` or `/model <name>` lists or selects a model.
+- `/mode [ask|accept-edits|plan|auto|policy|default]` shows or sets this session's
+  permission mode, and Shift+Tab in the TUI composer cycles ask → accept-edits → plan.
+  `ask` prompts before file edits and commands no rule allows; `accept-edits` applies
+  file edits automatically while commands still ask; `plan` allows only read-only
+  exploration and refuses changes; `auto` runs everything the sandbox and rules allow
+  without prompts and is never reached by Shift+Tab. The footer shows the active mode,
+  which applies from the next request (during a run it shows `(next request)`);
+  `/mode default` returns to the configured mode. The legacy `smart` preset still
+  behaves like `ask`; choose `accept-edits` for automatic file edits. Plan mode still
+  lets nib ask you questions.
+  In `policy` mode, actions no rule allows now ask in chat and the TUI instead of being
+  silently denied; headless runs still deny them. Read-only command sequences such as
+  `git status; git log` run without approval.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
   preset, then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
@@ -565,6 +578,12 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
 - `/continue <plan-id>` optionally continues that exact plan without retyping its goal.
   Answering saved questions or saying `resume` in ordinary conversation also recovers
   the interrupted operation; sets still require Submit.
+- When an interactive chat run is interrupted (a tool, model or approval failure, a
+  run or turn limit, or cancellation), the plan that run was executing is cleared; describe the next
+  request in the chat to plan again. Long plans stopped by a turn limit are cleared
+  too. Plans waiting for your answer, plans whose model connection was interrupted
+  mid-response, and plans of other runs (for example a side question that failed) are
+  kept. `/continue` on a cleared plan explains that it was cleared.
 - `/new` and `/clear` start a fresh session; `/resume` and `/session` open
   preview-and-confirm resume.
 - `/fork` copies the current transcript into a new session; `/rename <name>` sets a

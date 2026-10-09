@@ -253,6 +253,15 @@ pub(crate) async fn run_agent_loop_inner(
             .with_skill_catalog(catalog, active_skills.clone())
             .with_skill_context_budget(nib_cfg.llm.context_length);
     }
+    // A session permission mode (Shift+Tab or /mode) overrides the configured
+    // approvals.mode for this session's runs (T080).
+    if let Some(mode) = session_before_request
+        .permission_mode
+        .as_deref()
+        .and_then(crate::tools::executor::permission_mode_from_name)
+    {
+        executor = executor.with_approval_mode(mode);
+    }
     if let Some(stream_tx) = cfg.stream_tx.clone() {
         let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(64);
         executor = executor.with_terminal_output_sender(terminal_tx);
@@ -602,6 +611,9 @@ pub(crate) async fn run_agent_loop_inner(
         state = match state {
             AgentState::Idle => {
                 let (next, plan_id) = route_idle_plan(&store, session_id, &normalized_goal)?;
+                if let Some(plan_id) = plan_id.as_deref() {
+                    record_run_plan_binding(&store, session_id, &run_id, plan_id)?;
+                }
                 active_plan_id = plan_id;
                 transition_state(
                     &store,
@@ -762,6 +774,7 @@ pub(crate) async fn run_agent_loop_inner(
                                 })
                                 .map_err(|error| error.to_string())?;
                             if stored {
+                                record_run_plan_binding(&store, session_id, &run_id, &plan_id)?;
                                 active_plan_id = Some(plan_id);
                                 emit(
                                     &cfg.stream_tx,

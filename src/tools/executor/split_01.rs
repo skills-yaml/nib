@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// Refusal returned for changes while the session is in `plan` mode.
+pub(crate) const PLAN_MODE_DENIAL: &str =
+    "plan mode is read-only; switch with Shift+Tab or /mode ask to make changes";
+
+/// Whether `plan` mode refuses this action. Plan mode allows read-only tools,
+/// plan writing and questions to the user, whose answers it must not discard;
+/// every other action is refused before rules or remembered grants apply.
+pub(crate) fn plan_mode_refuses(
+    mode: ApprovalMode,
+    tool_name: &str,
+    level: PermissionLevel,
+    risk: ToolRisk,
+) -> bool {
+    mode == ApprovalMode::Plan
+        && !matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
+        && risk != ToolRisk::ReadOnly
+        && tool_name != "ask_question"
+}
+
 impl ToolExecutor {
     pub fn new(project_root: PathBuf, execution_config: ExecutionConfig) -> Self {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
@@ -315,6 +334,7 @@ impl ToolExecutor {
         if evaluations
             .iter()
             .any(|rule| rule.effect == PolicyEffect::Deny)
+            || plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk)
         {
             return false;
         }
@@ -358,8 +378,12 @@ impl ToolExecutor {
         {
             return false;
         }
-        !matches!(self.approval_mode, ApprovalMode::Policy | ApprovalMode::Off)
-            && !self.auto_approve
+        match self.approval_mode {
+            ApprovalMode::Plan | ApprovalMode::Off => false,
+            ApprovalMode::Smart if is_file_edit_tool(&call.tool_name) => false,
+            ApprovalMode::Policy if !self.approval_handler.can_prompt() => false,
+            _ => !self.auto_approve,
+        }
     }
 
     #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
@@ -1229,6 +1253,9 @@ impl ToolExecutor {
         {
             return decision;
         }
+        if plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk) {
+            return ApprovalDecision::denied_by_policy(PLAN_MODE_DENIAL);
+        }
         if let Some(rule) = evaluations
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
@@ -1280,7 +1307,15 @@ impl ToolExecutor {
         if !requires_approval && matches!(risk, ToolRisk::Safe) {
             return ApprovalDecision::granted_policy();
         }
-        if self.approval_mode == ApprovalMode::Policy {
+        if self.approval_mode == ApprovalMode::Smart && is_file_edit_tool(&call.tool_name) {
+            return ApprovalDecision {
+                granted: true,
+                source: "mode".to_string(),
+                note: Some("accept-edits mode applies file edits automatically".to_string()),
+                remember_command: None,
+            };
+        }
+        if self.approval_mode == ApprovalMode::Policy && !self.approval_handler.can_prompt() {
             return ApprovalDecision::denied_by_policy("no matching allow policy");
         }
         if self.approval_mode == ApprovalMode::Off {

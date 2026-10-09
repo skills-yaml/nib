@@ -1731,3 +1731,39 @@ fn session_temporary_paths(directory: &Path) -> Vec<PathBuf> {
         })
         .collect()
 }
+
+#[test]
+fn undeclared_verification_lists_the_declared_ids() {
+    let mut step = plan_step("verify");
+    step.verification_obligations.push(required_terminal_check(
+        "required-check",
+        "run the required check",
+        vec!["src".to_string()],
+    ));
+    let mut plan = Plan::new("verify", vec![step]);
+    plan.approve();
+    let error = plan
+        .begin_verification(
+            "review-task-check",
+            crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &serde_json::json!({"command": "task check", "affected_paths": ["."]}),
+            None,
+        )
+        .expect_err("undeclared obligation");
+    assert!(error.contains("\"review-task-check\""), "{error}");
+    assert!(error.contains("declared: [\"required-check\"]"), "{error}");
+
+    let mut bare = Plan::new("bare", vec![plan_step("no checks")]);
+    bare.approve();
+    let error = bare
+        .begin_verification(
+            "anything",
+            crate::tools::ToolInvocationId::new(),
+            "run_terminal",
+            &serde_json::json!({"command": "true", "affected_paths": ["."]}),
+            None,
+        )
+        .expect_err("no obligations");
+    assert!(error.contains("declared: none"), "{error}");
+}

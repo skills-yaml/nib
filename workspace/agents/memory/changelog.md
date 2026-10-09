@@ -737,3 +737,27 @@ before installing restrictions and hooks. Disabled controls suppress profile and
 configured activation; explicit requests for disabled skills report an error.
 Implicit-disabled skills require explicit selection. Supporting files are bounded
 regular reads beneath an activated root. Discovery refreshes each user turn.
+
+## 2026-10-08 - T081 interrupted-plan decision
+
+- Type: changelog
+- Source: T081
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the user's decision to clear interrupted plans in decisions.md.
+
+## 2026-10-09 - T080 phase 2a permission modes decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the permission-mode mapping and policy prompting decision in decisions.md.

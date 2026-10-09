@@ -450,6 +450,55 @@ security review of the mount plan and permission engine is mandatory.
   `approvals.mode = "manual"` restores the previous behavior. Phase 1 must not
   be rolled back to an unmasked state.
 
+## Phase 2 Delivery Split (2026-10-09)
+
+Phase 2 is delivered in two pull requests.
+
+**2a: permission modes.** `ApprovalMode` gains `Plan`, and the names `ask`,
+`accept-edits`, `plan` and `auto` are accepted alongside the original config
+names. The behavior:
+- `accept-edits` grants `apply_patch` automatically.
+- `plan` refuses every non-read-only action before allow rules or remembered
+  grants apply.
+- `policy` prompts for unmatched actions only when the approval handler can
+  prompt (TUI and plain chat); headless handlers still deny.
+- A session `permission_mode` field, set by `/mode` or Shift+Tab, overrides
+  `approvals.mode` from the next run.
+- The footer shows `mode <name>`.
+- Read-only command sequences and pipelines are classified read-only.
+- A lone `&` is now treated as shell composition. This closes a
+  classifier bypass where `git status & touch x` was approved as read-only.
+
+**2b: host-side Git.** `git_commit`/`git_push` with approval, the branch-first
+rule and the redirection of `run_terminal` Git writes.
+
+Independent review of `39daf74` (approved with fixes), and the
+resolutions:
+- **H1.** Plan mode refused `ask_question`, discarding answers the user had
+  already given. Plan mode now allows read-only tools, plan writing and
+  questions (`plan_mode_refuses`).
+- **M1.** The legacy `smart` preset keeps its previous behavior, which was
+  identical to `manual`, so existing configs do not start auto-applying
+  edits. Only the explicit `accept-edits` applies edits automatically.
+- **M2.** During an active run, the footer shows a changed mode as
+  `<mode> (next request)`.
+- **L1.** The approval pre-check applies the plan refusal before
+  RequireApproval rules.
+- **L3.** Forks keep the session mode, except `auto`.
+- **L4.** Tests prove that plan mode beats allow rules, remembered grants,
+  `--yes` and classifier auto-approval, and that the pre-check matches each
+  mode.
+- **L2, accepted.** `/permissions` still reports only the configured preset;
+  `/mode` reports the session mode.
+- **Follow-up candidate (pre-existing classifier issues).** Abbreviated long
+  options (`git log --outp=x`), `--ext-diff`/`--textconv`, glob-expanded
+  `--output=` file names and `wc --files0-from` can make single-command
+  "read-only" Git or `wc` invocations write files or run configured helpers.
+
+Plan mode uses the permission engine rather than the agent's planning mode,
+which no interactive surface selects. This matches Claude Code's read-only
+plan mode.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
