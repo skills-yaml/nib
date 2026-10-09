@@ -77,5 +77,5 @@ retain ordinary terminal approval. Rollback restores legacy heuristic selection.
 ## Memory Impact
 
 Status: updated
-Rationale: Record the shared skill discovery and progressive activation contract in [facts.md](../../../agents/memory/facts.md) and
-[changelog.md](../../../agents/memory/changelog.md).
+Rationale: Record the shared skill discovery and progressive activation contract in [workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
