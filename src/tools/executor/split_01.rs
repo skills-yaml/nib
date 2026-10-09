@@ -1202,11 +1202,26 @@ impl ToolExecutor {
         if self.project_root.join(".git").is_file() {
             return Ok(Some(effective_root));
         }
-        crate::integrations::worktree::with_validated_session_worktree(
+        let Some(worktree_root) = crate::integrations::worktree::with_validated_session_worktree(
             &self.project_root,
             session_id,
             |path| Ok(path.to_path_buf()),
-        )
+        )?
+        else {
+            return Ok(None);
+        };
+        // Same subdirectory mapping as ensure_worktree.
+        let relative = effective_root
+            .strip_prefix(&self.project_root)
+            .map_err(|_| "effective root is not under the configured root".to_string())?;
+        let target = worktree_root
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| format!("isolated execution root cannot be resolved: {error}"))?;
+        if !target.starts_with(&worktree_root) {
+            return Err("isolated execution root escaped its worktree".to_string());
+        }
+        Ok(Some(target))
     }
 
     pub(crate) async fn ensure_worktree(
