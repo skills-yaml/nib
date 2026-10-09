@@ -450,6 +450,32 @@ security review of the mount plan and permission engine is mandatory.
   `approvals.mode = "manual"` restores the previous behavior. Phase 1 must not
   be rolled back to an unmasked state.
 
+## Phase 2 Delivery Split (2026-10-09)
+
+Phase 2 is delivered in two pull requests.
+
+**2a: permission modes.** `ApprovalMode` gains `Plan`, and the names `ask`,
+`accept-edits`, `plan` and `auto` are accepted alongside the original config
+names. The behavior:
+- `accept-edits` grants `apply_patch` automatically.
+- `plan` refuses every non-read-only action before allow rules or remembered
+  grants apply.
+- `policy` prompts for unmatched actions only when the approval handler can
+  prompt (TUI and plain chat); headless handlers still deny.
+- A session `permission_mode` field, set by `/mode` or Shift+Tab, overrides
+  `approvals.mode` from the next run.
+- The footer shows `mode <name>`.
+- Read-only command sequences and pipelines are classified read-only.
+- A lone `&` is now treated as shell composition. This closes a
+  classifier bypass where `git status & touch x` was approved as read-only.
+
+**2b: host-side Git.** `git_commit`/`git_push` with approval, the branch-first
+rule and the redirection of `run_terminal` Git writes.
+
+Plan mode uses the permission engine rather than the agent's planning mode,
+which no interactive surface selects. This matches Claude Code's read-only
+plan mode.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

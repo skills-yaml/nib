@@ -1675,3 +1675,70 @@ async fn undeclared_verification_reaches_the_model_with_declared_ids() {
     assert!(observation.contains("review-task-check"), "{observation}");
     assert!(observation.contains("declared: none"), "{observation}");
 }
+
+/// T080 phase 2: the session permission mode reaches the run's executor, so a
+/// `plan`-mode session refuses a file edit without writing anything.
+#[tokio::test]
+async fn session_plan_mode_refuses_edits_in_the_run() {
+    let goal = "runtime coding e2e plan mode";
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn answer() -> u32 {\n    41\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".gitignore"), ".nib/\n").unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(dir.path())
+            .status()
+            .expect("fixture git");
+        assert!(status.success(), "{args:?}");
+    }
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let mut session = store.create_session();
+    let mut plan = pending_plan(goal, goal);
+    plan.approve();
+    session.plan = Some(plan);
+    session.permission_mode = Some("plan".to_string());
+    store.save(&mut session).unwrap();
+
+    run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        goal,
+        AgentLoopConfig {
+            max_steps: 3,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("run reconciles");
+
+    let saved = store.load(&session.id).unwrap();
+    let rendered = serde_json::to_string(&saved.events).unwrap()
+        + &serde_json::to_string(&saved.tool_calls).unwrap();
+    assert!(rendered.contains("plan mode is read-only"), "{rendered}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        "pub fn answer() -> u32 {\n    41\n}\n"
+    );
+}

@@ -487,6 +487,11 @@ pub struct Session {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+    /// Session permission mode chosen with Shift+Tab or `/mode` (`ask`,
+    /// `accept-edits`, `plan`, `auto`, `policy`); overrides the configured
+    /// `approvals.mode` for this session's runs (T080).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -623,6 +628,7 @@ impl Session {
             queued_follow_ups: vec![],
             display_name: None,
             forked_from: None,
+            permission_mode: None,
         }
     }
 

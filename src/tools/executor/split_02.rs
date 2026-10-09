@@ -319,12 +319,20 @@ pub(crate) fn valid_session_id(session_id: &str) -> bool {
 }
 
 pub(crate) fn approval_mode_from_config(config: &ApprovalsConfig) -> ApprovalMode {
-    match config.mode.to_ascii_lowercase().as_str() {
-        "manual" => ApprovalMode::Manual,
-        "smart" => ApprovalMode::Smart,
-        "policy" => ApprovalMode::Policy,
-        "off" => ApprovalMode::Off,
-        _ => ApprovalMode::Manual,
+    permission_mode_from_name(&config.mode).unwrap_or(ApprovalMode::Manual)
+}
+
+/// Parses a configured or user-selected mode. Both the original config names
+/// (`manual`, `smart`, `policy`, `off`) and the permission-mode names
+/// (`ask`, `accept-edits`, `plan`, `auto`) are accepted (T080).
+pub(crate) fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "manual" | "ask" => Some(ApprovalMode::Manual),
+        "smart" | "accept-edits" | "accept_edits" => Some(ApprovalMode::Smart),
+        "policy" => Some(ApprovalMode::Policy),
+        "off" | "auto" => Some(ApprovalMode::Off),
+        "plan" => Some(ApprovalMode::Plan),
+        _ => None,
     }
 }
 
@@ -334,7 +342,34 @@ pub(crate) fn approval_mode_label(mode: ApprovalMode) -> &'static str {
         ApprovalMode::Smart => "smart",
         ApprovalMode::Policy => "policy",
         ApprovalMode::Off => "off",
+        ApprovalMode::Plan => "plan",
     }
+}
+
+/// User-facing permission-mode name shown in the footer and by `/mode`.
+pub(crate) fn permission_mode_label(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Manual => "ask",
+        ApprovalMode::Smart => "accept-edits",
+        ApprovalMode::Policy => "policy",
+        ApprovalMode::Off => "auto",
+        ApprovalMode::Plan => "plan",
+    }
+}
+
+/// Shift+Tab order: ask → accept-edits → plan → ask. `auto` and `policy` are
+/// left for an explicit `/mode`, so cycling never silently drops prompts.
+pub(crate) fn next_cycled_permission_mode(mode: ApprovalMode) -> ApprovalMode {
+    match mode {
+        ApprovalMode::Manual => ApprovalMode::Smart,
+        ApprovalMode::Smart => ApprovalMode::Plan,
+        ApprovalMode::Plan | ApprovalMode::Policy | ApprovalMode::Off => ApprovalMode::Manual,
+    }
+}
+
+/// Tools whose only effect is editing files inside the workspace.
+pub(crate) fn is_file_edit_tool(name: &str) -> bool {
+    name == "apply_patch"
 }
 
 pub(crate) fn resolve_execution_config(

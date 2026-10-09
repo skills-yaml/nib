@@ -634,3 +634,23 @@ Kept plans:
 
 Plans recorded as interrupted before this change are cleared at the next run
 start.
+
+## 2026-10-09 - Permission modes and policy prompting
+
+- Type: decision
+- Source: T080 phase 2a and user decisions D3 (ask default) and D6
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: silent policy denials in interactive sessions
+
+Content:
+
+Permission modes map onto `ApprovalMode`: ask=Manual, accept-edits=Smart
+(file edits auto-approved), plan=Plan (read-only; every change refused before
+allow rules or remembered grants), auto=Off, plus policy. A per-session
+`permission_mode` (`/mode`, Shift+Tab: ask → accept-edits → plan) overrides the
+configured mode from the next run; auto and policy are reachable only
+explicitly. Policy mode prompts for unmatched actions only when the approval
+handler can prompt (TUI, plain chat) and still denies in headless runs, so
+background tasks and subagents never hang. Read-only command sequences are
+read-only; any `&` counts as shell composition.

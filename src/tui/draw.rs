@@ -850,6 +850,30 @@ pub(crate) fn draw_loop(
                         }
                     }
                 }
+                // Shift+Tab cycles the session permission mode (T080):
+                // ask → accept-edits → plan → ask.
+                if (key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)))
+                    && matches!(
+                        interaction_layer,
+                        InteractionLayer::Composer | InteractionLayer::Completion
+                    )
+                    && !completion.is_open()
+                {
+                    match crate::interactive::cycle_session_permission_mode(
+                        project_root,
+                        &store,
+                        &active_session_id,
+                    ) {
+                        Ok(mode) => timeline.push_status(format!(
+                            "Permission mode: {} (applies from the next request)",
+                            crate::tools::executor::permission_mode_label(mode)
+                        )),
+                        Err(error) => timeline.push_status(error),
+                    }
+                    chrome_generation = chrome_generation.saturating_add(1);
+                    continue;
+                }
                 if key.code == KeyCode::Tab
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
                     && matches!(

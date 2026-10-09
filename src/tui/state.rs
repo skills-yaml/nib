@@ -812,6 +812,10 @@ pub struct TuiApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for TuiApprovalHandler {
+    fn can_prompt(&self) -> bool {
+        true
+    }
+
     async fn handle_approval(&self, call: &ToolCall, level: PermissionLevel) -> ApprovalDecision {
         let context = ApprovalContext::compatibility(call, level);
         self.request(call, level, context).await

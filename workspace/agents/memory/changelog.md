@@ -730,3 +730,15 @@ and T023 live-provider acceptance remain separate.
 Content:
 
 Recorded the user's decision to clear interrupted plans in decisions.md.
+
+## 2026-10-09 - T080 phase 2a permission modes decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the permission-mode mapping and policy prompting decision in decisions.md.

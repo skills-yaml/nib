@@ -1476,3 +1476,167 @@ async fn schedule_rejects_untrusted_reserved_context_without_a_session() {
     assert_eq!(record.tool_name.as_deref(), Some("schedule"));
     assert_eq!(record.result.as_ref().unwrap()["success"], false);
 }
+
+/// Records prompts and grants them; `interactive` controls `can_prompt`.
+struct PromptCounter {
+    interactive: bool,
+    prompts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for PromptCounter {
+    fn can_prompt(&self) -> bool {
+        self.interactive
+    }
+
+    async fn handle_approval(&self, _call: &ToolCall, _level: PermissionLevel) -> ApprovalDecision {
+        self.prompts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ApprovalDecision::granted_user()
+    }
+}
+
+async fn decide_in_mode(
+    mode: ApprovalMode,
+    interactive: bool,
+    tool: &str,
+    arguments: serde_json::Value,
+    level: PermissionLevel,
+) -> (ApprovalDecision, usize) {
+    let root = tempfile::tempdir().expect("root");
+    let handler = Arc::new(PromptCounter {
+        interactive,
+        prompts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+        .with_approval_handler(handler.clone())
+        .with_approval_mode(mode);
+    let call = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: tool.to_string(),
+        arguments,
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.path().to_path_buf()),
+    };
+    let risk = crate::tools::classifier::classify_tool_call(&call);
+    let effective = executor.effective_execution_config(level, risk);
+    let decision = executor
+        .handle_approval(
+            &call,
+            level,
+            risk,
+            true,
+            true,
+            root.path(),
+            &effective,
+            Some("mode-session"),
+        )
+        .await;
+    let prompts = handler.prompts.load(std::sync::atomic::Ordering::SeqCst);
+    (decision, prompts)
+}
+
+fn patch_arguments() -> serde_json::Value {
+    json!({"patch": "*** Begin Patch\n*** Add File: notes.txt\n+hi\n*** End Patch\n"})
+}
+
+/// T080 phase 2: each permission mode's decision for an edit, a command that
+/// needs approval and a read-only command.
+#[tokio::test]
+async fn permission_modes_decide_edits_commands_and_reads() {
+    let edit = || ("apply_patch", patch_arguments(), PermissionLevel::Safe);
+    let command = || {
+        (
+            "run_terminal",
+            json!({"command": "mkdir build-output", "affected_paths": ["."]}),
+            PermissionLevel::Destructive,
+        )
+    };
+    let read = || {
+        (
+            "run_terminal",
+            json!({"command": "git status; git log -1", "affected_paths": ["."]}),
+            PermissionLevel::Destructive,
+        )
+    };
+
+    // ask: edits and commands prompt; reads do not.
+    for (tool, args, level) in [edit(), command()] {
+        let (decision, prompts) =
+            decide_in_mode(ApprovalMode::Manual, true, tool, args, level).await;
+        assert!(decision.granted && prompts == 1, "ask {tool}: {decision:?}");
+    }
+    let (tool, args, level) = read();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Manual, true, tool, args, level).await;
+    assert!(decision.granted && prompts == 0, "ask read: {decision:?}");
+
+    // accept-edits: edits apply without a prompt; commands still prompt.
+    let (tool, args, level) = edit();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Smart, true, tool, args, level).await;
+    assert!(
+        decision.granted && prompts == 0 && decision.source == "mode",
+        "{decision:?}"
+    );
+    let (tool, args, level) = command();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Smart, true, tool, args, level).await;
+    assert!(decision.granted && prompts == 1, "{decision:?}");
+
+    // plan: changes are refused without prompting; reads still run.
+    for (tool, args, level) in [edit(), command()] {
+        let (decision, prompts) = decide_in_mode(ApprovalMode::Plan, true, tool, args, level).await;
+        assert!(
+            !decision.granted && prompts == 0,
+            "plan {tool}: {decision:?}"
+        );
+        assert!(decision
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("plan mode"));
+    }
+    let (tool, args, level) = read();
+    let (decision, _) = decide_in_mode(ApprovalMode::Plan, true, tool, args, level).await;
+    assert!(decision.granted, "plan read: {decision:?}");
+
+    // policy: unmatched actions prompt when a person can answer, and are
+    // denied without a prompt in headless runs.
+    let (tool, args, level) = command();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Policy, true, tool, args, level).await;
+    assert!(decision.granted && prompts == 1, "{decision:?}");
+    let (tool, args, level) = command();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Policy, false, tool, args, level).await;
+    assert!(!decision.granted && prompts == 0, "{decision:?}");
+
+    // auto: no prompts.
+    let (tool, args, level) = command();
+    let (decision, prompts) = decide_in_mode(ApprovalMode::Off, true, tool, args, level).await;
+    assert!(decision.granted && prompts == 0, "{decision:?}");
+}
+
+#[test]
+fn permission_mode_names_parse_label_and_cycle() {
+    for (name, mode) in [
+        ("ask", ApprovalMode::Manual),
+        ("manual", ApprovalMode::Manual),
+        ("accept-edits", ApprovalMode::Smart),
+        ("smart", ApprovalMode::Smart),
+        ("plan", ApprovalMode::Plan),
+        ("auto", ApprovalMode::Off),
+        ("off", ApprovalMode::Off),
+        ("policy", ApprovalMode::Policy),
+    ] {
+        assert_eq!(permission_mode_from_name(name), Some(mode), "{name}");
+    }
+    assert_eq!(permission_mode_from_name("yolo"), None);
+    let mut mode = ApprovalMode::Manual;
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        mode = next_cycled_permission_mode(mode);
+        seen.push(permission_mode_label(mode));
+    }
+    assert_eq!(seen, ["accept-edits", "plan", "ask"]);
+    assert_eq!(
+        next_cycled_permission_mode(ApprovalMode::Off),
+        ApprovalMode::Manual
+    );
+}
