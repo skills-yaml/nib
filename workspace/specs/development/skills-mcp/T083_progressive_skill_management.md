@@ -54,7 +54,7 @@ src/interactive, associated tests, README and user documentation.
 - [x] AC-3: Activation installs policies/hooks and authoritative usage; supporting files are bounded to activated roots and arbitrary paths rejected.
 - [x] AC-4: Enable/disable controls, implicit policy, CLI and plain/TUI selection share behavior; catalog refreshes between turns.
 - [x] AC-5: Tests cover success, errors, symlinks, ambiguity, drift, budgets, policies and audit; documentation explains compatibility.
-- [ ] AC-6: Independent review and task verify, docs:check and versions:check pass before handoff.
+- [x] AC-6: Independent review and task verify, docs:check and versions:check pass before handoff.
 
 ## Validation Gates
 
@@ -94,10 +94,13 @@ Rationale: Record the shared skill discovery and progressive activation contract
   including progressive activation/resource reads and mixed-load side-effect guards.
   Full-body-or-reject budget coverage passed in the broader library run.
 - Independent spec-compliance and security/quality review approved the code
-  candidate. Final complete verification remains required before handoff.
+  candidate 8f34b76; fresh complete native verification passed at that revision.
 - This is local implementation evidence. No shared test integration, main merge,
   publication or native Windows/macOS qualification is inferred.
 
-The complete native `task verify` passed at f054d03 before the repository-priority
-fix. Both new priority regressions and all focused skill tests pass; complete
-verification is renewed against the final candidate before handoff.
+The complete native `task verify` passed at 8f34b76 after the repository-priority
+fix: 1,389 library tests, 106 CLI tests and all integration targets, including
+56 runtime end-to-end tests. This handoff reconciliation changes documentation
+only; code, tests, dependencies and Task commands remain identical to that
+reviewed and verified source revision. Renew documentation/governance and
+build-metadata evidence for the handoff commit.
