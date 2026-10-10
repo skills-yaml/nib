@@ -775,3 +775,15 @@ Progressive skill management is integrated into shared development alongside
 T080 permission modes and T081 interrupted-plan recovery. The remote branch was
 re-read after the normal push. T083 is in test, sharing the already-applied
 0.4.0 release; main delivery and publication remain separate.
+
+## 2026-10-09 - T080 phase 2b host Git tools decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent review required before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the host-side Git commit and push decision in decisions.md.

@@ -344,6 +344,9 @@ impl ToolExecutor {
         {
             return true;
         }
+        if call.tool_name == "git_push" {
+            return self.approval_handler.can_prompt();
+        }
         if evaluations
             .iter()
             .any(|rule| rule.effect == PolicyEffect::Allow)
@@ -472,6 +475,29 @@ impl ToolExecutor {
         } else {
             classify_tool_call(&call)
         };
+        // Git writes go through the approved host-side tools (T080 phase 2b);
+        // the sandbox keeps Git metadata read-only.
+        if call.tool_name == "run_terminal" {
+            if let Some(tool) = call
+                .arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(crate::tools::git_tools::terminal_git_write)
+            {
+                return ToolResult {
+                    invocation_id: call.invocation_id,
+                    tool_name: call.tool_name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Git commits and pushes are not run in the terminal; use the {tool} tool, which asks the user and runs with their Git setup"
+                    )),
+                    duration_seconds: start.elapsed().as_secs_f64(),
+                    approval_granted: false,
+                    approval_source: Some("policy".to_string()),
+                };
+            }
+        }
         let effective_execution_config = self.effective_execution_config(level, risk);
         let plan_id = self.resolve_plan_id(effective_session);
 
@@ -1160,6 +1186,44 @@ impl ToolExecutor {
             .map(|source| self.redact_text(&source));
     }
 
+    /// The directory a Git tool will run in, chosen exactly as
+    /// `ensure_worktree` does: the session's managed worktree, the main
+    /// checkout without a session or inside a linked worktree project, or
+    /// `None` when the session worktree does not exist yet.
+    fn git_execution_root(
+        &self,
+        call: &ToolCall,
+        session_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, String> {
+        let effective_root = self.resolve_scope(call)?;
+        let Some(session_id) = session_id.or(call.session_id.as_deref()) else {
+            return Ok(Some(effective_root));
+        };
+        if self.project_root.join(".git").is_file() {
+            return Ok(Some(effective_root));
+        }
+        let Some(worktree_root) = crate::integrations::worktree::with_validated_session_worktree(
+            &self.project_root,
+            session_id,
+            |path| Ok(path.to_path_buf()),
+        )?
+        else {
+            return Ok(None);
+        };
+        // Same subdirectory mapping as ensure_worktree.
+        let relative = effective_root
+            .strip_prefix(&self.project_root)
+            .map_err(|_| "effective root is not under the configured root".to_string())?;
+        let target = worktree_root
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| format!("isolated execution root cannot be resolved: {error}"))?;
+        if !target.starts_with(&worktree_root) {
+            return Err("isolated execution root escaped its worktree".to_string());
+        }
+        Ok(Some(target))
+    }
+
     pub(crate) async fn ensure_worktree(
         &mut self,
         required: bool,
@@ -1260,23 +1324,48 @@ impl ToolExecutor {
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
         {
-            let mut context = self.approval_context(
-                call,
-                level,
-                risk,
-                effective_root,
-                effective_execution_config,
-                requires_worktree,
-                session_id,
-                &format!("project or tool policy requires approval: {}", rule.reason),
-            );
-            context.remember_exact = None;
-            let mut decision = self.prompt_approval(call, level, context).await;
-            decision.remember_command = None;
+            let mut decision = self
+                .prompt_without_remembering(
+                    call,
+                    level,
+                    risk,
+                    (
+                        effective_root,
+                        effective_execution_config,
+                        requires_worktree,
+                    ),
+                    session_id,
+                    &format!("project or tool policy requires approval: {}", rule.reason),
+                )
+                .await;
             if decision.note.as_deref() == Some("User denied") || decision.note.is_none() {
                 decision.note = Some(rule.reason.clone());
             }
             return decision;
+        }
+        // A push publishes work: it always asks, even in auto mode, with
+        // --yes or with allow rules, which workspace instruction files can
+        // contain and an agent could therefore write.
+        if call.tool_name == "git_push" {
+            if !self.approval_handler.can_prompt() {
+                return ApprovalDecision::denied_by_policy(
+                    "git push needs the user's approval in an interactive session",
+                );
+            }
+            return self
+                .prompt_without_remembering(
+                    call,
+                    level,
+                    risk,
+                    (
+                        effective_root,
+                        effective_execution_config,
+                        requires_worktree,
+                    ),
+                    session_id,
+                    "pushing publishes commits to a remote and always needs approval",
+                )
+                .await;
         }
         if let Some(rule) = evaluations
             .iter()
@@ -1293,36 +1382,8 @@ impl ToolExecutor {
             return decision;
         }
 
-        if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
-            || risk == ToolRisk::ReadOnly
-        {
-            return ApprovalDecision::granted_policy();
-        }
-        if call.tool_name == "run_terminal"
-            && risk == ToolRisk::Safe
-            && self.classifier_auto_approval_allowed(call, level, risk)
-        {
-            return ApprovalDecision::granted_classifier();
-        }
-        if !requires_approval && matches!(risk, ToolRisk::Safe) {
-            return ApprovalDecision::granted_policy();
-        }
-        if self.approval_mode == ApprovalMode::Smart && is_file_edit_tool(&call.tool_name) {
-            return ApprovalDecision {
-                granted: true,
-                source: "mode".to_string(),
-                note: Some("accept-edits mode applies file edits automatically".to_string()),
-                remember_command: None,
-            };
-        }
-        if self.approval_mode == ApprovalMode::Policy && !self.approval_handler.can_prompt() {
-            return ApprovalDecision::denied_by_policy("no matching allow policy");
-        }
-        if self.approval_mode == ApprovalMode::Off {
-            return ApprovalDecision::granted_yolo();
-        }
-        if self.auto_approve {
-            return ApprovalDecision::granted_user();
+        if let Some(decision) = self.automatic_decision(call, level, risk, requires_approval) {
+            return decision;
         }
         let context = self.approval_context(
             call,
@@ -1334,7 +1395,77 @@ impl ToolExecutor {
             session_id,
             "effective tool metadata and risk classification require interactive approval",
         );
-        self.prompt_approval(call, level, context).await
+        self.prompt_approval(call, level, context, session_id).await
+    }
+
+    /// Decisions that need no prompt once rules have been applied: read-only
+    /// and classifier-safe actions, the permission mode's own grants or
+    /// refusals, and `--yes`. `None` means the user must be asked.
+    fn automatic_decision(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        risk: ToolRisk,
+        requires_approval: bool,
+    ) -> Option<ApprovalDecision> {
+        if matches!(level, PermissionLevel::ReadOnly | PermissionLevel::Plan)
+            || risk == ToolRisk::ReadOnly
+        {
+            return Some(ApprovalDecision::granted_policy());
+        }
+        if call.tool_name == "run_terminal"
+            && risk == ToolRisk::Safe
+            && self.classifier_auto_approval_allowed(call, level, risk)
+        {
+            return Some(ApprovalDecision::granted_classifier());
+        }
+        if !requires_approval && matches!(risk, ToolRisk::Safe) {
+            return Some(ApprovalDecision::granted_policy());
+        }
+        if self.approval_mode == ApprovalMode::Smart && is_file_edit_tool(&call.tool_name) {
+            return Some(ApprovalDecision {
+                granted: true,
+                source: "mode".to_string(),
+                note: Some("accept-edits mode applies file edits automatically".to_string()),
+                remember_command: None,
+            });
+        }
+        if self.approval_mode == ApprovalMode::Policy && !self.approval_handler.can_prompt() {
+            return Some(ApprovalDecision::denied_by_policy(
+                "no matching allow policy",
+            ));
+        }
+        if self.approval_mode == ApprovalMode::Off {
+            return Some(ApprovalDecision::granted_yolo());
+        }
+        self.auto_approve.then(ApprovalDecision::granted_user)
+    }
+
+    /// Prompts with a fixed reason and never offers to remember the grant.
+    async fn prompt_without_remembering(
+        &self,
+        call: &ToolCall,
+        level: PermissionLevel,
+        risk: ToolRisk,
+        scope: (&Path, &ExecutionConfig, bool),
+        session_id: Option<&str>,
+        reason: &str,
+    ) -> ApprovalDecision {
+        let (effective_root, effective_execution_config, requires_worktree) = scope;
+        let mut context = self.approval_context(
+            call,
+            level,
+            risk,
+            effective_root,
+            effective_execution_config,
+            requires_worktree,
+            session_id,
+            reason,
+        );
+        context.remember_exact = None;
+        let mut decision = self.prompt_approval(call, level, context, session_id).await;
+        decision.remember_command = None;
+        decision
     }
 
     pub(crate) fn refuse_hidden_or_closed_command(
@@ -1386,7 +1517,31 @@ impl ToolExecutor {
         call: &ToolCall,
         level: PermissionLevel,
         mut context: ApprovalContext,
+        session_id: Option<&str>,
     ) -> ApprovalDecision {
+        if matches!(call.tool_name.as_str(), "git_commit" | "git_push") {
+            let preview = match self.git_execution_root(call, session_id) {
+                Ok(Some(root)) => {
+                    crate::tools::git_tools::approval_preview(
+                        &call.tool_name,
+                        &call.arguments,
+                        &root,
+                    )
+                    .await
+                }
+                Ok(None) => vec![
+                    "This session has no worktree yet; one will be created from the current commit, so there is nothing of this session's to commit or push.".to_string(),
+                ],
+                Err(_) => Vec::new(),
+            };
+            if !preview.is_empty() {
+                let secrets = self.redaction_secrets();
+                context.details = preview
+                    .iter()
+                    .map(|line| redact_text_with_secrets(line, &secrets))
+                    .collect();
+            }
+        }
         loop {
             let decision = self
                 .approval_handler

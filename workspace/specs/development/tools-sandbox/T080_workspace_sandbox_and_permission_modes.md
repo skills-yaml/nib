@@ -495,6 +495,69 @@ resolutions:
   `--output=` file names and `wc --files0-from` can make single-command
   "read-only" Git or `wc` invocations write files or run configured helpers.
 
+**2b implementation (2026-10-09).** The host-side Git tools live in
+`src/tools/git_tools.rs`.
+
+`git_commit`:
+- Arguments are a message and optional workspace-relative paths, validated
+  with literal pathspecs and a `--` separator. Nothing staged is an error.
+- It branches first to `nib/<slug>` (with a numeric suffix on collision)
+  when HEAD is detached or on `main`, `master` or `origin/HEAD`'s branch.
+- It runs on the host with the user's Git environment, with
+  `GIT_TERMINAL_PROMPT=0`.
+- It is level Destructive, so the mode decides: `ask` and `accept-edits`
+  prompt, `plan` refuses, `auto` grants.
+
+`git_push`:
+- The remote must exist (default `origin`), and HEAD must be on a branch.
+  There is no force option, and the refspec is pinned to the same branch.
+- It always prompts, even in `auto`, with `--yes` or with allow rules.
+  Headless runs deny.
+
+Review of `1db1a28` (approved with fixes), and the resolutions:
+- **F1.** Every commit excludes `.nib` through an `:(exclude,top).nib`
+  pathspec. Explicit paths may not name nib state. Untracked nested
+  repositories are refused.
+- **F2.** Approval prompts carry a redacted preview: for a commit, the
+  message, the branch (or the new `nib/<topic>`), the changes and the diff
+  stat; for a push, the remote with credentials stripped from its URL, the
+  branch and the commits to be published.
+- **F3.** Allow rules can come from workspace instruction files that an
+  agent could edit, so `git_push` ignores allow rules entirely. This
+  supersedes D6's "explicit allow rule" exception.
+- **F4.** Git runs in its own session without a controlling terminal, so
+  terminal prompts fail fast while askpass and agents keep working. Its
+  process group is killed on timeout and after exit, and output is capped
+  while it streams.
+- **F5.** Inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and related
+  variables are removed, in the tool and in the fixtures.
+- **F6.** The push refspec is pinned.
+- **F7.** The change check runs before branching, and a failed commit
+  returns to the original branch and deletes the new one.
+- **Re-review of `d04deb5`, R1.** The preview is computed at the exact
+  directory the tool runs in (`git_execution_root`, mirroring
+  `ensure_worktree`): the session worktree, or a note that none exists yet.
+  It is never computed in the main checkout. **L1.** URL credentials are
+  stripped only from the authority. **L2, accepted residual risk.** A
+  pinentry that gpg-agent starts through `GPG_TTY` runs outside Git's
+  session and can still draw on the terminal. **L3, accepted.** Changes
+  made between the preview and the commit are not shown, and the group kill
+  after exit could in theory hit a reused group id.
+- **F8, accepted.**
+  - The protected-branch list (`main`, `master`, `origin/HEAD`'s branch) is
+    fixed rather than configurable.
+  - `nib run`'s console handler cannot push (fail closed until phase 6).
+  - The approval pre-check does not model the terminal redirect.
+
+Both tools:
+- They are not offered over nib's MCP server.
+- `git commit` and `git push` in `run_terminal` (including after `-C` or
+  `-c` global options) are redirected to the tools before any approval or
+  sandbox work.
+- Approval-engine helpers (`automatic_decision`,
+  `prompt_without_remembering`) keep `handle_approval` within the module
+  size limit.
+
 Plan mode uses the permission engine rather than the agent's planning mode,
 which no interactive surface selects. This matches Claude Code's read-only
 plan mode.
@@ -547,3 +610,21 @@ criteria are unresolved; this event does not establish main delivery or
 publication. Synchronization combines that phase with T069-T073 under the
 same applied minor 0.4.0 release and preserves the independent reviewed
 sandbox implementation. Combined review and native gates precede the push.
+
+## Integration Evidence (per phase)
+
+- **Phase 1** (sandbox mount plan): PR 52 merged the verified candidate
+  `ea2ac61` into `development` as
+  `045e0e21d6e51488fcfcc544e2fceb35f0eb2d3d` on 2026-10-08T16:38:49Z.
+- **Phase 2a** (permission modes): PR 54 merged the verified candidate
+  `0e8ecaf` as `21ccf1dcd4599900a242e889554f0fcd52ca4660` on
+  2026-10-09T20:10:07Z.
+
+For each phase, before the merge:
+- independent exact-candidate review approved it;
+- a serial `task verify` passed with `NIB_REQUIRE_BWRAP_TESTS=1`;
+- PR CI passed Linux Validate and macOS; the workflow skipped Windows.
+
+After each merge, `development` was re-read and contained the candidate
+with no file difference. T080 stays in development until every phase is
+integrated.

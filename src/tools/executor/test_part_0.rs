@@ -1790,3 +1790,194 @@ fn approval_precheck_matches_each_mode() {
     }]);
     assert!(!plan.requires_interactive_approval(&command));
 }
+
+fn git_tool_call(root: &std::path::Path, tool: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: tool.to_string(),
+        arguments,
+        session_id: Some("mode-session".to_string()),
+        project_root: Some(root.to_path_buf()),
+    }
+}
+
+/// T080 phase 2b: a push always asks, even in auto mode or with --yes,
+/// unless an explicit allow rule exists; headless runs cannot push; plan mode
+/// refuses commits and pushes; commits follow the mode like other changes.
+#[tokio::test]
+async fn git_tools_follow_modes_and_push_always_asks() {
+    let root = tempfile::tempdir().expect("root");
+    let push = git_tool_call(root.path(), "git_push", json!({}));
+    let commit = git_tool_call(root.path(), "git_commit", json!({"message": "x"}));
+
+    for mode in [ApprovalMode::Off, ApprovalMode::Manual, ApprovalMode::Smart] {
+        let (executor, prompts) = mode_executor(root.path(), mode, true);
+        let executor = executor.with_auto_approve(true);
+        assert!(
+            decide(&executor, root.path(), &push).await.granted,
+            "{mode:?}"
+        );
+        assert_eq!(
+            prompts.prompts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{mode:?} push must prompt"
+        );
+        assert!(executor.requires_interactive_approval(&push), "{mode:?}");
+    }
+    let (headless, _) = mode_executor(root.path(), ApprovalMode::Off, false);
+    assert!(!decide(&headless, root.path(), &push).await.granted);
+    assert!(!headless.requires_interactive_approval(&push));
+
+    // Allow rules can come from workspace instruction files an agent could
+    // write, so even an explicit allow rule does not skip the push prompt.
+    let (allowed, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
+    let allowed = allowed.with_policy_rules([PolicyRule {
+        effect: PolicyEffect::Allow,
+        tool_name: "*".to_string(),
+        argument_contains: None,
+        reason: "planted allow-all rule".to_string(),
+    }]);
+    assert!(decide(&allowed, root.path(), &push).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(allowed.requires_interactive_approval(&push));
+
+    let (plan, _) = mode_executor(root.path(), ApprovalMode::Plan, true);
+    assert!(!decide(&plan, root.path(), &push).await.granted);
+    assert!(!decide(&plan, root.path(), &commit).await.granted);
+
+    let (ask, prompts) = mode_executor(root.path(), ApprovalMode::Manual, true);
+    assert!(decide(&ask, root.path(), &commit).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (auto, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
+    assert!(decide(&auto, root.path(), &commit).await.granted);
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// T080 phase 2b: a terminal commit or push is redirected to the Git tools
+/// before any approval or sandbox work.
+#[tokio::test]
+async fn terminal_git_writes_are_redirected_to_git_tools() {
+    let root = tempfile::tempdir().expect("root");
+    let (mut executor, prompts) = mode_executor(root.path(), ApprovalMode::Off, true);
+    let result = executor
+        .execute(terminal_call(root.path(), "git commit -am wip"), None)
+        .await;
+    assert!(!result.success);
+    let error = result.error.unwrap_or_default();
+    assert!(error.contains("use the git_commit tool"), "{error}");
+    assert_eq!(prompts.prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+fn fixture_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("fixture git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// T080 phase 2b review R1: the commit preview describes the checkout the
+/// commit runs in (the session worktree), not the main checkout.
+#[tokio::test]
+#[serial_test::serial]
+async fn git_commit_preview_describes_the_session_worktree() {
+    let root = tempfile::tempdir().expect("root");
+    let root = root.path().canonicalize().expect("canonical root");
+    fixture_git(&root, &["init", "--quiet", "--initial-branch", "main"]);
+    fixture_git(&root, &["config", "user.name", "Fixture"]);
+    fixture_git(&root, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(root.join("README.md"), "start\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".nib/\n").unwrap();
+    fixture_git(&root, &["add", "."]);
+    fixture_git(&root, &["commit", "--quiet", "-m", "start"]);
+
+    let capture = Arc::new(ContextCapturingApprovalHandler::default());
+    let mut executor = ToolExecutor::new(root.clone(), ExecutionConfig::default())
+        .with_approval_handler(capture.clone());
+    let worktree = executor
+        .ensure_worktree(true, &root, Some("preview-session"))
+        .await
+        .expect("session worktree")
+        .expect("worktree path");
+    std::fs::write(worktree.join("feature.txt"), "session change\n").unwrap();
+    std::fs::write(root.join("main-only.txt"), "main checkout change\n").unwrap();
+
+    let commit = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "git_commit".to_string(),
+        arguments: json!({"message": "Add feature"}),
+        session_id: Some("preview-session".to_string()),
+        project_root: Some(root.clone()),
+    };
+    let context = executor.approval_context(
+        &commit,
+        PermissionLevel::Destructive,
+        ToolRisk::Destructive,
+        &root,
+        &executor.execution_config,
+        true,
+        Some("preview-session"),
+        "commit requires approval",
+    );
+    executor
+        .prompt_approval(
+            &commit,
+            PermissionLevel::Destructive,
+            context,
+            Some("preview-session"),
+        )
+        .await;
+    let details = capture
+        .context
+        .lock()
+        .expect("context lock")
+        .clone()
+        .expect("captured context")
+        .details
+        .join("\n");
+    assert!(details.contains("feature.txt"), "{details}");
+    assert!(!details.contains("main-only.txt"), "{details}");
+    assert!(details.contains("Branch: nib/session/"), "{details}");
+
+    let fresh = ToolCall {
+        session_id: Some("fresh-session".to_string()),
+        ..commit.clone()
+    };
+    let context = executor.approval_context(
+        &fresh,
+        PermissionLevel::Destructive,
+        ToolRisk::Destructive,
+        &root,
+        &executor.execution_config,
+        true,
+        Some("fresh-session"),
+        "commit requires approval",
+    );
+    executor
+        .prompt_approval(
+            &fresh,
+            PermissionLevel::Destructive,
+            context,
+            Some("fresh-session"),
+        )
+        .await;
+    let details = capture
+        .context
+        .lock()
+        .expect("context lock")
+        .clone()
+        .expect("captured context")
+        .details
+        .join("\n");
+    assert!(details.contains("no worktree yet"), "{details}");
+}
