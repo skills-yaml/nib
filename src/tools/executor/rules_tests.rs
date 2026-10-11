@@ -182,8 +182,13 @@ async fn ask_rules_prompt_even_for_read_only_actions() {
 #[tokio::test]
 async fn apply_patch_refuses_nib_state_and_git_metadata() {
     let root = tempfile::tempdir().expect("root");
-    for path in [".nib/permissions.json", "sub/.git/config", ".NIB/x"] {
-        let patch = format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n");
+    for patch in [
+        "--- /dev/null\n+++ b/.nib/permissions.json\n@@ -0,0 +1 @@\n+x\n".to_string(),
+        "--- /dev/null\n+++ b/.NIB/x\n@@ -0,0 +1 @@\n+x\n".to_string(),
+        // Review F1: a C-quoted name that Git decodes to `.nib`.
+        "--- /dev/null\n+++ \"b/\\056nib/config.toml\"\n@@ -0,0 +1 @@\n+x\n".to_string(),
+        "diff --git x/.nib/f y/.nib/f\nnew file mode 100644\n".to_string(),
+    ] {
         let error = crate::tools::core::dispatch(
             "apply_patch",
             crate::tools::ToolInvocationId::new(),
@@ -200,4 +205,41 @@ async fn apply_patch_refuses_nib_state_and_git_metadata() {
         .expect_err("refused");
         assert!(error.contains("nib state or Git metadata"), "{error}");
     }
+}
+
+/// Review F6: edits to instruction files always ask, even where file edits
+/// are otherwise automatic, and are refused when nobody can answer.
+#[tokio::test]
+async fn instruction_file_edits_always_ask() {
+    let _home = TestNibHome::isolated();
+    let root = tempfile::tempdir().expect("root");
+    let handler = Arc::new(Remembering::default());
+    let accept_edits = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+        .with_approval_handler(handler.clone())
+        .with_approval_mode(ApprovalMode::Smart);
+    let edit = |path: &str| {
+        call(
+            root.path(),
+            "apply_patch",
+            json!({"patch": format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n")}),
+        )
+    };
+    let ordinary = decide(&accept_edits, root.path(), &edit("src/lib.rs")).await;
+    assert!(
+        ordinary.granted && ordinary.source == "mode",
+        "{ordinary:?}"
+    );
+    assert_eq!(handler.prompts.load(Ordering::SeqCst), 0);
+
+    for path in ["AGENTS.md", "claude.local.md"] {
+        assert!(accept_edits.requires_interactive_approval(&edit(path)));
+        decide(&accept_edits, root.path(), &edit(path)).await;
+    }
+    assert_eq!(handler.prompts.load(Ordering::SeqCst), 2);
+    assert_eq!(handler.offered.lock().expect("offered")[0], None);
+
+    let headless = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+        .with_approval_mode(ApprovalMode::Off);
+    let refused = decide(&headless, root.path(), &edit("AGENTS.md")).await;
+    assert!(!refused.granted, "{refused:?}");
 }

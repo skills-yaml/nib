@@ -821,6 +821,23 @@ pub(crate) fn format_permission_rules(project_root: &Path) -> String {
             ));
         }
     }
+    if !set.trusted {
+        let ignored = crate::tools::executor::load_instruction_policy_rules(project_root)
+            .iter()
+            .filter(|rule| rule.effect == crate::tools::models::PolicyEffect::Allow)
+            .count();
+        if ignored > 0 {
+            lines.push(format!(
+                "  {ignored} allow line(s) in AGENTS.md or CLAUDE.md are ignored until /permissions trust"
+            ));
+        }
+    }
+    if set.unreadable {
+        lines.push(
+            "  warning: a rules file cannot be read, so every action asks until it is fixed"
+                .to_string(),
+        );
+    }
     for problem in &set.problems {
         lines.push(format!("  warning: {}", bounded_status_value(problem)));
     }

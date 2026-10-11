@@ -967,9 +967,13 @@ async fn read_tool_uses_executor_and_records_audit() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn direct_executor_uses_selected_profile_store_and_environment() {
+    let _home = crate::tools::permission_rules::TestNibHome::isolated();
     let root = tempdir().unwrap();
     initialize_git_repository(root.path());
+    // Allow lines shipped in AGENTS.md apply only to trusted projects (T080).
+    crate::tools::permission_rules::set_project_trust(root.path(), true).expect("trust");
     std::fs::write(
         root.path().join("AGENTS.md"),
         "- nib-policy: allow run_terminal printf\n",

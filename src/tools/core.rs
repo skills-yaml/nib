@@ -573,15 +573,16 @@ async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
     if patch.is_empty() {
         return Err("empty patch".to_string());
     }
-    // nib state holds permission settings and Git metadata holds hooks and
-    // configuration; file edits must not be able to plant either.
-    if let Some(path) = crate::tools::permission_rules::patch_paths(patch)
-        .into_iter()
-        .find(|path| {
-            path.split(['/', '\\'])
-                .any(|part| part.eq_ignore_ascii_case(".nib") || part.eq_ignore_ascii_case(".git"))
+    // nib state holds settings and skills, and Git metadata holds hooks and
+    // configuration; file edits must not be able to plant either. The paths
+    // come from Git itself, exactly as `git apply` will write them.
+    let paths = crate::tools::permission_matching::git_patch_paths(patch, cwd)?;
+    if let Some(path) = paths.iter().find(|path| {
+        path.split(['/', '\\']).any(|part| {
+            let part = part.trim_end_matches(['.', ' ']);
+            part.eq_ignore_ascii_case(".nib") || part.eq_ignore_ascii_case(".git")
         })
-    {
+    }) {
         return Err(format!(
             "apply_patch cannot change nib state or Git metadata ({path})"
         ));

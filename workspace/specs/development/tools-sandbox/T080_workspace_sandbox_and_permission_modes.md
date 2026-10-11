@@ -592,8 +592,9 @@ Claude Code. Compound commands are judged part by part, splitting on `&&`,
   of the file.
 - **Project local (user-home):** `~/.nib/permissions.json`, keyed by the
   canonical project path. It holds the project's trust flag and the rules
-  saved from prompts and `/permissions`. Tool commands cannot write it,
-  because the sandbox masks `$HOME`.
+  saved from prompts and `/permissions`. File edits cannot write it. On the
+  Linux sandbox route tool commands cannot either, because the sandbox masks
+  `$HOME`; on direct routes (macOS, Windows) an allowed command could.
 - **Project shared:** the `nib-policy:` lines of `AGENTS.md`, `CLAUDE.md`
   and their `.local` variants, plus the legacy remembered-command file
   `.nib/command-prefixes.json`. Their deny and require-approval lines always
@@ -622,6 +623,53 @@ project's trust flag.
 **Hardening.** `apply_patch` refuses patches that touch `.nib` or `.git`
 paths, so file edits cannot plant rules or Git configuration when phase 5
 edits in place.
+
+**Review of `c93ba01` (approve with fixes) and resolutions.**
+- **F1, High.** `apply_patch`'s `.nib`/`.git` guard parsed patch headers
+  itself, so C-quoted names (`"b/\056nib/x"`) and other prefixes slipped
+  through. Paths now come from `git apply --numstat -z`, Git's own parser;
+  a patch Git cannot read cannot be applied either.
+- **F2, Medium.** `edit(<glob>)` matched `--- src/AGENTS.md`, which `-p1`
+  writes as `AGENTS.md`. Same fix: rules see Git's paths.
+- **F3, Medium.** An exact suggestion such as `sudo rm *` was re-parsed as a
+  prefix rule. Commands with glob characters (`*`, `?`, `[`) offer no
+  remember choice.
+- **F4, Medium.** Deny and ask rules for commands now look through
+  `NAME=value` words and transparent wrappers (`sudo`, `env`, `timeout`,
+  `xargs` and others, trying every word after the wrapper), program paths and
+  case. Unsplittable commands are compared word by word after removing
+  quotes. Documented as a guardrail, not a sandbox.
+- **F5, Medium.** `read(...)` covers `read_file`, `list_directory` and
+  `grep`. Paths are matched lexically and after resolving symbolic links,
+  relative to the session directory or the project root, ignoring ASCII case.
+  A deny or ask on an anchored folder also covers a `grep` of any folder above
+  it. Absolute and `..` rule paths are rejected.
+- **F6, Medium (design).** Edits to top-level `AGENTS.md`, `AGENTS.local.md`,
+  `CLAUDE.md` and `CLAUDE.local.md` always ask, even in `accept-edits` and
+  `auto` or with allow rules, and are refused when nobody can answer
+  (`always_asks`, shared with `git_push`). A terminal command allowed by a
+  rule could still write them; accepted residual risk.
+- **F7, Low-Medium.** The wrapper list now includes process wrappers,
+  interpreters, package runners, `git`, `docker`, `podman` and `kubectl`, and
+  the word after `run`/`exec`/`x`/`dlx` is checked against it.
+- **F8, Low.** A linked worktree uses its main project's rules and trust,
+  accepted only when Git's back-link (`<gitdir>/gitdir`) points at this
+  worktree, so a copied `.git` file cannot claim another project's trust.
+- **F9, Low.** Spec and guide wording now limit the protection of `~/.nib` to
+  file edits everywhere and to commands on the Linux sandbox route.
+- **F10, accepted.** A command rule ignores `cwd`, timeout and background,
+  as in Claude Code. Documented.
+- **F11, Low.** When a rules file exists but cannot be read, every action asks
+  (headless runs deny) until it is fixed, and `/permissions` says so.
+- **F12, Low.** Saving forgets projects whose folder no longer exists and caps
+  the file at 1000 projects.
+- **F13, Low.** Unit tests use a thread-local nib home (`TestNibHome`) and
+  never read the developer's home or the environment. `task test` and
+  `task test:integration` set `NIB_HOME` under `target/`, and the
+  integration fixtures that need trust write it there.
+- **F14, Low.** Rules are stored in canonical spelling, so `bash(x:*)` and
+  `terminal(x *)` are one rule and either removes it. `/permissions` counts
+  the instruction-file allow lines that trust would enable.
 
 **Out of scope.** Project `.nib/config.toml` settings other than rules
 (for example `approvals.mode`) still apply without trust. That is recorded

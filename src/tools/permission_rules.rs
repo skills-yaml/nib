@@ -1,30 +1,30 @@
 //! T080 phase 3: permission rules, their layers and project trust.
 //!
-//! Rules are `tool` or `tool(specifier)`. The user layer is the
-//! `[permissions]` table of `~/.nib/config.toml`; the project-local layer and
-//! each project's trust flag live in `~/.nib/permissions.json`, keyed by the
-//! canonical project path. Both are outside the project and outside the tool
-//! sandbox, so neither a cloned repository nor a tool command can write them.
+//! Rules are `tool` or `tool(specifier)` (see `permission_matching`). The
+//! user layer is the `[permissions]` table of `~/.nib/config.toml`; the
+//! project-local layer and each project's trust flag live in
+//! `~/.nib/permissions.json`, keyed by the canonical project path. Both are
+//! outside the project, so a cloned repository or a file edit cannot write
+//! them, and the Linux sandbox hides them from tool commands.
 
 use crate::tools::models::{PolicyEffect, PolicyRule, ToolCall};
+use crate::tools::permission_matching::{
+    allow_command_matches, call_paths, directory_reaches, glob_matches, parse_rule,
+    restrictive_command_matches, tool_matches, Specifier,
+};
+pub(crate) use crate::tools::permission_matching::{
+    canonical_rule, command_segments, suggested_terminal_rule,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const PERMISSIONS_FILE: &str = "permissions.json";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_RULES_PER_LIST: usize = 256;
-const MAX_RULE_BYTES: usize = 1024;
+const MAX_PROJECTS: usize = 1000;
 const SAVE_ATTEMPTS: usize = 3;
-
-/// Programs that run other programs: a word prefix would grant far more than
-/// the command the user saw, so only the exact command is suggested.
-const WRAPPER_PROGRAMS: &[&str] = &[
-    "sudo", "su", "doas", "env", "sh", "bash", "zsh", "fish", "dash", "ksh", "eval", "exec",
-    "command", "builtin", "xargs", "find", "timeout", "nice", "nohup", "time", "watch", "ssh",
-    "python", "python3", "node", "perl", "ruby", "deno", "bun", "php", "lua", "awk", "sed",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleEffect {
@@ -68,12 +68,6 @@ impl RuleLayer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Specifier {
-    Command { words: Vec<String>, prefix: bool },
-    Path(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PermissionRule {
     pub(crate) effect: RuleEffect,
     pub(crate) layer: RuleLayer,
@@ -82,176 +76,46 @@ pub(crate) struct PermissionRule {
     specifier: Option<Specifier>,
 }
 
-/// Parses `tool` or `tool(specifier)` into a canonical tool name and matcher.
-fn parse_rule(text: &str) -> Result<(String, Option<Specifier>), String> {
-    let text = text.trim();
-    if text.is_empty() || text.len() > MAX_RULE_BYTES {
-        return Err("a rule must be 1 to 1024 bytes".to_string());
-    }
-    if text.chars().any(char::is_control) {
-        return Err("a rule cannot contain control characters".to_string());
-    }
-    let (name, specifier) = match text.split_once('(') {
-        Some((name, rest)) => {
-            let inner = rest
-                .strip_suffix(')')
-                .ok_or_else(|| format!("rule `{text}` is missing its closing parenthesis"))?;
-            (name.trim(), Some(inner.trim()))
-        }
-        None => (text, None),
-    };
-    let tool = match name.to_ascii_lowercase().as_str() {
-        "terminal" | "bash" | "run_terminal" => "run_terminal".to_string(),
-        "edit" | "apply_patch" => "apply_patch".to_string(),
-        "read" | "read_file" => "read_file".to_string(),
-        other
-            if !other.is_empty()
-                && other
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-')) =>
-        {
-            other.to_string()
-        }
-        _ => return Err(format!("rule `{text}` does not name a tool")),
-    };
-    let Some(specifier) = specifier.filter(|value| !value.is_empty() && *value != "*") else {
-        return Ok((tool, None));
-    };
-    let specifier = if tool == "run_terminal" {
-        let (body, prefix) = if let Some(body) = specifier.strip_suffix(":*") {
-            (body, true)
-        } else if let Some(body) = specifier.strip_suffix(" *") {
-            (body, true)
-        } else {
-            (specifier, false)
-        };
-        let words = command_words(body).ok_or_else(|| {
-            format!("rule `{text}` must name a plain command without shell operators or quotes")
-        })?;
-        if words.is_empty() {
-            return Err(format!("rule `{text}` names no command"));
-        }
-        Specifier::Command { words, prefix }
-    } else if path_tool(&tool) {
-        Specifier::Path(normalize_rule_path(specifier))
-    } else {
-        return Err(format!(
-            "rule `{text}`: only terminal and path tools take a specifier"
-        ));
-    };
-    Ok((tool, Some(specifier)))
-}
-
-/// Validates a rule as typed by the user and returns its canonical spelling.
-pub(crate) fn canonical_rule(text: &str) -> Result<String, String> {
-    parse_rule(text)?;
-    Ok(text.trim().to_string())
-}
-
-fn path_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "read_file" | "list_directory" | "grep" | "apply_patch"
-    )
-}
-
-fn normalize_rule_path(path: &str) -> String {
-    let mut path = path.trim();
-    while let Some(rest) = path.strip_prefix("./") {
-        path = rest;
-    }
-    path.trim_end_matches('/').to_string()
-}
-
-/// Splits a command segment into words the way `sh` would for plain words.
-/// `None` when the text contains anything a word split cannot model.
-fn command_words(segment: &str) -> Option<Vec<String>> {
-    if segment.chars().any(|c| {
-        (c.is_control() && c != '\t')
-            || matches!(
-                c,
-                '`' | '$' | '\'' | '"' | '\\' | '(' | ')' | '{' | '}' | '<' | '>' | '&' | '|' | ';'
-            )
-    }) {
-        return None;
-    }
-    Some(
-        segment
-            .split([' ', '\t'])
-            .filter(|word| !word.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-/// Splits a compound command on `&&`, `||`, `;`, `|` and newlines. `None`
-/// when quoting, substitution, redirection or a lone `&` make that unsafe.
-pub(crate) fn command_segments(command: &str) -> Option<Vec<Vec<String>>> {
-    let joined = command.replace("&&", "\n").replace("||", "\n");
-    let mut segments = Vec::new();
-    for segment in joined.split(['\n', ';', '|']) {
-        let words = command_words(segment)?;
-        if !words.is_empty() {
-            segments.push(words);
-        }
-    }
-    (!segments.is_empty()).then_some(segments)
-}
-
-fn program_name(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
-}
-
 impl PermissionRule {
-    fn command_matches(words: &[String], rule: &[String], prefix: bool, lenient: bool) -> bool {
-        if words.len() < rule.len() || (!prefix && words.len() != rule.len()) {
+    /// Whether a deny or ask rule applies to a call: any part of a compound
+    /// command, any path, or a directory search that reaches the rule's path.
+    fn restricts(&self, call: &ToolCall, roots: &[&Path]) -> bool {
+        if !tool_matches(&self.tool, &call.tool_name) {
             return false;
         }
-        words
-            .iter()
-            .zip(rule)
-            .enumerate()
-            .all(|(index, (word, expected))| {
-                word == expected || (lenient && index == 0 && program_name(word) == expected)
-            })
-    }
-
-    /// Whether the rule applies to one call. Allow rules need every part of a
-    /// compound command; deny and ask rules need any part, and fall back to a
-    /// text search when the command cannot be split.
-    fn matches(&self, call: &ToolCall, root: &Path) -> bool {
-        if self.tool != call.tool_name {
-            return false;
-        }
-        let Some(specifier) = &self.specifier else {
-            return true;
-        };
-        match specifier {
-            Specifier::Command { words, prefix } => {
+        match &self.specifier {
+            None => true,
+            Some(Specifier::Command { words, prefix }) => {
                 let command = call
                     .arguments
                     .get("command")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let restrictive = self.effect != RuleEffect::Allow;
-                match command_segments(command) {
-                    Some(segments) => segments
-                        .iter()
-                        .any(|segment| Self::command_matches(segment, words, *prefix, restrictive)),
-                    None => restrictive && command.contains(&words.join(" ")),
-                }
+                restrictive_command_matches(command, words, *prefix)
             }
-            Specifier::Path(glob) => {
-                let paths = call_paths(call, root);
-                if paths.is_empty() {
-                    return self.effect != RuleEffect::Allow;
-                }
-                if self.effect == RuleEffect::Allow {
-                    paths.iter().all(|path| glob_matches(glob, path))
-                } else {
-                    paths.iter().any(|path| glob_matches(glob, path))
-                }
+            Some(Specifier::Path(glob)) => {
+                let Some(paths) = call_paths(call, roots) else {
+                    return true;
+                };
+                let searches = call.tool_name == "grep";
+                paths.iter().any(|path| {
+                    glob_matches(glob, path) || (searches && directory_reaches(glob, path))
+                })
             }
+        }
+    }
+
+    /// Whether an allow rule covers a non-terminal call: every path must match.
+    fn allows(&self, call: &ToolCall, roots: &[&Path]) -> bool {
+        if !tool_matches(&self.tool, &call.tool_name) {
+            return false;
+        }
+        match &self.specifier {
+            None => true,
+            Some(Specifier::Command { .. }) => false,
+            Some(Specifier::Path(glob)) => call_paths(call, roots).is_some_and(|paths| {
+                !paths.is_empty() && paths.iter().all(|path| glob_matches(glob, path))
+            }),
         }
     }
 
@@ -259,169 +123,11 @@ impl PermissionRule {
         match &self.specifier {
             None => true,
             Some(Specifier::Command { words, prefix }) => {
-                Self::command_matches(segment, words, *prefix, false)
+                allow_command_matches(segment, words, *prefix)
             }
             Some(Specifier::Path(_)) => false,
         }
     }
-}
-
-/// Workspace-relative paths a call reads or edits. Absolute paths under the
-/// root are made relative; paths are normalized lexically.
-fn call_paths(call: &ToolCall, root: &Path) -> Vec<String> {
-    let raw: Vec<String> = if call.tool_name == "apply_patch" {
-        patch_paths(
-            call.arguments
-                .get("patch")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
-    } else {
-        vec![call
-            .arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".")
-            .to_string()]
-    };
-    raw.iter()
-        .map(|path| relative_lexical(Path::new(path), root))
-        .collect()
-}
-
-fn relative_lexical(path: &Path, root: &Path) -> String {
-    let path = path.strip_prefix(root).unwrap_or(path);
-    let mut parts: Vec<String> = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            Component::ParentDir => {
-                if parts.pop().is_none() {
-                    parts.push("..".to_string());
-                }
-            }
-            Component::RootDir => parts.push(String::new()),
-            Component::CurDir | Component::Prefix(_) => {}
-        }
-    }
-    parts.join("/")
-}
-
-/// File paths named by a unified or Git patch's headers.
-pub(crate) fn patch_paths(patch: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        let candidate = if let Some(rest) = line.strip_prefix("diff --git ") {
-            for part in rest.split(' ') {
-                if let Some(path) = part.strip_prefix("a/").or_else(|| part.strip_prefix("b/")) {
-                    paths.push(path.to_string());
-                }
-            }
-            continue;
-        } else if let Some(rest) = line
-            .strip_prefix("--- ")
-            .or_else(|| line.strip_prefix("+++ "))
-        {
-            rest.split('\t').next().unwrap_or(rest)
-        } else if let Some(rest) = line
-            .strip_prefix("rename from ")
-            .or_else(|| line.strip_prefix("rename to "))
-            .or_else(|| line.strip_prefix("copy from "))
-            .or_else(|| line.strip_prefix("copy to "))
-        {
-            rest
-        } else {
-            continue;
-        };
-        if candidate == "/dev/null" {
-            continue;
-        }
-        let path = candidate
-            .strip_prefix("a/")
-            .or_else(|| candidate.strip_prefix("b/"))
-            .unwrap_or(candidate);
-        paths.push(path.to_string());
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-/// Gitignore-style matching: a glob without `/` matches a file name at any
-/// depth; otherwise it matches from the workspace root. `**` spans
-/// directories and a match on a directory covers everything below it.
-pub(crate) fn glob_matches(glob: &str, path: &str) -> bool {
-    let path_parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    if glob.is_empty() {
-        return false;
-    }
-    if !glob.contains('/') {
-        return path_parts.iter().any(|part| segment_matches(glob, part));
-    }
-    let glob_parts: Vec<&str> = glob.split('/').filter(|part| !part.is_empty()).collect();
-    (0..=path_parts.len()).any(|end| parts_match(&glob_parts, &path_parts[..end]))
-}
-
-fn parts_match(glob: &[&str], path: &[&str]) -> bool {
-    match glob.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|skip| parts_match(rest, &path[skip..])),
-        Some((first, rest)) => path
-            .split_first()
-            .is_some_and(|(part, tail)| segment_matches(first, part) && parts_match(rest, tail)),
-    }
-}
-
-fn segment_matches(glob: &str, text: &str) -> bool {
-    fn inner(glob: &[char], text: &[char]) -> bool {
-        match glob.split_first() {
-            None => text.is_empty(),
-            Some(('*', rest)) => (0..=text.len()).any(|skip| inner(rest, &text[skip..])),
-            Some(('?', rest)) => !text.is_empty() && inner(rest, &text[1..]),
-            Some((c, rest)) => text.first() == Some(c) && inner(rest, &text[1..]),
-        }
-    }
-    let glob: Vec<char> = glob.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    inner(&glob, &text)
-}
-
-/// The rule offered by "don't ask again": the program and its subcommand word
-/// as a prefix, or the exact command when a prefix would grant too much.
-pub(crate) fn suggested_terminal_rule(command: &str) -> Option<String> {
-    let segments = command_segments(command)?;
-    let [words] = segments.as_slice() else {
-        return None;
-    };
-    if words.len() < 2 || command.contains('\n') {
-        return None;
-    }
-    let exact = words.join(" ");
-    let program = words[0].as_str();
-    let subcommand_word = |word: &str| {
-        word.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-            && word
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
-    };
-    if program.contains('/')
-        || program.contains('=')
-        || WRAPPER_PROGRAMS.contains(&program)
-        || program.starts_with("python")
-        || !subcommand_word(&words[1])
-    {
-        return Some(exact);
-    }
-    let mut prefix = vec![words[0].clone(), words[1].clone()];
-    if matches!(words[1].as_str(), "run" | "exec" | "x") {
-        match words.get(2) {
-            Some(script) if subcommand_word(script) => prefix.push(script.clone()),
-            _ => return Some(exact),
-        }
-    }
-    Some(format!("{} *", prefix.join(" ")))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -453,25 +159,60 @@ struct PermissionsFile {
     projects: BTreeMap<String, ProjectEntry>,
 }
 
-/// `$NIB_HOME`, else `~/.nib`. Unit tests never read the developer's home.
+/// `$NIB_HOME`, else `~/.nib`. Unit tests use only `TestNibHome`, never
+/// the developer's home or the process environment.
 pub(crate) fn nib_home() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("NIB_HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path));
+    #[cfg(test)]
+    {
+        TEST_HOME.with(|home| home.borrow().clone())
     }
-    if cfg!(test) {
-        return None;
+    #[cfg(not(test))]
+    {
+        if let Some(path) = std::env::var_os("NIB_HOME").filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(".nib"))
     }
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|value| !value.is_empty())
-        .map(|home| PathBuf::from(home).join(".nib"))
 }
 
+/// Settings are keyed by the canonical project folder. A linked Git worktree
+/// (a session or subagent worktree) uses its main project's settings.
 fn project_key(project_root: &Path) -> Option<String> {
-    project_root
+    let root = project_root.canonicalize().ok()?;
+    let root = main_worktree(&root).unwrap_or(root);
+    Some(root.display().to_string())
+}
+
+/// The main checkout of a linked worktree, accepted only when the repository
+/// links back to this worktree, so a crafted `.git` file cannot claim
+/// another project's trust.
+fn main_worktree(root: &Path) -> Option<PathBuf> {
+    let pointer = root.join(".git");
+    if !std::fs::symlink_metadata(&pointer)
+        .ok()?
+        .file_type()
+        .is_file()
+    {
+        return None;
+    }
+    let text = read_bounded(&pointer)?;
+    let gitdir = root
+        .join(text.trim().strip_prefix("gitdir:")?.trim())
         .canonicalize()
-        .ok()
-        .map(|path| path.display().to_string())
+        .ok()?;
+    let back_link = read_bounded(&gitdir.join("gitdir"))?;
+    if gitdir.join(back_link.trim()).canonicalize().ok()? != pointer.canonicalize().ok()? {
+        return None;
+    }
+    let common = read_bounded(&gitdir.join("commondir"))?;
+    let common = gitdir.join(common.trim()).canonicalize().ok()?;
+    if common.file_name()? != ".git" || gitdir.parent()? != common.join("worktrees") {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
 }
 
 fn read_bounded(path: &Path) -> Option<String> {
@@ -511,6 +252,9 @@ pub(crate) struct RuleSet {
     pub(crate) rules: Vec<PermissionRule>,
     pub(crate) trusted: bool,
     pub(crate) problems: Vec<String>,
+    /// A rules file exists but cannot be read. Its deny rules may be
+    /// missing, so every action asks until it is repaired.
+    pub(crate) unreadable: bool,
 }
 
 impl RuleSet {
@@ -535,7 +279,10 @@ impl RuleSet {
                     }
                 }
             }
-            Err(error) => set.problems.push(error),
+            Err(error) => {
+                set.unreadable = true;
+                set.problems.push(error);
+            }
         }
         set
     }
@@ -546,6 +293,7 @@ impl RuleSet {
             return;
         }
         let Some(text) = read_bounded(&path) else {
+            self.unreadable = true;
             self.problems.push(format!(
                 "{} is not a regular file under 1 MiB",
                 path.display()
@@ -555,6 +303,7 @@ impl RuleSet {
         let value: toml::Value = match toml::from_str(&text) {
             Ok(value) => value,
             Err(error) => {
+                self.unreadable = true;
                 self.problems
                     .push(format!("{} is invalid: {error}", path.display()));
                 return;
@@ -568,6 +317,7 @@ impl RuleSet {
                 continue;
             };
             let Some(items) = list.as_array() else {
+                self.unreadable = true;
                 self.problems.push(format!(
                     "{}: permissions.{} must be a list of strings",
                     path.display(),
@@ -601,29 +351,38 @@ impl RuleSet {
     }
 
     /// The strongest rule decision for a call: deny, then ask, then allow.
-    /// A compound command is allowed only when every part is allowed by a
-    /// rule or is read-only on its own.
-    pub(crate) fn evaluate(&self, call: &ToolCall, root: &Path) -> Option<PolicyRule> {
+    /// `roots` are the directory the call runs in, then the project root;
+    /// paths are made relative to whichever contains them. A compound command
+    /// is allowed only when every part is allowed by a rule or is read-only
+    /// on its own.
+    pub(crate) fn evaluate(&self, call: &ToolCall, roots: &[&Path]) -> Option<PolicyRule> {
         for effect in [RuleEffect::Deny, RuleEffect::Ask] {
             if let Some(rule) = self
                 .rules
                 .iter()
-                .find(|rule| rule.effect == effect && rule.matches(call, root))
+                .find(|rule| rule.effect == effect && rule.restricts(call, roots))
             {
                 return Some(policy_rule(rule, call));
             }
         }
-        let allows = self
-            .rules
-            .iter()
-            .filter(|rule| rule.effect == RuleEffect::Allow && rule.tool == call.tool_name);
+        if self.unreadable {
+            return Some(PolicyRule {
+                effect: PolicyEffect::RequireApproval,
+                tool_name: call.tool_name.clone(),
+                argument_contains: None,
+                reason: "a permission rules file cannot be read; see /permissions".to_string(),
+            });
+        }
+        let mut allows = self.rules.iter().filter(|rule| {
+            rule.effect == RuleEffect::Allow && tool_matches(&rule.tool, &call.tool_name)
+        });
         if call.tool_name != "run_terminal" {
             return allows
-                .clone()
-                .find(|rule| rule.matches(call, root))
+                .find(|rule| rule.allows(call, roots))
                 .map(|rule| policy_rule(rule, call));
         }
-        if let Some(rule) = allows.clone().find(|rule| rule.specifier.is_none()) {
+        let allows: Vec<&PermissionRule> = allows.collect();
+        if let Some(rule) = allows.iter().find(|rule| rule.specifier.is_none()) {
             return Some(policy_rule(rule, call));
         }
         let command = call.arguments.get("command").and_then(Value::as_str)?;
@@ -631,10 +390,10 @@ impl RuleSet {
         let mut used = None;
         for segment in &segments {
             if let Some(rule) = allows
-                .clone()
+                .iter()
                 .find(|rule| rule.command_part_allowed(segment))
             {
-                used.get_or_insert(rule);
+                used.get_or_insert(*rule);
             } else if crate::tools::classifier::classify_command(&segment.join(" "))
                 != crate::tools::classifier::ToolRisk::ReadOnly
             {
@@ -705,6 +464,14 @@ fn update_project_entry(
         if *entry == ProjectEntry::default() {
             file.projects.remove(&key);
         }
+        // Forget folders that no longer exist, and keep the file bounded.
+        file.projects
+            .retain(|path, _| path == &key || Path::new(path).is_dir());
+        if file.projects.len() > MAX_PROJECTS {
+            return Err(format!(
+                "nib keeps settings for at most {MAX_PROJECTS} projects"
+            ));
+        }
         file.version = 1;
         let encoded = serde_json::to_vec_pretty(&file).map_err(|error| error.to_string())?;
         if encoded.len() as u64 > MAX_FILE_BYTES {
@@ -754,13 +521,15 @@ pub(crate) fn add_project_rule(
 
 /// Removes a project-local rule from every list. Returns false when absent.
 pub(crate) fn remove_project_rule(project_root: &Path, rule: &str) -> Result<bool, String> {
-    let rule = rule.trim().to_string();
+    let rule = canonical_rule(rule).unwrap_or_else(|_| rule.trim().to_string());
     update_project_entry(project_root, |entry| {
         let mut removed = false;
         for effect in [RuleEffect::Allow, RuleEffect::Ask, RuleEffect::Deny] {
             let list = entry.list_mut(effect);
             let before = list.len();
-            list.retain(|existing| existing != &rule);
+            list.retain(|existing| {
+                existing != &rule && canonical_rule(existing).ok().as_ref() != Some(&rule)
+            });
             removed |= list.len() != before;
         }
         Ok(removed)
@@ -779,19 +548,24 @@ pub(crate) fn set_project_trust(project_root: &Path, trusted: bool) -> Result<bo
     })
 }
 
-/// Points `NIB_HOME` at a temporary directory while it lives.
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Gives the current thread a temporary nib home while it lives. Unit tests
+/// otherwise see no user settings at all.
 #[cfg(test)]
 pub(crate) struct TestNibHome {
     pub(crate) directory: tempfile::TempDir,
-    previous: Option<std::ffi::OsString>,
+    previous: Option<PathBuf>,
 }
 
 #[cfg(test)]
 impl TestNibHome {
     pub(crate) fn isolated() -> Self {
         let directory = tempfile::tempdir().expect("nib home");
-        let previous = std::env::var_os("NIB_HOME");
-        std::env::set_var("NIB_HOME", directory.path());
+        let previous = TEST_HOME.with(|home| home.replace(Some(directory.path().to_path_buf())));
         Self {
             directory,
             previous,
@@ -802,10 +576,8 @@ impl TestNibHome {
 #[cfg(test)]
 impl Drop for TestNibHome {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var("NIB_HOME", value),
-            None => std::env::remove_var("NIB_HOME"),
-        }
+        let previous = self.previous.take();
+        TEST_HOME.with(|home| *home.borrow_mut() = previous);
     }
 }
 
