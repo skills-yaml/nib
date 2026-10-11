@@ -698,6 +698,12 @@ edits in place.
   without the Taskfile can still read the developer's `~/.nib` in
   integration tests that do not set `NIB_HOME`; accepted.
 
+**Final re-review of `335e1a3`: approve.** Its three low notes are fixed
+in the delivery candidate: the legacy remembered-command file is ignored in
+linked worktrees, deny matching understands `[...]` classes in command
+words, and `git rev-parse --show-prefix` scrubs the same Git variables as the
+numstat call.
+
 **Out of scope.** Project `.nib/config.toml` settings other than rules
 (for example `approvals.mode`) still apply without trust. That is recorded
 as a T082 follow-up. The stale-write check stays in phase 5.

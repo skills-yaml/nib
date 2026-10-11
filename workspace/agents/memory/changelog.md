@@ -787,3 +787,16 @@ re-read after the normal push. T083 is in test, sharing the already-applied
 Content:
 
 Recorded the host-side Git commit and push decision in decisions.md.
+
+## 2026-10-11 - T080 phase 3 permission rules decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the permission-rule layers, project trust and always-allow decision
+in decisions.md.

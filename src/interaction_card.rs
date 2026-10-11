@@ -328,7 +328,10 @@ pub fn matching_remembered_invocation(
 ) -> bool {
     // The legacy file lives inside the project, which a cloned repository
     // could ship, so it applies only to trusted projects.
+    // A linked worktree's `.nib` can be created by sandboxed commands, so
+    // only the main checkout's file counts.
     crate::tools::permission_rules::project_trusted(project_root)
+        && crate::tools::permission_rules::linked_worktree_main(project_root).is_none()
         && load_remembered(project_root)
             .into_iter()
             .any(|stored| stored == *invocation)

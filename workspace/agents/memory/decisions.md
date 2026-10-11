@@ -678,3 +678,31 @@ committed or pushed. Git runs without a controlling terminal, and its process
 group is killed on timeout.
 Terminal `git commit` and `git push` are redirected to the tools. Neither tool
 is offered over nib's MCP server.
+
+## 2026-10-11 - Permission rules live outside the project; shipped allow lines need trust
+
+- Type: decision
+- Source: T080 phase 3
+- Confidence: high
+- Review: independent exact-candidate review (three rounds) before delivery
+- Supersedes: exact-invocation memory in `.nib/command-prefixes.json`
+
+Content:
+
+Permission rules (`allow`, `ask`, `deny`; `terminal(cargo test *)`,
+`read(<glob>)`, `edit(<glob>)`) come from `[permissions]` in
+`~/.nib/config.toml` and from `~/.nib/permissions.json`, which also holds each
+project's trust flag keyed by its canonical path (linked worktrees use their
+main checkout through Git's back-link). Deny beats ask beats allow. Allow
+rules match exactly and every part of a compound command must be allowed or
+read-only; deny and ask rules match loosely at any word. Allow lines shipped
+in `AGENTS.md`/`CLAUDE.md` and the legacy `.nib/command-prefixes.json` apply
+only after `/permissions trust`, and in a worktree only the main checkout's
+lines count. "Don't ask again" saves a `program subcommand *` rule (exact
+command for wrappers, interpreters, git and container tools; nothing for
+compound or glob commands). Patch paths come from `git apply --numstat`.
+Edits to top-level `AGENTS.md`/`CLAUDE.md` always ask, like `git_push`, and
+`apply_patch` never writes `.nib` or `.git`. An unreadable rules file or an
+unparsable deny/ask rule makes every action ask. `NIB_HOME` overrides
+`~/.nib`; unit tests use a thread-local home. Open follow-up (T082): other
+project `.nib/config.toml` settings still apply without trust.

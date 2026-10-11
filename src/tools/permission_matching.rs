@@ -423,7 +423,9 @@ pub(crate) fn git_patch_paths(patch: &str, cwd: &Path) -> Result<Vec<String>, St
         .current_dir(cwd)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -524,6 +526,19 @@ fn segment_matches(glob: &str, text: &str) -> bool {
             None => text.is_empty(),
             Some(('*', rest)) => (0..=text.len()).any(|skip| inner(rest, &text[skip..])),
             Some(('?', rest)) => !text.is_empty() && inner(rest, &text[1..]),
+            // A bracket class matches one character (rule texts never
+            // contain `[`, so this only widens command-word patterns).
+            Some(('[', rest)) => match rest.iter().position(|c| *c == ']') {
+                Some(end) => {
+                    !text.is_empty() && {
+                        let class = &rest[..end];
+                        let negated = matches!(class.first(), Some('!' | '^'));
+                        let members = if negated { &class[1..] } else { class };
+                        members.contains(&text[0]) != negated && inner(&rest[end + 1..], &text[1..])
+                    }
+                }
+                None => text.first() == Some(&'[') && inner(rest, &text[1..]),
+            },
             Some((c, rest)) => text.first() == Some(c) && inner(rest, &text[1..]),
         }
     }

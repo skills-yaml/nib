@@ -209,6 +209,7 @@ fn deny_beats_ask_beats_allow_and_is_hard_to_step_around() {
         "strace rm x",
         "sh -c rm",
         "/bin/r? -rf x",
+        "/bin/r[m] -rf x",
     ] {
         assert_eq!(
             effect_of(&set, &terminal(denied)),
