@@ -1558,11 +1558,18 @@ impl ToolExecutor {
             let Some(invocation) = crate::interaction_card::terminal_invocation(call) else {
                 return ApprovalDecision::denied_unshowable();
             };
-            if invocation.command != command {
+            if crate::tools::permission_rules::suggested_terminal_rule(&invocation.command)
+                .as_deref()
+                != Some(command.as_str())
+            {
                 return ApprovalDecision::denied_unshowable();
             }
-            match crate::interaction_card::remember_invocation(&self.project_root, &invocation) {
-                Ok(()) => {
+            match crate::tools::permission_rules::add_project_rule(
+                &self.project_root,
+                crate::tools::permission_rules::RuleEffect::Allow,
+                &format!("run_terminal({command})"),
+            ) {
+                Ok(_) => {
                     return ApprovalDecision {
                         granted: true,
                         source: "command_prefix".to_string(),
@@ -1571,8 +1578,7 @@ impl ToolExecutor {
                     };
                 }
                 Err(_) => {
-                    context.input_error =
-                        Some("Input error: the command prefix was not saved".to_string());
+                    context.input_error = Some("Input error: the rule was not saved".to_string());
                 }
             }
         }
@@ -1651,6 +1657,10 @@ impl ToolExecutor {
                 .iter()
                 .filter_map(|hook| hook.evaluate(call, effective_root))
                 .filter(|rule| rule.matches(call)),
+        );
+        evaluations.extend(
+            crate::tools::permission_rules::RuleSet::load(&self.project_root)
+                .evaluate(call, effective_root),
         );
         evaluations
     }

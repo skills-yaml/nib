@@ -244,7 +244,7 @@ fn ledger_keeps_transcript_visible_under_approval_and_question_docks() {
     assert!(rendered.contains("Would you like to run the following command?"));
     assert!(rendered.contains("task test"));
     assert!(rendered.contains("Yes, proceed"));
-    assert!(rendered.contains("tell Codex"));
+    assert!(rendered.contains("tell nib"));
     assert!(!rendered.contains("Approval required"));
     assert!(!rendered.contains("command="));
     assert!(!rendered.contains("{\"command\""));
@@ -335,14 +335,14 @@ fn approval_card_states_the_command_and_keeps_choices_on_a_narrow_terminal() {
     assert!(joined.contains("git status --short --branch"), "{joined}");
     assert!(rows.iter().any(|row| row.contains("task")), "{rows:?}");
     assert!(joined.contains("Yes, proceed"), "{joined}");
-    assert!(joined.contains("tell Codex"), "{joined}");
+    assert!(joined.contains("tell nib"), "{joined}");
     assert!(joined.contains("Press enter to confirm"), "{joined}");
     assert!(joined.contains("keep this visible"), "{joined}");
     assert!(!joined.contains("command="), "{joined}");
     assert!(!joined.contains("background=false"), "{joined}");
     let command = row_index_containing(&rows, "git status").expect("command row");
     let approve = row_index_containing(&rows, "Yes, proceed").expect("approve row");
-    let deny = row_index_containing(&rows, "tell Codex").expect("deny row");
+    let deny = row_index_containing(&rows, "tell nib").expect("deny row");
     assert!(
         command < approve,
         "command must sit above the choices: {rows:?}"

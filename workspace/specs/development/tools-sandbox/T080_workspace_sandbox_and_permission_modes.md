@@ -562,6 +562,71 @@ Plan mode uses the permission engine rather than the agent's planning mode,
 which no interactive surface selects. This matches Claude Code's read-only
 plan mode.
 
+## Phase 3 Plan: Rules and "Always Allow" (2026-10-11)
+
+Phase 3 delivers section 4 with these concrete choices.
+
+**Rule syntax.** A rule is `tool` or `tool(specifier)`. The aliases
+`terminal` and `bash` mean `run_terminal`, `edit` means `apply_patch`, and
+`read` means `read_file`.
+- A `run_terminal` specifier is an exact command (`cargo test`), or a word
+  prefix ending in ` *` (`cargo test *`, which also matches `cargo test` on
+  its own). The Claude Code spelling `cargo test:*` is accepted.
+- A path specifier for `read_file`, `list_directory`, `grep` and
+  `apply_patch` is a workspace-relative glob with `*`, `?` and `**`. For
+  `apply_patch`, the paths come from the patch headers.
+
+**Evaluation.** Deny beats ask, and ask beats allow. The phase 2
+specific-over-general idea is dropped: a matching deny always wins, as in
+Claude Code. Compound commands are judged part by part, splitting on `&&`,
+`||`, `;`, `|` and newlines.
+- An allow applies only if every part is allowed by a rule or is read-only.
+- A deny or ask applies if any part matches.
+- A command that cannot be split safely (quotes, substitution, redirection,
+  a lone `&`) never matches an allow. It matches a deny or ask if a rule's
+  command text appears anywhere in it.
+
+**Layers.**
+- **User:** the `[permissions]` table (`allow`, `ask`, `deny`) of
+  `~/.nib/config.toml`. Only that table is read until T082 defines the rest
+  of the file.
+- **Project local (user-home):** `~/.nib/permissions.json`, keyed by the
+  canonical project path. It holds the project's trust flag and the rules
+  saved from prompts and `/permissions`. Tool commands cannot write it,
+  because the sandbox masks `$HOME`.
+- **Project shared:** the `nib-policy:` lines of `AGENTS.md`, `CLAUDE.md`
+  and their `.local` variants, plus the legacy remembered-command file
+  `.nib/command-prefixes.json`. Their deny and require-approval lines always
+  apply. Their allow lines, and the legacy remembered commands, apply only
+  after `/permissions trust`, because a cloned repository or an agent can
+  write them.
+
+`NIB_HOME` overrides `~/.nib` (used by tests).
+
+**Prompt.** The remember choice becomes "Yes, and don't ask again for
+`<rule>` in this project". It saves `run_terminal(<rule>)` to the project-local
+layer. The suggested rule is the program and its subcommand word (plus a
+third word after `run`, `exec` or `x`) followed by ` *`, for example
+`cargo test *` or `npm run build *`. It falls back to the exact command when
+the program wraps other commands (`sudo`, `env`, shells and interpreters,
+`xargs`, `find`, `timeout`, `nice`, `nohup`, `exec`, `eval`, `command`,
+`time`, `watch`, `ssh`), when the program is given by path, or when the
+second word is not a plain subcommand word. Compound commands offer no
+remember choice.
+
+**`/permissions`.** Lists every rule with its layer, and marks ignored
+project allow lines. Its subcommands: `allow|ask|deny <rule>` and
+`remove <rule>` edit the project-local layer, and `trust`/`untrust` set the
+project's trust flag.
+
+**Hardening.** `apply_patch` refuses patches that touch `.nib` or `.git`
+paths, so file edits cannot plant rules or Git configuration when phase 5
+edits in place.
+
+**Out of scope.** Project `.nib/config.toml` settings other than rules
+(for example `approvals.mode`) still apply without trust. That is recorded
+as a T082 follow-up. The stale-write check stays in phase 5.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

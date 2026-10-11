@@ -660,7 +660,10 @@ pub(crate) fn rename_session(
 pub(crate) fn set_approval_mode(project_root: &Path, mode: &str) -> Result<String, String> {
     let mode = mode.trim().to_ascii_lowercase();
     if !matches!(mode.as_str(), "manual" | "smart" | "policy" | "off") {
-        return Err("usage: /permissions [manual|smart|policy|off]".to_string());
+        return Err(
+            "usage: /permissions [manual|smart|policy|off|trust|untrust|allow <rule>|ask <rule>|deny <rule>|remove <rule>]"
+                .to_string(),
+        );
     }
     update_nib_config(project_root, {
         let selected = mode.clone();
@@ -778,7 +781,105 @@ pub(crate) fn format_permissions(project_root: &Path) -> Result<String, String> 
         config.execution,
         &config.approvals,
     );
-    Ok(format_effective_execution_posture(&posture))
+    Ok(format!(
+        "{}\n{}",
+        format_effective_execution_posture(&posture),
+        format_permission_rules(project_root)
+    ))
+}
+
+/// The rule layers that apply to this project (T080 phase 3).
+pub(crate) fn format_permission_rules(project_root: &Path) -> String {
+    use crate::tools::permission_rules::{RuleEffect, RuleLayer, RuleSet};
+    let set = RuleSet::load(project_root);
+    let mut lines = vec![format!(
+        "Project trust: {}",
+        if set.trusted {
+            "trusted (allow lines in AGENTS.md and CLAUDE.md apply)"
+        } else {
+            "not trusted (allow lines in AGENTS.md and CLAUDE.md are ignored; /permissions trust)"
+        }
+    )];
+    if set.rules.is_empty() {
+        lines.push("Rules: none (add with /permissions allow|ask|deny <rule>)".to_string());
+    } else {
+        lines.push("Rules (deny beats ask beats allow):".to_string());
+        for rule in &set.rules {
+            let effect = match rule.effect {
+                RuleEffect::Allow => "allow",
+                RuleEffect::Ask => "ask",
+                RuleEffect::Deny => "deny",
+            };
+            let layer = match rule.layer {
+                RuleLayer::User => "user",
+                RuleLayer::ProjectLocal => "project",
+            };
+            lines.push(format!(
+                "  {effect:<5} {:<7} {}",
+                layer,
+                bounded_status_value(&rule.text)
+            ));
+        }
+    }
+    for problem in &set.problems {
+        lines.push(format!("  warning: {}", bounded_status_value(problem)));
+    }
+    lines.join("\n")
+}
+
+/// `/permissions <mode>`, `trust`, `untrust`, `allow|ask|deny <rule>` and
+/// `remove <rule>`. Rule and trust changes apply from the next request.
+pub(crate) fn edit_permissions(project_root: &Path, selection: &str) -> Result<String, String> {
+    use crate::tools::permission_rules::{
+        add_project_rule, remove_project_rule, set_project_trust, RuleEffect,
+    };
+    let selection = selection.trim();
+    let (command, rule) = selection
+        .split_once(char::is_whitespace)
+        .map_or((selection, ""), |(command, rule)| (command, rule.trim()));
+    let command = command.to_ascii_lowercase();
+    let outcome = match command.as_str() {
+        "trust" | "untrust" => {
+            let trusted = command == "trust";
+            let changed = set_project_trust(project_root, trusted)?;
+            match (trusted, changed) {
+                (true, true) => "This project is now trusted.",
+                (true, false) => "This project was already trusted.",
+                (false, true) => "This project is no longer trusted.",
+                (false, false) => "This project was not trusted.",
+            }
+            .to_string()
+        }
+        "allow" | "ask" | "deny" => {
+            let effect = RuleEffect::parse(&command).ok_or("unknown rule effect")?;
+            if add_project_rule(project_root, effect, rule)? {
+                format!(
+                    "Added project {command} rule {}.",
+                    bounded_status_value(rule)
+                )
+            } else {
+                format!(
+                    "Project {command} rule {} already exists.",
+                    bounded_status_value(rule)
+                )
+            }
+        }
+        "remove" => {
+            if remove_project_rule(project_root, rule)? {
+                format!("Removed project rule {}.", bounded_status_value(rule))
+            } else {
+                return Err(format!(
+                    "no project rule {} (user rules live in ~/.nib/config.toml)",
+                    bounded_status_value(rule)
+                ));
+            }
+        }
+        _ => return set_approval_mode(project_root, selection),
+    };
+    Ok(format!(
+        "{outcome} Changes apply from the next request.\n{}",
+        format_permission_rules(project_root)
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1140,6 +1241,19 @@ pub(crate) fn validate_interactive_arguments(
                         .any(|candidate| candidate.eq_ignore_ascii_case(argument))
                 })
         }
+        InteractiveArgumentSchema::PermissionRules => match arguments.first() {
+            None => true,
+            Some(first) => {
+                let first = first.to_ascii_lowercase();
+                match first.as_str() {
+                    "allow" | "ask" | "deny" | "remove" => arguments.len() >= 2,
+                    "manual" | "smart" | "policy" | "off" | "trust" | "untrust" => {
+                        arguments.len() == 1
+                    }
+                    _ => false,
+                }
+            }
+        },
         InteractiveArgumentSchema::Skills | InteractiveArgumentSchema::Mcp => true,
     };
     if valid {
@@ -1230,10 +1344,10 @@ pub fn execute_interactive_command_in_state(
             set_session_permission_mode(project_root, store, session_id, selection.as_deref())?,
         )),
         InteractiveCommand::Permissions {
-            selection: Some(mode),
-        } => Ok(InteractiveEffect::Output(set_approval_mode(
+            selection: Some(selection),
+        } => Ok(InteractiveEffect::Output(edit_permissions(
             project_root,
-            &mode,
+            &selection,
         )?)),
         InteractiveCommand::Review | InteractiveCommand::Diff => {
             Ok(InteractiveEffect::Output(bounded_session_workspace_diff(

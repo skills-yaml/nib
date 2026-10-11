@@ -24,3 +24,6 @@ impl ApprovalHandler for ContextCapturingApprovalHandler {
 
 #[path = "test_part_0.rs"]
 mod test_part_0;
+
+#[path = "rules_tests.rs"]
+mod rules_tests;

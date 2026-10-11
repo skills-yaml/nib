@@ -383,6 +383,11 @@ pub(crate) fn resolve_execution_config(
 ) -> ResolvedExecutionConfig {
     let configured = execution_config.clone();
     let mut policy_rules = load_instruction_policy_rules(project_root);
+    // Instruction files ship with the project and an agent can edit them, so
+    // their allow lines apply only after the user trusts the project.
+    if !crate::tools::permission_rules::project_trusted(project_root) {
+        policy_rules.retain(|rule| rule.effect != PolicyEffect::Allow);
+    }
     let instruction_posture =
         match apply_instruction_execution_tightening(project_root, &mut execution_config) {
             Ok(()) if execution_config == configured => InstructionExecutionPosture::Configured,
