@@ -2098,7 +2098,7 @@ pub(crate) fn edits_instruction_policy(call: &ToolCall, root: &Path) -> bool {
     match crate::tools::permission_matching::git_patch_paths(patch, root) {
         Ok(paths) => paths.iter().any(|path| {
             matches!(
-                path.to_ascii_lowercase().as_str(),
+                path.to_ascii_lowercase().trim_end_matches(['.', ' ']),
                 "agents.md" | "agents.local.md" | "claude.md" | "claude.local.md"
             )
         }),

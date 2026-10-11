@@ -117,6 +117,9 @@ fn suggested_rules_use_a_subcommand_prefix_or_the_exact_command() {
         ("pnpm dlx cowsay", Some("pnpm dlx cowsay *")),
         ("./build.sh release", Some("./build.sh release")),
         ("FOO=1 cargo test", Some("FOO=1 cargo test")),
+        // Re-review N9.
+        ("python3.12 script.py", Some("python3.12 script.py")),
+        ("yarn node script.js", Some("yarn node script.js")),
         // Review F3: glob characters would be saved as a prefix rule.
         ("sudo rm *", None),
         ("env *", None),
@@ -201,6 +204,11 @@ fn deny_beats_ask_beats_allow_and_is_hard_to_step_around() {
         "xargs rm < list",
         "RM -rf x",
         "r''m -rf x",
+        // Re-review N4: any word position, and glob program words.
+        "busybox rm -rf x",
+        "strace rm x",
+        "sh -c rm",
+        "/bin/r? -rf x",
     ] {
         assert_eq!(
             effect_of(&set, &terminal(denied)),
@@ -208,7 +216,7 @@ fn deny_beats_ask_beats_allow_and_is_hard_to_step_around() {
             "{denied}"
         );
     }
-    for allowed in ["echo information", "cargo build --features rm"] {
+    for allowed in ["echo information", "cargo build --features firm"] {
         assert_ne!(
             effect_of(&set, &terminal(allowed)),
             Some(PolicyEffect::Deny),
@@ -234,6 +242,10 @@ fn path_globs_follow_gitignore_rules_and_ignore_case() {
     assert!(directory_reaches("secrets/**", "secrets"));
     assert!(!directory_reaches("secrets/**", "src"));
     assert!(!directory_reaches(".env", ""));
+    // Re-review N2 and N3.
+    assert!(directory_reaches("*.pem", "src"));
+    assert!(directory_reaches("**/secrets/**", "src/sub"));
+    assert!(directory_reaches("src/**/key", "src/a/b"));
 }
 
 /// Review F5: `read(...)` covers every read tool, searches that reach a
@@ -341,7 +353,7 @@ fn layers_load_from_nib_home_and_trust_is_per_project() {
     let other = tempfile::tempdir().unwrap();
     write_config(
         &home,
-        "[llm]\nignored = true\n\n[permissions]\nallow = [\"terminal(task check *)\"]\ndeny = [\"read(.env)\", \"terminal(bad\"]\n",
+        "[llm]\nignored = true\n\n[permissions]\nallow = [\"terminal(task check *)\", \"terminal(bad\"]\ndeny = [\"read(.env)\"]\n",
     );
 
     let set = RuleSet::load(project.path());
@@ -483,4 +495,48 @@ fn linked_worktrees_use_their_main_project_settings() {
     std::fs::create_dir(&impostor).unwrap();
     std::fs::copy(worktree.join(".git"), impostor.join(".git")).unwrap();
     assert!(!project_trusted(&impostor));
+}
+
+/// Re-review N1: in a project inside a larger repository, Git reports patch
+/// paths from the repository top; they are made project-relative again.
+#[test]
+fn patch_paths_are_relative_to_a_project_inside_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    git(directory.path(), &["init", "-q"]);
+    let project = directory.path().join("proj");
+    std::fs::create_dir(&project).unwrap();
+    assert_eq!(
+        git_patch_paths(
+            "--- /dev/null\n+++ b/AGENTS.md\n@@ -0,0 +1 @@\n+x\n",
+            &project
+        )
+        .unwrap(),
+        vec!["AGENTS.md".to_string()]
+    );
+    let set = rules(&[(RuleEffect::Deny, "edit(secrets/**)")]);
+    let edit = call(
+        "apply_patch",
+        json!({"patch": "--- /dev/null\n+++ b/secrets/x\n@@ -0,0 +1 @@\n+x\n"}),
+    );
+    assert_eq!(effect_in(&set, &edit, &project), Some(PolicyEffect::Deny));
+}
+
+/// Re-review N6 and N7: restrictive rules are never dropped silently.
+#[test]
+fn restrictive_rules_survive_pruning_and_bad_entries_fail_closed() {
+    let home = TestNibHome::isolated();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.directory.path().join(PERMISSIONS_FILE),
+        r#"{"version":1,"projects":{"/unmounted/project":{"deny":["terminal(rm *)"]}}}"#,
+    )
+    .unwrap();
+    set_project_trust(project.path(), true).unwrap();
+    let saved = std::fs::read_to_string(home.directory.path().join(PERMISSIONS_FILE)).unwrap();
+    assert!(saved.contains("/unmounted/project"), "{saved}");
+
+    write_config(&home, "[permissions]\nallow = [\"terminal(bad\"]\n");
+    assert!(!RuleSet::load(project.path()).unreadable);
+    write_config(&home, "[permissions]\ndeny = [\"read(/etc/shadow)\"]\n");
+    assert!(RuleSet::load(project.path()).unreadable);
 }

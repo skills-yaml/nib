@@ -1047,15 +1047,17 @@ deny  = ["read(.env)", "terminal(rm -rf *)"]
   covers `apply_patch`. Globs match workspace paths, ignoring case. A glob without
   `/` matches a file name at any depth (`.env`, `*.pem`), and `**` spans directories
   (`src/**`). A deny or ask for a folder (`read(secrets/**)`) also covers a `grep`
-  of any folder above it, and paths are checked after following symbolic links.
+  of any folder above it, and one for a file name (`read(*.pem)`) covers every
+  `grep` except for hidden files, which `grep` skips. Paths are checked after
+  following symbolic links.
   Paths in a patch are read by Git itself.
 - Compound commands are judged part by part. `cargo test && git status` is allowed
   by `terminal(cargo test *)` because `git status` is read-only. `cargo test && rm x`
   is not, and a deny for `rm *` refuses it. Commands with quotes, `$`, redirection or
   a lone `&` are never matched by an allow rule.
-- Deny and ask rules for commands are deliberately loose: they look through
-  `sudo`, `env`, `timeout`, `xargs` and similar wrappers, `NAME=value` prefixes,
-  program paths, quotes and case. They are still a guardrail, not a sandbox: a
+- Deny and ask rules for commands are deliberately loose: they match the rule's
+  words anywhere in a command, so `sudo rm`, `sh -c rm`, `FOO=1 rm`, `/bin/rm`,
+  `RM` and `r''m` all match `rm *`. They are still a guardrail, not a sandbox: a
   program can always be renamed or run from a script.
 - A command rule ignores the other `run_terminal` settings (working directory,
   timeout, background).

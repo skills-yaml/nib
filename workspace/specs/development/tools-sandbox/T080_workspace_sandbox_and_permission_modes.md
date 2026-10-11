@@ -671,6 +671,33 @@ edits in place.
   `terminal(x *)` are one rule and either removes it. `/permissions` counts
   the instruction-file allow lines that trust would enable.
 
+**Re-review of `ffa9163` (approve with fixes) and resolutions.**
+- **N1, Medium.** Inside a repository subdirectory Git reports patch paths
+  from the repository top, so a nested project's `AGENTS.md` read as
+  `proj/AGENTS.md` and skipped the always-ask check. `git_patch_paths` strips
+  `git rev-parse --show-prefix`; regression tests cover rules and
+  `always_asks`.
+- **N2 and N3.** A `grep` of any folder reaches a file-name glob (`*.pem`)
+  unless it names hidden files, which the search skips, and reaches any glob
+  once a `**` part is reached.
+- **N4.** Deny and ask rules now match at any word of each command part
+  (`busybox rm`, `sh -c rm`), and a command word with glob characters is
+  matched as a pattern (`/bin/r?`). Over-matching is accepted; variable
+  composition (`x=r; ${x}m`) is out of reach and documented.
+- **N5.** In a linked worktree, allow lines come only from the main
+  checkout's instruction files (when trusted), never from the worktree's own
+  files, which sandboxed commands can write.
+- **N6.** Pruning keeps entries that hold deny or ask rules.
+- **N7.** A deny or ask entry that cannot be parsed makes every action ask.
+- **N8, partly accepted.** A call's paths are computed once per rule
+  evaluation. The remaining few synchronous `git apply --numstat` runs per
+  patch approval are short and accepted.
+- **N9.** Versioned interpreters (`python3.12`) and runner subcommands that
+  name a wrapper (`yarn node`) suggest only the exact command; a trailing dot
+  on `AGENTS.md.` still counts as an instruction file. Running `cargo test`
+  without the Taskfile can still read the developer's `~/.nib` in
+  integration tests that do not set `NIB_HOME`; accepted.
+
 **Out of scope.** Project `.nib/config.toml` settings other than rules
 (for example `approvals.mode`) still apply without trust. That is recorded
 as a T082 follow-up. The stale-write check stays in phase 5.

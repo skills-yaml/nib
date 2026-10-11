@@ -76,10 +76,25 @@ pub(crate) struct PermissionRule {
     specifier: Option<Specifier>,
 }
 
+/// A call's paths, computed once per evaluation: for a patch this runs Git.
+struct CallPaths<'a> {
+    call: &'a ToolCall,
+    roots: &'a [&'a Path],
+    paths: std::cell::OnceCell<Option<Vec<String>>>,
+}
+
+impl CallPaths<'_> {
+    fn get(&self) -> Option<&Vec<String>> {
+        self.paths
+            .get_or_init(|| call_paths(self.call, self.roots))
+            .as_ref()
+    }
+}
+
 impl PermissionRule {
     /// Whether a deny or ask rule applies to a call: any part of a compound
     /// command, any path, or a directory search that reaches the rule's path.
-    fn restricts(&self, call: &ToolCall, roots: &[&Path]) -> bool {
+    fn restricts(&self, call: &ToolCall, paths: &CallPaths<'_>) -> bool {
         if !tool_matches(&self.tool, &call.tool_name) {
             return false;
         }
@@ -94,7 +109,7 @@ impl PermissionRule {
                 restrictive_command_matches(command, words, *prefix)
             }
             Some(Specifier::Path(glob)) => {
-                let Some(paths) = call_paths(call, roots) else {
+                let Some(paths) = paths.get() else {
                     return true;
                 };
                 let searches = call.tool_name == "grep";
@@ -106,14 +121,14 @@ impl PermissionRule {
     }
 
     /// Whether an allow rule covers a non-terminal call: every path must match.
-    fn allows(&self, call: &ToolCall, roots: &[&Path]) -> bool {
+    fn allows(&self, call: &ToolCall, paths: &CallPaths<'_>) -> bool {
         if !tool_matches(&self.tool, &call.tool_name) {
             return false;
         }
         match &self.specifier {
             None => true,
             Some(Specifier::Command { .. }) => false,
-            Some(Specifier::Path(glob)) => call_paths(call, roots).is_some_and(|paths| {
+            Some(Specifier::Path(glob)) => paths.get().is_some_and(|paths| {
                 !paths.is_empty() && paths.iter().all(|path| glob_matches(glob, path))
             }),
         }
@@ -184,6 +199,11 @@ fn project_key(project_root: &Path) -> Option<String> {
     let root = project_root.canonicalize().ok()?;
     let root = main_worktree(&root).unwrap_or(root);
     Some(root.display().to_string())
+}
+
+/// The main checkout when `root` is a linked Git worktree.
+pub(crate) fn linked_worktree_main(root: &Path) -> Option<PathBuf> {
+    main_worktree(&root.canonicalize().ok()?)
 }
 
 /// The main checkout of a linked worktree, accepted only when the repository
@@ -343,9 +363,15 @@ impl RuleSet {
                     tool,
                     specifier,
                 }),
-                Err(error) => self
-                    .problems
-                    .push(format!("{} rule ignored: {error}", layer.label())),
+                Err(error) => {
+                    // A restrictive rule that cannot be read must not be
+                    // silently dropped: every action asks until it is fixed.
+                    if effect != RuleEffect::Allow {
+                        self.unreadable = true;
+                    }
+                    self.problems
+                        .push(format!("{} rule ignored: {error}", layer.label()));
+                }
             }
         }
     }
@@ -356,11 +382,16 @@ impl RuleSet {
     /// is allowed only when every part is allowed by a rule or is read-only
     /// on its own.
     pub(crate) fn evaluate(&self, call: &ToolCall, roots: &[&Path]) -> Option<PolicyRule> {
+        let paths = CallPaths {
+            call,
+            roots,
+            paths: std::cell::OnceCell::new(),
+        };
         for effect in [RuleEffect::Deny, RuleEffect::Ask] {
             if let Some(rule) = self
                 .rules
                 .iter()
-                .find(|rule| rule.effect == effect && rule.restricts(call, roots))
+                .find(|rule| rule.effect == effect && rule.restricts(call, &paths))
             {
                 return Some(policy_rule(rule, call));
             }
@@ -378,7 +409,7 @@ impl RuleSet {
         });
         if call.tool_name != "run_terminal" {
             return allows
-                .find(|rule| rule.allows(call, roots))
+                .find(|rule| rule.allows(call, &paths))
                 .map(|rule| policy_rule(rule, call));
         }
         let allows: Vec<&PermissionRule> = allows.collect();
@@ -465,8 +496,14 @@ fn update_project_entry(
             file.projects.remove(&key);
         }
         // Forget folders that no longer exist, and keep the file bounded.
-        file.projects
-            .retain(|path, _| path == &key || Path::new(path).is_dir());
+        // Entries with deny or ask rules are kept even when their folder is
+        // missing (an unmounted drive), so restrictions are never dropped.
+        file.projects.retain(|path, entry| {
+            path == &key
+                || Path::new(path).is_dir()
+                || !entry.deny.is_empty()
+                || !entry.ask.is_empty()
+        });
         if file.projects.len() > MAX_PROJECTS {
             return Err(format!(
                 "nib keeps settings for at most {MAX_PROJECTS} projects"

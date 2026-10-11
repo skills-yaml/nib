@@ -105,13 +105,6 @@ const WRAPPER_PROGRAMS: &[&str] = &[
 /// suggested prefix (`npm run build *`).
 const RUNNER_SUBCOMMANDS: &[&str] = &["run", "exec", "x", "dlx"];
 
-/// Leading programs that deny and ask rules look through: `sudo rm` is
-/// judged as `rm`.
-const TRANSPARENT_WRAPPERS: &[&str] = &[
-    "sudo", "doas", "env", "command", "builtin", "exec", "nice", "ionice", "nohup", "time",
-    "timeout", "stdbuf", "setsid", "xargs", "taskset", "chrt", "runuser", "pkexec",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Specifier {
     Command { words: Vec<String>, prefix: bool },
@@ -271,57 +264,38 @@ pub(crate) fn allow_command_matches(segment: &[String], rule: &[String], prefix:
         .all(|(word, expected)| word == expected)
 }
 
-/// Where the real program of a segment may start, for deny and ask rules.
-/// Leading `NAME=value` words are skipped, and after a transparent wrapper
-/// (`sudo -u root rm`, `env -i rm`) every later word is a candidate, since
-/// wrapper options cannot be parsed in general.
-fn candidate_starts(words: &[String]) -> Vec<&[String]> {
-    let mut start = 0;
-    while words
-        .get(start)
-        .is_some_and(|word| word.contains('=') && !word.starts_with('='))
-    {
-        start += 1;
-    }
-    let rest = &words[start..];
-    match rest.first() {
-        Some(word) if TRANSPARENT_WRAPPERS.contains(&program_name(word).as_str()) => {
-            let mut starts = vec![rest];
-            starts.extend((1..rest.len()).map(|index| &rest[index..]));
-            starts
-        }
-        _ => vec![rest],
-    }
-}
-
-/// Loose matching for deny and ask rules: wrappers, environment assignments,
-/// program paths and case are ignored.
+/// Loose matching for deny and ask rules: the rule's words may start at any
+/// word of the command, so wrappers (`sudo -u root rm`, `busybox rm`,
+/// `sh -c rm`), `NAME=value` prefixes, program paths, case and quoting do
+/// not hide a match. A command word containing glob characters is treated as
+/// the pattern the shell would expand (`/bin/r? -rf`). Over-matching is
+/// accepted for rules that only restrict.
 pub(crate) fn restrictive_command_matches(command: &str, rule: &[String], prefix: bool) -> bool {
     let rule: Vec<String> = rule.iter().map(|word| word.to_ascii_lowercase()).collect();
-    let matches_at = |words: &[String]| {
-        if words.len() < rule.len() || (!prefix && words.len() != rule.len()) {
-            return false;
-        }
-        words
-            .iter()
-            .zip(&rule)
-            .enumerate()
-            .all(|(index, (word, expected))| {
-                let word = if index == 0 {
-                    program_name(word)
-                } else {
-                    word.to_ascii_lowercase()
-                };
-                &word == expected
-            })
+    let word_matches = |word: &str, expected: &str, first: bool| {
+        let word = if first {
+            program_name(word)
+        } else {
+            word.to_ascii_lowercase()
+        };
+        word == expected || (word.contains(['*', '?', '[']) && segment_matches(&word, expected))
+    };
+    let matches_in = |words: &[String]| {
+        (0..words.len()).any(|start| {
+            let candidate = &words[start..];
+            candidate.len() >= rule.len()
+                && (prefix || candidate.len() == rule.len() || start > 0)
+                && candidate
+                    .iter()
+                    .zip(&rule)
+                    .enumerate()
+                    .all(|(index, (word, expected))| word_matches(word, expected, index == 0))
+        })
     };
     if let Some(segments) = command_segments(command) {
-        return segments
-            .iter()
-            .any(|segment| candidate_starts(segment).into_iter().any(matches_at));
+        return segments.iter().any(|segment| matches_in(segment));
     }
-    // Unsplittable: drop quoting, split on every shell operator and look for
-    // the rule's words at any word position.
+    // Unsplittable: drop quoting and split on every shell operator.
     let flattened: String = command
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
@@ -342,22 +316,7 @@ pub(crate) fn restrictive_command_matches(command: &str, rule: &[String], prefix
         .filter(|word| !word.is_empty())
         .map(str::to_string)
         .collect();
-    (0..words.len()).any(|index| {
-        let candidate = &words[index..];
-        candidate.len() >= rule.len()
-            && candidate
-                .iter()
-                .zip(&rule)
-                .enumerate()
-                .all(|(position, (word, expected))| {
-                    let word = if position == 0 {
-                        program_name(word)
-                    } else {
-                        word.to_ascii_lowercase()
-                    };
-                    &word == expected
-                })
-    })
+    matches_in(&words)
 }
 
 /// Workspace-relative paths a call reads or edits, or `None` when they
@@ -457,7 +416,26 @@ pub(crate) fn git_patch_paths(patch: &str, cwd: &Path) -> Result<Vec<String>, St
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(parse_numstat(&output.stdout))
+    // Inside a repository subdirectory Git reports paths from the
+    // repository top; make them relative to `cwd` again.
+    let prefix = std::process::Command::new("git")
+        .args(["rev-parse", "--show-prefix"])
+        .current_dir(cwd)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    Ok(parse_numstat(&output.stdout)
+        .into_iter()
+        .map(|path| match path.strip_prefix(&prefix) {
+            Some(relative) if !prefix.is_empty() => relative.to_string(),
+            _ => path,
+        })
+        .collect())
 }
 
 /// Parses `git apply --numstat -z`: `added\tdeleted\tpath\0`, or for a
@@ -505,24 +483,29 @@ pub(crate) fn glob_matches(glob: &str, path: &str) -> bool {
     (0..=path_parts.len()).any(|end| parts_match(&glob_parts, &path_parts[..end]))
 }
 
-/// Whether listing or searching `directory` would reach paths an anchored
-/// glob names: `secrets/**` is reached by a search of `.` or `secrets`.
+/// Whether searching `directory` could reach paths a glob names:
+/// `secrets/**` is reached by a search of `.` or `secrets`, `**/x` by any
+/// search, and a file-name glob such as `*.pem` by any search unless it names
+/// hidden files, which the search skips.
 pub(crate) fn directory_reaches(glob: &str, directory: &str) -> bool {
-    if !glob.contains('/') {
-        return false;
-    }
     let glob = glob.to_ascii_lowercase();
+    if !glob.contains('/') {
+        return !glob.starts_with('.');
+    }
     let directory = directory.to_ascii_lowercase();
     let directory: Vec<&str> = directory
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
     let glob_parts: Vec<&str> = glob.split('/').filter(|part| !part.is_empty()).collect();
-    directory.iter().enumerate().all(|(index, part)| {
-        glob_parts
-            .get(index)
-            .is_some_and(|expected| *expected == "**" || segment_matches(expected, part))
-    }) && directory.len() <= glob_parts.len()
+    for (index, part) in directory.iter().enumerate() {
+        match glob_parts.get(index) {
+            Some(&"**") => return true,
+            Some(expected) if segment_matches(expected, part) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn parts_match(glob: &[&str], path: &[&str]) -> bool {
@@ -574,10 +557,15 @@ pub(crate) fn suggested_terminal_rule(command: &str) -> Option<String> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
     };
-    let wraps = |word: &str| WRAPPER_PROGRAMS.contains(&program_name(word).as_str());
+    let wraps = |word: &str| {
+        let name = program_name(word);
+        let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        WRAPPER_PROGRAMS.contains(&name.as_str()) || WRAPPER_PROGRAMS.contains(&base)
+    };
     if program.contains('/')
         || program.contains('=')
         || wraps(program)
+        || wraps(&words[1])
         || !subcommand_word(&words[1])
     {
         return Some(exact);

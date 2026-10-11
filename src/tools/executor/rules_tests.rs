@@ -243,3 +243,87 @@ async fn instruction_file_edits_always_ask() {
     let refused = decide(&headless, root.path(), &edit("AGENTS.md")).await;
     assert!(!refused.granted, "{refused:?}");
 }
+
+/// Re-review N5: a worktree's own instruction files cannot add allow lines;
+/// they come from the trusted main checkout.
+#[tokio::test]
+async fn worktree_allow_lines_come_from_the_main_checkout() {
+    let _home = TestNibHome::isolated();
+    let directory = tempfile::tempdir().expect("root");
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&project, &["init", "-q"]);
+    git(
+        &project,
+        &[
+            "-c",
+            "user.name=f",
+            "-c",
+            "user.email=f@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ],
+    );
+    let worktree = directory.path().join("worktree");
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().expect("path"),
+        ],
+    );
+    set_project_trust(&project, true).expect("trust");
+    std::fs::write(
+        worktree.join("AGENTS.md"),
+        "- nib-policy: allow run_terminal\n",
+    )
+    .expect("planted");
+    let handler = Arc::new(Remembering::default());
+    let command = terminal(&worktree, "make build");
+    assert!(executor(&worktree, &handler).requires_interactive_approval(&command));
+
+    std::fs::write(
+        project.join("AGENTS.md"),
+        "- nib-policy: allow run_terminal make\n",
+    )
+    .expect("main");
+    assert!(!executor(&worktree, &handler).requires_interactive_approval(&command));
+}
+
+/// Re-review N1: an instruction edit inside a project nested in a larger
+/// repository still asks.
+#[tokio::test]
+async fn nested_project_instruction_edits_still_ask() {
+    let directory = tempfile::tempdir().expect("root");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(directory.path())
+        .output()
+        .expect("git init");
+    let project = directory.path().join("proj");
+    std::fs::create_dir(&project).expect("project");
+    let edit = call(
+        &project,
+        "apply_patch",
+        json!({"patch": "--- /dev/null\n+++ b/AGENTS.md\n@@ -0,0 +1 @@\n+x\n"}),
+    );
+    assert!(always_asks(&edit, &project).is_some());
+}
