@@ -49,9 +49,20 @@ impl TurnMarker {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum FileImage {
     Absent,
-    File { blob: String, executable: bool },
-    Symlink { target: String },
-    Unavailable { reason: String },
+    File {
+        blob: String,
+        executable: bool,
+        /// Unix permission bits; restored exactly so a private file stays
+        /// private.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    Symlink {
+        target: String,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -348,12 +359,16 @@ impl CheckpointStore {
         }
         // The entry is opened without following a link and checked through
         // the handle, so a swap after the check cannot redirect the read.
-        let (bytes, executable) = read_regular_file(&parent, &name)?;
+        let (bytes, executable, mode) = read_regular_file(&parent, &name)?;
         let (blob, new) = self
             .store_blob(&bytes)
             .map_err(|error| format!("cannot save: {error}"))?;
         *wrote_blob |= new;
-        Ok(FileImage::File { blob, executable })
+        Ok(FileImage::File {
+            blob,
+            executable,
+            mode,
+        })
     }
 
     fn restore(&self, workspace: &Dir, path: &str, image: &FileImage) -> Result<Restored, String> {
@@ -384,22 +399,27 @@ impl CheckpointStore {
                 if current.is_none() {
                     return Ok(Restored::Unchanged);
                 }
-                // Unlinking removes the entry itself, never a link's target.
-                parent
-                    .remove_file(&name)
-                    .map_err(|error| format!("cannot remove: {error}"))?;
+                remove_entry(&parent, &name).map_err(|error| format!("cannot remove: {error}"))?;
                 Ok(Restored::Removed)
             }
-            FileImage::File { blob, executable } => {
+            FileImage::File {
+                blob,
+                executable,
+                mode,
+            } => {
                 if current.is_some() && !current_is_link {
-                    if let Ok((bytes, mode)) = read_regular_file(&parent, &name) {
-                        if &hex_digest(&bytes) == blob && mode == *executable {
+                    if let Ok((bytes, now_executable, now_mode)) = read_regular_file(&parent, &name)
+                    {
+                        if &hex_digest(&bytes) == blob
+                            && now_executable == *executable
+                            && (mode.is_none() || now_mode == *mode)
+                        {
                             return Ok(Restored::Unchanged);
                         }
                     }
                 }
                 let bytes = self.read_blob(blob)?;
-                replace_with_file(&parent, &name, &bytes, *executable)?;
+                replace_with_file(&parent, &name, &bytes, *executable, *mode)?;
                 Ok(Restored::Written)
             }
             FileImage::Symlink { target } => {
@@ -411,8 +431,7 @@ impl CheckpointStore {
                     return Ok(Restored::Unchanged);
                 }
                 if current.is_some() {
-                    parent
-                        .remove_file(&name)
+                    remove_entry(&parent, &name)
                         .map_err(|error| format!("cannot replace: {error}"))?;
                 }
                 create_symlink(&parent, target, &name)
@@ -668,7 +687,7 @@ fn not_a_directory(part: &Component<'_>, error: &io::Error) -> String {
 
 /// Reads a regular file opened without following a link, checking its type
 /// and size through the open handle.
-fn read_regular_file(parent: &Dir, name: &Path) -> Result<(Vec<u8>, bool), String> {
+fn read_regular_file(parent: &Dir, name: &Path) -> Result<(Vec<u8>, bool, Option<u32>), String> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -693,25 +712,31 @@ fn read_regular_file(parent: &Dir, name: &Path) -> Result<(Vec<u8>, bool), Strin
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err("larger than 16 MiB".to_string());
     }
-    Ok((bytes, is_executable(&metadata)))
+    Ok((bytes, is_executable(&metadata), permission_bits(&metadata)))
 }
 
 /// Writes a new file beside the target and renames it over the target. The
 /// rename replaces the directory entry itself, so a link there is replaced,
-/// never followed.
+/// never followed. Temporary files a crashed rewind left in this directory
+/// are removed first.
 fn replace_with_file(
     parent: &Dir,
     name: &Path,
     bytes: &[u8],
     executable: bool,
+    mode: Option<u32>,
 ) -> Result<(), String> {
-    let temporary = PathBuf::from(format!(".nib-rewind-{}", uuid::Uuid::new_v4().simple()));
+    sweep_temporary_files(parent);
+    let temporary = PathBuf::from(format!(
+        "{TEMPORARY_PREFIX}{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     let written = (|| -> io::Result<()> {
         let mut file = parent.open_with(&temporary, &options)?;
         io::Write::write_all(&mut file, bytes)?;
-        set_executable(&file, executable)?;
+        set_permissions(&file, executable, mode)?;
         file.sync_all()?;
         parent.rename(&temporary, parent, name)
     })();
@@ -720,6 +745,38 @@ fn replace_with_file(
         return Err(format!("cannot write: {error}"));
     }
     Ok(())
+}
+
+const TEMPORARY_PREFIX: &str = ".nib-rewind-";
+
+fn sweep_temporary_files(parent: &Dir) {
+    let Ok(entries) = parent.entries() else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_leftover = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(TEMPORARY_PREFIX))
+            .is_some_and(|rest| rest.len() == 32 && rest.chars().all(|ch| ch.is_ascii_hexdigit()));
+        if is_leftover && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = parent.remove_file(&name);
+        }
+    }
+}
+
+/// Removes a file or link entry. A Windows directory link or junction needs
+/// `remove_dir`, which removes the link and never its target.
+fn remove_entry(parent: &Dir, name: &Path) -> io::Result<()> {
+    match parent.remove_file(name) {
+        Err(error) if cfg!(windows) => match parent.symlink_metadata(name) {
+            Ok(metadata) if metadata.is_dir() && metadata_is_reparse(&metadata) => {
+                parent.remove_dir(name)
+            }
+            _ => Err(error),
+        },
+        result => result,
+    }
 }
 
 #[cfg(windows)]
@@ -746,14 +803,31 @@ fn is_executable(_metadata: &cap_std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn set_executable(file: &cap_std::fs::File, executable: bool) -> io::Result<()> {
+fn permission_bits(metadata: &cap_std::fs::Metadata) -> Option<u32> {
+    use cap_std::fs::PermissionsExt;
+    Some(metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn permission_bits(_metadata: &cap_std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+/// Sets the saved Unix permission bits through the open handle, or, for an
+/// image without them, just the executable bit.
+#[cfg(unix)]
+fn set_permissions(
+    file: &cap_std::fs::File,
+    executable: bool,
+    saved: Option<u32>,
+) -> io::Result<()> {
     use cap_std::fs::PermissionsExt;
     let mut permissions = file.metadata()?.permissions();
-    let mode = permissions.mode();
-    let wanted = if executable {
-        mode | ((mode & 0o444) >> 2)
-    } else {
-        mode & !0o111
+    let mode = permissions.mode() & 0o777;
+    let wanted = match saved {
+        Some(bits) => bits & 0o777,
+        None if executable => mode | ((mode & 0o444) >> 2),
+        None => mode & !0o111,
     };
     if wanted != mode {
         permissions.set_mode(wanted);
@@ -763,7 +837,11 @@ fn set_executable(file: &cap_std::fs::File, executable: bool) -> io::Result<()> 
 }
 
 #[cfg(not(unix))]
-fn set_executable(_file: &cap_std::fs::File, _executable: bool) -> io::Result<()> {
+fn set_permissions(
+    _file: &cap_std::fs::File,
+    _executable: bool,
+    _saved: Option<u32>,
+) -> io::Result<()> {
     Ok(())
 }
 

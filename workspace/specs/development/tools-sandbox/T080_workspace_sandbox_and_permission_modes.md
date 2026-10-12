@@ -797,6 +797,14 @@ the store to user-home state (T082).
   whole rewind.
 - **F9.** Wording fixed.
 
+**Re-review of `be89ed0`: approve.** Its four low notes are fixed in the
+delivery candidate:
+- a later rewind removes a `.nib-rewind-*` temporary file a crash left in
+  a directory it restores into;
+- on Windows, a directory link or junction is removed with `remove_dir`;
+- files keep their saved Unix permission bits (`0o777`, never setuid);
+- the link tests use links to `.git` and `.nib` inside the workspace.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

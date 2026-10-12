@@ -1089,7 +1089,8 @@ Before the first file edit of each request, nib saves a checkpoint of every file
 the agent's edits touch. `/rewind` lists them, newest first, with the request text
 and file count. `/rewind <n>` puts every file edited since checkpoint `n` back as
 it was before that request: changes are undone, files the agent created are
-removed and files it deleted come back.
+removed and files it deleted come back. Restored files keep their saved
+permissions.
 
 - A rewind first saves the current files as a new checkpoint, so `/rewind <undo>`
   reverses it.

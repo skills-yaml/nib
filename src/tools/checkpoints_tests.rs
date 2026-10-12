@@ -268,25 +268,22 @@ fn rewind_does_not_write_through_a_symlinked_directory() {
 }
 
 /// Review finding 2: a link placed where a file was is replaced, never
-/// written through.
+/// written through, even when it points at Git metadata inside the
+/// workspace (which cap-std alone would allow).
 #[cfg(unix)]
 #[test]
 fn rewind_replaces_a_link_instead_of_following_it() {
     let fixture = Fixture::new();
     fixture.write("a.txt", "v1");
+    fixture.write(".git/config", "untouched");
     fixture.before_edit(1, &["a.txt"]);
-    let outside = tempfile::tempdir().expect("outside");
-    let target = outside.path().join("target.txt");
-    std::fs::write(&target, "untouched").expect("target");
     std::fs::remove_file(fixture.workspace.path().join("a.txt")).expect("remove");
-    std::os::unix::fs::symlink(&target, fixture.workspace.path().join("a.txt")).expect("link");
+    std::os::unix::fs::symlink(".git/config", fixture.workspace.path().join("a.txt"))
+        .expect("link");
 
     let report = fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
     assert_eq!(report.restored, vec!["a.txt"], "{report:?}");
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("target"),
-        "untouched"
-    );
+    assert_eq!(fixture.read(".git/config").as_deref(), Some("untouched"));
     let restored = fixture.workspace.path().join("a.txt");
     assert!(!std::fs::symlink_metadata(&restored)
         .expect("meta")
@@ -294,24 +291,83 @@ fn rewind_replaces_a_link_instead_of_following_it() {
     assert_eq!(fixture.read("a.txt").as_deref(), Some("v1"));
 }
 
+/// Review finding 2: a parent directory swapped for a link to `.git` is not
+/// entered.
+#[cfg(unix)]
+#[test]
+fn rewind_does_not_enter_a_parent_linked_to_git_metadata() {
+    let fixture = Fixture::new();
+    fixture.write("hooks/pre-commit", "v1");
+    fixture.write(".git/hooks/keep", "x");
+    fixture.before_edit(1, &["hooks/pre-commit"]);
+    std::fs::remove_dir_all(fixture.workspace.path().join("hooks")).expect("remove");
+    std::os::unix::fs::symlink(".git/hooks", fixture.workspace.path().join("hooks")).expect("link");
+
+    let report = fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(!fixture
+        .workspace
+        .path()
+        .join(".git/hooks/pre-commit")
+        .exists());
+}
+
 /// Review finding 2: capture saves a link as a link and never reads
-/// through it.
+/// through it into `.nib`.
 #[cfg(unix)]
 #[test]
 fn capture_never_reads_through_a_link() {
     let fixture = Fixture::new();
-    let outside = tempfile::tempdir().expect("outside");
-    let secret = outside.path().join("secret");
-    std::fs::write(&secret, "credential").expect("secret");
-    std::os::unix::fs::symlink(&secret, fixture.workspace.path().join("a.txt")).expect("link");
+    fixture.write(".nib/credentials", "secret");
+    std::os::unix::fs::symlink(".nib/credentials", fixture.workspace.path().join("a.txt"))
+        .expect("link");
     fixture.before_edit(1, &["a.txt"]);
 
     let checkpoints = fixture.store.list().expect("list");
-    assert!(matches!(
+    assert_eq!(
         checkpoints[0].files[0].image,
-        FileImage::Symlink { .. }
-    ));
+        FileImage::Symlink {
+            target: ".nib/credentials".to_string()
+        }
+    );
     assert!(!fixture.store.dir.join(BLOB_DIR).exists());
+}
+
+/// Review note 3: a private file comes back private.
+#[cfg(unix)]
+#[test]
+fn rewind_restores_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.write("private.txt", "v1");
+    let path = fixture.workspace.path().join("private.txt");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    fixture.before_edit(1, &["private.txt"]);
+    std::fs::remove_file(&path).expect("remove");
+
+    fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
+    let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+/// Review note 1: a temporary file left by an interrupted rewind is
+/// removed by the next one in that directory.
+#[test]
+fn leftover_temporary_files_are_swept() {
+    let fixture = Fixture::new();
+    fixture.write("a.txt", "v1");
+    fixture.before_edit(1, &["a.txt"]);
+    fixture.write("a.txt", "v2");
+    let leftover = format!(".nib-rewind-{}", "0".repeat(32));
+    fixture.write(&leftover, "partial");
+    fixture.write(".nib-rewind-notes", "user file");
+
+    fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
+    assert_eq!(fixture.read(&leftover), None);
+    assert_eq!(
+        fixture.read(".nib-rewind-notes").as_deref(),
+        Some("user file")
+    );
 }
 
 #[cfg(unix)]
