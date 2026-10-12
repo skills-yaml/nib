@@ -75,8 +75,10 @@ records cannot credit new work. Published 0.4.0 is preserved; the independently 
 
 ## Memory Impact
 
-Status: pending
-Rationale: Resolve the stable keymap and migration contract after verification.
+Status: updated
+Rationale: Record the approved keymap and migration contract in
+[workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md) and
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
 
 ## Version Reconciliation
 
@@ -89,3 +91,13 @@ reservation call used the committed publication-ledger read basis; no historical
 integration ref, task ownership or worktree was changed. Version mirrors were
 updated once before final integration artifacts. Source work also incorporates
 remote development permission-rule revision 8c0eabb; combined review/gates renew.
+
+## Implementation and Review Evidence
+
+The initial source implementation passed task test:interactive. Review findings
+about editor directory permissions, completion ownership, remapped action/context
+availability and running file-completion steering were fixed with regressions.
+The combined source includes development 8c0eabb and the reserved 0.5.0 version.
+Renew independent exact review and native task verify on the frozen candidate.
+Local implementation does not establish shared integration, main delivery or
+publication. Native Windows/macOS editor qualification remains separate.

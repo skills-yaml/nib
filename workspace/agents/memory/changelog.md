@@ -800,3 +800,15 @@ Content:
 
 Recorded the permission-rule layers, project trust and always-allow decision
 in decisions.md.
+
+## 2026-10-12 - T084 keymap migration decision
+
+- Type: changelog
+- Source: User-approved T084 implementation plan
+- Confidence: high
+- Review: Exact implementation review and validation remain required
+
+Content:
+
+Recorded the Codex default, legacy fallback, context ownership and audited
+steering/queue/fork boundaries in decisions.md.

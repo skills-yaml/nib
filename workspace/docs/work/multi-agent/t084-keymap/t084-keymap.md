@@ -19,15 +19,17 @@ scope:
 
 ## Assignment
 
-Implement the claimed scope.
+Implement T084 Codex keymap alignment with legacy migration and observable regressions.
 
 ## Actions
 
-Created an isolated worktree through an atomic peer claim.
+Created an isolated worktree through an atomic peer claim. Implemented contextual keymaps, configuration commands, steering/queue dispatch, editor recovery and edit forks. Merged remote permission-rule revision 8c0eabb without conflicts. A separate version peer applied the fresh 0.5.0 reservation after publication of 0.4.0.
 
 ## Validation
 
-Pending.
+Initial task test:interactive passed. Initial task check passed before the
+combined remote/version handoff. Review findings were fixed with regressions.
+Combined static checks, independent exact review and frozen task verify are pending.
 
 ## Blockers and Dependencies
 
@@ -35,8 +37,10 @@ None.
 
 ## Next Step
 
-Implement and validate the task.
+Complete combined checks, independent exact review, frozen native verification and safe local delivery.
 
 ## Handoff
 
-Pending.
+In progress. Memory updated with the approved keymap migration decision.
+Historical internal integration stays unchanged; actual shared/main delivery
+requires separately confirmed Git events.
