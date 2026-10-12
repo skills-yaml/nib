@@ -65,15 +65,27 @@ Default changes are visible in effective shortcut help; set tui.preset = "legacy
 to restore legacy behavior. Configuration changes are atomic. Context precedence
 prevents queued prompts from deciding approvals. Editor commands are explicitly
 user-configured local processes; drafts use private temporary files. Forked execution
-records cannot credit new work. Shared 0.4.0 remains already applied with no second bump.
+records cannot credit new work. Published 0.4.0 is preserved; the independently reviewed atomic reservation returned fresh minor 0.5.0. The version owner applies it once before final integration artifacts.
 
 ## Version Impact
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | minor | nib-catalog-refresh | Additive keymap and changed default share the atomically rechecked applied 0.4.0 minor reservation. |
+| nib | minor | nib-keymap-alignment | Additive keymap and changed defaults use the fresh 0.5.0 reservation from published 0.4.0, applied once by t084-keymap-version before integration artifacts. |
 
 ## Memory Impact
 
 Status: pending
 Rationale: Resolve the stable keymap and migration contract after verification.
+
+## Version Reconciliation
+
+The public development manifest published 0.4.0 at
+8c0eabb4d1ea768dee9b5d20872aa49a8181bc44 while this feature was being implemented.
+T084 was withdrawn from that released membership. Independent prospective review
+approved the bounded reservation read-basis adaptation at d978445; the same atomic
+runtime transaction returned nib-keymap-alignment minor 0.5.0 from 0.4.0. Only that
+reservation call used the committed publication-ledger read basis; no historical
+integration ref, task ownership or worktree was changed. Version mirrors were
+updated once before final integration artifacts. Source work also incorporates
+remote development permission-rule revision 8c0eabb; combined review/gates renew.

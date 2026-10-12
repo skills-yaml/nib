@@ -19,7 +19,7 @@ scope:
 
 ## Assignment
 
-Implement the claimed scope.
+Reconcile publication and apply the fresh T084 minor reservation once.
 
 ## Actions
 
@@ -35,7 +35,7 @@ None.
 
 ## Next Step
 
-Implement and validate the task.
+Hand off the version candidate for combined review and native version gates.
 
 ## Handoff
 
@@ -52,3 +52,13 @@ revision, without moving the historical integration reference. Preserve every
 peer task, worktree, checkpoint and contract. Apply the returned target once to
 Cargo.toml, Cargo.lock and skills.yaml before final integration artifacts. Review
 this release-control reconciliation independently and run native versions gates.
+
+## Reservation Result
+
+Independent prospective review approved read basis
+ d9784453b4eb2cd58647f4fd03fd53cfe7eed01a. The single unchanged atomic reservation
+transaction returned nib-keymap-alignment, baseline 0.4.0, impact minor, target
+0.5.0. Applied Cargo.toml, Cargo.lock and skills.yaml once; no global integration
+reference, existing task ownership, worktree or checkpoint was changed. Combined
+native version validation is required before delivery. Memory: none for this
+bounded application; the keymap author records the overall durable contract.
