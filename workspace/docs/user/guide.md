@@ -1095,10 +1095,16 @@ removed and files it deleted come back.
   reverses it.
 - The conversation is not rewound. nib tells the model which files changed so it
   re-reads them.
-- Files changed by terminal commands are not restored. When a request ran a
-  command that is not read-only, `/rewind` says so; check `/diff`.
+- Files changed by terminal commands, subagent merges or MCP tools are not
+  restored. When a request ran one of those, `/rewind` says so; check `/diff`.
+- A rewind overwrites later edits to the same files, including your own; its
+  undo checkpoint keeps them. Files whose worktree was landed or removed are
+  listed, not restored.
 - Checkpoints never touch `.git` or `.nib` and are not Git commits. They are
-  stored under `.nib/profiles/<id>/checkpoints/`, out of reach of tool commands.
+  stored under `.nib/profiles/<id>/checkpoints/`, which the Linux sandbox hides
+  from tool commands. Commands allowed to run outside the sandbox (macOS,
+  Windows, `full-access`) could change them, but a rewind still writes only
+  inside the session's workspace.
   A session keeps its last 100 checkpoints and up to 256 MiB of saved files.
   Files over 16 MiB are not saved.
 

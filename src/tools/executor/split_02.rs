@@ -1039,8 +1039,9 @@ pub(crate) fn is_sensitive_environment_key(key: &str) -> bool {
 }
 
 impl ToolExecutor {
-    /// Saves the files an applied patch will change, or notes a command that
-    /// may write files, in the turn's checkpoint (T080 phase 4). A storage
+    /// Saves the files an applied patch will change, or notes a command,
+    /// subagent merge or MCP tool that may write files, in the turn's
+    /// checkpoint (T080 phase 4). A storage
     /// failure is logged and never blocks the call.
     pub(crate) fn record_checkpoint(
         &self,
@@ -1051,7 +1052,11 @@ impl ToolExecutor {
     ) {
         let edit = call.tool_name == "apply_patch"
             && call.arguments.get("dry_run").and_then(Value::as_bool) == Some(false);
-        let command = call.tool_name == "run_terminal" && risk != ToolRisk::ReadOnly;
+        // Commands, subagent merges and MCP tools can write files nib does
+        // not snapshot; the checkpoint flags them instead.
+        let command = (call.tool_name == "run_terminal" && risk != ToolRisk::ReadOnly)
+            || call.tool_name == "merge_subagent_worktree"
+            || (get_tool_metadata(&call.tool_name).is_none() && call.tool_name.contains("::"));
         if !edit && !command {
             return;
         }

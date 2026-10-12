@@ -153,20 +153,72 @@ fn commands_are_flagged_not_restored() {
 }
 
 #[test]
-fn rewind_refuses_a_workspace_that_is_not_the_sessions() {
+fn rewind_skips_a_workspace_that_is_not_the_sessions() {
     let fixture = Fixture::new();
     fixture.write("a.txt", "v1");
     fixture.before_edit(1, &["a.txt"]);
     fixture.write("a.txt", "v2");
     let other = tempfile::tempdir().expect("other");
 
-    let error = fixture
+    let report = fixture
         .store
         .rewind(1, &[other.path().to_path_buf()])
-        .expect_err("foreign workspace");
-    assert!(error.contains("not this session's workspace"), "{error}");
+        .expect("rewind reports the foreign workspace");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].1.contains("no longer this session's"));
+    assert_eq!(report.undo_number, None);
     assert_eq!(fixture.read("a.txt").as_deref(), Some("v2"));
     assert!(fixture.store.rewind(9, &[fixture.root()]).is_err());
+}
+
+/// Review finding 1: the undo checkpoint must not prune the data the
+/// rewind is about to restore.
+#[test]
+fn rewinding_to_the_oldest_checkpoint_keeps_its_data() {
+    let fixture = Fixture::new();
+    for turn in 0..MAX_CHECKPOINTS {
+        fixture.write("a.txt", &format!("v{turn}"));
+        fixture.before_edit(turn, &["a.txt"]);
+    }
+    fixture.write("a.txt", "latest");
+    let oldest = fixture.store.list().expect("list")[0].number;
+
+    let report = fixture
+        .store
+        .rewind(oldest, &[fixture.root()])
+        .expect("rewind");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(fixture.read("a.txt").as_deref(), Some("v0"));
+    let checkpoints = fixture.store.list().expect("list");
+    assert_eq!(checkpoints.len(), MAX_CHECKPOINTS);
+    assert_eq!(
+        checkpoints.last().expect("undo").kind,
+        CheckpointKind::Rewind
+    );
+}
+
+/// Review finding 6: a file that already matches is left alone.
+#[test]
+fn unchanged_files_are_not_rewritten() {
+    let fixture = Fixture::new();
+    fixture.write("a.txt", "same");
+    fixture.before_edit(1, &["a.txt"]);
+
+    let report = fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
+    assert!(report.restored.is_empty(), "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+}
+
+/// Review finding 7: a name Git reported lossily is not claimed as saved.
+#[test]
+fn lossy_names_are_unavailable() {
+    let fixture = Fixture::new();
+    fixture.before_edit(1, &["bad\u{fffd}name"]);
+    let checkpoints = fixture.store.list().expect("list");
+    assert!(matches!(
+        checkpoints[0].files[0].image,
+        FileImage::Unavailable { .. }
+    ));
 }
 
 #[test]
@@ -213,6 +265,53 @@ fn rewind_does_not_write_through_a_symlinked_directory() {
     let report = fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
     assert_eq!(report.skipped.len(), 1, "{report:?}");
     assert!(!elsewhere.join("a.txt").exists());
+}
+
+/// Review finding 2: a link placed where a file was is replaced, never
+/// written through.
+#[cfg(unix)]
+#[test]
+fn rewind_replaces_a_link_instead_of_following_it() {
+    let fixture = Fixture::new();
+    fixture.write("a.txt", "v1");
+    fixture.before_edit(1, &["a.txt"]);
+    let outside = tempfile::tempdir().expect("outside");
+    let target = outside.path().join("target.txt");
+    std::fs::write(&target, "untouched").expect("target");
+    std::fs::remove_file(fixture.workspace.path().join("a.txt")).expect("remove");
+    std::os::unix::fs::symlink(&target, fixture.workspace.path().join("a.txt")).expect("link");
+
+    let report = fixture.store.rewind(1, &[fixture.root()]).expect("rewind");
+    assert_eq!(report.restored, vec!["a.txt"], "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target"),
+        "untouched"
+    );
+    let restored = fixture.workspace.path().join("a.txt");
+    assert!(!std::fs::symlink_metadata(&restored)
+        .expect("meta")
+        .is_symlink());
+    assert_eq!(fixture.read("a.txt").as_deref(), Some("v1"));
+}
+
+/// Review finding 2: capture saves a link as a link and never reads
+/// through it.
+#[cfg(unix)]
+#[test]
+fn capture_never_reads_through_a_link() {
+    let fixture = Fixture::new();
+    let outside = tempfile::tempdir().expect("outside");
+    let secret = outside.path().join("secret");
+    std::fs::write(&secret, "credential").expect("secret");
+    std::os::unix::fs::symlink(&secret, fixture.workspace.path().join("a.txt")).expect("link");
+    fixture.before_edit(1, &["a.txt"]);
+
+    let checkpoints = fixture.store.list().expect("list");
+    assert!(matches!(
+        checkpoints[0].files[0].image,
+        FileImage::Symlink { .. }
+    ));
+    assert!(!fixture.store.dir.join(BLOB_DIR).exists());
 }
 
 #[cfg(unix)]

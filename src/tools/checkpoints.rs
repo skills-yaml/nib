@@ -143,7 +143,9 @@ impl CheckpointStore {
         let mut index = self.load()?;
         let position = self.turn_checkpoint(&mut index, turn, &root);
         let workspace = open_root(&root)?;
+        let opened = index.checkpoints[position].files.is_empty();
         let mut wrote_blob = false;
+        let mut added = false;
         for path in paths {
             let checkpoint = &index.checkpoints[position];
             if checkpoint.files.iter().any(|saved| &saved.path == path) {
@@ -154,6 +156,10 @@ impl CheckpointStore {
                 path: path.clone(),
                 image,
             });
+            added = true;
+        }
+        if !added && !opened {
+            return Ok(());
         }
         self.finish(index, wrote_blob)
     }
@@ -211,14 +217,23 @@ impl CheckpointStore {
         for ((root, path), image) in targets {
             by_root.entry(root).or_default().push((path, image));
         }
-        for root in by_root.keys() {
-            if !allowed.contains(root) {
-                return Err(format!(
-                    "checkpoint #{number} edited {}, which is not this session's workspace",
-                    root.display()
+        // A workspace that is no longer the session's (a landed or removed
+        // worktree) is never written; its files are reported instead.
+        by_root.retain(|root, files| {
+            if allowed.contains(root) {
+                return true;
+            }
+            for (path, _) in files.drain(..) {
+                report.skipped.push((
+                    path,
+                    format!(
+                        "its workspace {} is no longer this session's (worktree landed or removed?)",
+                        root.display()
+                    ),
                 ));
             }
-        }
+            false
+        });
         if by_root.is_empty() {
             return Ok(report);
         }
@@ -247,7 +262,9 @@ impl CheckpointStore {
                 files: saved,
             });
         }
-        self.finish(index, wrote_blob)?;
+        // Nothing is pruned until the restore is done: pruning could drop
+        // the blobs the restore is about to read.
+        self.save(&index)?;
         report.undo_number = Some(undo_number);
 
         for (root, files) in by_root {
@@ -260,6 +277,9 @@ impl CheckpointStore {
                     Err(reason) => report.skipped.push((path, reason)),
                 }
             }
+        }
+        if let Err(error) = self.finish(index, wrote_blob) {
+            tracing::warn!("checkpoints not pruned after a rewind: {error}");
         }
         Ok(report)
     }
@@ -292,113 +312,110 @@ impl CheckpointStore {
     }
 
     fn capture(&self, workspace: &Dir, path: &str, wrote_blob: &mut bool) -> FileImage {
-        let Some(relative) = safe_relative(path) else {
-            return FileImage::Unavailable {
-                reason: "path is outside the workspace or inside .git or .nib".to_string(),
-            };
-        };
-        if let Err(reason) = parents_are_directories(workspace, &relative) {
-            return FileImage::Unavailable { reason };
-        }
-        let metadata = match workspace.symlink_metadata(&relative) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return FileImage::Absent,
-            Err(error) => {
-                return FileImage::Unavailable {
-                    reason: format!("cannot read: {error}"),
-                }
-            }
-        };
-        if metadata.is_symlink() {
-            return match workspace.read_link(&relative) {
-                Ok(target) => FileImage::Symlink {
-                    target: target.to_string_lossy().into_owned(),
-                },
-                Err(error) => FileImage::Unavailable {
-                    reason: format!("cannot read the link: {error}"),
-                },
-            };
-        }
-        if !metadata.is_file() {
-            return FileImage::Unavailable {
-                reason: "not a regular file".to_string(),
-            };
-        }
-        if metadata.len() > MAX_FILE_BYTES {
-            return FileImage::Unavailable {
-                reason: "larger than 16 MiB".to_string(),
-            };
-        }
-        let bytes = match workspace.read(&relative) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return FileImage::Unavailable {
-                    reason: format!("cannot read: {error}"),
-                }
-            }
-        };
-        match self.store_blob(&bytes) {
-            Ok((blob, new)) => {
-                *wrote_blob |= new;
-                FileImage::File {
-                    blob,
-                    executable: is_executable(&metadata),
-                }
-            }
-            Err(error) => FileImage::Unavailable {
-                reason: format!("cannot save: {error}"),
-            },
+        match self.try_capture(workspace, path, wrote_blob) {
+            Ok(image) => image,
+            Err(reason) => FileImage::Unavailable { reason },
         }
     }
 
+    fn try_capture(
+        &self,
+        workspace: &Dir,
+        path: &str,
+        wrote_blob: &mut bool,
+    ) -> Result<FileImage, String> {
+        // Git reports a name that is not UTF-8 lossily; it cannot be found
+        // again reliably, so it is not claimed as saved.
+        if path.contains(char::REPLACEMENT_CHARACTER) {
+            return Err("the file name is not valid UTF-8".to_string());
+        }
+        let (relative, name) = split_safe(path)?;
+        let Some(parent) = open_parent(workspace, &relative, false)? else {
+            return Ok(FileImage::Absent);
+        };
+        let metadata = match parent.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(FileImage::Absent),
+            Err(error) => return Err(format!("cannot read: {error}")),
+        };
+        if metadata.is_symlink() || metadata_is_reparse(&metadata) {
+            let target = parent
+                .read_link_contents(&name)
+                .map_err(|error| format!("cannot read the link: {error}"))?;
+            return Ok(FileImage::Symlink {
+                target: target.to_string_lossy().into_owned(),
+            });
+        }
+        // The entry is opened without following a link and checked through
+        // the handle, so a swap after the check cannot redirect the read.
+        let (bytes, executable) = read_regular_file(&parent, &name)?;
+        let (blob, new) = self
+            .store_blob(&bytes)
+            .map_err(|error| format!("cannot save: {error}"))?;
+        *wrote_blob |= new;
+        Ok(FileImage::File { blob, executable })
+    }
+
     fn restore(&self, workspace: &Dir, path: &str, image: &FileImage) -> Result<Restored, String> {
-        let relative =
-            safe_relative(path).ok_or("path is outside the workspace or inside .git or .nib")?;
         if let FileImage::Unavailable { reason } = image {
             return Err(format!("not saved ({reason})"));
         }
-        parents_are_directories(workspace, &relative)?;
-        let current = match workspace.symlink_metadata(&relative) {
+        let (relative, name) = split_safe(path)?;
+        let create = !matches!(image, FileImage::Absent);
+        let Some(parent) = open_parent(workspace, &relative, create)? else {
+            return Ok(Restored::Unchanged);
+        };
+        let current = match parent.symlink_metadata(&name) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(format!("cannot inspect: {error}")),
         };
-        if current.as_ref().is_some_and(|metadata| metadata.is_dir()) {
+        let current_is_link = current
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_symlink() || metadata_is_reparse(metadata));
+        if current
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_dir() && !current_is_link)
+        {
             return Err("a directory is there now".to_string());
         }
-        let remove_current = |workspace: &Dir| match &current {
-            Some(_) => workspace
-                .remove_file(&relative)
-                .map_err(|error| format!("cannot replace: {error}")),
-            None => Ok(()),
-        };
         match image {
             FileImage::Absent => {
                 if current.is_none() {
                     return Ok(Restored::Unchanged);
                 }
-                remove_current(workspace)?;
+                // Unlinking removes the entry itself, never a link's target.
+                parent
+                    .remove_file(&name)
+                    .map_err(|error| format!("cannot remove: {error}"))?;
                 Ok(Restored::Removed)
             }
             FileImage::File { blob, executable } => {
-                let bytes = self.read_blob(blob)?;
-                if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    workspace
-                        .create_dir_all(parent)
-                        .map_err(|error| format!("cannot create its directory: {error}"))?;
-                    parents_are_directories(workspace, &relative)?;
+                if current.is_some() && !current_is_link {
+                    if let Ok((bytes, mode)) = read_regular_file(&parent, &name) {
+                        if &hex_digest(&bytes) == blob && mode == *executable {
+                            return Ok(Restored::Unchanged);
+                        }
+                    }
                 }
-                remove_current(workspace)?;
-                workspace
-                    .write(&relative, &bytes)
-                    .map_err(|error| format!("cannot write: {error}"))?;
-                set_executable(workspace, &relative, *executable)
-                    .map_err(|error| format!("cannot set permissions: {error}"))?;
+                let bytes = self.read_blob(blob)?;
+                replace_with_file(&parent, &name, &bytes, *executable)?;
                 Ok(Restored::Written)
             }
             FileImage::Symlink { target } => {
-                remove_current(workspace)?;
-                create_symlink(workspace, target, &relative)
+                if current_is_link
+                    && parent
+                        .read_link_contents(&name)
+                        .is_ok_and(|current| current.to_string_lossy() == target.as_str())
+                {
+                    return Ok(Restored::Unchanged);
+                }
+                if current.is_some() {
+                    parent
+                        .remove_file(&name)
+                        .map_err(|error| format!("cannot replace: {error}"))?;
+                }
+                create_symlink(&parent, target, &name)
                     .map_err(|error| format!("cannot create the link: {error}"))?;
                 Ok(Restored::Written)
             }
@@ -422,8 +439,17 @@ impl CheckpointStore {
         }
         let mut must_collect = pruned > 0;
         if wrote_blob {
-            while index.checkpoints.len() > 1 && self.referenced_bytes(&index) > MAX_BLOB_BYTES {
-                index.checkpoints.remove(0);
+            // Drop whole checkpoint numbers, oldest first, and always keep
+            // the newest one (a rewind's undo spans one number).
+            while self.referenced_bytes(&index) > MAX_BLOB_BYTES {
+                let oldest = index.checkpoints[0].number;
+                let newest = highest_number(&index);
+                if oldest == newest {
+                    break;
+                }
+                index
+                    .checkpoints
+                    .retain(|checkpoint| checkpoint.number != oldest);
                 must_collect = true;
             }
         }
@@ -591,26 +617,121 @@ pub(crate) fn safe_relative(path: &str) -> Option<PathBuf> {
     (!relative.as_os_str().is_empty()).then_some(relative)
 }
 
-/// Every existing parent of `relative` must be a real directory: a symlink
-/// there could redirect the write elsewhere inside the workspace.
-fn parents_are_directories(workspace: &Dir, relative: &Path) -> Result<(), String> {
-    let mut prefix = PathBuf::new();
+/// Splits a safe workspace path into its parent directories and file name.
+fn split_safe(path: &str) -> Result<(PathBuf, PathBuf), String> {
+    let relative =
+        safe_relative(path).ok_or("path is outside the workspace or inside .git or .nib")?;
+    let name = relative
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or("path has no file name")?;
+    Ok((relative, name))
+}
+
+/// Opens the parent directory of `relative` one component at a time without
+/// following links, so no component can be swapped for a link to `.git`,
+/// `.nib` or anywhere else. `Ok(None)` means a parent does not exist and
+/// `create` is false.
+fn open_parent(workspace: &Dir, relative: &Path, create: bool) -> Result<Option<Dir>, String> {
+    use cap_fs_ext::DirExt;
+    let mut current = workspace
+        .try_clone()
+        .map_err(|error| format!("cannot open the workspace: {error}"))?;
     let parts: Vec<_> = relative.components().collect();
     for part in &parts[..parts.len().saturating_sub(1)] {
-        prefix.push(part);
-        match workspace.symlink_metadata(&prefix) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(format!(
-                    "{} is a link or file, not a directory",
-                    prefix.display()
-                ))
+        let next = match current.open_dir_nofollow(part) {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
+                match current.create_dir(part) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(format!("cannot create its directory: {error}")),
+                }
+                current
+                    .open_dir_nofollow(part)
+                    .map_err(|error| not_a_directory(part, &error))?
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("cannot inspect {}: {error}", prefix.display())),
-        }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(not_a_directory(part, &error)),
+        };
+        current = next;
+    }
+    Ok(Some(current))
+}
+
+fn not_a_directory(part: &Component<'_>, error: &io::Error) -> String {
+    format!(
+        "{} is a link or file, not a directory ({error})",
+        part.as_os_str().to_string_lossy()
+    )
+}
+
+/// Reads a regular file opened without following a link, checking its type
+/// and size through the open handle.
+fn read_regular_file(parent: &Dir, name: &Path) -> Result<(Vec<u8>, bool), String> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|error| format!("cannot read: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot read: {error}"))?;
+    if !metadata.is_file() || metadata_is_reparse(&metadata) {
+        return Err("not a regular file".to_string());
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err("larger than 16 MiB".to_string());
+    }
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(
+        &mut io::Read::take(&mut file, MAX_FILE_BYTES + 1),
+        &mut bytes,
+    )
+    .map_err(|error| format!("cannot read: {error}"))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err("larger than 16 MiB".to_string());
+    }
+    Ok((bytes, is_executable(&metadata)))
+}
+
+/// Writes a new file beside the target and renames it over the target. The
+/// rename replaces the directory entry itself, so a link there is replaced,
+/// never followed.
+fn replace_with_file(
+    parent: &Dir,
+    name: &Path,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<(), String> {
+    let temporary = PathBuf::from(format!(".nib-rewind-{}", uuid::Uuid::new_v4().simple()));
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let written = (|| -> io::Result<()> {
+        let mut file = parent.open_with(&temporary, &options)?;
+        io::Write::write_all(&mut file, bytes)?;
+        set_executable(&file, executable)?;
+        file.sync_all()?;
+        parent.rename(&temporary, parent, name)
+    })();
+    if let Err(error) = written {
+        let _ = parent.remove_file(&temporary);
+        return Err(format!("cannot write: {error}"));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse(metadata: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse(_metadata: &cap_std::fs::Metadata) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -625,9 +746,9 @@ fn is_executable(_metadata: &cap_std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn set_executable(workspace: &Dir, relative: &Path, executable: bool) -> io::Result<()> {
+fn set_executable(file: &cap_std::fs::File, executable: bool) -> io::Result<()> {
     use cap_std::fs::PermissionsExt;
-    let mut permissions = workspace.metadata(relative)?.permissions();
+    let mut permissions = file.metadata()?.permissions();
     let mode = permissions.mode();
     let wanted = if executable {
         mode | ((mode & 0o444) >> 2)
@@ -636,23 +757,23 @@ fn set_executable(workspace: &Dir, relative: &Path, executable: bool) -> io::Res
     };
     if wanted != mode {
         permissions.set_mode(wanted);
-        workspace.set_permissions(relative, permissions)?;
+        file.set_permissions(permissions)?;
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_executable(_workspace: &Dir, _relative: &Path, _executable: bool) -> io::Result<()> {
+fn set_executable(_file: &cap_std::fs::File, _executable: bool) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn create_symlink(workspace: &Dir, target: &str, relative: &Path) -> io::Result<()> {
-    workspace.symlink(target, relative)
+fn create_symlink(parent: &Dir, target: &str, name: &Path) -> io::Result<()> {
+    parent.symlink_contents(target, name)
 }
 
 #[cfg(not(unix))]
-fn create_symlink(_workspace: &Dir, _target: &str, _relative: &Path) -> io::Result<()> {
+fn create_symlink(_parent: &Dir, _target: &str, _name: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "symbolic links are restored only on Unix",

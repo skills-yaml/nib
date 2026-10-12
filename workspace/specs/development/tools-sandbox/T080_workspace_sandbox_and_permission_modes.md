@@ -715,7 +715,8 @@ Phase 4 delivers section 5 with these concrete choices.
 **One checkpoint per turn.** A turn starts with each human request,
 steering message or question answer in the session. The first file edit
 of a turn opens that turn's checkpoint, labelled with the request text.
-Turns that edit nothing have no checkpoint.
+Turns that neither edit files nor run a command that may write them have no
+checkpoint.
 
 **What is captured.** Before `apply_patch` writes, nib saves the prior
 state of every path the patch touches, taken from Git's patch parsing
@@ -725,11 +726,16 @@ state of every path the patch touches, taken from Git's patch parsing
 - or "absent" when the patch creates the file.
 
 Contents go to a content-addressed blob store under
-`.nib/profiles/<id>/checkpoints/<session>/`. The sandbox masks that
-directory, so tool commands cannot read or forge it.
+`.nib/profiles/<id>/checkpoints/<session>/`. On the Linux sandbox route
+that directory is masked, so tool commands cannot read or forge it. On
+direct routes (macOS, Windows, `full-access`), or with a profile
+`state_dir` outside `.nib`, an allowed command could change it. Forging
+gains little: a restore still writes only inside the session's workspace,
+never `.git` or `.nib`.
 
 **Terminal commands.** Commands are not snapshotted in this phase. When a
-turn ran a command that is not read-only, its checkpoint records that.
+turn ran a command that is not read-only, a subagent merge or an MCP tool,
+its checkpoint records that.
 `/rewind` then says files changed by commands are not restored. Restoring
 command effects needs the terminal-observed diff that phase 5 builds for
 in-place reconciliation (section 6b). Copying the whole tree each turn, or
@@ -745,8 +751,16 @@ unsafe here.
 - It first saves the current state of those files as a new checkpoint
   ("before rewind to #n"), so a rewind can itself be undone.
 - It writes only inside the recorded workspace root, which must be the
-  project or the session's validated worktree. It never writes `.git` or
-  `.nib`, and refuses paths that escape the root or pass through a symlink.
+  project or the session's validated worktree. Files whose workspace is
+  gone (a landed or removed worktree) are reported, not written. It never
+  writes `.git` or `.nib`, and refuses paths that escape the root or pass
+  through a symlink.
+- Each directory is opened through a handle that does not follow links.
+  Files are read the same way, and written to a new file that is renamed
+  over the target. A concurrent swap to a link therefore cannot redirect
+  a read or a write. Files that already match are left alone.
+- A rewind overwrites concurrent edits to the same files, whether by
+  another session or by the user. Its undo checkpoint keeps them.
 - The conversation is not rewound. nib appends a runtime note listing the
   restored files so the model re-reads them.
 - `/rewind` needs an idle session.
@@ -761,6 +775,27 @@ unsafe here.
 **Out of scope.** Rewinding the conversation, restoring command effects
 (phase 5), subagent worktrees (their merge is the review point) and moving
 the store to user-home state (T082).
+
+**Independent review of `a2773f4`: changes requested, then resolved.**
+- **F1 (medium-high).** The undo checkpoint's pruning could drop the
+  checkpoint being restored, together with its blobs. Fixed: a rewind
+  saves without pruning, and prunes only after the restore. The size cap
+  drops whole checkpoint numbers and always keeps the newest.
+- **F2 (medium).** A check-then-use race could redirect a restore into
+  `.git`, or a capture into `.nib`. Fixed with the handle-based I/O
+  described above.
+- **F3.** Overstated store protection. Fixed by naming the unsandboxed
+  routes.
+- **F4.** Subagent merges and MCP tools are now flagged.
+- **F5.** An index with no new paths is not re-saved. Not done: reusing
+  the patch paths computed during approval, and moving the I/O to a
+  blocking thread. Edits are small and the extra Git calls are bounded;
+  this is accepted as a later optimisation.
+- **F6.** Unchanged files are left alone.
+- **F7.** Lossy non-UTF-8 names are recorded as unavailable.
+- **F8.** A gone workspace is skipped and reported, instead of failing the
+  whole rewind.
+- **F9.** Wording fixed.
 
 ## User Decisions (2026-10-07)
 
