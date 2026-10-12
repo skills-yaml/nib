@@ -712,7 +712,7 @@ project `.nib/config.toml` settings still apply without trust.
 - Type: decision
 - Source: User-approved T084 implementation plan
 - Confidence: high
-- Review: Interface and security review required for the exact implementation
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
 
 Content:
 

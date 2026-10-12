@@ -806,7 +806,7 @@ in decisions.md.
 - Type: changelog
 - Source: User-approved T084 implementation plan
 - Confidence: high
-- Review: Exact implementation review and validation remain required
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
 
 Content:
 

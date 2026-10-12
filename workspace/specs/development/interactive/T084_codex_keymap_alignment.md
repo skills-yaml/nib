@@ -32,15 +32,15 @@ workspace/docs/user/guide.md. No governed instructions change.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Codex and legacy presets resolve actions by context; malformed and
+- [x] AC-1: Codex and legacy presets resolve actions by context; malformed and
   colliding overrides fail validation, with persistent set/unbind/reset and effective help.
-- [ ] AC-2: Running Enter steers, running Tab queues, completion takes precedence;
+- [x] AC-2: Running Enter steers, running Tab queues, completion takes precedence;
   modal answers and durable workload state stay authoritative.
-- [ ] AC-3: Copy, clear-view and composer editing operate on their intended targets.
-- [ ] AC-4: External editor success/failure restores the terminal and preserves the draft.
-- [ ] AC-5: Empty double Escape restores the latest user message in a new fork;
+- [x] AC-3: Copy, clear-view and composer editing operate on their intended targets.
+- [x] AC-4: External editor success/failure restores the terminal and preserves the draft.
+- [x] AC-5: Empty double Escape restores the latest user message in a new fork;
   original history remains intact, and post-branch execution state is not inherited.
-- [ ] AC-6: Legacy preserves prior defaults; tests, docs and independent review pass.
+- [x] AC-6: Legacy preserves prior defaults; tests, docs and independent review pass.
 
 ## Implementation Plan
 
@@ -98,7 +98,11 @@ The initial source implementation passed task test:interactive. Review findings
 about editor directory permissions, completion ownership, remapped action/context
 availability and running file-completion steering were fixed with regressions.
 The combined source includes development 8c0eabb and the reserved 0.5.0 version.
-Renew independent exact review and native task verify on the frozen candidate.
+Independent review approved 9f1b9da; its complete task verify passed, including
+1,452 library tests, CLI and integration suites, and documentation integrity.
+Independent review also approved the fail-closed smoke follow-up at 5998fdc.
+The reconciled final candidate requires renewed exact review and
+final task verify, task build and task smoke:interactive:binary before handoff.
 Local implementation does not establish shared integration, main delivery or
 publication. Native Windows/macOS editor qualification remains separate.
 
@@ -107,3 +111,30 @@ now follow modal ownership, transcript focus and the effective composer/running
 bindings, including overridden and unbound actions. Regression coverage exercises
 each context. The docs-integrity gate also required the explicit Implementation
 Plan heading; the existing ordered plan now uses that heading.
+
+## Acceptance Evidence and Final Qualification
+
+- AC-1: Configuration/keymap tests cover context availability, effective presets,
+  override collisions, invalid writes, unbinding and reset. Footer regressions
+  cover idle, running, transcript, completion/modal and customized hints.
+- AC-2: Steering and shared-reducer tests cover exact-run fencing, Enter steering,
+  Tab queue/completion precedence and modifier-safe approval ownership.
+- AC-3: TUI tests cover composer actions, output/selection copy and view-only
+  clearing without changing persisted session history.
+- AC-4: Editor tests cover successful edits, failure and invalid-output recovery,
+  private backups, symlink rejection and terminal resume on every error path.
+  The native Unix release gate additionally exercises editor success/failure.
+- AC-5: Fork tests preserve the original, restore the last user message, exclude
+  prior execution authority and reject a concurrently running original.
+- AC-6: Preset and command tests cover legacy migration/reset; user documentation
+  describes effective bindings and rollback. Independent exact-candidate review
+  and the full Task gate passed 9f1b9da. Final qualification renews after the
+  bounded smoke-script follow-up and these evidence records.
+
+The first native run established draft recovery and persisted preset changes,
+but redraw-dependent waits did not fail their producer. Its overall success is
+not accepted as qualification. Revised cases use bounded editor invocation and
+persisted configuration synchronization, propagate all new wait failures, and
+must pass against the clean, exact-revision release binary before delivery.
+Local qualification is Linux; Windows/macOS native editor execution is not
+claimed. No shared integration, main merge or publication is recorded here.
