@@ -924,10 +924,16 @@ pub(crate) fn draw_loop(
                             continue;
                         }
                         Some(KeyAction::Queue) if worker.is_some() => {
+                            let input = composer.input.trim();
+                            let queued = if input.starts_with("queue:") {
+                                crate::interactive::parse_queue_line(input).unwrap_or("")
+                            } else {
+                                input
+                            };
                             match persist_queued_follow_up(
                                 &store,
                                 &active_session_id,
-                                &composer.input,
+                                queued,
                                 "composer",
                             ) {
                                 Ok(_) => {
@@ -1115,6 +1121,8 @@ pub(crate) fn draw_loop(
                 }
                 if key_action == Some(KeyAction::Steer)
                     && !composer.input.trim_start().starts_with('/')
+                    && !composer.input.trim_start().starts_with("queue:")
+                    && !composer.input.trim_start().starts_with("steer:")
                 {
                     match submit_tui_steering_draft(worker.as_ref(), &mut composer) {
                         Ok((text, sequence)) => {
@@ -1159,11 +1167,15 @@ pub(crate) fn draw_loop(
                                 timeline.push_status(format!("[command error] {message}"));
                             }
                             InteractionReduction::SteerCurrent(text) => {
-                                composer.set_text(submitted);
+                                composer.set_text(text);
+                                match submit_tui_steering_draft(worker.as_ref(), &mut composer) {
+                                    Ok((text, sequence)) => timeline.push_steering(&text, sequence),
+                                    Err(error) => {
+                                        composer.set_text(submitted);
+                                        timeline.push_status(format!("[steer error] {error}"));
+                                    }
+                                }
                                 completion.sync_for(&composer.input, Some(project_root));
-                                timeline.push_status(format!(
-                                    "[ui error] Enter cannot steer an active run: {text}"
-                                ));
                             }
                             InteractionReduction::QueueNext(queued) => {
                                 match persist_queued_follow_up(
