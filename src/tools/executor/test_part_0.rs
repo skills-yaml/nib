@@ -1691,8 +1691,11 @@ fn terminal_call(root: &std::path::Path, command: &str) -> ToolCall {
 /// T080 2a review: plan mode refuses changes before allow rules, remembered
 /// grants, `--yes` and classifier auto-approval, and still lets questions run.
 #[tokio::test]
+#[serial_test::serial]
 async fn plan_mode_wins_over_grants_and_allows_questions() {
+    let _home = crate::tools::permission_rules::TestNibHome::isolated();
     let root = tempfile::tempdir().expect("root");
+    crate::tools::permission_rules::set_project_trust(root.path(), true).expect("trust");
     let command = terminal_call(root.path(), "mkdir build-output");
 
     let allow = PolicyRule {

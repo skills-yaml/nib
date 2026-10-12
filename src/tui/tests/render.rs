@@ -1085,7 +1085,7 @@ fn footer_and_completion_follow_the_current_interaction() {
         .iter()
         .map(|suggestion| completion_line(suggestion, 76))
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(rows.len(), 4, "fixed subcommands must have distinct rows");
+    assert_eq!(rows.len(), 10, "fixed subcommands must have distinct rows");
     assert!(rows.iter().any(|row| row.contains("/permissions manual")));
     assert!(rows
         .iter()

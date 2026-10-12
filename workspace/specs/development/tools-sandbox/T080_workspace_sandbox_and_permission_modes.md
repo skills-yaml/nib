@@ -562,6 +562,152 @@ Plan mode uses the permission engine rather than the agent's planning mode,
 which no interactive surface selects. This matches Claude Code's read-only
 plan mode.
 
+## Phase 3 Plan: Rules and "Always Allow" (2026-10-11)
+
+Phase 3 delivers section 4 with these concrete choices.
+
+**Rule syntax.** A rule is `tool` or `tool(specifier)`. The aliases
+`terminal` and `bash` mean `run_terminal`, `edit` means `apply_patch`, and
+`read` means `read_file`.
+- A `run_terminal` specifier is an exact command (`cargo test`), or a word
+  prefix ending in ` *` (`cargo test *`, which also matches `cargo test` on
+  its own). The Claude Code spelling `cargo test:*` is accepted.
+- A path specifier for `read_file`, `list_directory`, `grep` and
+  `apply_patch` is a workspace-relative glob with `*`, `?` and `**`. For
+  `apply_patch`, the paths come from the patch headers.
+
+**Evaluation.** Deny beats ask, and ask beats allow. The phase 2
+specific-over-general idea is dropped: a matching deny always wins, as in
+Claude Code. Compound commands are judged part by part, splitting on `&&`,
+`||`, `;`, `|` and newlines.
+- An allow applies only if every part is allowed by a rule or is read-only.
+- A deny or ask applies if any part matches.
+- A command that cannot be split safely (quotes, substitution, redirection,
+  a lone `&`) never matches an allow. It matches a deny or ask if a rule's
+  command text appears anywhere in it.
+
+**Layers.**
+- **User:** the `[permissions]` table (`allow`, `ask`, `deny`) of
+  `~/.nib/config.toml`. Only that table is read until T082 defines the rest
+  of the file.
+- **Project local (user-home):** `~/.nib/permissions.json`, keyed by the
+  canonical project path. It holds the project's trust flag and the rules
+  saved from prompts and `/permissions`. File edits cannot write it. On the
+  Linux sandbox route tool commands cannot either, because the sandbox masks
+  `$HOME`; on direct routes (macOS, Windows) an allowed command could.
+- **Project shared:** the `nib-policy:` lines of `AGENTS.md`, `CLAUDE.md`
+  and their `.local` variants, plus the legacy remembered-command file
+  `.nib/command-prefixes.json`. Their deny and require-approval lines always
+  apply. Their allow lines, and the legacy remembered commands, apply only
+  after `/permissions trust`, because a cloned repository or an agent can
+  write them.
+
+`NIB_HOME` overrides `~/.nib` (used by tests).
+
+**Prompt.** The remember choice becomes "Yes, and don't ask again for
+`<rule>` in this project". It saves `run_terminal(<rule>)` to the project-local
+layer. The suggested rule is the program and its subcommand word (plus a
+third word after `run`, `exec` or `x`) followed by ` *`, for example
+`cargo test *` or `npm run build *`. It falls back to the exact command when
+the program wraps other commands (`sudo`, `env`, shells and interpreters,
+`xargs`, `find`, `timeout`, `nice`, `nohup`, `exec`, `eval`, `command`,
+`time`, `watch`, `ssh`), when the program is given by path, or when the
+second word is not a plain subcommand word. Compound commands offer no
+remember choice.
+
+**`/permissions`.** Lists every rule with its layer, and marks ignored
+project allow lines. Its subcommands: `allow|ask|deny <rule>` and
+`remove <rule>` edit the project-local layer, and `trust`/`untrust` set the
+project's trust flag.
+
+**Hardening.** `apply_patch` refuses patches that touch `.nib` or `.git`
+paths, so file edits cannot plant rules or Git configuration when phase 5
+edits in place.
+
+**Review of `c93ba01` (approve with fixes) and resolutions.**
+- **F1, High.** `apply_patch`'s `.nib`/`.git` guard parsed patch headers
+  itself, so C-quoted names (`"b/\056nib/x"`) and other prefixes slipped
+  through. Paths now come from `git apply --numstat -z`, Git's own parser;
+  a patch Git cannot read cannot be applied either.
+- **F2, Medium.** `edit(<glob>)` matched `--- src/AGENTS.md`, which `-p1`
+  writes as `AGENTS.md`. Same fix: rules see Git's paths.
+- **F3, Medium.** An exact suggestion such as `sudo rm *` was re-parsed as a
+  prefix rule. Commands with glob characters (`*`, `?`, `[`) offer no
+  remember choice.
+- **F4, Medium.** Deny and ask rules for commands now look through
+  `NAME=value` words and transparent wrappers (`sudo`, `env`, `timeout`,
+  `xargs` and others, trying every word after the wrapper), program paths and
+  case. Unsplittable commands are compared word by word after removing
+  quotes. Documented as a guardrail, not a sandbox.
+- **F5, Medium.** `read(...)` covers `read_file`, `list_directory` and
+  `grep`. Paths are matched lexically and after resolving symbolic links,
+  relative to the session directory or the project root, ignoring ASCII case.
+  A deny or ask on an anchored folder also covers a `grep` of any folder above
+  it. Absolute and `..` rule paths are rejected.
+- **F6, Medium (design).** Edits to top-level `AGENTS.md`, `AGENTS.local.md`,
+  `CLAUDE.md` and `CLAUDE.local.md` always ask, even in `accept-edits` and
+  `auto` or with allow rules, and are refused when nobody can answer
+  (`always_asks`, shared with `git_push`). A terminal command allowed by a
+  rule could still write them; accepted residual risk.
+- **F7, Low-Medium.** The wrapper list now includes process wrappers,
+  interpreters, package runners, `git`, `docker`, `podman` and `kubectl`, and
+  the word after `run`/`exec`/`x`/`dlx` is checked against it.
+- **F8, Low.** A linked worktree uses its main project's rules and trust,
+  accepted only when Git's back-link (`<gitdir>/gitdir`) points at this
+  worktree, so a copied `.git` file cannot claim another project's trust.
+- **F9, Low.** Spec and guide wording now limit the protection of `~/.nib` to
+  file edits everywhere and to commands on the Linux sandbox route.
+- **F10, accepted.** A command rule ignores `cwd`, timeout and background,
+  as in Claude Code. Documented.
+- **F11, Low.** When a rules file exists but cannot be read, every action asks
+  (headless runs deny) until it is fixed, and `/permissions` says so.
+- **F12, Low.** Saving forgets projects whose folder no longer exists and caps
+  the file at 1000 projects.
+- **F13, Low.** Unit tests use a thread-local nib home (`TestNibHome`) and
+  never read the developer's home or the environment. `task test` and
+  `task test:integration` set `NIB_HOME` under `target/`, and the
+  integration fixtures that need trust write it there.
+- **F14, Low.** Rules are stored in canonical spelling, so `bash(x:*)` and
+  `terminal(x *)` are one rule and either removes it. `/permissions` counts
+  the instruction-file allow lines that trust would enable.
+
+**Re-review of `ffa9163` (approve with fixes) and resolutions.**
+- **N1, Medium.** Inside a repository subdirectory Git reports patch paths
+  from the repository top, so a nested project's `AGENTS.md` read as
+  `proj/AGENTS.md` and skipped the always-ask check. `git_patch_paths` strips
+  `git rev-parse --show-prefix`; regression tests cover rules and
+  `always_asks`.
+- **N2 and N3.** A `grep` of any folder reaches a file-name glob (`*.pem`)
+  unless it names hidden files, which the search skips, and reaches any glob
+  once a `**` part is reached.
+- **N4.** Deny and ask rules now match at any word of each command part
+  (`busybox rm`, `sh -c rm`), and a command word with glob characters is
+  matched as a pattern (`/bin/r?`). Over-matching is accepted; variable
+  composition (`x=r; ${x}m`) is out of reach and documented.
+- **N5.** In a linked worktree, allow lines come only from the main
+  checkout's instruction files (when trusted), never from the worktree's own
+  files, which sandboxed commands can write.
+- **N6.** Pruning keeps entries that hold deny or ask rules.
+- **N7.** A deny or ask entry that cannot be parsed makes every action ask.
+- **N8, partly accepted.** A call's paths are computed once per rule
+  evaluation. The remaining few synchronous `git apply --numstat` runs per
+  patch approval are short and accepted.
+- **N9.** Versioned interpreters (`python3.12`) and runner subcommands that
+  name a wrapper (`yarn node`) suggest only the exact command; a trailing dot
+  on `AGENTS.md.` still counts as an instruction file. Running `cargo test`
+  without the Taskfile can still read the developer's `~/.nib` in
+  integration tests that do not set `NIB_HOME`; accepted.
+
+**Final re-review of `335e1a3`: approve.** Its three low notes are fixed
+in the delivery candidate: the legacy remembered-command file is ignored in
+linked worktrees, deny matching understands `[...]` classes in command
+words, and `git rev-parse --show-prefix` scrubs the same Git variables as the
+numstat call.
+
+**Out of scope.** Project `.nib/config.toml` settings other than rules
+(for example `approvals.mode`) still apply without trust. That is recorded
+as a T082 follow-up. The stale-write check stays in phase 5.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

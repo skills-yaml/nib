@@ -584,7 +584,13 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   preset, then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
-  states are labeled in text rather than by color alone.
+  states are labeled in text rather than by color alone. `/permissions` also lists
+  the permission rules that apply and whether the project is trusted (see
+  [Permission rules](#permission-rules)).
+- `/permissions allow|ask|deny <rule>` adds a rule for this project,
+  `/permissions remove <rule>` removes one, and `/permissions trust` or `untrust`
+  sets whether allow lines shipped in the project apply. Changes apply from the next
+  request.
 - `/review` and `/diff` show the git workspace diff (`Show changes (diff)`).
 - `/continue <plan-id>` optionally continues that exact plan without retyping its goal.
   Answering saved questions or saying `resume` in ordinary conversation also recovers
@@ -770,8 +776,10 @@ without waiting for you to approve a generated plan. nib asks when the request
 is unclear or an action needs approval.
 Calls that still require interactive approval use the same under-composer list as `/`
 options. A command approval asks whether to run the exact command. Yes is highlighted.
-The next row remembers that exact command for this project. No asks what to do
-differently. Enter confirms the highlighted row. `y` and `p` confirm only when that
+The next row, "Yes, and don't ask again for `cargo test *` in this project", saves
+an allow rule for the command and its subcommand (or for the exact command when
+the program runs other programs, such as `sudo`, `env`, a shell or an interpreter).
+Compound commands do not offer it. No asks what to do differently. Enter confirms the highlighted row. `y` and `p` confirm only when that
 row is already highlighted. Esc cancels and does not run the command. Other tool
 approvals still start on Deny, with `Approve once`, `Deny`, and `View details`.
 The details view shows the bounded redacted command, patch, or validated arguments;
@@ -1061,6 +1069,60 @@ The agent can use `manage_memory` to list, read, persist, or remove profile-scop
 approval or an explicit allow policy, and deletes are classified as destructive.
 Memory is stored in the selected profile's `memory.json` and is included in bounded
 runtime context on later sessions.
+
+### Permission rules
+
+Rules decide, before the permission mode does, whether an action runs, asks or is
+refused. A matching **deny** always wins, then **ask**, then **allow**:
+
+```toml
+# ~/.nib/config.toml (your rules for every project)
+[permissions]
+allow = ["terminal(cargo test *)", "terminal(task check)", "edit(src/**)"]
+ask   = ["terminal(cargo publish *)"]
+deny  = ["read(.env)", "terminal(rm -rf *)"]
+```
+
+- `terminal(cargo test *)` matches `cargo test` with any arguments.
+  `terminal(cargo test)` matches only that exact command. `cargo test:*` is also
+  accepted. `terminal` alone matches every command.
+- `read(<glob>)` covers `read_file`, `list_directory` and `grep`; `edit(<glob>)`
+  covers `apply_patch`. Globs match workspace paths, ignoring case. A glob without
+  `/` matches a file name at any depth (`.env`, `*.pem`), and `**` spans directories
+  (`src/**`). A deny or ask for a folder (`read(secrets/**)`) also covers a `grep`
+  of any folder above it, and one for a file name (`read(*.pem)`) covers every
+  `grep` except for hidden files, which `grep` skips. Paths are checked after
+  following symbolic links.
+  Paths in a patch are read by Git itself.
+- Compound commands are judged part by part. `cargo test && git status` is allowed
+  by `terminal(cargo test *)` because `git status` is read-only. `cargo test && rm x`
+  is not, and a deny for `rm *` refuses it. Commands with quotes, `$`, redirection or
+  a lone `&` are never matched by an allow rule.
+- Deny and ask rules for commands are deliberately loose: they match the rule's
+  words anywhere in a command, so `sudo rm`, `sh -c rm`, `FOO=1 rm`, `/bin/rm`,
+  `RM` and `r''m` all match `rm *`. They are still a guardrail, not a sandbox: a
+  program can always be renamed or run from a script.
+- A command rule ignores the other `run_terminal` settings (working directory,
+  timeout, background).
+
+Rules come from three places:
+
+| Layer | Where | Applies |
+| --- | --- | --- |
+| User | `[permissions]` in `~/.nib/config.toml` | always |
+| Project | `~/.nib/permissions.json`, written by "don't ask again" and `/permissions` | always |
+| Shipped with the project | `nib-policy:` lines in `AGENTS.md` and `CLAUDE.md`, and the older `.nib/command-prefixes.json` | deny and require-approval lines always; allow lines only after `/permissions trust` |
+
+nib keeps your rules and the trust flag outside the project, so a cloned
+repository or an agent's file edits cannot grant themselves permissions. On Linux
+the sandbox also hides your home folder from commands; where commands run without
+the sandbox (macOS, Windows), a command you allow could still change them. Session
+and subagent worktrees use their project's rules and trust. File edits cannot
+change `.nib` or `.git`, and edits to `AGENTS.md` or `CLAUDE.md` always ask (and
+are refused when nobody can answer), because those files can carry allow lines.
+If a rules file cannot be read, every action asks until it is fixed;
+`/permissions` shows the problem. `git_push` asks even when a rule
+allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`.
 
 ## Safety and Persistence
 

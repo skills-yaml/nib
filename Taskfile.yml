@@ -86,11 +86,17 @@ tasks:
 
   test:
     desc: Run unit and integration tests
+    # Integration tests run nib itself; keep them away from the developer's
+    # ~/.nib permission rules (T080).
+    env:
+      NIB_HOME: '{{.ROOT_DIR}}/target/test-nib-home'
     cmds:
       - cargo test -- --test-threads=1
 
   test:integration:
     desc: Run every integration test target
+    env:
+      NIB_HOME: '{{.ROOT_DIR}}/target/test-nib-home'
     cmds:
       - "cargo test --test '*' -- --test-threads=1"
 

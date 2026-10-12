@@ -81,7 +81,8 @@ pub(crate) fn command_presentation(
     let remember_exact = (allow_remember
         && offer_grant
         && crate::interaction_card::command_can_be_remembered(&invocation.command))
-    .then(|| invocation.command.clone());
+    .then(|| crate::tools::permission_rules::suggested_terminal_rule(&invocation.command))
+    .flatten();
     CommandPresentation {
         environment: environment.to_string(),
         shown_command: Some(shown),
@@ -110,7 +111,8 @@ pub struct ApprovalContext {
     /// Redacted command text. `None` when this approval is not `run_terminal`.
     pub shown_command: Option<String>,
     pub command_extras: Vec<String>,
-    /// Exact command that option 2 may remember. Absent when remembering is unsafe.
+    /// Rule that option 2 saves as a project allow rule, such as `cargo test *`.
+    /// Absent when remembering is unsafe.
     pub remember_exact: Option<String>,
     pub offer_grant: bool,
     pub input_error: Option<String>,

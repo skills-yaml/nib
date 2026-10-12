@@ -6,6 +6,8 @@ pub mod delegation;
 pub mod executor;
 pub(crate) mod git_tools;
 pub mod models;
+pub(crate) mod permission_matching;
+pub(crate) mod permission_rules;
 pub mod registry;
 
 pub use delegation::{merge_subagent_worktree, spawn_subagent};

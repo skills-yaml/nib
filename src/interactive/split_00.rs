@@ -29,6 +29,7 @@ pub enum InteractiveArgumentSchema {
     RequiredText,
     OptionalSingle,
     Permissions,
+    PermissionRules,
     Skills,
     Mcp,
 }
@@ -160,13 +161,16 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
     spec(
         "permissions",
         &[],
-        "/permissions [manual|smart|policy|off]",
-        "Inspect or set the configured approval mode",
-        InteractiveArgumentSchema::Permissions,
+        "/permissions [manual|smart|policy|off|trust|untrust|allow <rule>|ask <rule>|deny <rule>|remove <rule>]",
+        "Inspect permission rules, edit this project's rules or trust, or set the approval mode",
+        InteractiveArgumentSchema::PermissionRules,
         InteractiveMutability::Configuration,
         InteractiveWorkerPolicy::RequiresIdle,
         InteractiveCompletionSpec {
-            candidates: &["manual", "smart", "policy", "off"],
+            candidates: &[
+                "manual", "smart", "policy", "off", "trust", "untrust", "allow", "ask", "deny",
+                "remove",
+            ],
             argument_after: &[],
         },
     ),

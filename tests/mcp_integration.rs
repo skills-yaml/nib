@@ -1,3 +1,5 @@
+#[path = "support/trusted_project.rs"]
+mod trusted_project;
 #[cfg(target_os = "linux")]
 use nib::config::load_nib_config_full;
 use nib::config::{save_nib_config_full, ExecutionConfig, McpServerEntry, NibConfig};
@@ -381,6 +383,7 @@ fn initialize_server_fixture(root: &Path) {
     std::fs::write(root.join("README.md"), "fixture\n").expect("fixture readme");
     std::fs::write(root.join("AGENTS.md"), "- nib-policy: allow run_terminal\n")
         .expect("noninteractive MCP policy");
+    trusted_project::trust_project(root);
     git(root, &["add", ".gitignore", "README.md", "AGENTS.md"]);
     git(root, &["commit", "-qm", "initial"]);
 
