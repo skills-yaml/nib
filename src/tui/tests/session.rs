@@ -546,7 +546,7 @@ fn approval_enter_and_number_keys_are_explicit_choices() {
     assert!(reply_rx.try_recv().is_err());
     assert!(handle_approval_key(&mut pending, KeyCode::Enter));
     let remembered = reply_rx.try_recv().unwrap();
-    assert_eq!(remembered.remember_command.as_deref(), Some("task test"));
+    assert_eq!(remembered.remember_command.as_deref(), Some("task test *"));
 
     let (reply_tx, mut reply_rx) = oneshot::channel();
     let mut pending = Some(approval_request(

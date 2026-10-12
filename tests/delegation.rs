@@ -1,3 +1,5 @@
+#[path = "support/trusted_project.rs"]
+mod trusted_project;
 use chrono::Utc;
 use nib::agent::CancellationSignal;
 use nib::config::{ExecutionConfig, TerminalConfig};
@@ -587,6 +589,7 @@ async fn subagent_policy_allow_cannot_bypass_mutation_or_network_ceiling() {
         "- nib-policy: allow run_terminal\n",
     )
     .expect("allow policy");
+    trusted_project::trust_project(root.path());
     git(root.path(), &["add", "AGENTS.md"]);
     git(root.path(), &["commit", "-qm", "allow terminal policy"]);
 

@@ -827,6 +827,27 @@ async fn run_failure_fixture_with_obligations_and_max_steps_and_stream(
     verification_obligations: Vec<VerificationObligation>,
     max_steps: u32,
 ) -> (AgentRunSummary, Session, Vec<Value>, Vec<StreamEvent>) {
+    run_failure_fixture_with_approver(
+        root,
+        responses,
+        question_handler,
+        verification_obligations,
+        max_steps,
+        None,
+    )
+    .await
+}
+
+/// Like the plain fixture, with an approval handler for the actions that
+/// always ask (for example edits to AGENTS.md, T080 phase 3).
+async fn run_failure_fixture_with_approver(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
+    max_steps: u32,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
+) -> (AgentRunSummary, Session, Vec<Value>, Vec<StreamEvent>) {
     let (base_url, request_rx) = serve_responses_sequence(responses);
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(128);
     let stream_collector = tokio::spawn(async move {
@@ -878,6 +899,7 @@ async fn run_failure_fixture_with_obligations_and_max_steps_and_stream(
                 max_steps,
                 auto_approve: true,
                 question_handler,
+                approval_handler,
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
@@ -1823,13 +1845,17 @@ async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan
     let patch = format!(
         "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1 +1 @@\n-Runtime fixture rule: preserve the physical verification record.\n+{oversized}\n"
     );
-    let (summary, persisted, requests) = run_failure_fixture(
+    // Edits to AGENTS.md always ask, so a person approves this one.
+    let (summary, persisted, requests, _) = run_failure_fixture_with_approver(
         root.path(),
         vec![failure_fixture_tool_turn(
             "oversize-worktree-instructions",
             vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
         )],
         None,
+        Vec::new(),
+        16,
+        Some(Arc::new(ApproveInteractively)),
     )
     .await;
 
@@ -3848,6 +3874,20 @@ async fn full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_workt
     assert!(std::fs::read_to_string(root.path().join("src/lib.rs"))
         .expect("unchanged main source")
         .contains("    41"));
+}
+
+/// A person who answers every prompt with yes.
+struct ApproveInteractively;
+
+#[async_trait]
+impl ApprovalHandler for ApproveInteractively {
+    fn can_prompt(&self) -> bool {
+        true
+    }
+
+    async fn handle_approval(&self, _call: &ToolCall, _level: PermissionLevel) -> ApprovalDecision {
+        ApprovalDecision::granted_user()
+    }
 }
 
 struct PlanThenDenyTool {

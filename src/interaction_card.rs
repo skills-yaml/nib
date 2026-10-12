@@ -1,8 +1,8 @@
-//! Command-approval card text, keys, and exact-invocation memory.
+//! Command-approval card text, keys, and the legacy exact-invocation memory.
 //!
-//! A remembered grant matches one raw `run_terminal` invocation. A following
-//! argument, operator, or newline is a different command because the executor
-//! passes the string to `sh -c`.
+//! New "don't ask again" choices are saved as project allow rules
+//! (`crate::tools::permission_rules`). The legacy file still matches one raw
+//! `run_terminal` invocation, and only in a trusted project.
 
 use crate::tools::models::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -227,13 +227,13 @@ pub fn command_approval_card(
     }];
     if let Some(exact) = remember_command {
         rows.push(CardRow {
-            label: format!("Yes, and don't ask again for the exact command `{exact}`"),
+            label: format!("Yes, and don't ask again for `{exact}` in this project"),
             shortcut: "p".to_string(),
             role: CommandRowRole::Remember,
         });
     }
     rows.push(CardRow {
-        label: "No, and tell Codex what to do differently".to_string(),
+        label: "No, and tell nib what to do differently".to_string(),
         shortcut: "esc".to_string(),
         role: CommandRowRole::No,
     });
@@ -326,9 +326,15 @@ pub fn matching_remembered_invocation(
     project_root: &Path,
     invocation: &TerminalInvocation,
 ) -> bool {
-    load_remembered(project_root)
-        .into_iter()
-        .any(|stored| stored == *invocation)
+    // The legacy file lives inside the project, which a cloned repository
+    // could ship, so it applies only to trusted projects.
+    // A linked worktree's `.nib` can be created by sandboxed commands, so
+    // only the main checkout's file counts.
+    crate::tools::permission_rules::project_trusted(project_root)
+        && crate::tools::permission_rules::linked_worktree_main(project_root).is_none()
+        && load_remembered(project_root)
+            .into_iter()
+            .any(|stored| stored == *invocation)
 }
 
 pub fn remember_invocation(
@@ -484,7 +490,7 @@ mod tests {
             REASON,
             "task test:interactive",
             &[],
-            Some("task test:interactive"),
+            Some("task test:interactive *"),
             0,
             show_chevron,
         )
@@ -505,8 +511,8 @@ Reason: May I run the focused interaction gate outside the sandbox to validate t
 $ task test:interactive
 
 › 1. Yes, proceed (y)
-  2. Yes, and don't ask again for the exact command `task test:interactive` (p)
-  3. No, and tell Codex what to do differently (esc)
+  2. Yes, and don't ask again for `task test:interactive *` in this project (p)
+  3. No, and tell nib what to do differently (esc)
 
 Press enter to confirm or esc to cancel"
         );
@@ -605,7 +611,9 @@ Press enter to confirm or esc to cancel"
     }
 
     #[test]
+    #[serial_test::serial]
     fn remembered_file_matches_only_the_same_invocation() {
+        let _home = crate::tools::permission_rules::TestNibHome::isolated();
         let directory = tempfile::tempdir().expect("temp project");
         let invocation = TerminalInvocation {
             command: "task test:interactive".to_string(),
@@ -618,6 +626,11 @@ Press enter to confirm or esc to cancel"
             max_output_bytes: None,
         };
         remember_invocation(directory.path(), &invocation).expect("remember");
+        assert!(
+            !matching_remembered_invocation(directory.path(), &invocation),
+            "the legacy file applies only to trusted projects"
+        );
+        crate::tools::permission_rules::set_project_trust(directory.path(), true).expect("trust");
         assert!(matching_remembered_invocation(
             directory.path(),
             &invocation

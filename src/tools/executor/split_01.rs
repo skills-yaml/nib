@@ -344,7 +344,7 @@ impl ToolExecutor {
         {
             return true;
         }
-        if call.tool_name == "git_push" {
+        if always_asks(call, &effective_root).is_some() {
             return self.approval_handler.can_prompt();
         }
         if evaluations
@@ -1343,14 +1343,11 @@ impl ToolExecutor {
             }
             return decision;
         }
-        // A push publishes work: it always asks, even in auto mode, with
-        // --yes or with allow rules, which workspace instruction files can
-        // contain and an agent could therefore write.
-        if call.tool_name == "git_push" {
+        // Pushes and edits to instruction files always ask, even in auto
+        // mode, with --yes or with allow rules (see `always_asks`).
+        if let Some((reason, refusal)) = always_asks(call, effective_root) {
             if !self.approval_handler.can_prompt() {
-                return ApprovalDecision::denied_by_policy(
-                    "git push needs the user's approval in an interactive session",
-                );
+                return ApprovalDecision::denied_by_policy(refusal);
             }
             return self
                 .prompt_without_remembering(
@@ -1363,7 +1360,7 @@ impl ToolExecutor {
                         requires_worktree,
                     ),
                     session_id,
-                    "pushing publishes commits to a remote and always needs approval",
+                    reason,
                 )
                 .await;
         }
@@ -1558,11 +1555,18 @@ impl ToolExecutor {
             let Some(invocation) = crate::interaction_card::terminal_invocation(call) else {
                 return ApprovalDecision::denied_unshowable();
             };
-            if invocation.command != command {
+            if crate::tools::permission_rules::suggested_terminal_rule(&invocation.command)
+                .as_deref()
+                != Some(command.as_str())
+            {
                 return ApprovalDecision::denied_unshowable();
             }
-            match crate::interaction_card::remember_invocation(&self.project_root, &invocation) {
-                Ok(()) => {
+            match crate::tools::permission_rules::add_project_rule(
+                &self.project_root,
+                crate::tools::permission_rules::RuleEffect::Allow,
+                &format!("run_terminal({command})"),
+            ) {
+                Ok(_) => {
                     return ApprovalDecision {
                         granted: true,
                         source: "command_prefix".to_string(),
@@ -1571,8 +1575,7 @@ impl ToolExecutor {
                     };
                 }
                 Err(_) => {
-                    context.input_error =
-                        Some("Input error: the command prefix was not saved".to_string());
+                    context.input_error = Some("Input error: the rule was not saved".to_string());
                 }
             }
         }
@@ -1651,6 +1654,10 @@ impl ToolExecutor {
                 .iter()
                 .filter_map(|hook| hook.evaluate(call, effective_root))
                 .filter(|rule| rule.matches(call)),
+        );
+        evaluations.extend(
+            crate::tools::permission_rules::RuleSet::load(&self.project_root)
+                .evaluate(call, &[effective_root, self.project_root.as_path()]),
         );
         evaluations
     }
@@ -2057,4 +2064,46 @@ pub(crate) fn bounded_approval_field_with_limit(
 
 pub(crate) fn approval_argument_string<'a>(call: &'a ToolCall, field: &str) -> Option<&'a str> {
     call.arguments.get(field).and_then(Value::as_str)
+}
+
+/// Actions that always ask, with the prompt reason and the refusal used when
+/// nobody can answer. A push publishes work, and allow rules can come from
+/// instruction files an agent could edit. Instruction files carry
+/// `nib-policy:` rules, so editing them could grant permissions in a trusted
+/// project.
+pub(crate) fn always_asks(call: &ToolCall, root: &Path) -> Option<(&'static str, &'static str)> {
+    if call.tool_name == "git_push" {
+        return Some((
+            "pushing publishes commits to a remote and always needs approval",
+            "git push needs the user's approval in an interactive session",
+        ));
+    }
+    edits_instruction_policy(call, root).then_some((
+        "this edit changes project instructions, which can carry permission rules",
+        "editing AGENTS.md or CLAUDE.md needs the user's approval in an interactive session",
+    ))
+}
+
+/// Whether a patch changes a top-level instruction file that can carry
+/// `nib-policy:` rules.
+pub(crate) fn edits_instruction_policy(call: &ToolCall, root: &Path) -> bool {
+    if call.tool_name != "apply_patch" {
+        return false;
+    }
+    let patch = call
+        .arguments
+        .get("patch")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match crate::tools::permission_matching::git_patch_paths(patch, root) {
+        Ok(paths) => paths.iter().any(|path| {
+            matches!(
+                path.to_ascii_lowercase().trim_end_matches(['.', ' ']),
+                "agents.md" | "agents.local.md" | "claude.md" | "claude.local.md"
+            )
+        }),
+        // `git apply` uses the same parser, so a patch Git cannot read
+        // cannot change anything either.
+        Err(_) => false,
+    }
 }
