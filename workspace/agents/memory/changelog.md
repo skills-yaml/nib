@@ -800,3 +800,15 @@ Content:
 
 Recorded the permission-rule layers, project trust and always-allow decision
 in decisions.md.
+
+## 2026-10-12 - T080 phase 4 checkpoints decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the per-turn checkpoint and `/rewind` decision in decisions.md.

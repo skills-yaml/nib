@@ -1202,6 +1202,17 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         },
         "review" if arguments.is_empty() => InteractiveCommand::Review,
         "diff" if arguments.is_empty() => InteractiveCommand::Diff,
+        "rewind" => InteractiveCommand::Rewind {
+            checkpoint: match arguments.first() {
+                None => None,
+                Some(argument) => Some(
+                    argument
+                        .trim_start_matches('#')
+                        .parse()
+                        .map_err(|_| format!("usage: {}", spec.usage))?,
+                ),
+            },
+        },
         "compact" if arguments.is_empty() => InteractiveCommand::Compact,
         "session" if arguments.is_empty() => InteractiveCommand::Session,
         "resume" if arguments.is_empty() => InteractiveCommand::Resume,
@@ -1373,6 +1384,17 @@ pub fn execute_interactive_command_in_state(
                 store.public_sensitive_values(),
             )?))
         }
+        InteractiveCommand::Rewind { checkpoint: None } => Ok(InteractiveEffect::Output(
+            format_checkpoints(store, session_id)?,
+        )),
+        InteractiveCommand::Rewind {
+            checkpoint: Some(number),
+        } => Ok(InteractiveEffect::Output(rewind_files(
+            project_root,
+            store,
+            session_id,
+            number,
+        )?)),
         InteractiveCommand::Compact => Ok(InteractiveEffect::Compact),
         InteractiveCommand::Ps => Ok(InteractiveEffect::Output(format_session_background_tasks(
             store, session_id, false,

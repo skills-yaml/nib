@@ -1037,3 +1037,47 @@ pub(crate) fn is_sensitive_environment_key(key: &str) -> bool {
     .iter()
     .any(|sensitive| key.contains(sensitive))
 }
+
+impl ToolExecutor {
+    /// Saves the files an applied patch will change, or notes a command that
+    /// may write files, in the turn's checkpoint (T080 phase 4). A storage
+    /// failure is logged and never blocks the call.
+    pub(crate) fn record_checkpoint(
+        &self,
+        call: &ToolCall,
+        risk: ToolRisk,
+        root: &Path,
+        session_id: Option<&str>,
+    ) {
+        let edit = call.tool_name == "apply_patch"
+            && call.arguments.get("dry_run").and_then(Value::as_bool) == Some(false);
+        let command = call.tool_name == "run_terminal" && risk != ToolRisk::ReadOnly;
+        if !edit && !command {
+            return;
+        }
+        let (Some(store), Some(session_id)) = (self.session_store.as_ref(), session_id) else {
+            return;
+        };
+        let recorded = (|| -> Result<(), String> {
+            let session = store
+                .load_result(session_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("the session no longer exists")?;
+            let turn = crate::tools::checkpoints::TurnMarker::from_session(&session);
+            let checkpoints = crate::tools::checkpoints::CheckpointStore::for_session(
+                store.sessions_dir(),
+                session_id,
+            )?;
+            if edit {
+                let patch = approval_argument_string(call, "patch").unwrap_or_default();
+                let paths = crate::tools::permission_matching::git_patch_paths(patch, root)?;
+                checkpoints.record_before_edit(&turn, root, &paths)
+            } else {
+                checkpoints.record_command(&turn, root)
+            }
+        })();
+        if let Err(error) = recorded {
+            tracing::warn!(tool = %call.tool_name, "checkpoint not recorded: {}", self.redact_text(&error));
+        }
+    }
+}

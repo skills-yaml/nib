@@ -708,6 +708,60 @@ numstat call.
 (for example `approvals.mode`) still apply without trust. That is recorded
 as a T082 follow-up. The stale-write check stays in phase 5.
 
+## Phase 4 Plan: Checkpoints and `/rewind` (2026-10-12)
+
+Phase 4 delivers section 5 with these concrete choices.
+
+**One checkpoint per turn.** A turn starts with each human request,
+steering message or question answer in the session. The first file edit
+of a turn opens that turn's checkpoint, labelled with the request text.
+Turns that edit nothing have no checkpoint.
+
+**What is captured.** Before `apply_patch` writes, nib saves the prior
+state of every path the patch touches, taken from Git's patch parsing
+(phase 3). It saves each path once per turn:
+- a file's bytes and executable bit;
+- a symlink's target;
+- or "absent" when the patch creates the file.
+
+Contents go to a content-addressed blob store under
+`.nib/profiles/<id>/checkpoints/<session>/`. The sandbox masks that
+directory, so tool commands cannot read or forge it.
+
+**Terminal commands.** Commands are not snapshotted in this phase. When a
+turn ran a command that is not read-only, its checkpoint records that.
+`/rewind` then says files changed by commands are not restored. Restoring
+command effects needs the terminal-observed diff that phase 5 builds for
+in-place reconciliation (section 6b). Copying the whole tree each turn, or
+running the host's Git on an untrusted repository, would be too costly or
+unsafe here.
+
+**`/rewind`.**
+- `/rewind` lists the checkpoints, newest first. Each shows its number,
+  time, request text, file count and the command warning.
+- `/rewind <n>` restores every file edited since checkpoint `n` began to
+  its state before that turn. Files the agent created are removed, and
+  files it deleted come back.
+- It first saves the current state of those files as a new checkpoint
+  ("before rewind to #n"), so a rewind can itself be undone.
+- It writes only inside the recorded workspace root, which must be the
+  project or the session's validated worktree. It never writes `.git` or
+  `.nib`, and refuses paths that escape the root or pass through a symlink.
+- The conversation is not rewound. nib appends a runtime note listing the
+  restored files so the model re-reads them.
+- `/rewind` needs an idle session.
+
+**Bounds.**
+- A file over 16 MiB is recorded as unavailable and reported by `/rewind`.
+- A session keeps at most 100 checkpoints and 256 MiB of blobs. The oldest
+  checkpoints and unreferenced blobs are pruned first.
+- A storage failure never blocks the edit. It is logged, and `/rewind`
+  reports the missing checkpoint.
+
+**Out of scope.** Rewinding the conversation, restoring command effects
+(phase 5), subagent worktrees (their merge is the review point) and moving
+the store to user-home state (T082).
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
@@ -765,6 +819,15 @@ sandbox implementation. Combined review and native gates precede the push.
 - **Phase 2a** (permission modes): PR 54 merged the verified candidate
   `0e8ecaf` as `21ccf1dcd4599900a242e889554f0fcd52ca4660` on
   2026-10-09T20:10:07Z.
+- **Phase 2b** (host-side `git_commit` and `git_push`): PR 55 merged the
+  verified candidate `11efc46` as `6e14f30e013b3699760d54563f542035e93ab32a`
+  on 2026-10-10T21:15:43Z.
+- **Phase 3** (permission rules, project trust, always-allow): PR 56 merged
+  the verified candidate `b217eac` as
+  `8c0eabb4d1ea768dee9b5d20872aa49a8181bc44` on 2026-10-12T21:14:08Z. The
+  first macOS CI run timed out in the unrelated process-timing test
+  `successful_sync_leader_does_not_wait_for_descendant_owned_pipes`; the
+  unchanged re-run passed.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;

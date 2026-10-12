@@ -706,3 +706,28 @@ Edits to top-level `AGENTS.md`/`CLAUDE.md` always ask, like `git_push`, and
 unparsable deny/ask rule makes every action ask. `NIB_HOME` overrides
 `~/.nib`; unit tests use a thread-local home. Open follow-up (T082): other
 project `.nib/config.toml` settings still apply without trust.
+
+## 2026-10-12 - Checkpoints save file-tool edits per turn; command effects are flagged, not restored
+
+- Type: decision
+- Source: T080 phase 4
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Before `apply_patch` writes (not dry runs), nib saves the prior state of each
+patched path once per human turn: bytes and executable bit, a symlink target,
+or "absent". The store is content-addressed under
+`.nib/profiles/<id>/checkpoints/<session>/`, which the sandbox masks. `/rewind
+<n>` restores every file saved since checkpoint `n`, but only inside the
+project or the session's validated worktree. It never writes `.git` or `.nib`
+and never writes through a symlinked parent. It first saves the current state
+as an undo checkpoint, and appends a runtime-continuation note so the model
+re-reads the files. The conversation itself is not rewound. Commands are not
+snapshotted: a turn that ran a non-read-only command is flagged and `/rewind`
+says so. Restoring command effects waits for phase 5's terminal-observed diff,
+because host Git on an untrusted repository is unsafe and copying the tree each
+turn is too costly. Bounds: 100 checkpoints, 256 MiB of blobs, 16 MiB per
+file. A storage failure is logged and never blocks the edit.
