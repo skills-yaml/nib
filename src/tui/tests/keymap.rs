@@ -226,7 +226,7 @@ fn modified_composer_shortcuts_do_not_answer_pending_approvals() {
     let (reply, mut receive) = oneshot::channel();
     let mut approval = Some(approval_request(
         ToolCall {
-            id: "protected".into(),
+            invocation_id: crate::tools::ToolInvocationId::new(),
             tool_name: "run_terminal".into(),
             arguments: json!({"command":"task test"}),
             session_id: None,
