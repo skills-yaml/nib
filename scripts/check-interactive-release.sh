@@ -682,6 +682,7 @@ printf '%s' 'T084_EDITOR_SUCCESS_DRAFT' >"$1"
 EDITOR
 cat >"$fixture/editor-failure.sh" <<'EDITOR'
 #!/bin/sh
+: >"$NIB_SMOKE_EDITOR_FAILURE_MARKER"
 exit 7
 EDITOR
 chmod 700 "$fixture/editor-success.sh" "$fixture/editor-failure.sh"
@@ -689,34 +690,58 @@ chmod 700 "$fixture/editor-success.sh" "$fixture/editor-failure.sh"
 tui_editor_success_input() {
   sleep 0.8
   printf '\033[200~original editor draft\033[201~\007'
-  wait_for_pty_output "$fixture/tui-editor-success.txt" 'T084_EDITOR_SUCCESS_DRAFT'
+  wait_for_pty_output "$fixture/tui-editor-success.txt" 'T084_EDITOR_SUCCESS_DRAFT' || return 1
   printf '\r'
-  wait_for_goal_session 'T084_EDITOR_SUCCESS_DRAFT' >/dev/null
+  wait_for_goal_session 'T084_EDITOR_SUCCESS_DRAFT' >/dev/null || return 1
   printf '\021\021'
 }
 
 tui_editor_failure_input() {
   sleep 0.8
   printf '\033[200~T084_EDITOR_FAILURE_DRAFT\033[201~\007'
-  wait_for_pty_output "$fixture/tui-editor-failure.txt" '[editor error]'
+  local attempts=0
+  while [ ! -f "$fixture/editor-failure-observed" ] && [ "$attempts" -lt 100 ]; do
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  if [ ! -f "$fixture/editor-failure-observed" ]; then
+    printf '%s\n' 'external editor failure fixture was not invoked' >&2
+    return 1
+  fi
+  # The editor has exited; input is consumed after terminal restoration.
+  sleep 0.1
   printf '\r'
-  wait_for_goal_session 'T084_EDITOR_FAILURE_DRAFT' >/dev/null
+  wait_for_goal_session 'T084_EDITOR_FAILURE_DRAFT' >/dev/null || return 1
   printf '\021\021'
 }
 
 printf -v editor_success_environment 'TERM=xterm-256color VISUAL=%q EDITOR=false' "$fixture/editor-success.sh"
-printf -v editor_failure_environment 'TERM=xterm-256color VISUAL=%q EDITOR=false' "$fixture/editor-failure.sh"
+printf -v editor_failure_environment 'TERM=xterm-256color VISUAL=%q EDITOR=false NIB_SMOKE_EDITOR_FAILURE_MARKER=%q' "$fixture/editor-failure.sh" "$fixture/editor-failure-observed"
 run_tui_case tui-editor-success tui_editor_success_input '--tui' no "$editor_success_environment"
 run_tui_case tui-editor-failure tui_editor_failure_input '--tui' no "$editor_failure_environment"
+
+wait_for_keymap_preset() {
+  local expected=$1
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    if grep -Fq "preset = \"$expected\"" "$fixture/.nib/config.toml" 2>/dev/null; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'keymap preset did not persist: %s\n' "$expected" >&2
+  return 1
+}
 
 tui_legacy_keymap_input() {
   sleep 0.8
   printf '/keymap preset legacy\r'
-  wait_for_pty_output "$fixture/tui-keymap-legacy.txt" 'Keymap: Legacy'
+  wait_for_keymap_preset legacy || return 1
   printf '\003'
-  wait_for_pty_output "$fixture/tui-keymap-legacy.txt" 'Draft cleared.'
+  sleep 0.1
   printf '/keymap reset\r'
-  wait_for_pty_output "$fixture/tui-keymap-legacy.txt" 'Keymap: Codex'
+  wait_for_keymap_preset codex || return 1
   printf '\021\021'
 }
 run_tui_case tui-keymap-legacy tui_legacy_keymap_input '--tui'

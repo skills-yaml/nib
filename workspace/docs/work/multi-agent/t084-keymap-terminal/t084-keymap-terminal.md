@@ -25,7 +25,10 @@ Created an isolated worktree through an atomic peer claim.
 
 ## Validation
 
-Pending.
+First native run confirmed editor draft recovery and persisted preset migration,
+but redraw-dependent text waits timed out without failing their producer. Revised
+cases synchronize on the editor invocation marker and persisted keymap, and every
+new bounded wait explicitly propagates failure. Exact review and native rerun pending.
 
 ## Blockers and Dependencies
 
