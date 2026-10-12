@@ -644,7 +644,8 @@ Bindings are stored under `[tui]` with `preset = "codex"` or `"legacy"`, and nes
 `[tui.keymap.<context>]` action lists. Contexts are `composer`, `running`, `transcript`
 and `global`; context bindings override global bindings. Each action list replaces
 its preset defaults, and an empty list unbinds that action. Unsupported context/action
-pairs and collisions are rejected. For example:
+pairs and collisions are rejected; bare Escape is reserved for completion, draft
+and form controls. For example:
 
 ```text
 /keymap set composer history alt-r
@@ -696,7 +697,7 @@ session and exact active run rather than from terminal chrome:
 | State | Meaning and next action |
 | --- | --- |
 | `idle` | A submitted goal starts one foreground turn; slash commands use the shared registry. |
-| `planning` / `running` | Progress remains bound to the exact run. Steering uses the explicit steer path; Enter or ordinary plain text durably queues the next turn. Commands marked idle-only report an error instead of becoming goals. |
+| `planning` / `running` | Progress remains bound to the exact run. The Codex preset uses Enter to steer and Tab to durably queue after completion. Legacy Enter and ordinary plain text queue; plain `steer:` uses the explicit steer path. Commands marked idle-only report an error instead of becoming goals. |
 | `waiting_approval` | Approval owns input before every lower layer. Accepting grants only the displayed bounded action; denial resumes reconciliation. |
 | `waiting_question` | The displayed numbered option or free-form answer owns input before commands and the composer. Empty or out-of-range answers remain local errors. |
 | `reconciling` | Cancellation, completion, or failure is not terminal until workload/session evidence is persisted and the worker is joined. |
@@ -817,7 +818,7 @@ unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mod
 The question list footer reads `Up/Down select · Enter choose · Esc interrupt
 operation`; the editor footer reads `Enter submit · Esc interrupt operation`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
-when idle and queues when a turn is running.
+when idle and steers an active turn in the Codex preset (legacy Enter queues).
 
 The composer has focus initially, a top border, and a `> ` prompt. An empty session
 shows a startup welcome with `Nib <version>`, the working directory, an update

@@ -220,3 +220,41 @@ fn running_file_completion_preserves_current_turn_steering_action() {
         InteractionReduction::SteerCurrent(composer.input.clone())
     );
 }
+
+#[test]
+fn modified_composer_shortcuts_do_not_answer_pending_approvals() {
+    let (reply, mut receive) = oneshot::channel();
+    let mut approval = Some(approval_request(
+        ToolCall {
+            id: "protected".into(),
+            tool_name: "run_terminal".into(),
+            arguments: json!({"command":"task test"}),
+            session_id: None,
+            project_root: None,
+        },
+        PermissionLevel::Destructive,
+        reply,
+    ));
+    let mut question = None;
+    handle_pending_interaction_key_with_modifiers(
+        &mut approval,
+        &mut question,
+        KeyCode::Char('y'),
+        KeyModifiers::ALT,
+    );
+    handle_pending_interaction_key_with_modifiers(
+        &mut approval,
+        &mut question,
+        KeyCode::Enter,
+        KeyModifiers::ALT,
+    );
+    assert!(approval.is_some());
+    assert!(receive.try_recv().is_err());
+    handle_pending_interaction_key_with_modifiers(
+        &mut approval,
+        &mut question,
+        KeyCode::Char('n'),
+        KeyModifiers::NONE,
+    );
+    assert!(!receive.try_recv().unwrap().granted);
+}

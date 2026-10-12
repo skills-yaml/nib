@@ -756,10 +756,11 @@ pub(crate) fn draw_loop(
                     interaction_layer,
                     InteractionLayer::Approval | InteractionLayer::Question
                 ) {
-                    handle_pending_interaction_key(
+                    handle_pending_interaction_key_with_modifiers(
                         &mut pending_approval,
                         &mut pending_question,
                         key.code,
+                        key.modifiers,
                     );
                     continue;
                 }
@@ -1041,6 +1042,7 @@ pub(crate) fn draw_loop(
                     }
                 }
                 if key.code == KeyCode::Esc
+                    && key_action.is_none()
                     && pointer_selection_is_active(pointer_selection)
                     && matches!(interaction_layer, InteractionLayer::Composer)
                 {
@@ -1049,6 +1051,7 @@ pub(crate) fn draw_loop(
                     continue;
                 }
                 if key.code == KeyCode::Esc
+                    && key_action.is_none()
                     && tui_focus == TuiFocus::Composer
                     && matches!(interaction_layer, InteractionLayer::Composer)
                 {

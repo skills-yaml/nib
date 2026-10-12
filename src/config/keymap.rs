@@ -126,6 +126,9 @@ pub fn parse_binding(binding: &str) -> Result<(KeyCode, KeyModifiers), String> {
         }
         _ => return Err(format!("invalid key binding: {binding}")),
     };
+    if code == KeyCode::Esc && modifiers.is_empty() {
+        return Err("bare Escape is reserved for completion, draft and form controls".to_string());
+    }
     if matches!(code, KeyCode::Char(_)) && modifiers.is_empty() {
         return Err("printable keys cannot be bound without a modifier".to_string());
     }
@@ -426,5 +429,20 @@ mod context_tests {
             .or_default()
             .insert("editor".into(), vec!["alt-g".into()]);
         assert!(map.validate().unwrap_err().contains("specific context"));
+    }
+}
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::*;
+    #[test]
+    fn bare_escape_cannot_shadow_fixed_draft_and_fork_controls() {
+        assert!(parse_binding("esc").unwrap_err().contains("reserved"));
+        let mut map = TuiConfig::default();
+        map.keymap
+            .entry("composer".into())
+            .or_default()
+            .insert("send".into(), vec!["esc".into()]);
+        assert!(map.validate().unwrap_err().contains("reserved"));
     }
 }
