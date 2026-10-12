@@ -258,3 +258,75 @@ fn modified_composer_shortcuts_do_not_answer_pending_approvals() {
     );
     assert!(!receive.try_recv().unwrap().granted);
 }
+
+#[test]
+fn footer_hints_follow_context_modal_ownership_and_overrides() {
+    let mut map = crate::config::keymap::TuiConfig::default();
+    let hint = |map: &crate::config::keymap::TuiConfig, layer, focus, running, consent| {
+        keymap_context_hint(map, layer, focus, running, consent)
+    };
+    let idle = hint(
+        &map,
+        InteractionLayer::Composer,
+        TuiFocus::Composer,
+        false,
+        false,
+    );
+    assert!(idle.contains("Enter send"));
+    assert!(!idle.contains("steer"));
+    let running = hint(
+        &map,
+        InteractionLayer::Composer,
+        TuiFocus::Composer,
+        true,
+        false,
+    );
+    assert!(running.contains("Enter/Ctrl+S steer"));
+    assert!(running.contains("Tab queue"));
+    let transcript = hint(
+        &map,
+        InteractionLayer::Composer,
+        TuiFocus::Transcript,
+        true,
+        false,
+    );
+    assert!(transcript.contains("copy selection"));
+    assert!(!transcript.contains("steer"));
+    for layer in [
+        InteractionLayer::Approval,
+        InteractionLayer::Question,
+        InteractionLayer::Completion,
+        InteractionLayer::HistorySearch,
+        InteractionLayer::Model,
+    ] {
+        assert_eq!(hint(&map, layer, TuiFocus::Composer, true, false), "Codex");
+    }
+    assert_eq!(
+        hint(
+            &map,
+            InteractionLayer::Composer,
+            TuiFocus::Composer,
+            true,
+            true
+        ),
+        "Codex"
+    );
+    map.keymap
+        .entry("running".into())
+        .or_default()
+        .insert("steer".into(), vec!["ctrl-x".into()]);
+    map.keymap
+        .entry("running".into())
+        .or_default()
+        .insert("queue".into(), vec![]);
+    let custom = hint(
+        &map,
+        InteractionLayer::Composer,
+        TuiFocus::Composer,
+        true,
+        false,
+    );
+    assert!(custom.contains("Ctrl+X steer"));
+    assert!(!custom.contains("Enter"));
+    assert!(!custom.contains("queue"));
+}

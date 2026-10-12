@@ -42,7 +42,7 @@ workspace/docs/user/guide.md. No governed instructions change.
   original history remains intact, and post-branch execution state is not inherited.
 - [ ] AC-6: Legacy preserves prior defaults; tests, docs and independent review pass.
 
-## Ordered Plan
+## Implementation Plan
 
 1. Add validated keymap configuration and pure context resolver, then persistence commands.
 2. Route TUI semantic controls through it; preserve modal precedence and queue/steer audit.
@@ -101,3 +101,9 @@ The combined source includes development 8c0eabb and the reserved 0.5.0 version.
 Renew independent exact review and native task verify on the frozen candidate.
 Local implementation does not establish shared integration, main delivery or
 publication. Native Windows/macOS editor qualification remains separate.
+
+Footer review found unconditional running hints in idle and modal contexts. Hints
+now follow modal ownership, transcript focus and the effective composer/running
+bindings, including overridden and unbound actions. Regression coverage exercises
+each context. The docs-integrity gate also required the explicit Implementation
+Plan heading; the existing ordered plan now uses that heading.

@@ -1,6 +1,7 @@
 //! TUI internals split for T043 module size.
 
 use super::*;
+use crate::config::keymap::KeyAction;
 
 pub(crate) fn composer_height(composer: &Composer, width: u16) -> u16 {
     let visual = composer_visual_rows(composer, width).len().clamp(2, 6);
@@ -823,4 +824,51 @@ pub(crate) fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: b
     let job_budget = width.saturating_sub(fixed_width.saturating_add(1)).max(1);
     let job = truncate_display_cells(&job, job_budget);
     truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
+}
+
+/// Advertise only actions owned by the currently visible interaction context.
+pub(crate) fn keymap_context_hint(
+    keymap: &crate::config::keymap::TuiConfig,
+    layer: InteractionLayer,
+    focus: TuiFocus,
+    running: bool,
+    workspace_consent: bool,
+) -> String {
+    let mut hints = vec![format!("{:?}", keymap.preset)];
+    if workspace_consent || !matches!(layer, InteractionLayer::Composer) {
+        return hints.join(" · ");
+    }
+    let (context, actions): (&str, &[(KeyAction, &str)]) = match (focus, running) {
+        (TuiFocus::Transcript, _) => (
+            "transcript",
+            &[
+                (KeyAction::Focus, "focus"),
+                (KeyAction::CopySelection, "copy selection"),
+            ],
+        ),
+        (TuiFocus::Composer, true) => (
+            "running",
+            &[(KeyAction::Steer, "steer"), (KeyAction::Queue, "queue")],
+        ),
+        (TuiFocus::Composer, false) => (
+            "composer",
+            &[
+                (KeyAction::Send, "send"),
+                (KeyAction::Editor, "editor"),
+                (KeyAction::Copy, "copy"),
+            ],
+        ),
+    };
+    for (action, label) in actions {
+        let bindings = keymap.bindings(context, *action);
+        if !bindings.is_empty() {
+            let keys = bindings
+                .iter()
+                .map(|binding| crate::config::keymap::binding_label(binding))
+                .collect::<Vec<_>>()
+                .join("/");
+            hints.push(format!("{keys} {label}"));
+        }
+    }
+    hints.join(" · ")
 }

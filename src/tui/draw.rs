@@ -253,10 +253,14 @@ pub(crate) fn draw_loop(
         .to_string();
         chrome.keymap = keymap.clone();
         chrome.agent_mode.push_str(&format!(
-            " · {:?} · {} steer · {} queue",
-            keymap.preset,
-            keymap.bindings("running", KeyAction::Steer).join("/"),
-            keymap.bindings("running", KeyAction::Queue).join("/")
+            " · {}",
+            keymap_context_hint(
+                &keymap,
+                interaction_layer,
+                tui_focus,
+                worker.is_some(),
+                welcome.consent_directory.is_some(),
+            )
         ));
         if selected_activity.is_some_and(|index| index >= timeline.activities.len()) {
             selected_activity = timeline.activities.len().checked_sub(1);
