@@ -847,3 +847,47 @@ pub(crate) fn handle_pending_interaction_key(
     }
     false
 }
+
+/// Suggestions own navigation and acceptance, but never swallow remapped editing actions.
+pub(crate) fn completion_keymap_action(
+    menu: &mut CompletionMenu,
+    composer: &mut Composer,
+    action: Option<crate::config::keymap::KeyAction>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> CompletionKeyResult {
+    use crate::config::keymap::KeyAction;
+    if matches!(action, Some(KeyAction::Send | KeyAction::Steer)) {
+        return menu.handle_key(composer, KeyCode::Enter);
+    }
+    if modifiers.is_empty()
+        && matches!(
+            code,
+            KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::Esc
+        )
+    {
+        return menu.handle_key(composer, code);
+    }
+    CompletionKeyResult::Ignored
+}
+
+pub(crate) fn composer_keymap_action(
+    composer: &mut Composer,
+    action: Option<crate::config::keymap::KeyAction>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> ComposerAction {
+    use crate::config::keymap::KeyAction;
+    let (code, modifiers) = match action {
+        Some(KeyAction::Send | KeyAction::Steer) => (KeyCode::Enter, KeyModifiers::NONE),
+        Some(KeyAction::Newline) => (KeyCode::Enter, KeyModifiers::SHIFT),
+        _ => (code, modifiers),
+    };
+    if action.is_none()
+        && (matches!(code, KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab)
+            || modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return ComposerAction::Pending;
+    }
+    composer_action_for_key(composer, code, modifiers)
+}

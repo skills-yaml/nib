@@ -545,7 +545,7 @@ fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
     assert!(rendered.contains("new session and worktree"));
     assert!(rendered.contains("/session"));
     assert!(rendered.contains("Ctrl+C"));
-    assert!(rendered.contains("never copies or quits"));
+    assert!(rendered.contains("Keymap Codex"));
     assert!(rendered.contains("> Ask nib anything…"));
     assert!(rendered.contains("mode ask"));
     assert!(rendered.contains("idle"));
@@ -558,6 +558,7 @@ fn startup_asks_permission_to_work_in_the_working_directory() {
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut viewport = TranscriptViewport::default();
     let welcome = StartupWelcome {
+        keymap: crate::config::keymap::TuiConfig::default(),
         version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
         working_directory: "~/work/nib".to_string(),
         update_notice: None,
@@ -658,6 +659,7 @@ fn workspace_consent_key_reducer_persists_the_gate_before_a_goal_can_start() {
 #[test]
 fn empty_state_includes_update_notice_and_install_instruction() {
     let welcome = StartupWelcome {
+        keymap: crate::config::keymap::TuiConfig::default(),
         version: "Nib 0.1.0".to_string(),
         working_directory: "~/work/nib".to_string(),
         update_notice: Some(
@@ -877,6 +879,7 @@ fn quiet_tool_title_hides_running_and_ok() {
 #[test]
 fn header_shows_folder_and_branch_left_and_model_right() {
     let chrome = TuiChrome {
+        keymap: crate::config::keymap::TuiConfig::default(),
         folder: "~/work/nib".to_string(),
         branch: "feat/t039".to_string(),
         model: "mock-model".to_string(),

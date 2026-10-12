@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn transcript_action_for_key(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -158,4 +159,19 @@ pub(crate) fn transcript_hit(view: &TranscriptView, mouse: MouseEvent) -> Option
     let col = usize::from(mouse.column.saturating_sub(view.area.x))
         .min(unicode_display_width(&view.plain_rows[row]));
     Some((row, col))
+}
+
+pub(crate) fn transcript_keymap_action(
+    action: Option<crate::config::keymap::KeyAction>,
+) -> Option<TranscriptViewportAction> {
+    use crate::config::keymap::KeyAction;
+    match action? {
+        KeyAction::PageUp => Some(TranscriptViewportAction::PageUp),
+        KeyAction::PageDown => Some(TranscriptViewportAction::PageDown),
+        KeyAction::ScrollUp => Some(TranscriptViewportAction::Lines(-1)),
+        KeyAction::ScrollDown => Some(TranscriptViewportAction::Lines(1)),
+        KeyAction::First => Some(TranscriptViewportAction::JumpToStart),
+        KeyAction::FollowTail => Some(TranscriptViewportAction::JumpToEnd),
+        _ => None,
+    }
 }

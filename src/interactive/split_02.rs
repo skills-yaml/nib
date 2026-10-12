@@ -1064,6 +1064,7 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
     let command = spec.name;
 
     let parsed = match command {
+        "keymap" => InteractiveCommand::Keymap { arguments },
         "quit" if arguments.is_empty() => InteractiveCommand::Quit,
         "help" if arguments.is_empty() => InteractiveCommand::Help,
         "status" if arguments.is_empty() => InteractiveCommand::Status,
@@ -1281,6 +1282,9 @@ pub fn execute_interactive_command_in_state(
                 session.as_ref(),
             )?))
         }
+        InteractiveCommand::Keymap { arguments } => Ok(InteractiveEffect::Output(
+            crate::config::keymap::keymap_command(project_root, &arguments)?,
+        )),
         InteractiveCommand::History { .. } => {
             Err("draft history search requires an interactive composer".to_string())
         }

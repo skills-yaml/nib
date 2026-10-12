@@ -593,19 +593,51 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
         Line::from(""),
         Line::from(Span::styled("Keys", title)),
         Line::from(Span::styled(
-            "Enter           send · Shift+Enter newline",
+            format!("Keymap {:?} · /keymap to customize", welcome.keymap.preset),
             muted,
         )),
         Line::from(Span::styled(
-            "Ctrl+C          stop · clear draft · never copies or quits",
+            format!(
+                "{} send · {} newline",
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Send)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Newline)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
             muted,
         )),
         Line::from(Span::styled(
-            "Ctrl+Q          twice to quit · /q also quits",
+            format!(
+                "{} cancel · {} twice to quit",
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Cancel)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Quit)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
             muted,
         )),
         Line::from(Span::styled(
-            "/               commands · @ files · Tab transcript",
+            "/ commands · @ files · completion consumes Tab",
             muted,
         )),
         Line::from(Span::styled("drag            copy chat on release", muted)),
@@ -631,7 +663,16 @@ pub(crate) fn footer_line(
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {
-        hint = format!("{hint} · Ctrl+Y copy · Esc clear");
+        let binding = chrome
+            .keymap
+            .bindings(
+                "transcript",
+                crate::config::keymap::KeyAction::CopySelection,
+            )
+            .first()
+            .map(|b| crate::config::keymap::binding_label(b))
+            .unwrap_or_else(|| "unbound".to_string());
+        hint = format!("{hint} · {binding} copy · Esc clear");
     } else if let Some(band) = band_hint {
         hint = format!("{hint} · {band}");
     }
@@ -639,7 +680,13 @@ pub(crate) fn footer_line(
         hint = format!("queue {queued} · {hint}");
     }
     if !viewport.is_pinned_to_tail() {
-        hint.push_str(" · Ctrl+End follow");
+        let binding = chrome
+            .keymap
+            .bindings("transcript", crate::config::keymap::KeyAction::FollowTail)
+            .first()
+            .map(|b| crate::config::keymap::binding_label(b))
+            .unwrap_or_else(|| "unbound".to_string());
+        hint.push_str(&format!(" · {binding} follow"));
     }
     hint
 }
