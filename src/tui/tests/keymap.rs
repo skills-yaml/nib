@@ -253,13 +253,7 @@ fn modified_composer_shortcuts_do_not_answer_pending_approvals() {
     handle_pending_interaction_key_with_modifiers(
         &mut approval,
         &mut question,
-        KeyCode::Char('n'),
-        KeyModifiers::NONE,
-    );
-    handle_pending_interaction_key_with_modifiers(
-        &mut approval,
-        &mut question,
-        KeyCode::Enter,
+        KeyCode::Esc,
         KeyModifiers::NONE,
     );
     assert!(!receive.try_recv().unwrap().granted);
