@@ -50,3 +50,14 @@ Implementation and acceptance evidence reconciled. Final gates remain mandatory
 before local delivery. Memory updated with the approved keymap migration decision.
 Historical internal integration stays unchanged; actual shared/main delivery
 requires separately confirmed Git events.
+
+## Merge Handoff
+
+User requested merge on 2026-10-13. PR58 integrated exact reviewed head44ee589
+into shared development at 252c62b after CI38363488692 passed Linux and macOS.
+The merge tree equals the reviewed head. Local task verify, task build and native
+Linux smoke passed; Windows qualification is not claimed. Lifecycle, catalog and
+release membership now reconcile the confirmed test-stage event. Main merge and
+publication are separate. These records receive exact review and renewed Task
+verification. Memory: none for this bounded merge operation, which adds no new
+durable decision beyond the existing approved migration contract.

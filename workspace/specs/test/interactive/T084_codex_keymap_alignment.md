@@ -1,7 +1,7 @@
 # T084: Codex Keymap Alignment
 
-**Status:** Development
-State: development
+**Status:** Test
+State: test
 Primary Feature: interactive
 
 ## Authority and Scope
@@ -103,8 +103,8 @@ Independent review approved 9f1b9da; its complete task verify passed, including
 Independent review also approved the fail-closed smoke follow-up at 5998fdc.
 The reconciled final candidate requires renewed exact review and
 final task verify, task build and task smoke:interactive:binary before handoff.
-Local implementation does not establish shared integration, main delivery or
-publication. Native Windows/macOS editor qualification remains separate.
+Shared development integration is now confirmed below. Main delivery and
+publication remain separate. Native Windows editor qualification is not claimed.
 
 Footer review found unconditional running hints in idle and modal contexts. Hints
 now follow modal ownership, transcript focus and the effective composer/running
@@ -136,5 +136,22 @@ but redraw-dependent waits did not fail their producer. Its overall success is
 not accepted as qualification. Revised cases use bounded editor invocation and
 persisted configuration synchronization, propagate all new wait failures, and
 must pass against the clean, exact-revision release binary before delivery.
-Local qualification is Linux; Windows/macOS native editor execution is not
-claimed. No shared integration, main merge or publication is recorded here.
+Native Linux qualification passed locally; native macOS qualification also
+passed in CI 38363488692. Native Windows qualification is not claimed.
+Main merge and publication are not recorded here.
+
+## Shared Development Integration
+
+PR [58](https://github.com/skills-yaml/nib/pull/58) merged the independently
+reviewed head 44ee5890ab8ed8db2c2eb0c04054e49381e00485 into shared development at
+252c62bf74ddc9c513e4843057dfcd174c4a0600 on 2026-10-13T08:15:05Z.
+CI [38363488692](https://github.com/skills-yaml/nib/actions/runs/38363488692)
+passed Linux static checks, full tests, coverage, release qualification and native
+interaction/process smokes, plus macOS full tests and native interaction smoke.
+Windows was skipped by the existing workflow and is not claimed qualified.
+Native Git tree comparison confirmed that the actual merge tree equals the
+reviewed and locally verified head. The local frozen gates were task verify,
+task build and task smoke:interactive:binary. No second version bump occurred.
+The spec moves to test based on this confirmed shared integration; main merge
+and publication remain separate events. The integration records receive exact
+review and renewed Task verification before their handoff.
