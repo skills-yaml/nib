@@ -823,8 +823,9 @@ Phase 5 is split like phase 2, so each part stays reviewable.
 **Stale-write check.**
 - After a successful `read_file`, nib records a fingerprint of the whole
   file for the session: the SHA-256 of its bytes, or of a symlink's target.
-  Files over 16 MiB are fingerprinted by size, modification time, inode and
-  change time instead, which bounds the work per read. The fingerprint is
+  Files over 16 MiB are fingerprinted by size and modification time (plus
+  device, inode and change time on Unix) instead, which bounds the work per
+  read. The fingerprint is
   taken before and after the read and recorded only if both match, so the
   file did not change during the read. A partial read (a line range, or a
   file beyond the read limits) still counts as a read, as in Claude Code. A
@@ -908,6 +909,10 @@ differ in the session worktree.
 - **F8.** Tests added: the footer with other sessions, a read through a
   link, a refused edit leaves no checkpoint, re-creating a deleted file,
   unkeyable paths and the large-file fingerprint.
+
+**Re-review of `9c37455`: approve.** Its two low notes need no code change:
+the large-file fingerprint's Unix-only fields are now stated above, and a
+patch through a symlinked directory is refused by `git apply` either way.
 
 ## User Decisions (2026-10-07)
 
