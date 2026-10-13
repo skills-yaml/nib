@@ -149,13 +149,13 @@
       "target": "0.5.0",
       "impact": "minor",
       "timing": "merge",
-      "status": "applied",
+      "status": "released",
       "owner": "t084-keymap-version",
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/test/interactive/T084_codex_keymap_alignment.md"
       ],
-      "evidence": "User approved Codex keymap alignment on 2026-10-12. Preliminary work reused applied 0.4.0; while implementation ran, the public development manifest confirmed publication of 0.4.0 at 8c0eabb4d1ea768dee9b5d20872aa49a8181bc44. Independent prospective release-control review approved using committed publication ledger d9784453b4eb2cd58647f4fd03fd53cfe7eed01a as the read basis for the unchanged atomic Runtime.reserve transaction, preserving every conflict and actor check and all historical integration refs/peer ownership. That single call returned minor 0.5.0 from published 0.4.0 for nib-keymap-alignment. The designated version owner applies the returned target once to Cargo.toml, Cargo.lock and skills.yaml before final integration artifacts. No new publication or main delivery is inferred. Shared development integration confirmed at 252c62bf74ddc9c513e4843057dfcd174c4a0600 via PR58 on 2026-10-13T08:15:05Z after independent exact review, local native gates and successful Linux/macOS CI38363488692. Git proves the merged tree matches reviewed head44ee589. T084 membership moves to test; no second version application, main delivery or publication is implied."
+      "evidence": "User approved Codex keymap alignment on 2026-10-12. Preliminary work reused applied 0.4.0; while implementation ran, the public development manifest confirmed publication of 0.4.0 at 8c0eabb4d1ea768dee9b5d20872aa49a8181bc44. Independent prospective release-control review approved using committed publication ledger d9784453b4eb2cd58647f4fd03fd53cfe7eed01a as the read basis for the unchanged atomic Runtime.reserve transaction, preserving every conflict and actor check and all historical integration refs/peer ownership. That single call returned minor 0.5.0 from published 0.4.0 for nib-keymap-alignment. The designated version owner applies the returned target once to Cargo.toml, Cargo.lock and skills.yaml before final integration artifacts. No new publication or main delivery is inferred. Shared development integration confirmed at 252c62bf74ddc9c513e4843057dfcd174c4a0600 via PR58 on 2026-10-13T08:15:05Z after independent exact review, local native gates and successful Linux/macOS CI38363488692. Git proves the merged tree matches reviewed head44ee589. T084 membership moves to test; no second version application, main delivery or publication is implied. Public development-latest manifest was observed on 2026-10-13 at version 0.5.0, exact revision252c62bf74ddc9c513e4843057dfcd174c4a0600. This confirms development-channel publication, not production or main delivery."
     }
   ]
 }

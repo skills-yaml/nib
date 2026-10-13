@@ -34,6 +34,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
 | [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
+| [T085](development/interactive/T085_claude_style_waiting_indicator.md) | interactive | development | User requested compact Claude-style waiting status; version reservation and implementation active. |
 | [T084](test/interactive/T084_codex_keymap_alignment.md) | interactive | test | Confirmed shared development merge 252c62b via PR58 after exact review and Linux/macOS CI38363488692; main delivery and publication remain separate. |
 | [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
 | [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
