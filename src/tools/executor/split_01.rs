@@ -759,6 +759,29 @@ impl ToolExecutor {
             }
         }
 
+        let patch_targets = match self.check_patch_freshness(
+            &call,
+            execution_root,
+            &effective_root,
+            effective_session,
+        ) {
+            Ok(targets) => targets,
+            Err(error) => {
+                return self.finish_failure(
+                    &call,
+                    effective_session,
+                    start,
+                    error,
+                    approval,
+                    level,
+                    risk,
+                    worktree.as_deref(),
+                    plan_id,
+                );
+            }
+        };
+        let pending_read =
+            self.file_read_before(&call, execution_root, &effective_root, effective_session);
         self.record_checkpoint(&call, risk, execution_root, effective_session);
         let terminal_capture_limit = (call.tool_name == "run_terminal" && !background_terminal)
             .then(|| core::terminal_output_limit(&dispatch_arguments).ok())
@@ -796,6 +819,12 @@ impl ToolExecutor {
             )
             .await
         };
+        if let Some(read) = pending_read {
+            read.finish(outcome.is_ok());
+        }
+        if outcome.is_ok() {
+            self.record_patched_files(&call, patch_targets.as_deref(), effective_session);
+        }
         let outcome = outcome.map(|output| {
             self.project_authoritative_terminal_output(
                 output,

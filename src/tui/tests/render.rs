@@ -886,6 +886,7 @@ fn header_shows_folder_and_branch_left_and_model_right() {
         context: "ctx ~12/100".to_string(),
         approval: "ask".to_string(),
         agent_mode: "idle".to_string(),
+        other_sessions: 0,
     };
     let line = header_line(&chrome, 80, true);
     let text: String = line
@@ -1009,6 +1010,12 @@ fn footer_and_completion_follow_the_current_interaction() {
     assert_eq!(
         footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
         "queue 2 · mode ask · execute"
+    );
+    let mut shared = chrome.clone();
+    shared.other_sessions = 2;
+    assert_eq!(
+        footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · idle · 2 other sessions in this folder"
     );
     let mut waiting = chrome.clone();
     waiting.agent_mode = "WAITING APPROVAL".to_string();

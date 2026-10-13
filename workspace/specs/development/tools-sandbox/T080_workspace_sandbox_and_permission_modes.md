@@ -805,6 +805,115 @@ delivery candidate:
 - files keep their saved Unix permission bits (`0o777`, never setuid);
 - the link tests use links to `.git` and `.nib` inside the workspace.
 
+## Phase 5 Delivery Split (2026-10-13)
+
+Phase 5 is split like phase 2, so each part stays reviewable.
+
+- **5a: shared-folder safety.** The stale-write check (AC-6d) and session
+  presence (AC-6e). Both protect sessions that already share a folder
+  today, for example the user editing while nib works, and are needed
+  before the in-place default.
+- **5b: in-place by default.** The in-place workspace, `/worktree`,
+  `/land`, path-scoped in-place reconciliation with the terminal-observed
+  diff (AC-3, AC-6b, AC-6h) and the D2 governed-instruction amendments
+  (AC-8). Worktrees stay the default until 5b lands.
+
+### Phase 5a Plan
+
+**Stale-write check.**
+- After a successful `read_file`, nib records a fingerprint of the whole
+  file for the session: the SHA-256 of its bytes, or of a symlink's target.
+  Files over 16 MiB are fingerprinted by size and modification time (plus
+  device, inode and change time on Unix) instead, which bounds the work per
+  read. The fingerprint is
+  taken before and after the read and recorded only if both match, so the
+  file did not change during the read. A partial read (a line range, or a
+  file beyond the read limits) still counts as a read, as in Claude Code. A
+  read through a symlink also records the link itself, because a patch
+  addresses the link.
+- Before `apply_patch` runs, dry run or not, every path Git reports for the
+  patch is checked:
+  - an existing file the session never read fails with
+    `read <path> with read_file before editing it; ...`;
+  - a file whose fingerprint changed since the read fails with
+    `file changed since you read it; re-read <path> and retry`;
+  - a path that does not exist is a creation and needs no read, even when
+    the session read it before it was deleted (nothing can be overwritten,
+    and a re-read of a missing file could never succeed);
+  - a path that cannot be keyed (a name Git reports lossily, or one outside
+    the workspace) fails with `cannot check <path> ...`.
+  Nothing is written when the check fails.
+- After a real patch succeeds, nib records the new fingerprints, so
+  consecutive edits need no re-read. Deleted files are forgotten.
+- Records are keyed by the on-disk path below the workspace top. A read in
+  the project and an edit in the session worktree therefore agree when the
+  contents are the same, and must re-read when they differ. Existing patch
+  targets are keyed by their canonical name, as reads are, so a
+  case-insensitive file system cannot make the two disagree.
+- Records live in `.nib/profiles/<id>/file_reads/<session>.json`, one file
+  per session, written atomically. A session keeps at most 10,000 files and
+  forgets the least recently read first. A damaged record is reset, which
+  only costs re-reads.
+- The check is skipped for calls without a session, which cannot edit a
+  shared folder. Terminal commands are not covered (section 6).
+- Accepted limits:
+  - The check and the write are separate steps. A write landing between
+    them is not detected. The window is the duration of one `git apply`.
+  - Likewise, a write landing between `git apply` and the new fingerprint
+    is recorded as the session's own, so its next patch is not flagged.
+  - Fingerprints are computed on the executor's thread. Hashing is bounded
+    by the 16 MiB limit (twice per read); moving it to a blocking thread is
+    a later optimisation, like phase 4's F5.
+  - A patch that fails the check after the user approved it must be
+    approved again once re-read.
+  - On the direct routes, a tool command could rewrite the record. It
+    would only weaken this session's own check.
+- Fingerprints never follow a final symlink, and never open FIFOs or
+  devices, so a check cannot block.
+
+**Session presence.**
+- Each interactive session writes a heartbeat file to
+  `.nib/profiles/<id>/presence/<session>.json` every 30 seconds, naming its
+  canonical folder. The TUI beats from its draw loop; plain mode and
+  `nib run` keep a heartbeat from a background thread, which follows a
+  plain-mode session switch.
+- The TUI footer re-counts the other sessions in the same folder every 5
+  seconds and shows `1 other session in this folder` (or `N other
+  sessions`). It is informational only and blocks nothing.
+- A heartbeat older than 2 minutes is ignored, so a crashed session
+  disappears. Files older than a day are removed by any scan. A session
+  removes its own file when it exits or switches session.
+- Subagents and scheduled work run in worktrees and are not counted.
+- Presence is per profile until T082 moves state to user home.
+
+**Out of scope for 5a:** everything listed under 5b. Until 5b, sessions
+edit in their own worktree, so the check mainly protects in-place runs (a
+project that is itself a linked worktree) and reads in the checkout that
+differ in the session worktree.
+
+**Independent review of `2dbef20`: changes requested, then resolved.**
+- **F1 (high).** A file the session had recorded and that was then deleted
+  (by `/rewind`, a command or another session) could never be created
+  again, since a re-read of a missing file fails. Fixed: a missing target
+  is always a creation.
+- **F2 (medium).** Whole-file hashing of huge files blocked the executor.
+  Fixed with the 16 MiB metadata fingerprint; moving hashing off the async
+  thread is accepted as a later optimisation.
+- **F3 (medium).** Plain interactive mode wrote no heartbeat. Fixed.
+- **F4.** Lossily decoded or unkeyable patch paths skipped the check. They
+  now fail closed.
+- **F5.** The apply-to-record window is listed as an accepted limit.
+- **F6.** Patch targets are keyed by their canonical on-disk name.
+- **F7.** The guide and this plan describe today's worktree default and
+  partial reads accurately.
+- **F8.** Tests added: the footer with other sessions, a read through a
+  link, a refused edit leaves no checkpoint, re-creating a deleted file,
+  unkeyable paths and the large-file fingerprint.
+
+**Re-review of `9c37455`: approve.** Its two low notes need no code change:
+the large-file fingerprint's Unix-only fields are now stated above, and a
+patch through a symlinked directory is refused by `git apply` either way.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

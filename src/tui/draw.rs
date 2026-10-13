@@ -63,6 +63,7 @@ pub(crate) fn draw_loop(
     let mut chrome_generation: u64 = 0;
     let mut chrome_cache: Option<ChromeCache> = None;
     let mut session_display_cache = SessionDisplayCache::with_session(initial_session);
+    let mut presence = crate::session::presence::Presence::new(store.sessions_dir(), project_root);
     let mut exit_requested = false;
     let mut exit_requested_with_active_run = false;
 
@@ -238,6 +239,7 @@ pub(crate) fn draw_loop(
         } else {
             run_started_mode = None;
         }
+        chrome.other_sessions = presence.tick(&timeline.session_id, Instant::now());
         chrome.agent_mode = agent_mode_label(
             if pending_approval.is_some() {
                 WaitingKind::Approval

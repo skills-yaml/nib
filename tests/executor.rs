@@ -809,6 +809,14 @@ async fn patch_defaults_to_dry_run_and_terminal_nonzero_is_failure() {
             command: "printf %s \"$NIB_HOOK_VALUE\" > hook.txt".to_string(),
         }]);
     let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    // Edits need a prior read in the session (T080 phase 5a).
+    let read = executor
+        .execute(
+            call("read_file", json!({"path": "note.txt"}), root.path()),
+            Some("edit-test"),
+        )
+        .await;
+    assert!(read.success, "{:?}", read.error);
 
     let dry_run = executor
         .execute(
@@ -823,7 +831,7 @@ async fn patch_defaults_to_dry_run_and_terminal_nonzero_is_failure() {
         true
     );
     let session = store.load("edit-test").expect("edit audit");
-    let worktree = session.tool_calls[0]
+    let worktree = session.tool_calls[1]
         .worktree_path
         .as_deref()
         .expect("worktree");

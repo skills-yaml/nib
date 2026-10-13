@@ -1780,6 +1780,9 @@ pub struct TuiChrome {
     pub context: String,
     pub approval: String,
     pub agent_mode: String,
+    /// Other live nib sessions in this folder (T080 section 6), refreshed
+    /// every frame from presence heartbeats rather than cached.
+    pub other_sessions: usize,
     pub keymap: crate::config::keymap::TuiConfig,
 }
 
@@ -1793,6 +1796,7 @@ impl TuiChrome {
             context: "ctx ?".to_string(),
             approval: "ask".to_string(),
             agent_mode: "idle".to_string(),
+            other_sessions: 0,
             keymap: crate::config::keymap::TuiConfig::default(),
         }
     }
@@ -1805,6 +1809,7 @@ impl TuiChrome {
             context: "ctx ?".to_string(),
             approval: "-".to_string(),
             agent_mode: "idle".to_string(),
+            other_sessions: 0,
             keymap: crate::config::keymap::TuiConfig::default(),
         }
     }
@@ -1872,6 +1877,7 @@ pub fn format_tui_interaction_chrome(
         context,
         approval,
         agent_mode: "idle".to_string(),
+        other_sessions: 0,
         keymap: config.tui,
     })
 }

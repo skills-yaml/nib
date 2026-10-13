@@ -661,6 +661,9 @@ pub(crate) fn footer_line(
             .to_string();
     }
     let mut hint = format!("mode {} · {}", chrome.approval, chrome.agent_mode);
+    if let Some(others) = crate::session::presence::other_sessions_label(chrome.other_sessions) {
+        hint = format!("{hint} · {others}");
+    }
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {
