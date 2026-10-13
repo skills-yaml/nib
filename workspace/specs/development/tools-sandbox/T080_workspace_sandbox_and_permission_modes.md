@@ -1078,6 +1078,8 @@ successful mutations still invalidate its passed checks as today; section
 - The F5 note above is corrected: MCP tools still disable narrowing.
 The accepted limits for F7 were agreed.
 
+**Re-review of `54104c6`: approve**, with no new findings.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
