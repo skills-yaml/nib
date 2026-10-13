@@ -1146,6 +1146,15 @@ sandbox implementation. Combined review and native gates precede the push.
   first macOS CI run timed out in the unrelated process-timing test
   `successful_sync_leader_does_not_wait_for_descendant_owned_pipes`; the
   unchanged re-run passed.
+- **Phase 4** (checkpoints, `/rewind`): PR 57 merged the candidate `117f8e1`
+  (the reviewed phase 4 with `development` merged in; PR CI passed Linux
+  Validate and macOS) as `2dd459168eaf60f2f06e3895b54115db70dc24ea` on
+  2026-10-13T12:37:29Z, beside T085's waiting indicator (`6e85d8d`).
+- **Phases 5a and 5b**: PR 59 and PR 60 were merged on 2026-10-13 into
+  their stacked base branches (`feat/t080-checkpoints`,
+  `feat/t080-stale-write`) instead of `development`, so they did not reach
+  `development`. A follow-up PR from `feat/t080-stale-write`, with
+  `development` merged in and a fresh native `task verify`, carries both.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;
