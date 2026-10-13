@@ -125,3 +125,6 @@ pub use question_recovery::{
 pub use question_state::{
     QuestionEditor, QuestionEditorKind, QuestionFormEvent, QuestionFormState,
 };
+
+mod edit_fork;
+pub(crate) use edit_fork::fork_before_last_user;

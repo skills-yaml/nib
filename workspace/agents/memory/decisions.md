@@ -706,3 +706,20 @@ Edits to top-level `AGENTS.md`/`CLAUDE.md` always ask, like `git_push`, and
 unparsable deny/ask rule makes every action ask. `NIB_HOME` overrides
 `~/.nib`; unit tests use a thread-local home. Open follow-up (T082): other
 project `.nib/config.toml` settings still apply without trust.
+
+## 2026-10-12 - Codex keymap default with legacy migration
+
+- Type: decision
+- Source: User-approved T084 implementation plan
+- Confidence: high
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
+
+Content:
+
+Nib uses a Codex TUI preset by default and retains a selectable legacy preset.
+Composer Enter steers active work and Tab queues after completion; modal input
+retains its own controls. Keymap customization resolves named actions by context
+and validates collisions before atomic configuration writes. Previous-message
+editing branches a new session without copying execution authority. External
+editor drafts and backups require private storage and terminal recovery. Plain
+mode keeps its explicit steering and queuing grammar.

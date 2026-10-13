@@ -99,6 +99,7 @@ task build
    back to line-oriented plain mode elsewhere. Both presentation modes use the same
    slash commands:
    - `/help` - Show available commands
+   - `/keymap` - Inspect shortcuts; `/keymap preset legacy` restores previous TUI bindings
    - `/model` - Switch the active LLM model
    - `/session` - Preview and resume a persisted session
    - `/continue <plan-id>` - Explicitly continue that exact recovered plan

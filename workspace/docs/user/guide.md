@@ -625,10 +625,50 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
 - `/mcp list|add|remove` manages MCP servers.
 - `/help` prints commands; `/quit`, `/exit`, or `/q` exits.
 - `queue: <text>` stores a follow-up for the next turn. While a turn is running,
-  `steer: <text>` in plain mode and `Ctrl+S` in TUI mode submit the current draft to
+  `steer: <text>` in plain mode and `Enter` (or `Ctrl+S`) in the default Codex TUI preset submit the current draft to
   the exact active run at its next safe model boundary. Steering is persisted before
   acknowledgement; the TUI clears the draft only after that persistence succeeds.
-  Enter queues and never steers. Approval and question prompts retain input precedence.
+  `Tab` queues the draft for the next turn after completion has closed. In the legacy
+  preset, Enter queues and Ctrl+S steers. Approval and question prompts retain input precedence.
+
+### Keymap presets and customization
+
+The default TUI preset is `codex`. Use `/keymap` to inspect effective bindings,
+`/keymap preset legacy` to restore the previous nib controls, or
+`/keymap preset codex` to return. Legacy Enter queues, Tab switches transcript focus,
+Ctrl+A selects chat, Ctrl+C never quits, and double Esc only clears a nonempty draft.
+Preset changes retain overrides; `/keymap reset` restores Codex defaults and removes
+all overrides. Invalid settings fail without changing the configuration or active map.
+
+Bindings are stored under `[tui]` with `preset = "codex"` or `"legacy"`, and nested
+`[tui.keymap.<context>]` action lists. Contexts are `composer`, `running`, `transcript`
+and `global`; context bindings override global bindings. Each action list replaces
+its preset defaults, and an empty list unbinds that action. Unsupported context/action
+pairs and collisions are rejected; bare Escape is reserved for completion, draft
+and form controls. For example:
+
+```text
+/keymap set composer history alt-r
+/keymap unbind composer history
+/keymap reset
+```
+
+Use modifier names `ctrl`, `shift`, `alt` and keys such as `enter`, `tab`, `home`,
+`end`, or an ASCII letter/digit. Printable shortcuts require a modifier. Completion
+owns its navigation, Tab acceptance and Escape dismissal; configured submission and
+newline bindings retain their meaning while suggestions are open. Approval and
+question forms retain their own controls. Preset and custom bindings appear in help;
+run `/keymap` for the complete list. Configuration commands require an idle worker.
+
+`Ctrl+O` copies the latest persisted assistant output; selection copying remains
+separate. `Ctrl+L` clears the idle transcript view without changing session history.
+`Ctrl+G` opens `VISUAL`, falling back to `EDITOR`, while idle. Save and close the editor
+to replace the draft; launch failure, invalid UTF-8 or oversized output preserves it.
+Drafts and editor backups stay inside an owner-private temporary directory. On Windows,
+inbox PowerShell applies a protected owner-only ACL before any draft is written; an
+unavailable ACL facility fails safely. Terminal restoration failure closes the TUI
+through its cleanup boundary. Editor output is bounded by the composer limit and
+uses the same control-character filtering as paste. Vim editing is not included.
 
 Parity matrix (same command/session effect in both renderers):
 
@@ -636,12 +676,12 @@ Parity matrix (same command/session effect in both renderers):
 | --- | --- | --- |
 | Idle submit | `Enter` | `Enter` |
 | Newline | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | continuation / editor |
-| Queue next | `Enter` while running, or `queue: text` | `queue: text` |
-| Steer | `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
+| Queue next | `Tab` while running (completion consumes Tab first), or `queue: text` | `queue: text` |
+| Steer | `Enter` or `Ctrl+S` while running; accepted at the next safe boundary | `steer: text` while running |
 | Cancel run | `Ctrl+C` | `Ctrl+C` / end of turn |
 | Clear draft | double `Esc`, or idle `Ctrl+C` | line editor |
-| Quit | `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
-| Transcript | `Tab`, then arrows / fold / `Ctrl+Y` or `Ctrl+Shift+C` | ordered printed transcript |
+| Quit | idle empty-draft `Ctrl+C`, `Ctrl+Q` twice, or `/quit` | `/quit` (`/exit`, `/q`) |
+| Transcript | `Alt+T`, then arrows / fold / `Ctrl+Y` or `Ctrl+Shift+C` | ordered printed transcript |
 | Command discovery | `/` completion | `/` plus numbered choices |
 | Session switch | `/session` or `/resume` overlay | numbered or exact ID + `y` |
 | Approvals | dock on the current tool; Deny is the default | `y`/`yes` or `n`/`no`; `details` |
@@ -657,7 +697,7 @@ session and exact active run rather than from terminal chrome:
 | State | Meaning and next action |
 | --- | --- |
 | `idle` | A submitted goal starts one foreground turn; slash commands use the shared registry. |
-| `planning` / `running` | Progress remains bound to the exact run. Steering uses the explicit steer path; Enter or ordinary plain text durably queues the next turn. Commands marked idle-only report an error instead of becoming goals. |
+| `planning` / `running` | Progress remains bound to the exact run. The Codex preset uses Enter to steer and Tab to durably queue after completion. Legacy Enter and ordinary plain text queue; plain `steer:` uses the explicit steer path. Commands marked idle-only report an error instead of becoming goals. |
 | `waiting_approval` | Approval owns input before every lower layer. Accepting grants only the displayed bounded action; denial resumes reconciliation. |
 | `waiting_question` | The displayed numbered option or free-form answer owns input before commands and the composer. Empty or out-of-range answers remain local errors. |
 | `reconciling` | Cancellation, completion, or failure is not terminal until workload/session evidence is persisted and the worker is joined. |
@@ -778,7 +818,7 @@ unchanged prompt and draft. F2 is a no-op without a pending prompt. In plain mod
 The question list footer reads `Up/Down select · Enter choose · Esc interrupt
 operation`; the editor footer reads `Enter submit · Esc interrupt operation`.
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` still works); `Enter` sends
-when idle and queues when a turn is running.
+when idle and steers an active turn in the Codex preset (legacy Enter queues).
 
 The composer has focus initially, a top border, and a `> ` prompt. An empty session
 shows a startup welcome with `Nib <version>`, the working directory, an update
@@ -829,8 +869,9 @@ composer and the transcript. Click in the chat to focus it; drag to select text.
 Releasing the drag copies the selection and clears the highlight. `Esc` or
 `Enter` also clears a leftover selection and returns to the composer; a click
 in the prompt or typing does the same. `Ctrl+A` selects
-the whole chat. `Ctrl+C` cancels an active run or clears idle draft/selection; it
-never copies or quits. `Ctrl+Y` or `Ctrl+Shift+C` copy the selection, the selected
+the whole chat only in transcript focus; in the Codex composer it moves to the
+start (`Ctrl+E` moves to the end). `Ctrl+C` cancels an active run or clears a
+nonempty idle draft; it exits when the idle composer is empty. It never copies. `Ctrl+Y` or `Ctrl+Shift+C` copy the selection, the selected
 block, or the last reply. Printable keys return to the composer and insert.
 
 The transcript follows new activity by default. Scroll the conversation with the
@@ -858,7 +899,10 @@ full-view replacement boundary for its new session.
 Approval, question, model, and session overlays take input before command completion.
 Switcher and selector errors render on the overlay that caused them. `Esc` never
 cancels a run; press it twice within 800ms to clear a non-empty draft. `Ctrl+C`
-cancels an active run, or clears an idle draft/selection, and never quits.
+cancels an active run, clears a nonempty idle draft, or exits when idle and empty
+in the Codex preset. With an empty idle composer, double Esc forks before the latest
+user message and restores it for editing. The source session is preserved, and the
+fork does not inherit plans, verification credits or queued work.
 `Ctrl+Q` twice within 1000ms quits. `/quit`, `/exit`, and `/q` still exit.
 Presentation differs between plain mode and the TUI, but their agent, session,
 completion, and management capabilities are shared.

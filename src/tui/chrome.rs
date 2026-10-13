@@ -1,6 +1,7 @@
 //! TUI internals split for T043 module size.
 
 use super::*;
+use crate::config::keymap::KeyAction;
 
 pub(crate) fn composer_height(composer: &Composer, width: u16) -> u16 {
     let visual = composer_visual_rows(composer, width).len().clamp(2, 6);
@@ -593,19 +594,51 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
         Line::from(""),
         Line::from(Span::styled("Keys", title)),
         Line::from(Span::styled(
-            "Enter           send · Shift+Enter newline",
+            format!("Keymap {:?} · /keymap to customize", welcome.keymap.preset),
             muted,
         )),
         Line::from(Span::styled(
-            "Ctrl+C          stop · clear draft · never copies or quits",
+            format!(
+                "{} send · {} newline",
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Send)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Newline)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
             muted,
         )),
         Line::from(Span::styled(
-            "Ctrl+Q          twice to quit · /q also quits",
+            format!(
+                "{} cancel · {} twice to quit",
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Cancel)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                welcome
+                    .keymap
+                    .bindings("composer", crate::config::keymap::KeyAction::Quit)
+                    .iter()
+                    .map(|binding| crate::config::keymap::binding_label(binding))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
             muted,
         )),
         Line::from(Span::styled(
-            "/               commands · @ files · Tab transcript",
+            "/ commands · @ files · completion consumes Tab",
             muted,
         )),
         Line::from(Span::styled("drag            copy chat on release", muted)),
@@ -631,7 +664,16 @@ pub(crate) fn footer_line(
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {
-        hint = format!("{hint} · Ctrl+Y copy · Esc clear");
+        let binding = chrome
+            .keymap
+            .bindings(
+                "transcript",
+                crate::config::keymap::KeyAction::CopySelection,
+            )
+            .first()
+            .map(|b| crate::config::keymap::binding_label(b))
+            .unwrap_or_else(|| "unbound".to_string());
+        hint = format!("{hint} · {binding} copy · Esc clear");
     } else if let Some(band) = band_hint {
         hint = format!("{hint} · {band}");
     }
@@ -639,7 +681,13 @@ pub(crate) fn footer_line(
         hint = format!("queue {queued} · {hint}");
     }
     if !viewport.is_pinned_to_tail() {
-        hint.push_str(" · Ctrl+End follow");
+        let binding = chrome
+            .keymap
+            .bindings("transcript", crate::config::keymap::KeyAction::FollowTail)
+            .first()
+            .map(|b| crate::config::keymap::binding_label(b))
+            .unwrap_or_else(|| "unbound".to_string());
+        hint.push_str(&format!(" · {binding} follow"));
     }
     hint
 }
@@ -776,4 +824,51 @@ pub(crate) fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: b
     let job_budget = width.saturating_sub(fixed_width.saturating_add(1)).max(1);
     let job = truncate_display_cells(&job, job_budget);
     truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
+}
+
+/// Advertise only actions owned by the currently visible interaction context.
+pub(crate) fn keymap_context_hint(
+    keymap: &crate::config::keymap::TuiConfig,
+    layer: InteractionLayer,
+    focus: TuiFocus,
+    running: bool,
+    workspace_consent: bool,
+) -> String {
+    let mut hints = vec![format!("{:?}", keymap.preset)];
+    if workspace_consent || !matches!(layer, InteractionLayer::Composer) {
+        return hints.join(" · ");
+    }
+    let (context, actions): (&str, &[(KeyAction, &str)]) = match (focus, running) {
+        (TuiFocus::Transcript, _) => (
+            "transcript",
+            &[
+                (KeyAction::Focus, "focus"),
+                (KeyAction::CopySelection, "copy selection"),
+            ],
+        ),
+        (TuiFocus::Composer, true) => (
+            "running",
+            &[(KeyAction::Steer, "steer"), (KeyAction::Queue, "queue")],
+        ),
+        (TuiFocus::Composer, false) => (
+            "composer",
+            &[
+                (KeyAction::Send, "send"),
+                (KeyAction::Editor, "editor"),
+                (KeyAction::Copy, "copy"),
+            ],
+        ),
+    };
+    for (action, label) in actions {
+        let bindings = keymap.bindings(context, *action);
+        if !bindings.is_empty() {
+            let keys = bindings
+                .iter()
+                .map(|binding| crate::config::keymap::binding_label(binding))
+                .collect::<Vec<_>>()
+                .join("/");
+            hints.push(format!("{keys} {label}"));
+        }
+    }
+    hints.join(" · ")
 }

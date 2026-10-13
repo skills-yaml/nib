@@ -275,6 +275,12 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         NO_COMPLETION,
     ),
     spec(
+        "keymap", &[], "/keymap [reset|preset <name>|set <context> <action> <keys...>|unbind <context> <action>]",
+        "Inspect or customize TUI shortcut bindings",
+        InteractiveArgumentSchema::OptionalText, InteractiveMutability::Configuration,
+        InteractiveWorkerPolicy::RequiresIdle, NO_COMPLETION,
+    ),
+    spec(
         "history",
         &[],
         "/history [query]",
@@ -372,7 +378,7 @@ pub(crate) const MAX_DIFF_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_DIFF_REDACTION_INPUT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INTERACTIVE_BACKGROUND_TASKS: usize = 100;
 pub(crate) const STEER_HINT: &str =
-    "Ctrl+S steers the exact active run. Enter queues the next turn and never steers.";
+    "Codex preset: Enter steers and Tab queues after completion. Legacy preset: Ctrl+S steers; Enter queues. Plain mode uses steer: and queue:.";
 
 pub(crate) const MAX_INTERACTIVE_SESSION_ITEMS: usize = 100;
 pub(crate) const MAX_INTERACTIVE_SESSION_PREVIEW_CHARS: usize = 2_000;
@@ -751,6 +757,7 @@ pub enum InteractiveCommand {
     Rename { name: String },
     Copy,
     History { query: Option<String> },
+    Keymap { arguments: Vec<String> },
     Ps,
     Stop { task_id: Option<String> },
     Model { selection: Option<String> },
@@ -780,6 +787,7 @@ impl InteractiveCommand {
             Self::Rename { .. } => "rename",
             Self::Copy => "copy",
             Self::History { .. } => "history",
+            Self::Keymap { .. } => "keymap",
             Self::Ps => "ps",
             Self::Stop { .. } => "stop",
             Self::Model { .. } => "model",
