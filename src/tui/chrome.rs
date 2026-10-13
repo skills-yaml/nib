@@ -717,63 +717,6 @@ pub(crate) fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
-pub(crate) fn live_job_label(activities: &[ActivityEntry], live_state: Option<&str>) -> String {
-    for entry in activities.iter().rev() {
-        if entry.kind != ActivityKind::Tool {
-            continue;
-        }
-        let (name_phase, hint) = entry
-            .title
-            .split_once(" · ")
-            .unwrap_or((entry.title.as_str(), ""));
-        let Some(name) = name_phase
-            .strip_suffix(" running")
-            .or_else(|| name_phase.strip_suffix(" requested"))
-        else {
-            continue;
-        };
-        if hint.is_empty() {
-            return name.to_string();
-        }
-        return format!("{name} · {hint}");
-    }
-    match live_state {
-        Some(state) if !state.is_empty() => state.to_string(),
-        _ => "working".to_string(),
-    }
-}
-
-pub(crate) fn plan_step_label(session: Option<&crate::session::Session>) -> String {
-    session
-        .and_then(|session| session.plan.as_ref())
-        .map(|plan| {
-            format!(
-                "{}/{}",
-                plan.current_step_index.min(plan.steps.len()),
-                plan.steps.len()
-            )
-        })
-        .unwrap_or_else(|| "-".to_string())
-}
-
-pub(crate) fn approximate_visible_tokens(session: Option<&crate::session::Session>) -> String {
-    let Some(session) = session else {
-        return "tok -".to_string();
-    };
-    let bytes = session
-        .messages
-        .iter()
-        .map(|message| message.content.len())
-        .sum::<usize>()
-        .saturating_add(session.summary.as_deref().map(str::len).unwrap_or(0));
-    let tokens = bytes / 4;
-    if tokens >= 1000 {
-        format!("tok {}k", tokens / 1000)
-    } else {
-        format!("tok {tokens}")
-    }
-}
-
 pub(crate) fn meter_status_label(waiting: WaitingKind, lifecycle: &str) -> String {
     match waiting {
         WaitingKind::Approval => "WAITING APPROVAL".to_string(),
@@ -804,29 +747,40 @@ pub(crate) fn render_waiting_meter(
 }
 
 pub(crate) fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: bool) -> String {
-    let spin = spinner_glyph(meter.tick, no_color);
-    let job = control_safe_text(&meter.job, false);
-    let step = truncate_display_cells(&control_safe_text(&meter.step, false), 10);
-    let elapsed = truncate_display_cells(&format_elapsed(meter.elapsed), 8);
-    let tokens = meter.tokens.strip_prefix("tok ").unwrap_or(&meter.tokens);
-    let tokens = truncate_display_cells(&control_safe_text(tokens, false), 8);
-    let token_label = format!("tok {tokens}");
-    let status = truncate_display_cells(&control_safe_text(&meter.status, false), 16);
-    let full = format!(
-        "{spin}  {job}  ·  step {step}  ·  {elapsed}  ·  {}  ·  {status}",
-        token_label
-    );
-    if unicode_display_width(&full) <= width {
-        return full;
+    const STARS: [char; 4] = ['✽', '✻', '✼', '✶'];
+    let spin = if no_color {
+        spinner_glyph(meter.tick / 125, true)
+    } else {
+        STARS[((meter.tick / 125) % STARS.len() as u128) as usize]
+    };
+    let (phrase, short) = match meter.status.as_str() {
+        "WAITING APPROVAL" => ("Waiting for approval", "Approval"),
+        "WAITING QUESTION" | "awaiting you" => ("Waiting for your answer", "Answer"),
+        "WAITING PERMISSION" => ("Waiting for permission", "Permission"),
+        "planning" => ("Planning", "Planning"),
+        "thinking" => ("Thinking", "Thinking"),
+        "compression" | "compressing" => ("Compressing", "Compressing"),
+        "reconciling" | "reconciliation" => ("Reconciling", "Reconciling"),
+        "cancelling" => ("Cancelling", "Cancelling"),
+        "cancelled" => ("Cancelled", "Cancelled"),
+        "failed" => ("Failed", "Failed"),
+        "completed" => ("Completed", "Completed"),
+        "running" => ("Flowing", "Flowing"),
+        _ => ("Working", "Working"),
+    };
+    let elapsed = format_elapsed(meter.elapsed);
+    let tokens = truncate_display_cells(&control_safe_text(&meter.tokens, false), 24);
+    for text in [
+        format!("{spin} {phrase}… ({elapsed} · ↓ {tokens} tokens)"),
+        format!("{spin} {short}… ({elapsed} · ↓ {tokens})"),
+        format!("{spin} {short}… ({elapsed})"),
+        format!("{spin} {short}…"),
+    ] {
+        if unicode_display_width(&text) <= width {
+            return text;
+        }
     }
-
-    // Keep every operational field visible on constrained terminals. The job is
-    // the only elastic field; labels become compact before any suffix is dropped.
-    let suffix = format!("s:{step} {elapsed} t:{tokens} {status}");
-    let fixed_width = unicode_display_width(&format!("{spin}  {suffix}"));
-    let job_budget = width.saturating_sub(fixed_width.saturating_add(1)).max(1);
-    let job = truncate_display_cells(&job, job_budget);
-    truncate_display_cells(&format!("{spin} {job} {suffix}"), width)
+    truncate_display_cells(&format!("{spin} {short}…"), width)
 }
 
 /// Advertise only actions owned by the currently visible interaction context.

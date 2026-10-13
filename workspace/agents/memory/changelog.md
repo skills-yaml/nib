@@ -849,3 +849,15 @@ Content:
 
 Recorded the path-scoped in-place verification and run-record decision in
 decisions.md.
+
+## 2026-10-13 - T085 waiting-indicator preference
+
+- Type: changelog
+- Source: User's Claude-style wait-message example
+- Confidence: high
+- Review: User-provided preference; implementation receives exact interface review
+
+Content:
+
+Recorded the compact animated-star wait-line preference in preferences.md, with
+explicit human-wait labels and approximate current-run generated-token counts.

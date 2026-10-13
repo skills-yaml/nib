@@ -214,25 +214,21 @@ impl TranscriptRenderCache {
 pub(crate) struct SessionDisplayCache {
     pub(crate) session_id: String,
     pub(crate) session: Option<crate::session::Session>,
-    pub(crate) token_label: String,
     pub(crate) last_attempt: Option<Instant>,
     pub(crate) pending: Option<mpsc::Receiver<Result<Option<crate::session::Session>, ()>>>,
 }
 
 impl SessionDisplayCache {
     pub(crate) fn with_session(session: crate::session::Session) -> Self {
-        let token_label = approximate_visible_tokens(Some(&session));
         Self {
             session_id: session.id.clone(),
             session: Some(session),
-            token_label,
             last_attempt: Some(Instant::now()),
             pending: None,
         }
     }
 
     pub(crate) fn set_session(&mut self, session: Option<crate::session::Session>) {
-        self.token_label = approximate_visible_tokens(session.as_ref());
         self.session = session;
     }
 
@@ -354,8 +350,6 @@ impl InteractionBand<'_> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WaitingMeter {
-    pub(crate) job: String,
-    pub(crate) step: String,
     pub(crate) elapsed: Duration,
     pub(crate) tokens: String,
     pub(crate) status: String,
@@ -596,6 +590,7 @@ pub(crate) struct ActiveTimeline {
     pub(crate) live: LiveOutput,
     pub(crate) sensitive_values: Vec<String>,
     pub(crate) run_started_at: Option<Instant>,
+    pub(crate) generated_output_bytes: usize,
 }
 
 impl ActiveTimeline {
@@ -637,6 +632,7 @@ impl ActiveTimeline {
             live: LiveOutput::default(),
             sensitive_values,
             run_started_at: None,
+            generated_output_bytes: 0,
         }
     }
 
@@ -682,6 +678,19 @@ impl ActiveTimeline {
     }
 
     pub(crate) fn apply_event(&mut self, event: StreamEvent) {
+        if self.active_run_id.is_some() {
+            let bytes = match &event {
+                StreamEvent::Content(content) => content.len(),
+                StreamEvent::ToolCallChunk {
+                    name, arguments, ..
+                } => name
+                    .as_ref()
+                    .map_or(0, String::len)
+                    .saturating_add(arguments.as_ref().map_or(0, String::len)),
+                _ => 0,
+            };
+            self.generated_output_bytes = self.generated_output_bytes.saturating_add(bytes);
+        }
         self.render_generation = self.render_generation.wrapping_add(1);
         if let StreamEvent::Reconciled { outcome } = &event {
             if !matches!(outcome.as_str(), "step_completed" | "verification_recovery") {
@@ -726,7 +735,14 @@ impl ActiveTimeline {
         }
     }
 
+    pub(crate) fn generated_token_estimate(&self) -> String {
+        format!("~{}", self.generated_output_bytes / 4)
+    }
+
     pub(crate) fn bind_run(&mut self, run_id: Option<String>) {
+        if self.active_run_id != run_id {
+            self.generated_output_bytes = 0;
+        }
         if run_id.is_some() {
             self.reconciled_terminal = None;
             self.reconciled_outcome = None;

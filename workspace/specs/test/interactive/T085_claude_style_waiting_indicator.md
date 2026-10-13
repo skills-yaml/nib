@@ -1,0 +1,107 @@
+# T085: Compact Claude-Style Waiting Indicator
+
+**Status:** Test
+State: test
+Primary Feature: interactive
+
+## Authority and Scope
+
+The user requested a wait line like `✽ Flowing… (12s · ↓ 743 tokens)` on
+2026-10-13. Replace the dense TUI waiting meter with an animated star, a short
+activity phrase, elapsed run time and a generated-output estimate. Keep pending
+approval, question and workspace-permission labels explicit. Use current-run
+received model content/tool-call chunks for the estimate, mark it approximate,
+and never relabel conversation context or terminal output as generated tokens.
+No billed usage, provider protocol, plain-mode controls or workload state changes.
+
+## Affected Areas
+
+src/tui/chrome.rs, draw.rs, state.rs, rendering/state tests and the user guide.
+Version mirrors, release membership, catalog and memory records reconcile delivery.
+No governed instructions change.
+
+## Acceptance Criteria
+
+- [x] AC-1: Active running work renders the requested compact animated style,
+  with elapsed time and an explicitly approximate generated token count.
+- [x] AC-2: Approval, question, permission, planning, compression and cancellation
+  remain truthful; narrow and monochrome terminals render safe bounded text.
+- [x] AC-3: Estimates reset for a new run, accumulate model output, and exclude
+  session history and terminal-tool output; run execution remains unchanged.
+- [x] AC-4: Focused render/state tests, documentation and required final gates pass.
+
+## Implementation Plan
+
+1. Reconcile observed 0.5.0 publication and reserve patch 0.5.1 atomically before
+   implementation. Independent prospective review covers the bounded historical
+   ledger read-basis adaptation; the version owner applies mirrors once.
+2. Implement the compact renderer and presentation-only current-run estimate.
+3. Cover active/modal/cancellation, widths, animation, counter boundaries and
+   new-run reset; update user guide and record the stable user preference.
+4. Obtain exact independent interface review, freeze and run task verify.
+5. Keep local work in development until a confirmed shared integration event.
+
+## Validation Gates
+
+Use task test:interactive for focused observable render/state regressions and
+Task formatting/static checks while iterating. Freeze after review and run
+complete task verify; run task versions:check and task docs:check as applicable.
+
+## Risks and Compatibility
+
+The estimate is derived from received model output bytes, not billed usage;
+mark it with `~`. Keep explicit human-wait labels and use display-cell truncation
+without adding new terminal dependencies. This changes presentation only and
+can be reverted without modifying persisted sessions or execution authority.
+
+## Version Impact
+
+| Component | Impact | Release | Rationale |
+| --- | --- | --- | --- |
+| nib | patch | nib-waiting-indicator | Compatible display refinement after publicly published 0.5.0; reserve fresh 0.5.1 and apply once before artifacts. |
+
+## Memory Impact
+
+Status: updated
+Rationale: The explicit user preference is recorded in
+[workspace/agents/memory/preferences.md](../../../agents/memory/preferences.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+## Implementation and Version Evidence
+
+The independently approved reserve-only ledger read basis3c3c963 allowed the
+unmodified atomic runtime to reserve patch0.5.1 from published0.5.0. The designated
+owner applied all native version mirrors once. No historical integration ref,
+peer ownership or worktree storage changed. The renderer uses a 125ms animated
+star and short activity phrases; the presentation-only estimate accumulates
+received model-content and tool-call chunk bytes while a run is bound, resets
+when run identity changes, and excludes terminal output and persisted history.
+Focused render/state tests and exact review precede final frozen task verify.
+Local verification does not establish shared integration, main delivery or publication.
+
+## Focused Validation and Final Candidate
+
+Task test:interactive passed the initial implementation, including 138 TUI tests,
+shared steering, commands, plain-mode compatibility and the smoke-script contract.
+The now-unused session-wide meter estimate/cache field was subsequently removed;
+final task verify renews complete evidence after that cleanup and exact review.
+AC-1 through AC-3 have observable render/state regressions. AC-4 remains the
+mandatory frozen-candidate gate before local handoff; no integration is inferred.
+
+## Integration Evidence
+
+Revision: 93151e020f281669521961d5c89c1606f497eb77
+Outcome: passed
+
+The user requested pushing on 2026-10-13. A normal fast-forward push integrated
+this exact independently reviewed and locally verified revision into shared
+`development`; the remote ref was re-read and matched. Complete frozen
+`task verify` passed, including 1,453 library tests and all CLI, integration and
+documentation targets. This observed integration moves T085 to test. Push-triggered
+CI is tracked separately; no terminal CI outcome is claimed in this record.
+Main merge and publication remain separate. Version0.5.1 was applied once;
+this delivery does not apply another bump. The records receive exact review
+and renewed Task verification before their push.
+
+Memory impact of this bounded push operation: none. The approved display
+preference is unchanged; delivery evidence belongs in the spec and work record.

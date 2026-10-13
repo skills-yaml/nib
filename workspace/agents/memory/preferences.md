@@ -45,3 +45,13 @@
 - Clarification: The user explicitly chose three newest general Grok releases and
   general OpenAI models only; exclude Cyber, Pro and Grok Build suggestions.
 - Reference: [T073](../../specs/test/llm-providers/T073_provider_specific_model_selection.md).
+
+## 2026-10-13 - Compact Claude-style waiting indicator
+
+- Source: user, explicit display example
+- Confidence: high
+- Preference: Use a compact animated-star activity line such as
+  `✽ Flowing… (12s · ↓ 743 tokens)` in nib's TUI.
+- Implementation: Preserve explicit human-wait labels; mark generated estimates
+  with `~` and keep the current run separate from history.
+- Reference: [T085](../../specs/test/interactive/T085_claude_style_waiting_indicator.md).
