@@ -85,7 +85,7 @@ impl Presence {
             .last_scan
             .is_none_or(|last| now.duration_since(last) >= SCAN_INTERVAL)
         {
-            self.others = self.count_others(session_id, SystemTime::now());
+            self.others = self.others(session_id, SystemTime::now()).len();
             self.last_scan = Some(now);
         }
         self.others
@@ -118,12 +118,13 @@ impl Presence {
         Ok(())
     }
 
-    fn count_others(&self, session_id: &str, now: SystemTime) -> usize {
+    /// The ids of the other live sessions in this folder, sorted.
+    fn others(&self, session_id: &str, now: SystemTime) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return 0;
+            return Vec::new();
         };
         let now = unix_seconds(now);
-        let mut others = 0;
+        let mut others = Vec::new();
         for entry in entries.flatten().take(MAX_SCANNED) {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -144,11 +145,20 @@ impl Presence {
                 && heartbeat.folder == self.folder
                 && age < PRESENCE_TIMEOUT.as_secs()
             {
-                others += 1;
+                others.push(heartbeat.session_id);
             }
         }
+        others.sort();
         others
     }
+}
+
+/// The other live sessions working in `folder`, for run records (T080
+/// section 6b). Writes no heartbeat; like any scan, it removes day-old
+/// heartbeat files.
+pub fn other_sessions_in(sessions_dir: &Path, folder: &Path, session_id: &str) -> Vec<String> {
+    // A fresh `Presence` owns no heartbeat, so dropping it removes nothing.
+    Presence::new(sessions_dir, folder).others(session_id, SystemTime::now())
 }
 
 impl Drop for Presence {

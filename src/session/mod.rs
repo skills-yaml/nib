@@ -37,8 +37,8 @@ pub(crate) use split_03::*;
 
 pub use split_00::{normalize_plan_goal, normalize_verification_arguments, Plan};
 pub use split_00::{
-    ClarificationRecord, PathAttachment, PlanStep, ToolCallRecord, VerificationAuthority,
-    VerificationStatus,
+    ChangedPaths, ClarificationRecord, IdentityScope, PathAttachment, PlanStep, ToolCallRecord,
+    VerificationAuthority, VerificationStatus,
 };
 pub use split_00::{
     ClarificationStatus, HumanIntentKind, HumanIntentRecord, MessageOrigin, MessageProvenance,

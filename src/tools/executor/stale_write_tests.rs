@@ -5,7 +5,7 @@
 use super::*;
 use crate::tools::permission_rules::TestNibHome;
 
-fn git(root: &Path, arguments: &[&str]) {
+pub(super) fn git(root: &Path, arguments: &[&str]) {
     let status = std::process::Command::new("git")
         .args(arguments)
         .current_dir(root)
@@ -15,7 +15,7 @@ fn git(root: &Path, arguments: &[&str]) {
 }
 
 /// A linked worktree: nib edits it in place, so two sessions share it.
-fn shared_folder() -> (tempfile::TempDir, PathBuf) {
+pub(super) fn shared_folder() -> (tempfile::TempDir, PathBuf) {
     let repository = tempfile::tempdir().expect("repository");
     let main = repository.path().join("main");
     std::fs::create_dir(&main).expect("main");
@@ -42,7 +42,7 @@ fn shared_folder() -> (tempfile::TempDir, PathBuf) {
     (repository, shared)
 }
 
-fn executor(root: &Path, store: &SessionStore) -> ToolExecutor {
+pub(super) fn executor(root: &Path, store: &SessionStore) -> ToolExecutor {
     let config = ExecutionConfig {
         plan_mode: false,
         ..ExecutionConfig::default()
@@ -52,7 +52,7 @@ fn executor(root: &Path, store: &SessionStore) -> ToolExecutor {
         .with_auto_approve(true)
 }
 
-fn call(root: &Path, session_id: &str, tool: &str, arguments: Value) -> ToolCall {
+pub(super) fn call(root: &Path, session_id: &str, tool: &str, arguments: Value) -> ToolCall {
     ToolCall {
         invocation_id: crate::tools::ToolInvocationId::new(),
         tool_name: tool.to_string(),
@@ -62,7 +62,7 @@ fn call(root: &Path, session_id: &str, tool: &str, arguments: Value) -> ToolCall
     }
 }
 
-async fn read(executor: &mut ToolExecutor, root: &Path, session_id: &str, path: &str) {
+pub(super) async fn read(executor: &mut ToolExecutor, root: &Path, session_id: &str, path: &str) {
     let result = executor
         .execute(
             call(root, session_id, "read_file", json!({"path": path})),
@@ -72,7 +72,7 @@ async fn read(executor: &mut ToolExecutor, root: &Path, session_id: &str, path: 
     assert!(result.success, "{result:?}");
 }
 
-async fn patch(
+pub(super) async fn patch(
     executor: &mut ToolExecutor,
     root: &Path,
     session_id: &str,

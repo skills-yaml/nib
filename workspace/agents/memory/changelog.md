@@ -836,3 +836,16 @@ Content:
 
 Recorded the Codex default, legacy fallback, context ownership and audited
 steering/queue/fork boundaries in decisions.md.
+
+## 2026-10-13 - T080 phase 5b in-place reconciliation decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the path-scoped in-place verification and run-record decision in
+decisions.md.

@@ -1449,6 +1449,20 @@ pub struct ToolCallRecord {
     pub boundaries: Option<crate::config::BoundaryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
+    /// In place only: the project files this call changed (T080 section 6b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_paths: Option<ChangedPaths>,
+}
+
+/// The project files an in-place call changed, keyed below `root`, the
+/// project top. `complete` is false when nib could not see everything the
+/// call changed, for example a background command or an MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangedPaths {
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1546,6 +1560,10 @@ pub struct VerificationObligation {
     pub worktree_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_identity: Option<String>,
+    /// In place, a whole-folder check is narrowed to the session's own
+    /// changed paths (T080 section 6b); its identity covers exactly these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_scope: Option<IdentityScope>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub content_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1556,6 +1574,14 @@ pub struct VerificationObligation {
     pub waiver_source_message_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<VerificationAttempt>,
+}
+
+/// The exact paths, below `root`, that a narrowed identity covers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityScope {
+    pub root: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 pub(crate) fn default_required_verification() -> bool {
@@ -1582,6 +1608,7 @@ impl VerificationObligation {
             invocation_id: None,
             worktree_identity: None,
             content_identity: None,
+            identity_scope: None,
             content_generation: 0,
             reason: None,
             updated_at: None,

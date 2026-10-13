@@ -42,12 +42,14 @@ mod support;
 pub(crate) use discussion::*;
 pub(crate) use question_forms::*;
 mod verify;
+mod workspace_record;
 
 pub(crate) use entry::*;
 pub(crate) use finish::*;
 pub(crate) use inner::*;
 pub(crate) use support::*;
 pub(crate) use verify::*;
+pub(crate) use workspace_record::*;
 
 pub use entry::{run_agent_loop, run_agent_loop_for_profile};
 pub use support::{
