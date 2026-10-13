@@ -295,6 +295,7 @@ impl PlainSignalOwner {
                             if let Some(cancellation) = cancellation {
                                 cancellation.cancel();
                             } else {
+                                nib::session::presence::leave_all();
                                 std::process::exit(130);
                             }
                         }

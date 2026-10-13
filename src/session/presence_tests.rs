@@ -103,3 +103,16 @@ fn labels_name_the_other_sessions() {
         Some("3 other sessions in this folder")
     );
 }
+
+#[test]
+fn leave_all_removes_heartbeats_before_an_exit_that_skips_destructors() {
+    let state = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let mut presence = Presence::new(&state.path().join("sessions"), folder.path());
+    presence.tick("exiting", Instant::now());
+    assert!(presence.file("exiting").exists());
+    leave_all();
+    assert!(!presence.file("exiting").exists());
+    // The later destructor finds nothing left to remove.
+    drop(presence);
+}

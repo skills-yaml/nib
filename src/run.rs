@@ -246,6 +246,7 @@ fn report_run_summary(
 ) -> Result<(), String> {
     if summary.outcome == "cancelled_by_user" {
         eprintln!("Run cancelled.");
+        nib::session::presence::leave_all();
         std::process::exit(interrupt_exit_status());
     }
     if summary.outcome == "waiting_for_user_input" {

@@ -24,6 +24,25 @@ const STALE_FILE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_SCANNED: usize = 512;
 const PRESENCE_DIR: &str = "presence";
 
+/// Heartbeat files this process owns, so an exit that skips destructors
+/// (`std::process::exit` after Ctrl+C) can still remove them.
+static OWNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn owned() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    OWNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Removes every heartbeat this process owns. Call it before
+/// `std::process::exit`, which runs no destructors, so the session does not
+/// linger as present until the timeout.
+pub fn leave_all() {
+    for file in owned().drain(..) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Heartbeat {
     session_id: String,
@@ -94,7 +113,9 @@ impl Presence {
     /// Removes this session's heartbeat.
     pub fn leave(&mut self) {
         if let Some(session_id) = self.session_id.take() {
-            let _ = std::fs::remove_file(self.file(&session_id));
+            let file = self.file(&session_id);
+            owned().retain(|owned| *owned != file);
+            let _ = std::fs::remove_file(file);
         }
         self.last_beat = None;
     }
@@ -113,8 +134,12 @@ impl Presence {
         let bytes = serde_json::to_vec(&heartbeat).map_err(io::Error::other)?;
         let mut file = tempfile::NamedTempFile::new_in(&self.dir)?;
         io::Write::write_all(&mut file, &bytes)?;
-        file.persist(self.file(session_id))
-            .map_err(|error| error.error)?;
+        let target = self.file(session_id);
+        file.persist(&target).map_err(|error| error.error)?;
+        let mut owned = owned();
+        if !owned.contains(&target) {
+            owned.push(target);
+        }
         Ok(())
     }
 

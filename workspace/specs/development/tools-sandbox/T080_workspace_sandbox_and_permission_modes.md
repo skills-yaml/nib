@@ -1155,10 +1155,16 @@ sandbox implementation. Combined review and native gates precede the push.
   `feat/t080-stale-write`) instead of `development`, so they did not reach
   `development`. A follow-up PR from `feat/t080-stale-write`, with
   `development` merged in and a fresh native `task verify`, carries both.
-  Its first CI run failed the interactive release smoke: a heartbeat left
-  by an earlier smoke case added `1 other session in this folder` before
-  the `Ctrl+End follow` hint, and the 50-column terminal clipped the hint.
-  The presence label now comes last in the footer, after every key hint.
+  Its first CI runs failed the interactive release smoke: the TUI footer
+  showed `3 other sessions in this folder` and lost the `Ctrl+End follow`
+  hint. The heartbeats came from earlier `nib run` cases interrupted with
+  Ctrl+C, whose `std::process::exit` skipped the heartbeat's destructor, so
+  finished sessions stayed "present" for two minutes (a 5a defect; plain
+  mode's Ctrl+C exit had the same gap). Fixed: each process tracks the
+  heartbeats it owns and removes them before those exits. The presence
+  label also now comes last in the footer, after every key hint, so a
+  narrow terminal clips it first. The smoke passed locally against the
+  debug binary.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;
