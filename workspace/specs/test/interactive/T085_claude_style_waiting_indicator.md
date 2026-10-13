@@ -1,7 +1,7 @@
 # T085: Compact Claude-Style Waiting Indicator
 
-**Status:** Development
-State: development
+**Status:** Test
+State: test
 Primary Feature: interactive
 
 ## Authority and Scope
@@ -28,7 +28,7 @@ No governed instructions change.
   remain truthful; narrow and monochrome terminals render safe bounded text.
 - [x] AC-3: Estimates reset for a new run, accumulate model output, and exclude
   session history and terminal-tool output; run execution remains unchanged.
-- [ ] AC-4: Focused render/state tests, documentation and required final gates pass.
+- [x] AC-4: Focused render/state tests, documentation and required final gates pass.
 
 ## Implementation Plan
 
@@ -87,3 +87,21 @@ The now-unused session-wide meter estimate/cache field was subsequently removed;
 final task verify renews complete evidence after that cleanup and exact review.
 AC-1 through AC-3 have observable render/state regressions. AC-4 remains the
 mandatory frozen-candidate gate before local handoff; no integration is inferred.
+
+## Integration Evidence
+
+Revision: 93151e020f281669521961d5c89c1606f497eb77
+Outcome: passed
+
+The user requested pushing on 2026-10-13. A normal fast-forward push integrated
+this exact independently reviewed and locally verified revision into shared
+`development`; the remote ref was re-read and matched. Complete frozen
+`task verify` passed, including 1,453 library tests and all CLI, integration and
+documentation targets. This observed integration moves T085 to test. Push-triggered
+CI is tracked separately; no terminal CI outcome is claimed in this record.
+Main merge and publication remain separate. Version0.5.1 was applied once;
+this delivery does not apply another bump. The records receive exact review
+and renewed Task verification before their push.
+
+Memory impact of this bounded push operation: none. The approved display
+preference is unchanged; delivery evidence belongs in the spec and work record.

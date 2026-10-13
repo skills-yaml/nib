@@ -67,3 +67,13 @@ updated for the explicit user preference; shared integration is not inferred.
 Focused task test:interactive passed, including 138 TUI regressions. The obsolete
 session-wide meter estimate was removed after separating current-run generation
 from context usage. Final exact review and full task verify renew the candidate.
+
+## Shared Push Handoff
+
+User-authorized normal push integrated reviewed93151e0 into shared development
+on 2026-10-13; the remote ref was independently re-read at the same revision.
+Frozen task verify passed all targets, including 1,453 library tests. Lifecycle,
+catalog, release membership and the preference reference now reconcile test state.
+Main delivery and publication remain separate. These records receive exact review
+and renewed Task verification before publication. Memory: none for this bounded
+push operation; the stable display preference remains the prior updated memory.

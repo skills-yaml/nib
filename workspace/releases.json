@@ -168,9 +168,9 @@
       "owner": "t085-waiting",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T085_claude_style_waiting_indicator.md"
+        "workspace/specs/test/interactive/T085_claude_style_waiting_indicator.md"
       ],
-      "evidence": "User requested compact Claude-style waiting status on 2026-10-13. Independent prospective review verified published development0.5.0 at252c62b and approved the bounded reserve-only read basis3c3c963. The unmodified atomic runtime reserve returned fresh patch0.5.1 from0.5.0. Only that single reservation used the committed publication ledger; no historical integration ref, ownership or worktree storage changed. Owner t085-waiting applied Cargo.toml, Cargo.lock and skills.yaml once before implementation artifacts. Application is not integration, main delivery or publication."
+      "evidence": "User requested compact Claude-style waiting status on 2026-10-13. Independent prospective review verified published development0.5.0 at252c62b and approved the bounded reserve-only read basis3c3c963. The unmodified atomic runtime reserve returned fresh patch0.5.1 from0.5.0. Only that single reservation used the committed publication ledger; no historical integration ref, ownership or worktree storage changed. Owner t085-waiting applied Cargo.toml, Cargo.lock and skills.yaml once before implementation artifacts. Application is not integration, main delivery or publication. Confirmed shared development integration at93151e020f281669521961d5c89c1606f497eb77 via normal fast-forward push on 2026-10-13T10:51:18.912984+00:00 after independent exact review and complete native task verify. Remote ref was re-read at the same revision. T085 moves to test without a second bump. Main delivery and publication remain separate; push-triggered CI is not claimed complete here."
     }
   ]
 }

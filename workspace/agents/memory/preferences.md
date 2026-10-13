@@ -54,4 +54,4 @@
   `✽ Flowing… (12s · ↓ 743 tokens)` in nib's TUI.
 - Implementation: Preserve explicit human-wait labels; mark generated estimates
   with `~` and keep the current run separate from history.
-- Reference: [T085](../../specs/development/interactive/T085_claude_style_waiting_indicator.md).
+- Reference: [T085](../../specs/test/interactive/T085_claude_style_waiting_indicator.md).
