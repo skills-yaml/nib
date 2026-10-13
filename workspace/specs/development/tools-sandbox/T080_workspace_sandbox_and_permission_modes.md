@@ -947,13 +947,16 @@ top), recorded only in place:
   read-only: the observed diff (below). Commits and pushes are observed
   because the user's hooks may rewrite files. Complete unless the
   observation was cut short.
-- A dry run, a read-only command or tool, or a call refused before it ran:
-  an empty, complete record ("changed nothing").
-- Any other call (a background command, a subagent merge, an MCP or unknown
-  tool that is not read-only): incomplete, because nib cannot see what it
-  changed.
+- A dry run, a patch that did not apply (`git apply` is all or nothing), a
+  read-only command or built-in tool, or a call refused before it ran: an
+  empty, complete record ("changed nothing").
+- Any other call (a background command, a subagent merge, any MCP tool,
+  an unknown tool): incomplete, because nib cannot see what it changed. MCP
+  tools are always classified as network risk, so even read-only ones
+  disable narrowing for the session.
 - Built-in tools that never edit files (`read_file`, `grep`, plan, task,
-  memory and subagent management) record nothing.
+  memory and subagent management) and the profile curator's record record
+  nothing.
 - Calls in a managed worktree record nothing; the worktree is their
   isolation, and verification keeps covering the whole worktree.
 
@@ -1058,12 +1061,22 @@ successful mutations still invalidate its passed checks as today; section
   are now observed like commands.
 - **F4 (medium).** Subagent worktrees of a linked-worktree project were not
   recognised as managed. Fixed and tested.
-- **F5 (low).** Read-only MCP tools no longer disable narrowing.
+- **F5 (low).** Read-only built-in calls record "changed nothing". MCP
+  tools are always network risk and still disable narrowing (safe; stated
+  above).
 - **F6-F8 (low).** Limits, field names and the catalog row are now stated
   accurately.
 - **F9 (low).** Tests added for F1, F2 and F4. Rename keys are covered by
   5a's `tracked_patch_paths`; `git_commit` hooks and cancellation timing
   are covered by the session-level rules rather than end-to-end fixtures.
+
+**Re-review of `625eefc`: F1-F4 confirmed fixed; three new findings, resolved.**
+- A real patch that failed to apply was recorded without change details,
+  making the session's changes unknown and staling passed checks. It now
+  records "changed nothing".
+- The daily profile-curator record (profile state only) is exempt.
+- The F5 note above is corrected: MCP tools still disable narrowing.
+The accepted limits for F7 were agreed.
 
 ## User Decisions (2026-10-07)
 

@@ -125,16 +125,13 @@ impl ChangeWatch {
                 paths: Vec::new(),
                 complete: true,
             },
-            Self::Patch { root, keys } => {
-                if !ran {
-                    return None;
-                }
-                ChangedPaths {
-                    root,
-                    paths: keys,
-                    complete: true,
-                }
-            }
+            // `git apply` applies all or nothing, so a patch that failed
+            // changed nothing.
+            Self::Patch { root, keys } => ChangedPaths {
+                root,
+                paths: if ran { keys } else { Vec::new() },
+                complete: true,
+            },
             Self::Command { root, top, before } => {
                 match tokio::task::spawn_blocking(move || Snapshot::take(&top)).await {
                     Ok(after) => {

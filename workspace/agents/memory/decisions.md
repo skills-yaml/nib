@@ -798,7 +798,8 @@ whole-folder obligation (`affected_paths` `["."]`) is narrowed to an
 `identity_scope` of the session's changed paths; incomplete records, a
 foreign project top, a mutating record without change details, an attempt
 without a record or more than 1,000 paths keep the whole-folder identity.
-Dry runs, read-only calls and refusals record an empty change set;
+Dry runs, patches that did not apply, read-only built-in calls and refusals
+record an empty change set; MCP tools always count as unknown;
 `git_commit`/`git_push` are observed because hooks may rewrite files.
 Revalidation also stales a narrowed check once the session's own changes
 are unknown or leave its scope (even from failed calls); own successful

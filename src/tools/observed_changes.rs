@@ -17,7 +17,8 @@ pub(crate) const MAX_ENTRIES: usize = 50_000;
 /// identity would have to walk in full.
 const SKIPPED: &[&str] = &[".git", ".nib", "target", "node_modules"];
 
-/// Built-in tools that never edit project files. Any other tool's record
+/// Built-in tools (and the profile curator's record) that never edit
+/// project files. Any other tool's record
 /// must say what it changed in place, or the session's changes are unknown.
 pub(crate) fn edits_no_project_files(tool_name: &str) -> bool {
     matches!(
@@ -39,6 +40,7 @@ pub(crate) fn edits_no_project_files(tool_name: &str) -> bool {
             | "ask_question"
             | "load_skill"
             | "read_skill_resource"
+            | "daemon_curator"
     )
 }
 

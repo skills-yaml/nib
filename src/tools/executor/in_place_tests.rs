@@ -36,6 +36,10 @@ async fn in_place_patches_and_commands_record_what_they_changed() {
     assert!(dry_run.success, "{dry_run:?}");
     let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
     assert!(applied.success, "{applied:?}");
+    // A patch that does not apply changes nothing.
+    let mismatch = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-zzz\n+two\n";
+    let failed = patch(&mut executor, &root, &session.id, mismatch, false).await;
+    assert!(!failed.success, "{failed:?}");
     let command = executor
         .execute(
             call(
@@ -63,6 +67,7 @@ async fn in_place_patches_and_commands_record_what_they_changed() {
             None,          // read_file never edits
             recorded(&[]), // dry run
             recorded(&["a.txt"]),
+            recorded(&[]), // patch that did not apply
             recorded(&["a.txt", "b.txt"]),
         ]
     );
