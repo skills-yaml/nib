@@ -140,7 +140,10 @@ Native Linux qualification passed locally; native macOS qualification also
 passed in CI 38363488692. Native Windows qualification is not claimed.
 Main merge and publication are not recorded here.
 
-## Shared Development Integration
+## Integration Evidence
+
+Revision: 252c62bf74ddc9c513e4843057dfcd174c4a0600
+Outcome: passed
 
 PR [58](https://github.com/skills-yaml/nib/pull/58) merged the independently
 reviewed head 44ee5890ab8ed8db2c2eb0c04054e49381e00485 into shared development at
