@@ -1109,6 +1109,23 @@ permissions.
   A session keeps its last 100 checkpoints and up to 256 MiB of saved files.
   Files over 16 MiB are not saved.
 
+### Sharing a folder with other sessions
+
+Several nib sessions, and you, may work in the same folder at once. nib does
+not lock the folder; it protects each file instead.
+
+- The agent can edit a file only after reading it in the same session, and only
+  while the file is unchanged since that read. If you, another session or a
+  formatter changed it, the edit fails with `file changed since you read it`
+  and writes nothing; the agent re-reads the file and tries again. New files
+  need no read, and the agent's own consecutive edits need no re-read.
+- Terminal commands are not checked this way. A command that rewrites files
+  (a formatter, code generation) can overwrite concurrent edits.
+- The footer shows `1 other session in this folder` (or `N other sessions`)
+  while other nib sessions, including `nib run`, are active there. A session
+  that crashed disappears after two minutes. Subagents work in their own
+  worktrees and are not counted.
+
 ## Safety and Persistence
 
 Agent-selected tool calls use `ToolExecutor`. It applies scope checks, tool and shell

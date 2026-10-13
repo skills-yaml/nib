@@ -5,6 +5,7 @@ pub mod classifier;
 pub mod core;
 pub mod delegation;
 pub mod executor;
+pub(crate) mod file_reads;
 pub(crate) mod git_tools;
 pub mod models;
 pub(crate) mod permission_matching;

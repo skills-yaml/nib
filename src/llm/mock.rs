@@ -577,6 +577,7 @@ impl LlmClient for MockLlmClient {
                 let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn answer() -> u32 {\n-    41\n+    42\n }\n";
                 return mock_tool_response(
                     vec![
+                        ToolCallRequest::new("read_file", json!({"path": "src/lib.rs"})),
                         ToolCallRequest::new(
                             "apply_patch",
                             json!({"patch": patch, "dry_run": false}),
@@ -802,8 +803,9 @@ mod tests {
             .await
             .expect("runtime response");
         let calls = runtime.tool_calls.expect("runtime tool calls");
-        assert_eq!(calls[0].name, "apply_patch");
-        assert_eq!(calls[1].name, "run_terminal");
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[1].name, "apply_patch");
+        assert_eq!(calls[2].name, "run_terminal");
     }
 
     #[tokio::test]

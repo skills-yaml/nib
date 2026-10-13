@@ -30,3 +30,6 @@ mod rules_tests;
 
 #[path = "checkpoint_tests.rs"]
 mod checkpoint_tests;
+
+#[path = "stale_write_tests.rs"]
+mod stale_write_tests;

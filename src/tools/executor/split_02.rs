@@ -1085,4 +1085,145 @@ impl ToolExecutor {
             tracing::warn!(tool = %call.tool_name, "checkpoint not recorded: {}", self.redact_text(&error));
         }
     }
+
+    /// The session's file-read ledger, when the call belongs to a session.
+    fn file_read_ledger(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<crate::tools::file_reads::ReadLedger> {
+        let (store, session_id) = (self.session_store.as_ref()?, session_id?);
+        match crate::tools::file_reads::ReadLedger::for_session(store.sessions_dir(), session_id) {
+            Ok(ledger) => Some(ledger),
+            Err(error) => {
+                tracing::warn!("file reads not tracked: {}", self.redact_text(&error));
+                None
+            }
+        }
+    }
+
+    /// Where `effective_root` sits below the workspace top, so ledger keys
+    /// agree between scopes and between the project and its worktree.
+    fn workspace_scope(&self, effective_root: &Path) -> PathBuf {
+        self.project_root
+            .canonicalize()
+            .ok()
+            .and_then(|top| effective_root.strip_prefix(top).ok().map(Path::to_path_buf))
+            .unwrap_or_default()
+    }
+
+    /// Stale-write check (T080 section 6): before `apply_patch`, every
+    /// existing target must have been read in this session and be unchanged
+    /// since. Returns the targets to record after a real edit.
+    pub(crate) fn check_patch_freshness(
+        &self,
+        call: &ToolCall,
+        root: &Path,
+        effective_root: &Path,
+        session_id: Option<&str>,
+    ) -> Result<Option<Vec<crate::tools::file_reads::TrackedPath>>, String> {
+        if call.tool_name != "apply_patch" {
+            return Ok(None);
+        }
+        let Some(ledger) = self.file_read_ledger(session_id) else {
+            return Ok(None);
+        };
+        let patch = approval_argument_string(call, "patch").unwrap_or_default();
+        let paths = crate::tools::permission_matching::git_patch_paths(patch, root)?;
+        let targets = crate::tools::file_reads::tracked_patch_paths(
+            root,
+            &self.workspace_scope(effective_root),
+            &paths,
+        );
+        ledger.check_before_edit(&targets)?;
+        Ok(Some(targets))
+    }
+
+    /// Records what a successful real `apply_patch` wrote.
+    pub(crate) fn record_patched_files(
+        &self,
+        call: &ToolCall,
+        targets: Option<&[crate::tools::file_reads::TrackedPath]>,
+        session_id: Option<&str>,
+    ) {
+        let real = call.arguments.get("dry_run").and_then(Value::as_bool) == Some(false);
+        let (true, Some(targets), Some(ledger)) =
+            (real, targets, self.file_read_ledger(session_id))
+        else {
+            return;
+        };
+        if let Err(error) = ledger.record_after_edit(targets) {
+            tracing::warn!("edited files not recorded: {}", self.redact_text(&error));
+        }
+    }
+
+    /// The file a `read_file` call will read, with its fingerprint before the
+    /// read. `None` when the call is not a tracked read.
+    pub(crate) fn file_read_before(
+        &self,
+        call: &ToolCall,
+        root: &Path,
+        effective_root: &Path,
+        session_id: Option<&str>,
+    ) -> Option<PendingRead> {
+        if call.tool_name != "read_file" {
+            return None;
+        }
+        let ledger = self.file_read_ledger(session_id)?;
+        let requested = call.arguments.get("path").and_then(Value::as_str)?;
+        let canonical_root = root.canonicalize().ok()?;
+        let resolved =
+            crate::tools::core::resolve_existing_path(&canonical_root, requested).ok()?;
+        let scope = self.workspace_scope(effective_root);
+        let mut files = vec![(
+            crate::tools::file_reads::ledger_key(
+                &scope.join(resolved.strip_prefix(&canonical_root).ok()?),
+            )?,
+            resolved,
+        )];
+        // A patch addresses a symlink itself, while the read follows it, so
+        // a read through a link also records the link.
+        let lexical = Path::new(requested);
+        if lexical.is_relative()
+            && std::fs::symlink_metadata(canonical_root.join(lexical))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            if let Some(key) = crate::tools::file_reads::ledger_key(&scope.join(lexical)) {
+                files.push((key, canonical_root.join(lexical)));
+            }
+        }
+        let files = files
+            .into_iter()
+            .map(|(key, path)| {
+                let before = crate::tools::file_reads::fingerprint(&path).ok().flatten();
+                (key, path, before)
+            })
+            .collect();
+        Some(PendingRead { ledger, files })
+    }
+}
+
+/// A `read_file` in flight: recorded only when the file did not change while
+/// it was read, so the session never vouches for contents it did not see.
+pub(crate) struct PendingRead {
+    ledger: crate::tools::file_reads::ReadLedger,
+    files: Vec<(String, PathBuf, Option<String>)>,
+}
+
+impl PendingRead {
+    pub(crate) fn finish(self, read_succeeded: bool) {
+        if !read_succeeded {
+            return;
+        }
+        let seen: Vec<_> = self
+            .files
+            .into_iter()
+            .filter_map(|(key, path, before)| {
+                let after = crate::tools::file_reads::fingerprint(&path).ok().flatten();
+                (before.is_some() && before == after).then_some((key, after))
+            })
+            .collect();
+        if let Err(error) = self.ledger.record(&seen) {
+            tracing::warn!("file read not recorded: {error}");
+        }
+    }
 }

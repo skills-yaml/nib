@@ -883,6 +883,7 @@ fn header_shows_folder_and_branch_left_and_model_right() {
         context: "ctx ~12/100".to_string(),
         approval: "ask".to_string(),
         agent_mode: "idle".to_string(),
+        other_sessions: 0,
     };
     let line = header_line(&chrome, 80, true);
     let text: String = line

@@ -14,6 +14,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod memory;
+pub mod presence;
 pub(crate) mod question_forms;
 pub(crate) use question_forms::{
     append_question_event, apply_form_outcome, normalized_record_options, public_form_outcome,

@@ -733,3 +733,28 @@ says so. Pruning never runs before a rewind's restore finishes. Restoring comman
 because host Git on an untrusted repository is unsafe and copying the tree each
 turn is too costly. Bounds: 100 checkpoints, 256 MiB of blobs, 16 MiB per
 file. A storage failure is logged and never blocks the edit.
+
+## 2026-10-13 - Edits require a fresh read; sessions in one folder are visible, never locked
+
+- Type: decision
+- Source: T080 phase 5a
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+`apply_patch`, dry run or not, changes an existing file only when the same
+session read it with `read_file` and its fingerprint (SHA-256 of the bytes,
+or of a symlink target) still matches. Otherwise it writes nothing and tells
+the model to read or re-read the file. New files need no read, and a
+successful patch records the new fingerprints, so consecutive edits need no
+re-read. A read is recorded only when the file was identical before and after
+it. Records are keyed by the path below the workspace top and stored per
+session under `.nib/profiles/<id>/file_reads/`; a damaged record resets.
+Terminal commands are not stale-checked, as in Claude Code. Presence is a
+per-session heartbeat under `.nib/profiles/<id>/presence/` (30 s beat, 2 min
+timeout); the TUI footer shows other live sessions in the same folder and
+blocks nothing. Phase 5 is split: 5a ships these, 5b ships the in-place
+default, `/worktree`, `/land`, path-scoped reconciliation and the D2
+governed-instruction amendments.
