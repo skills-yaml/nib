@@ -1133,7 +1133,7 @@ impl ToolExecutor {
             root,
             &self.workspace_scope(effective_root),
             &paths,
-        );
+        )?;
         ledger.check_before_edit(&targets)?;
         Ok(Some(targets))
     }

@@ -1114,17 +1114,21 @@ permissions.
 Several nib sessions, and you, may work in the same folder at once. nib does
 not lock the folder; it protects each file instead.
 
-- The agent can edit a file only after reading it in the same session, and only
-  while the file is unchanged since that read. If you, another session or a
-  formatter changed it, the edit fails with `file changed since you read it`
-  and writes nothing; the agent re-reads the file and tries again. New files
-  need no read, and the agent's own consecutive edits need no re-read.
+- The agent can edit an existing file only after reading it in the same
+  session, and only while the file is unchanged since that read. Otherwise the
+  edit fails with `file changed since you read it` (or asks for a read) and
+  writes nothing; the agent re-reads the file and tries again. New files need
+  no read, and the agent's own consecutive edits need no re-read.
+- Today sessions edit in their own worktree, so this matters mainly when nib
+  runs in place: when the folder is itself a linked Git worktree, or when the
+  agent read a file in your checkout that differs in its session worktree.
+  Phase 5b of T080 makes in-place editing the default.
 - Terminal commands are not checked this way. A command that rewrites files
   (a formatter, code generation) can overwrite concurrent edits.
 - The footer shows `1 other session in this folder` (or `N other sessions`)
-  while other nib sessions, including `nib run`, are active there. A session
-  that crashed disappears after two minutes. Subagents work in their own
-  worktrees and are not counted.
+  while other nib sessions, including plain mode and `nib run`, are active
+  there. A session that crashed disappears after two minutes. Subagents work
+  in their own worktrees and are not counted.
 
 ## Safety and Persistence
 

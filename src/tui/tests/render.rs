@@ -1008,6 +1008,12 @@ fn footer_and_completion_follow_the_current_interaction() {
         footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
         "queue 2 · mode ask · execute"
     );
+    let mut shared = chrome.clone();
+    shared.other_sessions = 2;
+    assert_eq!(
+        footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · idle · 2 other sessions in this folder"
+    );
     let mut waiting = chrome.clone();
     waiting.agent_mode = "WAITING APPROVAL".to_string();
     assert_eq!(

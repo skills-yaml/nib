@@ -16,6 +16,8 @@ use std::sync::Mutex;
 /// The most files a session remembers; the least recently read are dropped.
 const MAX_ENTRIES: usize = 10_000;
 const LEDGER_DIR: &str = "file_reads";
+/// Larger files are fingerprinted from metadata instead of hashed.
+const MAX_HASHED_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Serializes ledger updates within this process; sessions do not share a
 /// ledger file, so no cross-process lock is needed.
@@ -101,8 +103,9 @@ impl ReadLedger {
 
     /// Fails, naming the first offending file, unless every existing target
     /// was read in this session and is unchanged since. A target that does
-    /// not exist is a creation and needs no read, unless the session saw it
-    /// before (then it was deleted behind the session's back).
+    /// not exist is a creation and needs no read, even when the session saw
+    /// it before: nothing is there to overwrite, and a re-read of a deleted
+    /// file could never succeed.
     pub(crate) fn check_before_edit(&self, targets: &[TrackedPath]) -> Result<(), String> {
         let ledger = {
             let _guard = LEDGER_LOCK
@@ -115,14 +118,14 @@ impl ReadLedger {
                 .map_err(|error| format!("cannot check {}: {error}", target.key))?;
             let recorded = ledger.files.get(&target.key).map(|e| &e.fingerprint);
             match (current, recorded) {
-                (None, None) => {}
+                (None, _) => {}
                 (Some(_), None) => {
                     return Err(format!(
                         "read {} with read_file before editing it; apply_patch only changes files this session has read",
                         target.key
                     ))
                 }
-                (current, Some(recorded)) if current.as_ref() != Some(recorded) => {
+                (Some(current), Some(recorded)) if &current != recorded => {
                     return Err(format!(
                         "file changed since you read it; re-read {} and retry",
                         target.key
@@ -179,15 +182,49 @@ impl ReadLedger {
 }
 
 /// Maps patch paths (relative to `root`, as Git reports them) to tracked
-/// paths. `scope` is `root`'s location below the workspace top.
-pub(crate) fn tracked_patch_paths(root: &Path, scope: &Path, paths: &[String]) -> Vec<TrackedPath> {
+/// paths. `scope` is `root`'s location below the workspace top. An existing
+/// target is keyed by its on-disk name, as `read_file` keys it, so a
+/// case-insensitive file system cannot make the two disagree. A path that
+/// cannot be keyed fails the check instead of skipping it.
+pub(crate) fn tracked_patch_paths(
+    root: &Path,
+    scope: &Path,
+    paths: &[String],
+) -> Result<Vec<TrackedPath>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot check the patch's files: {error}"))?;
     paths
         .iter()
-        .filter_map(|path| {
+        .map(|path| {
+            let unchecked = || format!("cannot check {path} for changes since it was read");
+            // Git reports undecodable names lossily; such a name would not
+            // match the file the patch really changes.
+            if path.contains('\u{FFFD}') {
+                return Err(unchecked());
+            }
             let relative = Path::new(path);
-            Some(TrackedPath {
-                key: ledger_key(&scope.join(relative))?,
-                absolute: root.join(relative),
+            let absolute = root.join(relative);
+            let on_disk = match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) => {
+                    let canonical = if metadata.file_type().is_symlink() {
+                        absolute
+                            .parent()
+                            .and_then(|parent| parent.canonicalize().ok())
+                            .zip(absolute.file_name())
+                            .map(|(parent, name)| parent.join(name))
+                    } else {
+                        absolute.canonicalize().ok()
+                    };
+                    canonical
+                        .and_then(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
+                        .ok_or_else(unchecked)?
+                }
+                Err(_) => relative.to_path_buf(),
+            };
+            Ok(TrackedPath {
+                key: ledger_key(&scope.join(on_disk)).ok_or_else(unchecked)?,
+                absolute,
             })
         })
         .collect()
@@ -210,7 +247,9 @@ pub(crate) fn ledger_key(path: &Path) -> Option<String> {
 /// A fingerprint of the file at `path` without following a final symlink:
 /// the SHA-256 of a regular file's bytes or of a link's target, or `None`
 /// when nothing is there. Directories and special files get a fixed marker
-/// and are never opened, so a FIFO cannot block the check.
+/// and are never opened, so a FIFO cannot block the check. Files over
+/// [`MAX_HASHED_BYTES`] are fingerprinted by size, modification time and
+/// (on Unix) inode and change time, which bounds the work per read.
 pub(crate) fn fingerprint(path: &Path) -> io::Result<Option<String>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -231,8 +270,12 @@ pub(crate) fn fingerprint(path: &Path) -> io::Result<Option<String>> {
         ));
     }
     let mut file = open_regular_file(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Ok(Some("special".to_string()));
+    }
+    if metadata.len() > MAX_HASHED_BYTES {
+        return Ok(Some(metadata_fingerprint(&metadata)));
     }
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
@@ -258,6 +301,28 @@ fn open_regular_file(path: &Path) -> io::Result<std::fs::File> {
 #[cfg(not(unix))]
 fn open_regular_file(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
+}
+
+fn metadata_fingerprint(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{}:{}.{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )
+    };
+    #[cfg(not(unix))]
+    let identity = String::new();
+    format!("meta:{}:{modified}:{identity}", metadata.len())
 }
 
 fn hex(bytes: &[u8]) -> String {

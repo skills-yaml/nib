@@ -119,6 +119,11 @@ async fn edits_need_a_read_and_consecutive_edits_do_not_need_another() {
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "one\n"
     );
+    // A refused edit is not checkpointed.
+    let checkpoints =
+        crate::tools::checkpoints::CheckpointStore::for_session(store.sessions_dir(), &session.id)
+            .unwrap();
+    assert!(checkpoints.list().unwrap().is_empty());
 
     read(&mut executor, &root, &session.id, "a.txt").await;
     let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
@@ -137,6 +142,12 @@ async fn edits_need_a_read_and_consecutive_edits_do_not_need_another() {
     let edit_new = "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-new\n+newer\n";
     let edited = patch(&mut executor, &root, &session.id, edit_new, false).await;
     assert!(edited.success, "{edited:?}");
+
+    // Once the file is gone (a rewind, a command, another session), the
+    // session can create it again without a read that could never succeed.
+    std::fs::remove_file(root.join("b.txt")).unwrap();
+    let recreated = patch(&mut executor, &root, &session.id, create, false).await;
+    assert!(recreated.success, "{recreated:?}");
 }
 
 #[tokio::test]
@@ -220,4 +231,28 @@ async fn reads_and_edits_agree_across_scopes() {
     let diff = "--- a/sub/c.txt\n+++ b/sub/c.txt\n@@ -1 +1 @@\n-one\n+two\n";
     let applied = patch(&mut executor, &root, &session.id, diff, false).await;
     assert!(applied.success, "{applied:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_through_a_link_covers_the_link_and_its_target() {
+    let _home = TestNibHome::isolated();
+    let (_repository, root) = shared_folder();
+    std::os::unix::fs::symlink("a.txt", root.join("alias")).unwrap();
+    let store = SessionStore::new(&root);
+    let session = store.create_session_with_id("link-session");
+    let mut executor = executor(&root, &store);
+
+    read(&mut executor, &root, &session.id, "alias").await;
+    let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
+    assert!(applied.success, "{applied:?}");
+    // The link itself is recorded too, so a patch to the link does not ask
+    // for a read that would only ever record its target.
+    let ledger =
+        crate::tools::file_reads::ReadLedger::for_session(store.sessions_dir(), &session.id)
+            .unwrap();
+    let link =
+        crate::tools::file_reads::tracked_patch_paths(&root, Path::new(""), &["alias".to_string()])
+            .unwrap();
+    ledger.check_before_edit(&link).unwrap();
 }

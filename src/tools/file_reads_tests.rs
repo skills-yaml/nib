@@ -5,7 +5,7 @@ fn ledger(state: &Path) -> ReadLedger {
 }
 
 fn tracked(root: &Path, path: &str) -> Vec<TrackedPath> {
-    tracked_patch_paths(root, Path::new(""), &[path.to_string()])
+    tracked_patch_paths(root, Path::new(""), &[path.to_string()]).unwrap()
 }
 
 fn read(ledger: &ReadLedger, root: &Path, path: &str) {
@@ -49,7 +49,7 @@ fn a_file_changed_after_the_read_cannot_be_edited() {
 }
 
 #[test]
-fn a_file_deleted_after_the_read_is_stale_but_a_new_file_needs_no_read() {
+fn new_files_need_no_read_even_when_a_deleted_file_was_read_before() {
     let state = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let ledger = ledger(state.path());
@@ -57,16 +57,15 @@ fn a_file_deleted_after_the_read_is_stale_but_a_new_file_needs_no_read() {
         .check_before_edit(&tracked(root.path(), "new.txt"))
         .unwrap();
 
+    // A file the session saw that was then deleted (by a rewind, a command
+    // or another session) can be created again: nothing is overwritten,
+    // and a re-read of a missing file could never succeed.
     std::fs::write(root.path().join("gone.txt"), "x").unwrap();
     read(&ledger, root.path(), "gone.txt");
     std::fs::remove_file(root.path().join("gone.txt")).unwrap();
-    let error = ledger
+    ledger
         .check_before_edit(&tracked(root.path(), "gone.txt"))
-        .unwrap_err();
-    assert!(
-        error.starts_with("file changed since you read it"),
-        "{error}"
-    );
+        .unwrap();
 }
 
 #[test]
@@ -109,13 +108,49 @@ fn sessions_do_not_share_reads() {
 
 #[test]
 fn keys_are_relative_to_the_workspace_top() {
-    let root = Path::new("/w/sub");
-    let paths = tracked_patch_paths(root, Path::new("sub"), &["./x/y.rs".to_string()]);
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("x")).unwrap();
+    std::fs::write(root.path().join("x/y.rs"), "").unwrap();
+    let paths = tracked_patch_paths(
+        root.path(),
+        Path::new("sub"),
+        &["./x/y.rs".to_string(), "x/new.rs".to_string()],
+    )
+    .unwrap();
     assert_eq!(paths[0].key, "sub/x/y.rs");
-    assert_eq!(paths[0].absolute, root.join("./x/y.rs"));
+    assert_eq!(paths[1].key, "sub/x/new.rs");
     assert_eq!(ledger_key(Path::new("../x")), None);
     assert_eq!(ledger_key(Path::new("/abs")), None);
     assert_eq!(ledger_key(Path::new("")), None);
+}
+
+#[test]
+fn paths_that_cannot_be_keyed_fail_closed() {
+    let root = tempfile::tempdir().unwrap();
+    for path in ["f\u{FFFD}.txt", "../outside.txt", "/abs.txt"] {
+        let error = tracked_patch_paths(root.path(), Path::new(""), &[path.to_string()])
+            .err()
+            .unwrap_or_else(|| panic!("{path} was keyed"));
+        assert!(error.starts_with("cannot check "), "{error}");
+    }
+}
+
+#[test]
+fn large_files_are_fingerprinted_from_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("big.bin");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(MAX_HASHED_BYTES + 1).unwrap();
+    drop(file);
+    let first = fingerprint(&path).unwrap().unwrap();
+    assert!(first.starts_with("meta:"), "{first}");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_HASHED_BYTES + 2)
+        .unwrap();
+    assert_ne!(fingerprint(&path).unwrap().unwrap(), first);
 }
 
 #[test]
