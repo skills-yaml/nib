@@ -824,3 +824,15 @@ Recorded the per-turn checkpoint and `/rewind` decision in decisions.md.
 Content:
 
 Recorded the stale-write check and session presence decision in decisions.md.
+
+## 2026-10-12 - T084 keymap migration decision
+
+- Type: changelog
+- Source: User-approved T084 implementation plan
+- Confidence: high
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
+
+Content:
+
+Recorded the Codex default, legacy fallback, context ownership and audited
+steering/queue/fork boundaries in decisions.md.

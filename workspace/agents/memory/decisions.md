@@ -760,3 +760,20 @@ timeout) written by the TUI, plain mode and `nib run`; the TUI footer shows othe
 blocks nothing. Phase 5 is split: 5a ships these, 5b ships the in-place
 default, `/worktree`, `/land`, path-scoped reconciliation and the D2
 governed-instruction amendments.
+
+## 2026-10-12 - Codex keymap default with legacy migration
+
+- Type: decision
+- Source: User-approved T084 implementation plan
+- Confidence: high
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
+
+Content:
+
+Nib uses a Codex TUI preset by default and retains a selectable legacy preset.
+Composer Enter steers active work and Tab queues after completion; modal input
+retains its own controls. Keymap customization resolves named actions by context
+and validates collisions before atomic configuration writes. Previous-message
+editing branches a new session without copying execution authority. External
+editor drafts and backups require private storage and terminal recovery. Plain
+mode keeps its explicit steering and queuing grammar.

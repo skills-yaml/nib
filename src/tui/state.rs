@@ -69,6 +69,7 @@ pub(crate) struct StartupWelcome {
     pub(crate) update_notice: Option<String>,
     pub(crate) consent_directory: Option<String>,
     pub(crate) consent_selected: usize,
+    pub(crate) keymap: crate::config::keymap::TuiConfig,
 }
 
 impl StartupWelcome {
@@ -80,6 +81,9 @@ impl StartupWelcome {
                 .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
             consent_directory: None,
             consent_selected: 1,
+            keymap: crate::config::load_nib_config_or_default(project_root)
+                .unwrap_or_default()
+                .tui,
         }
     }
 
@@ -91,6 +95,7 @@ impl StartupWelcome {
             update_notice: None,
             consent_directory: None,
             consent_selected: 1,
+            keymap: crate::config::keymap::TuiConfig::default(),
         }
     }
 }
@@ -1190,4 +1195,10 @@ impl Composer {
         }
         self.input.replace_range(self.cursor..end, "");
     }
+}
+
+pub(crate) fn clear_visible_transcript(timeline: &mut ActiveTimeline) {
+    timeline.activities.clear();
+    timeline.live.text.clear();
+    timeline.render_generation = timeline.render_generation.saturating_add(1);
 }

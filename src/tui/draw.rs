@@ -1,6 +1,7 @@
 //! TUI internals split for T043 module size.
 
 use super::*;
+use crate::config::keymap::{KeyAction, KeymapPreset};
 
 #[allow(clippy::too_many_arguments)]
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
@@ -46,6 +47,9 @@ pub(crate) fn draw_loop(
     let mut pending_model: Option<PendingModelSelection> = None;
     let mut pending_switcher: Option<SessionSwitcher> = None;
     let mut pending_history_search: Option<PendingHistorySearch> = None;
+    let mut keymap = crate::config::load_nib_config_full(project_root)
+        .map_err(io::Error::other)?
+        .tui;
     let mut composer = Composer::default();
     let mut completion = CompletionMenu::default();
     let mut transcript_viewport = TranscriptViewport::default();
@@ -249,6 +253,17 @@ pub(crate) fn draw_loop(
             worker.as_ref().map(|worker| worker.mode),
         )
         .to_string();
+        chrome.keymap = keymap.clone();
+        chrome.agent_mode.push_str(&format!(
+            " · {}",
+            keymap_context_hint(
+                &keymap,
+                interaction_layer,
+                tui_focus,
+                worker.is_some(),
+                welcome.consent_directory.is_some(),
+            )
+        ));
         if selected_activity.is_some_and(|index| index >= timeline.activities.len()) {
             selected_activity = timeline.activities.len().checked_sub(1);
         }
@@ -333,12 +348,18 @@ pub(crate) fn draw_loop(
                 Ok(input) => input,
                 Err(error) => break Err(error),
             };
-            let is_control_q = matches!(
-                &input,
-                Event::Key(key)
-                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-            );
+            let context = if tui_focus == TuiFocus::Transcript {
+                "transcript"
+            } else if worker.is_some() {
+                "running"
+            } else {
+                "composer"
+            };
+            let is_control_q = matches!(&input, Event::Key(key)
+                if keymap.resolve(context, key.code, key.modifiers) == Some(KeyAction::Quit));
+            if !matches!(&input, Event::Key(key) if key.code == KeyCode::Esc) {
+                clear_armed_at = None;
+            }
             refresh_pending_interactions(
                 &mut pending_approval,
                 &mut pending_question,
@@ -353,6 +374,9 @@ pub(crate) fn draw_loop(
                 pending_history_search.is_some(),
                 completion.is_open(),
             );
+            if interaction_layer != InteractionLayer::Composer {
+                clear_armed_at = None;
+            }
             quit_arm = quit_arm_for_consumer(quit_arm, interaction_layer);
             quit_arm = quit_arm_after_input(quit_arm, is_control_q);
             if let Event::Paste(pasted) = input {
@@ -444,16 +468,18 @@ pub(crate) fn draw_loop(
                 if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                     continue;
                 }
-                let control_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::SHIFT);
-                let control_shift_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.modifiers.contains(KeyModifiers::SHIFT);
-                let control_q = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                let context = if tui_focus == TuiFocus::Transcript {
+                    "transcript"
+                } else if worker.is_some() {
+                    "running"
+                } else {
+                    "composer"
+                };
+                let key_action = keymap.resolve(context, key.code, key.modifiers);
+                let control_c = key_action == Some(KeyAction::Cancel);
+                let control_q = key_action == Some(KeyAction::Quit);
                 if welcome.consent_directory.is_some() {
-                    if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
+                    if let Some(action) = transcript_keymap_action(key_action) {
                         transcript_viewport.apply(action);
                         continue;
                     }
@@ -526,9 +552,20 @@ pub(crate) fn draw_loop(
                 } else {
                     None
                 };
-                let copy_requested = (matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || control_shift_c;
+                let copy_requested = key_action == Some(KeyAction::CopySelection);
+                if key_action == Some(KeyAction::Copy) {
+                    let output = store
+                        .load_result(&active_session_id)
+                        .map_err(|e| e.to_string())
+                        .and_then(|session| {
+                            crate::interactive::latest_assistant_output(session.as_ref())
+                        });
+                    timeline.push_status(match output {
+                        Ok(text) => copy_text_to_clipboard(&text).to_string(),
+                        Err(error) => format!("[copy error] {error}"),
+                    });
+                    continue;
+                }
                 if copy_requested {
                     if let Some(status) = publish_copied_chat(
                         pointer_selection,
@@ -559,6 +596,17 @@ pub(crate) fn draw_loop(
                     continue;
                 }
                 if control_c {
+                    if keymap.preset == KeymapPreset::Codex
+                        && composer.input.is_empty()
+                        && pending_approval.is_none()
+                        && pending_question.is_none()
+                        && pending_model.is_none()
+                        && pending_switcher.is_none()
+                        && pending_history_search.is_none()
+                    {
+                        exit_requested = true;
+                        break Ok(());
+                    }
                     pointer_selection = None;
                     composer.set_text(String::new());
                     completion.sync_for(&composer.input, Some(project_root));
@@ -590,8 +638,7 @@ pub(crate) fn draw_loop(
                     }
                     continue;
                 }
-                if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key_action == Some(KeyAction::SelectChat)
                     && !transcript_view.plain_rows.is_empty()
                 {
                     let last = transcript_view.plain_rows.len().saturating_sub(1);
@@ -606,21 +653,13 @@ pub(crate) fn draw_loop(
                     timeline.push_status("Chat selected.".to_string());
                     continue;
                 }
-                if let Some(action) = transcript_action_for_key(key.code, key.modifiers) {
+                if let Some(action) = transcript_keymap_action(key_action) {
                     transcript_viewport.apply(action);
                     continue;
                 }
-                let semantic_reduction = match key.code {
-                    KeyCode::Char('r') | KeyCode::Char('R')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        Some(reduce_interaction(
-                            &interaction_state,
-                            InteractionInput::OpenHistorySearch,
-                        ))
-                    }
-                    _ => None,
-                };
+                let semantic_reduction = (key_action == Some(KeyAction::History)).then(|| {
+                    reduce_interaction(&interaction_state, InteractionInput::OpenHistorySearch)
+                });
                 if let Some(InteractionReduction::OpenHistorySearch { query }) = semantic_reduction
                 {
                     pending_history_search =
@@ -723,10 +762,11 @@ pub(crate) fn draw_loop(
                     interaction_layer,
                     InteractionLayer::Approval | InteractionLayer::Question
                 ) {
-                    handle_pending_interaction_key(
+                    handle_pending_interaction_key_with_modifiers(
                         &mut pending_approval,
                         &mut pending_question,
                         key.code,
+                        key.modifiers,
                     );
                     continue;
                 }
@@ -844,32 +884,82 @@ pub(crate) fn draw_loop(
                     continue;
                 }
                 if interaction_layer == InteractionLayer::Completion {
-                    match completion.handle_key(&mut composer, key.code) {
-                        CompletionKeyResult::Ignored => {
-                            match composer_action_for_key(&mut composer, key.code, key.modifiers) {
-                                ComposerAction::Pending => {
-                                    completion.sync_for(&composer.input, Some(project_root));
-                                }
-                                ComposerAction::Submit(submitted) => {
-                                    composer.set_text(submitted);
-                                    timeline.push_status(
-                                        "[ui error] completion input could not be submitted"
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            continue;
-                        }
+                    match completion_keymap_action(
+                        &mut completion,
+                        &mut composer,
+                        key_action,
+                        key.code,
+                        key.modifiers,
+                    ) {
+                        CompletionKeyResult::Ignored => {}
                         CompletionKeyResult::Consumed => continue,
                         CompletionKeyResult::Submit => {
                             tui_focus = TuiFocus::Composer;
                         }
                     }
                 }
+                if matches!(
+                    interaction_layer,
+                    InteractionLayer::Composer | InteractionLayer::Completion
+                ) && tui_focus == TuiFocus::Composer
+                {
+                    match key_action {
+                        Some(KeyAction::Start) => {
+                            composer.cursor = 0;
+                            continue;
+                        }
+                        Some(KeyAction::End) => {
+                            composer.cursor = composer.input.len();
+                            continue;
+                        }
+                        Some(KeyAction::Editor) if worker.is_none() => {
+                            match open_draft_editor(&mut terminal, &composer.input) {
+                                Ok(Ok(text)) => composer.set_text(text),
+                                Err(error) => break Err(error),
+                                Ok(Err(error)) => {
+                                    timeline.push_status(format!("[editor error] {error}"))
+                                }
+                            }
+                            completion.sync_for(&composer.input, Some(project_root));
+                            continue;
+                        }
+                        Some(KeyAction::ClearView) if worker.is_none() => {
+                            clear_visible_transcript(&mut timeline);
+                            pointer_selection = None;
+                            transcript_viewport.pin_to_tail();
+                            continue;
+                        }
+                        Some(KeyAction::Queue) if worker.is_some() => {
+                            let input = composer.input.trim();
+                            let queued = if input.starts_with("queue:") {
+                                crate::interactive::parse_queue_line(input).unwrap_or("")
+                            } else {
+                                input
+                            };
+                            match persist_queued_follow_up(
+                                &store,
+                                &active_session_id,
+                                queued,
+                                "composer",
+                            ) {
+                                Ok(_) => {
+                                    composer.remember_submission(&composer.input.clone());
+                                    composer.set_text(String::new());
+                                    completion = CompletionMenu::default();
+                                    timeline.push_status("Queued for the next turn.".to_string());
+                                }
+                                Err(error) => {
+                                    timeline.push_status(format!("[queue error] {error}"))
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 // Shift+Tab cycles the session permission mode (T080):
                 // ask → accept-edits → plan → ask.
-                if (key.code == KeyCode::BackTab
-                    || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)))
+                if key_action == Some(KeyAction::Mode)
                     && matches!(
                         interaction_layer,
                         InteractionLayer::Composer | InteractionLayer::Completion
@@ -890,14 +980,15 @@ pub(crate) fn draw_loop(
                     chrome_generation = chrome_generation.saturating_add(1);
                     continue;
                 }
-                if key.code == KeyCode::Tab
-                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                if key_action == Some(KeyAction::Focus)
                     && matches!(
                         interaction_layer,
                         InteractionLayer::Composer | InteractionLayer::Completion
                     )
-                    && !completion.is_open()
                 {
+                    if completion.is_open() {
+                        completion.handle_key(&mut composer, KeyCode::Esc);
+                    }
                     match tui_focus {
                         TuiFocus::Composer => {
                             tui_focus = TuiFocus::Transcript;
@@ -963,6 +1054,7 @@ pub(crate) fn draw_loop(
                     }
                 }
                 if key.code == KeyCode::Esc
+                    && key_action.is_none()
                     && pointer_selection_is_active(pointer_selection)
                     && matches!(interaction_layer, InteractionLayer::Composer)
                 {
@@ -971,10 +1063,52 @@ pub(crate) fn draw_loop(
                     continue;
                 }
                 if key.code == KeyCode::Esc
+                    && key_action.is_none()
                     && tui_focus == TuiFocus::Composer
                     && matches!(interaction_layer, InteractionLayer::Composer)
                 {
                     if composer.input.is_empty() {
+                        if keymap.preset == KeymapPreset::Codex && worker.is_none() {
+                            let now = Instant::now();
+                            if clear_armed_at.is_some_and(|armed| {
+                                now.duration_since(armed) <= CLEAR_DRAFT_CONFIRM
+                            }) {
+                                match crate::interactive::fork_before_last_user(
+                                    &store,
+                                    &active_session_id,
+                                ) {
+                                    Ok((id, draft)) => {
+                                        match replace_active_session(
+                                            &store,
+                                            id,
+                                            "Editing previous message in a new fork.".to_string(),
+                                            &mut active_session_id,
+                                            &mut timeline,
+                                        ) {
+                                            Ok(_) => {
+                                                composer.set_text(draft);
+                                                session_origin = "forked".to_string();
+                                                completion
+                                                    .sync_for(&composer.input, Some(project_root));
+                                                chrome_generation =
+                                                    chrome_generation.saturating_add(1);
+                                            }
+                                            Err(error) => timeline
+                                                .push_status(format!("[fork error] {error}")),
+                                        }
+                                    }
+                                    Err(error) => {
+                                        timeline.push_status(format!("[fork error] {error}"))
+                                    }
+                                }
+                                clear_armed_at = None;
+                            } else {
+                                clear_armed_at = Some(now);
+                                timeline.push_status(
+                                    "Press Esc again to edit the previous message.".to_string(),
+                                );
+                            }
+                        }
                         continue;
                     }
                     let now = Instant::now();
@@ -991,8 +1125,10 @@ pub(crate) fn draw_loop(
                     }
                     continue;
                 }
-                if matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key_action == Some(KeyAction::Steer)
+                    && !composer.input.trim_start().starts_with('/')
+                    && !composer.input.trim_start().starts_with("queue:")
+                    && !composer.input.trim_start().starts_with("steer:")
                 {
                     match submit_tui_steering_draft(worker.as_ref(), &mut composer) {
                         Ok((text, sequence)) => {
@@ -1006,7 +1142,7 @@ pub(crate) fn draw_loop(
                     }
                     continue;
                 }
-                match composer_action_for_key(&mut composer, key.code, key.modifiers) {
+                match composer_keymap_action(&mut composer, key_action, key.code, key.modifiers) {
                     ComposerAction::Pending => {
                         completion.sync_for(&composer.input, Some(project_root))
                     }
@@ -1037,11 +1173,15 @@ pub(crate) fn draw_loop(
                                 timeline.push_status(format!("[command error] {message}"));
                             }
                             InteractionReduction::SteerCurrent(text) => {
-                                composer.set_text(submitted);
+                                composer.set_text(text);
+                                match submit_tui_steering_draft(worker.as_ref(), &mut composer) {
+                                    Ok((text, sequence)) => timeline.push_steering(&text, sequence),
+                                    Err(error) => {
+                                        composer.set_text(submitted);
+                                        timeline.push_status(format!("[steer error] {error}"));
+                                    }
+                                }
                                 completion.sync_for(&composer.input, Some(project_root));
-                                timeline.push_status(format!(
-                                    "[ui error] Enter cannot steer an active run: {text}"
-                                ));
                             }
                             InteractionReduction::QueueNext(queued) => {
                                 match persist_queued_follow_up(
@@ -1108,6 +1248,12 @@ pub(crate) fn draw_loop(
                                         break Ok(());
                                     }
                                     Ok(InteractiveEffect::Output(output)) => {
+                                        if let Ok(config) =
+                                            crate::config::load_nib_config_full(project_root)
+                                        {
+                                            keymap = config.tui;
+                                            welcome.keymap = keymap.clone();
+                                        }
                                         chrome_generation = chrome_generation.saturating_add(1);
                                         timeline.push_status(if copy_command {
                                             copy_text_to_clipboard(&output).to_string()

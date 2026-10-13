@@ -127,6 +127,8 @@ pub struct NibConfig {
     #[serde(default)]
     pub terminal: TerminalConfig,
     #[serde(default)]
+    pub tui: super::keymap::TuiConfig,
+    #[serde(default)]
     pub approvals: ApprovalsConfig,
     #[serde(default)]
     pub workload: WorkloadConfig,
@@ -735,6 +737,9 @@ impl NibConfig {
     #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         let mut issues = Vec::new();
+        if let Err(error) = self.tui.validate() {
+            issues.push(error);
+        }
 
         if self.llm.context_length == 0 {
             issues.push("llm.context_length must be greater than zero".to_string());
