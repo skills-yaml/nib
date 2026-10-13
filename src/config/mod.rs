@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub mod keymap;
 mod split_00;
 mod split_01;
 

@@ -733,3 +733,20 @@ says so. Pruning never runs before a rewind's restore finishes. Restoring comman
 because host Git on an untrusted repository is unsafe and copying the tree each
 turn is too costly. Bounds: 100 checkpoints, 256 MiB of blobs, 16 MiB per
 file. A storage failure is logged and never blocks the edit.
+
+## 2026-10-12 - Codex keymap default with legacy migration
+
+- Type: decision
+- Source: User-approved T084 implementation plan
+- Confidence: high
+- Review: Independent interface/security review approved the source; final exact qualification gates apply
+
+Content:
+
+Nib uses a Codex TUI preset by default and retains a selectable legacy preset.
+Composer Enter steers active work and Tab queues after completion; modal input
+retains its own controls. Keymap customization resolves named actions by context
+and validates collisions before atomic configuration writes. Previous-message
+editing branches a new session without copying execution authority. External
+editor drafts and backups require private storage and terminal recovery. Plain
+mode keeps its explicit steering and queuing grammar.
