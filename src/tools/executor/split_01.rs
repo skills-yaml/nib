@@ -1802,8 +1802,11 @@ impl ToolExecutor {
             approval_source: Some(approval.source.clone()),
         };
         self.sanitize_tool_result(&mut result);
+        // Refused before it ran: in place, it changed nothing.
+        let unchanged =
+            self.unchanged_in_place(call, session_id, worktree.unwrap_or(&self.project_root));
         if let Err(record_error) = self.record(
-            call, &result, &approval, session_id, worktree, level, risk, plan_id, None,
+            call, &result, &approval, session_id, worktree, level, risk, plan_id, unchanged,
         ) {
             result.error = Some(format!(
                 "{}; audit recording failed: {record_error}",

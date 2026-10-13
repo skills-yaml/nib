@@ -28,6 +28,9 @@ async fn in_place_patches_and_commands_record_what_they_changed() {
     let session = store.create_session_with_id("in-place-session");
     let mut executor = executor(&root, &store);
 
+    // Refused before it ran (not read yet): it changed nothing.
+    let refused = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
+    assert!(!refused.success);
     read(&mut executor, &root, &session.id, "a.txt").await;
     let dry_run = patch(&mut executor, &root, &session.id, ONE_TO_TWO, true).await;
     assert!(dry_run.success, "{dry_run:?}");
@@ -56,11 +59,17 @@ async fn in_place_patches_and_commands_record_what_they_changed() {
     assert_eq!(
         changed_paths(&store, &session.id),
         vec![
-            None, // read_file
-            None, // dry run
+            recorded(&[]), // refused patch
+            None,          // read_file never edits
+            recorded(&[]), // dry run
             recorded(&["a.txt"]),
             recorded(&["a.txt", "b.txt"]),
         ]
+    );
+    let session = store.load_result(&session.id).unwrap().unwrap();
+    assert_eq!(
+        session.in_place_changes(&top, None),
+        Some(vec!["a.txt".to_string(), "b.txt".to_string()])
     );
 }
 

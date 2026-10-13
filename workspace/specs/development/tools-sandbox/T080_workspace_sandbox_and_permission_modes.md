@@ -933,18 +933,27 @@ session changed, so another session's edits elsewhere in the folder do not
 make it stale (section 6b, AC-6b).
 
 **Where a call runs.** A call runs *in place* when its execution root is
-not a nib-managed worktree (`.nib/worktrees/<kind>/<name>`). Today that is
-a project that is itself a linked worktree; after 5c it is the default.
+not a nib-managed worktree (`.nib/worktrees/<kind>/<name>`, also when the
+project itself is a linked worktree). Today that is a project that is itself
+a linked worktree; after 5c it is the default.
 Changed paths are keyed, as in 5a, by the path below the project top.
 
 **Changed paths per call.** Each audited tool record gains an optional
-`changed_paths` field, `{paths, complete}`, recorded only in place:
-- `apply_patch` (not a dry run, succeeded): the patch's target keys.
-  Complete.
-- A `run_terminal` command that is not read-only: the terminal-observed
-  diff (below). Complete unless the observation was cut short.
-- Any other mutating call (a subagent merge, an MCP or unknown mutating
-  tool): incomplete, because nib cannot see what it changed.
+`changed_paths` field, `{root, paths, complete}` (`root` is the project
+top), recorded only in place:
+- `apply_patch` (not a dry run, succeeded): the patch's target keys,
+  including both names of a rename. Complete.
+- A foreground `run_terminal`, `git_commit` or `git_push` that is not
+  read-only: the observed diff (below). Commits and pushes are observed
+  because the user's hooks may rewrite files. Complete unless the
+  observation was cut short.
+- A dry run, a read-only command or tool, or a call refused before it ran:
+  an empty, complete record ("changed nothing").
+- Any other call (a background command, a subagent merge, an MCP or unknown
+  tool that is not read-only): incomplete, because nib cannot see what it
+  changed.
+- Built-in tools that never edit files (`read_file`, `grep`, plan, task,
+  memory and subagent management) record nothing.
 - Calls in a managed worktree record nothing; the worktree is their
   isolation, and verification keeps covering the whole worktree.
 
@@ -960,24 +969,33 @@ changed paths.
 - No Git command runs, so it works without bwrap and on every platform.
 
 **Session changes.** The session's changed paths are the union of its
-in-place records. Any incomplete record makes the set unknown.
+in-place records. The set is unknown when:
+- any record is incomplete, or names another project top;
+- a record of a tool that may edit files has no `changed_paths` (written
+  before 5b, or in a managed worktree);
+- a `tool_attempted` event has no matching record (for example a run
+  cancelled mid-command);
+- it grows past 1,000 paths.
 
 **Path-scoped identity.** A verification obligation that covers the whole
 folder (`affected_paths` is `["."]` or empty, for example a required
 command such as `task verify`) is narrowed when it passes in place:
-- it records `identity_paths`, the session's changed paths at that moment,
-  and computes its content identity over exactly those paths, relative to
-  the project top;
-- revalidation recomputes the identity over the same `identity_paths`, so
-  a later change to one of them, by anyone, makes it stale;
+- it records `identity_scope {root, paths}`, the session's changed paths
+  at that moment, and computes its content identity over exactly those
+  paths, relative to the project top;
+- revalidation recomputes the identity over the same scope, so a later
+  change to one of them, by anyone, makes it stale;
+- revalidation also makes it stale once the session's own changes are
+  unknown or include a path outside the scope, even when the call that
+  changed it failed and so never invalidated the check (review F1);
 - an edit by another session to any other file does not;
 - if the session changes are unknown, nothing is narrowed: the identity
   covers the whole folder, as today. The project top is taken from the
   session's in-place records (the verification command's own first), so a
   session with no in-place record at all also keeps the whole folder.
 Obligations with planner-declared paths keep those paths. The session's own
-mutations still invalidate its passed checks as today (section 6b only
-narrows what *other* writers can invalidate).
+successful mutations still invalidate its passed checks as today; section
+6b only narrows what *other* writers can invalidate.
 
 **Run records.** In the session's event log:
 - `run_started` adds `workspace` (`in_place` or `worktree`), the
@@ -993,8 +1011,20 @@ narrows what *other* writers can invalidate).
   (more invalidation, never less).
 - A same-size rewrite within one modification-time tick is not observed.
   Nanosecond times and the change time make this rare.
-- Writes into skipped directories (`target`, `node_modules`) are not
-  observed; they are build output.
+- Writes into skipped directories (`target`, `node_modules`, at any
+  depth) are not observed; they are build output. A source directory with
+  one of those names is not observed either.
+- Writes made after the second snapshot by a process the command left
+  running are not observed.
+- Non-UTF-8 names, unreadable directories or more than 50,000 entries make
+  every command's record incomplete, which keeps the whole-folder identity.
+- Each in-place command that is not read-only costs two metadata walks.
+- The run-end identity is hashed when the run ends (at most 1,000 paths and
+  64 MiB). A run that is cancelled writes no `run_terminal` event, as
+  before.
+- `workspace_root` is stored unredacted. If redaction changes the project
+  top, tool records and run records disagree and `run_terminal` reports
+  `unknown`.
 - A passing check in place may depend on another session's unverified
   edits to other files (section 6b). The run record lists the other
   sessions that were active.
@@ -1003,13 +1033,37 @@ narrows what *other* writers can invalidate).
 - Snapshot diffs: creation, deletion, a rewrite, a symlink retarget,
   skipped directories, and the entry cap making a record incomplete.
 - Executor: an in-place patch and an in-place command record their changed
-  paths; a managed worktree records none; a dry run records none.
+  paths; a managed worktree records none; a dry run and a refused patch
+  record "changed nothing".
 - Verification: in a shared linked-worktree folder, session A runs a
   required command after editing `a.txt`. Session B's edit to `b.txt`
   leaves A's check passed. B's edit to `a.txt` makes it stale. An unknown
-  change set keeps the whole-folder identity.
+  change set, a foreign top and a record without change details keep the
+  whole-folder identity. A's own later change outside its scope (from a
+  failed call) and an attempt without a record make the check stale.
+- Managed worktrees are recognised inside a linked-worktree project.
 - Run records carry the workspace, the checkpoint, the other sessions and
   the changed paths.
+
+**Independent review of `6955e4f`: changes requested, then resolved.**
+- **F1 (high).** A narrowed check ignored the session's own later change
+  outside its scope when the call that made it failed (and so never
+  invalidated). Fixed: revalidation stales a check whose session changes
+  are unknown or outgrow its scope.
+- **F2 (medium).** A missing record counted as "changed nothing" (legacy
+  records, cancellation). Fixed: dry runs, read-only calls and refusals now
+  record an empty change set; a mutating record without one, or an attempt
+  without a record, makes the set unknown.
+- **F3 (medium).** `git_commit` and `git_push` run the user's hooks and
+  are now observed like commands.
+- **F4 (medium).** Subagent worktrees of a linked-worktree project were not
+  recognised as managed. Fixed and tested.
+- **F5 (low).** Read-only MCP tools no longer disable narrowing.
+- **F6-F8 (low).** Limits, field names and the catalog row are now stated
+  accurately.
+- **F9 (low).** Tests added for F1, F2 and F4. Rename keys are covered by
+  5a's `tracked_patch_paths`; `git_commit` hooks and cancellation timing
+  are covered by the session-level rules rather than end-to-end fixtures.
 
 ## User Decisions (2026-10-07)
 

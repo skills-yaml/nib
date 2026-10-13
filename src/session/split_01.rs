@@ -615,24 +615,37 @@ pub(crate) const MAX_IN_PLACE_CHANGES: usize = 1_000;
 impl Session {
     /// The files this session changed in place below `root` (the project
     /// top), optionally only by calls recorded at or after `since`. `None`
-    /// means unknown: a call could not be fully observed, a call ran in
-    /// place under another top, or the set grew past
-    /// [`MAX_IN_PLACE_CHANGES`] (T080 section 6b).
+    /// means unknown (T080 section 6b):
+    /// - a call could not be fully observed, or ran in place under another
+    ///   top;
+    /// - a call that may edit files has no change record (written before
+    ///   phase 5b, or by a run cancelled before its record was written);
+    /// - the set grew past [`MAX_IN_PLACE_CHANGES`].
     pub(crate) fn in_place_changes(
         &self,
         root: &str,
         since: Option<DateTime<Utc>>,
     ) -> Option<Vec<String>> {
+        use crate::tools::observed_changes::edits_no_project_files;
+        let in_range =
+            |at: Option<DateTime<Utc>>| since.is_none_or(|since| at.is_some_and(|at| at >= since));
         let mut paths = std::collections::BTreeSet::new();
+        let mut recorded = std::collections::HashSet::new();
         for record in &self.tool_calls {
-            let Some(changed) = record.changed_paths.as_ref() else {
-                continue;
-            };
-            if since.is_some_and(|since| record.timestamp.is_none_or(|at| at < since)) {
+            recorded.extend(record.invocation_id);
+            if !in_range(record.timestamp) {
                 continue;
             }
-            // Changes recorded under another project top cannot be mapped
-            // onto this one, so they make the set unknown too.
+            let Some(changed) = record.changed_paths.as_ref() else {
+                if record
+                    .tool_name
+                    .as_deref()
+                    .is_some_and(edits_no_project_files)
+                {
+                    continue;
+                }
+                return None;
+            };
             if changed.root != root || !changed.complete {
                 return None;
             }
@@ -641,7 +654,23 @@ impl Session {
                 return None;
             }
         }
-        Some(paths.into_iter().collect())
+        // An attempt that never got a record may have changed anything.
+        let unfinished = self.events.iter().any(|event| {
+            event.kind == "tool_attempted"
+                && in_range(event.timestamp)
+                && !event
+                    .details
+                    .get("tool_name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(edits_no_project_files)
+                && !event
+                    .details
+                    .get("invocation_id")
+                    .cloned()
+                    .and_then(|id| serde_json::from_value(id).ok())
+                    .is_some_and(|id| recorded.contains(&id))
+        });
+        (!unfinished).then(|| paths.into_iter().collect())
     }
 
     pub(crate) fn new(id: String) -> Self {

@@ -618,6 +618,22 @@ pub(crate) fn in_place_identity_scope(
     Some(crate::session::IdentityScope { root: top, paths })
 }
 
+/// A narrowed check covers only the files the session had changed when it
+/// passed. Once the session changes anything else, or its changes become
+/// unknown, the check no longer covers its own work and is stale, even when
+/// the call that made the change failed and so never invalidated it.
+fn scope_outgrown(
+    session: &crate::session::Session,
+    obligation: &crate::session::VerificationObligation,
+) -> Option<String> {
+    let scope = obligation.identity_scope.as_ref()?;
+    match session.in_place_changes(&scope.root, None) {
+        Some(paths) if paths.iter().all(|path| scope.paths.contains(path)) => None,
+        Some(_) => Some("the session changed files outside its verified scope".to_string()),
+        None => Some("the session's in-place changes are no longer known".to_string()),
+    }
+}
+
 pub(crate) fn content_identity_over(
     worktree_root: &Path,
     requested: Vec<String>,
@@ -748,6 +764,10 @@ pub(crate) fn revalidate_plan_verification_content(
     let mut stale = Vec::new();
     for obligation in &step.verification_obligations {
         if obligation.status != crate::session::VerificationStatus::Passed {
+            continue;
+        }
+        if let Some(reason) = scope_outgrown(&snapshot, obligation) {
+            stale.push((obligation.id.clone(), reason));
             continue;
         }
         let current = obligation_content_identity(obligation);

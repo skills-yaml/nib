@@ -692,4 +692,10 @@ fn only_nib_managed_worktrees_count_as_managed() {
     assert!(!super::in_managed_worktree(&project));
     assert!(!super::in_managed_worktree(&linked));
     assert!(!super::in_managed_worktree(directory.path()));
+
+    // A project that is itself a linked worktree still owns managed ones.
+    let subagent = linked.join(".nib/worktrees/subagents/two");
+    std::fs::create_dir_all(&subagent).unwrap();
+    std::fs::write(subagent.join(".git"), "gitdir: x\n").unwrap();
+    assert!(super::in_managed_worktree(&subagent));
 }

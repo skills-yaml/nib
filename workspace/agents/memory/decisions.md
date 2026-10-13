@@ -796,8 +796,13 @@ metadata-snapshot diff for a foreground non-read-only terminal command
 command), and an incomplete record for anything nib cannot observe. A passed
 whole-folder obligation (`affected_paths` `["."]`) is narrowed to an
 `identity_scope` of the session's changed paths; incomplete records, a
-foreign project top or more than 1,000 paths keep the whole-folder identity.
-Own mutations still invalidate as before. `run_started` records the
+foreign project top, a mutating record without change details, an attempt
+without a record or more than 1,000 paths keep the whole-folder identity.
+Dry runs, read-only calls and refusals record an empty change set;
+`git_commit`/`git_push` are observed because hooks may rewrite files.
+Revalidation also stales a narrowed check once the session's own changes
+are unknown or leave its scope (even from failed calls); own successful
+mutations still invalidate as before. `run_started` records the
 workspace, the checkpoint before the run and the other live sessions;
 `run_terminal` records the run's changed paths and their identity. Phase 5 is
 re-split: 5b these records, 5c the in-place default, `/worktree` and the D2

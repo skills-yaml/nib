@@ -8,39 +8,17 @@
 use super::*;
 use crate::session::ChangedPaths;
 use crate::tools::file_reads::TrackedPath;
-use crate::tools::observed_changes::Snapshot;
-
-/// Built-in tools that never edit project files. Other tools that can change
-/// local state are treated as unobservable edits.
-pub(crate) fn edits_no_project_files(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_file"
-            | "list_directory"
-            | "grep"
-            | "git_status"
-            | "git_commit"
-            | "git_push"
-            | "write_plan"
-            | "spawn_subagent"
-            | "invoke_subagent"
-            | "manage_subagents"
-            | "send_message"
-            | "search_web"
-            | "read_url_content"
-            | "manage_task"
-            | "manage_memory"
-            | "schedule"
-            | "ask_question"
-            | "load_skill"
-            | "read_skill_resource"
-    )
-}
+use crate::tools::observed_changes::{edits_no_project_files, Snapshot};
 
 /// What an in-place call may change, captured before it runs.
 pub(crate) enum ChangeWatch {
-    /// Not in place, no session, or a call that edits no project files.
+    /// Not in place, no session, or a built-in tool that edits no project
+    /// files: nothing is recorded.
     Off,
+    /// In place, a call that cannot edit project files (a dry run, a
+    /// read-only command or tool): recorded as changing nothing, so a
+    /// missing record can mean "unknown" (T080 phase 5b review F2).
+    Nothing { root: String },
     /// A real `apply_patch`: its targets are known before it runs.
     Patch { root: String, keys: Vec<String> },
     /// A foreground terminal command: the project as it was before.
@@ -63,23 +41,16 @@ impl ToolExecutor {
         session_id: Option<&str>,
         patch_targets: Option<&[TrackedPath]>,
     ) -> ChangeWatch {
-        if session_id.is_none()
-            || edits_no_project_files(&call.tool_name)
-            || crate::sandbox::in_managed_worktree(execution_root)
-        {
+        if session_id.is_none() || edits_no_project_files(&call.tool_name) {
             return ChangeWatch::Off;
         }
-        let Ok(top) = self.project_root.canonicalize() else {
+        let Some((root, top)) = self.in_place_top(execution_root) else {
             return ChangeWatch::Off;
         };
-        if !execution_root.starts_with(&top) {
-            return ChangeWatch::Off;
-        }
-        let root = self.redact_text(&top.to_string_lossy());
         match call.tool_name.as_str() {
             "apply_patch" => {
                 if call.arguments.get("dry_run").and_then(Value::as_bool) != Some(false) {
-                    return ChangeWatch::Off;
+                    return ChangeWatch::Nothing { root };
                 }
                 match patch_targets {
                     Some(targets) => ChangeWatch::Patch {
@@ -89,8 +60,10 @@ impl ToolExecutor {
                     None => ChangeWatch::Unknown { root },
                 }
             }
-            "run_terminal" if risk == ToolRisk::ReadOnly => ChangeWatch::Off,
-            "run_terminal"
+            _ if risk == ToolRisk::ReadOnly => ChangeWatch::Nothing { root },
+            // Commits and pushes run the user's hooks, which may rewrite
+            // files (a pre-commit formatter), so they are observed too.
+            "run_terminal" | "git_commit" | "git_push"
                 if call.arguments.get("background").and_then(Value::as_bool) != Some(true) =>
             {
                 let walk = top.clone();
@@ -104,6 +77,39 @@ impl ToolExecutor {
     }
 }
 
+impl ToolExecutor {
+    /// The project top, as recorded and as a path, when `execution_root`
+    /// runs in place below it rather than in a nib-managed worktree.
+    pub(crate) fn in_place_top(&self, execution_root: &Path) -> Option<(String, PathBuf)> {
+        if crate::sandbox::in_managed_worktree(execution_root) {
+            return None;
+        }
+        let top = self.project_root.canonicalize().ok()?;
+        execution_root
+            .starts_with(&top)
+            .then(|| (self.redact_text(&top.to_string_lossy()), top))
+    }
+
+    /// The record for a call refused before it ran: in place it changed
+    /// nothing; elsewhere nothing is recorded.
+    pub(crate) fn unchanged_in_place(
+        &self,
+        call: &ToolCall,
+        session_id: Option<&str>,
+        effective_root: &Path,
+    ) -> Option<ChangedPaths> {
+        if session_id.is_none() || edits_no_project_files(&call.tool_name) {
+            return None;
+        }
+        let (root, _) = self.in_place_top(effective_root)?;
+        Some(ChangedPaths {
+            root,
+            paths: Vec::new(),
+            complete: true,
+        })
+    }
+}
+
 impl ChangeWatch {
     /// The paths the call changed, once it has finished. `ran` is false when
     /// the call failed before it could edit anything.
@@ -114,6 +120,11 @@ impl ChangeWatch {
     ) -> Option<ChangedPaths> {
         let changed = match self {
             Self::Off => return None,
+            Self::Nothing { root } => ChangedPaths {
+                root,
+                paths: Vec::new(),
+                complete: true,
+            },
             Self::Patch { root, keys } => {
                 if !ran {
                     return None;

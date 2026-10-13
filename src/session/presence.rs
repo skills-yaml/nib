@@ -154,7 +154,8 @@ impl Presence {
 }
 
 /// The other live sessions working in `folder`, for run records (T080
-/// section 6b). Reads heartbeats only; writes none.
+/// section 6b). Writes no heartbeat; like any scan, it removes day-old
+/// heartbeat files.
 pub fn other_sessions_in(sessions_dir: &Path, folder: &Path, session_id: &str) -> Vec<String> {
     // A fresh `Presence` owns no heartbeat, so dropping it removes nothing.
     Presence::new(sessions_dir, folder).others(session_id, SystemTime::now())

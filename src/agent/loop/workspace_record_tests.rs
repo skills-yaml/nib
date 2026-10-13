@@ -244,3 +244,62 @@ fn worktree_runs_record_no_in_place_details() {
     assert_eq!(started["workspace"], "worktree");
     assert_eq!(started["workspace_root"], Value::Null);
 }
+
+#[test]
+fn an_own_change_outside_the_scope_stales_the_check_even_when_its_call_failed() {
+    let verified = verified_in_place(|root| vec![changed(root, &["a.txt"], true)]);
+    let root = verified.root.to_string_lossy().to_string();
+    verified
+        .store
+        .update_session(&verified.session_id, |session| {
+            // `sed -i ... b.txt && cargo test` failed after editing b.txt, so
+            // nothing invalidated the check when it ran.
+            session.tool_calls.push(changed(&root, &["b.txt"], true));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(verified.revalidate(), vec![verified.obligation_id.clone()]);
+}
+
+#[test]
+fn an_attempt_without_a_record_stales_a_narrowed_check() {
+    let verified = verified_in_place(|root| vec![changed(root, &["a.txt"], true)]);
+    verified
+        .store
+        .update_session(&verified.session_id, |session| {
+            // Cancelled mid-command: the attempt was logged, the record never.
+            append_session_event(
+                session,
+                "tool_attempted",
+                json!({
+                    "invocation_id": crate::tools::ToolInvocationId::new(),
+                    "tool_name": "run_terminal",
+                }),
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(verified.revalidate(), vec![verified.obligation_id.clone()]);
+}
+
+#[test]
+fn records_without_change_details_keep_the_whole_folder() {
+    let verified = verified_in_place(|root| {
+        vec![
+            changed(root, &["a.txt"], true),
+            // Written before phase 5b: an edit with no change record.
+            ToolCallRecord {
+                tool_name: Some("apply_patch".to_string()),
+                timestamp: Some(Utc::now()),
+                ..Default::default()
+            },
+            // Tools that never edit files need no change record.
+            ToolCallRecord {
+                tool_name: Some("read_file".to_string()),
+                timestamp: Some(Utc::now()),
+                ..Default::default()
+            },
+        ]
+    });
+    assert_eq!(verified.obligation().identity_scope, None);
+}

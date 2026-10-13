@@ -17,6 +17,31 @@ pub(crate) const MAX_ENTRIES: usize = 50_000;
 /// identity would have to walk in full.
 const SKIPPED: &[&str] = &[".git", ".nib", "target", "node_modules"];
 
+/// Built-in tools that never edit project files. Any other tool's record
+/// must say what it changed in place, or the session's changes are unknown.
+pub(crate) fn edits_no_project_files(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "list_directory"
+            | "grep"
+            | "git_status"
+            | "write_plan"
+            | "spawn_subagent"
+            | "invoke_subagent"
+            | "manage_subagents"
+            | "send_message"
+            | "search_web"
+            | "read_url_content"
+            | "manage_task"
+            | "manage_memory"
+            | "schedule"
+            | "ask_question"
+            | "load_skill"
+            | "read_skill_resource"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
     Directory,
