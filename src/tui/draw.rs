@@ -276,14 +276,25 @@ pub(crate) fn draw_loop(
         };
         let meter = if worker.is_some() || waiting != WaitingKind::None {
             Some(WaitingMeter {
-                job: live_job_label(&timeline.activities, timeline.live.state.as_deref()),
-                step: plan_step_label(session),
                 elapsed: timeline
                     .run_started_at
                     .map(|started| started.elapsed())
                     .unwrap_or_default(),
-                tokens: session_display_cache.token_label.clone(),
-                status: meter_status_label(waiting, worker_status),
+                tokens: timeline.generated_token_estimate(),
+                status: meter_status_label(
+                    waiting,
+                    timeline
+                        .live
+                        .state
+                        .as_deref()
+                        .filter(|state| {
+                            matches!(
+                                *state,
+                                "compression" | "compressing" | "cancelling" | "thinking"
+                            )
+                        })
+                        .unwrap_or(worker_status),
+                ),
                 tick: spinner_origin.elapsed().as_millis(),
             })
         } else {

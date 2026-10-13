@@ -323,10 +323,8 @@ fn long_transcript_reuses_layout_until_source_or_live_second_changes() {
     let mut composer = Composer::default();
     let mut activities = (0..300).map(long_test_activity).collect::<Vec<_>>();
     let mut meter = WaitingMeter {
-        job: "working".to_string(),
-        step: "1/2".to_string(),
         elapsed: Duration::ZERO,
-        tokens: "tok 1k".to_string(),
+        tokens: "~1000".to_string(),
         status: "running".to_string(),
         tick: 0,
     };
@@ -1157,66 +1155,105 @@ fn slash_completion_renders_under_the_composer_without_covering_conversation() {
 }
 
 #[test]
-fn waiting_meter_shows_job_step_time_tokens_and_status() {
-    let meter = WaitingMeter {
-        job: "read_file · src/lib.rs".to_string(),
-        step: "2/5".to_string(),
+fn waiting_meter_renders_compact_activity_above_composer() {
+    let mut meter = WaitingMeter {
         elapsed: Duration::from_secs(12),
-        tokens: "tok 8k".to_string(),
+        tokens: "~743".to_string(),
         status: "running".to_string(),
         tick: 0,
     };
+    assert_eq!(
+        waiting_meter_text(&meter, 80, false),
+        "✽ Flowing… (12s · ↓ ~743 tokens)"
+    );
     let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| {
             render_session_view_with_completion(
                 frame,
-                "nib · project · session abc",
-                "running · mock/mock-model",
-                "you  inspect wrap",
+                "nib · session abc",
+                "running",
+                "you  inspect",
                 &Composer::default(),
                 None,
                 Some(&meter),
-                true,
+                false,
             )
         })
         .expect("render waiting meter");
     let rows = buffer_rows(&terminal);
-    let joined = rows.concat();
-    assert!(joined.contains("read_file · src/lib.rs"), "{joined}");
-    assert!(joined.contains("step 2/5"), "{joined}");
-    assert!(joined.contains("12s"), "{joined}");
-    assert!(joined.contains("tok 8k"), "{joined}");
-    assert!(joined.contains("running"), "{joined}");
-    let meter_row = row_index_containing(&rows, "step 2/5").expect("meter row");
+    let meter_row =
+        row_index_containing(&rows, "Flowing… (12s · ↓ ~743 tokens)").expect("meter row");
     let prompt = rows
         .iter()
         .position(|row| row.contains("> Ask nib anything"))
         .expect("composer row");
-    assert!(
-        meter_row < prompt,
-        "waiting meter must sit above the text input: {rows:?}"
-    );
-    assert_eq!(
-        live_job_label(
-            &[ActivityEntry::new(
-                ActivityKind::Tool,
-                "read_file running · src/lib.rs",
-                String::new(),
-            )],
-            Some("planning"),
-        ),
-        "read_file · src/lib.rs"
-    );
+    assert!(meter_row < prompt, "{rows:?}");
+    meter.tick = 125;
+    assert!(waiting_meter_text(&meter, 80, false).starts_with('✻'));
+    assert!(!waiting_meter_text(&meter, 80, true).starts_with('✻'));
     assert_eq!(format_elapsed(Duration::from_secs(75)), "1m15s");
+    for (status, phrase) in [
+        ("WAITING APPROVAL", "Waiting for approval"),
+        ("WAITING QUESTION", "Waiting for your answer"),
+        ("WAITING PERMISSION", "Waiting for permission"),
+        ("planning", "Planning"),
+        ("compressing", "Compressing"),
+        ("cancelling", "Cancelling"),
+        ("reconciling", "Reconciling"),
+    ] {
+        meter.status = status.into();
+        assert!(waiting_meter_text(&meter, 80, false).contains(phrase));
+        for width in 0..80 {
+            let text = waiting_meter_text(&meter, width, false);
+            assert!(
+                unicode_display_width(&text) <= width,
+                "width {width}: {text}"
+            );
+            assert!(!text.contains("Flowing"), "{text}");
+        }
+    }
+    meter.status = "WAITING APPROVAL".into();
+    assert!(waiting_meter_text(&meter, 20, false).contains("Approval"));
+    meter.status = "running".into();
+    meter.tokens = "~1\x1b[31m\n2".into();
+    assert!(!waiting_meter_text(&meter, 80, false).contains(['\x1b', '\n']));
+}
 
-    let compact = waiting_meter_text(&meter, 40, true);
-    assert!(unicode_display_width(&compact) <= 40, "{compact}");
-    assert!(compact.contains("s:2/5"), "{compact}");
-    assert!(compact.contains("12s"), "{compact}");
-    assert!(compact.contains("t:8k"), "{compact}");
-    assert!(compact.contains("running"), "{compact}");
+#[test]
+fn generated_output_estimate_tracks_only_the_current_run() {
+    let mut timeline = ActiveTimeline::default();
+    timeline.apply_event(StreamEvent::Content("history".repeat(100)));
+    assert_eq!(timeline.generated_token_estimate(), "~0");
+    timeline.bind_run(Some("run-a".into()));
+    timeline.apply_event(StreamEvent::Content("x".repeat(2972)));
+    assert_eq!(timeline.generated_token_estimate(), "~743");
+    timeline.apply_event(StreamEvent::TerminalOutput {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "terminal".into(),
+        stream: "stdout".into(),
+        chunk: "tool output".repeat(100),
+        background_task_id: None,
+    });
+    timeline.apply_event(StreamEvent::StateTransition {
+        state: "planning".into(),
+    });
+    assert_eq!(timeline.generated_token_estimate(), "~743");
+    timeline.bind_run(Some("run-a".into()));
+    timeline.apply_event(StreamEvent::ToolCallChunk {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        index: 0,
+        name: Some("read".into()),
+        arguments: Some("file".into()),
+    });
+    assert_eq!(timeline.generated_token_estimate(), "~745");
+    timeline.bind_run(Some("run-b".into()));
+    assert_eq!(timeline.generated_token_estimate(), "~0");
+    timeline.apply_event(StreamEvent::Content("🙂".into()));
+    assert_eq!(timeline.generated_token_estimate(), "~1");
+    timeline.bind_run(None);
+    assert_eq!(timeline.generated_token_estimate(), "~0");
 }
 
 #[test]

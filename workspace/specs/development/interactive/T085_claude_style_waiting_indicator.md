@@ -22,11 +22,11 @@ No governed instructions change.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Active running work renders the requested compact animated style,
+- [x] AC-1: Active running work renders the requested compact animated style,
   with elapsed time and an explicitly approximate generated token count.
-- [ ] AC-2: Approval, question, permission, planning, compression and cancellation
+- [x] AC-2: Approval, question, permission, planning, compression and cancellation
   remain truthful; narrow and monochrome terminals render safe bounded text.
-- [ ] AC-3: Estimates reset for a new run, accumulate model output, and exclude
+- [x] AC-3: Estimates reset for a new run, accumulate model output, and exclude
   session history and terminal-tool output; run execution remains unchanged.
 - [ ] AC-4: Focused render/state tests, documentation and required final gates pass.
 
@@ -62,6 +62,28 @@ can be reverted without modifying persisted sessions or execution authority.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Record the user's compact Claude-style wait-indicator preference once
-implementation resolves its display and estimate contract.
+Status: updated
+Rationale: The explicit user preference is recorded in
+[workspace/agents/memory/preferences.md](../../../agents/memory/preferences.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+## Implementation and Version Evidence
+
+The independently approved reserve-only ledger read basis3c3c963 allowed the
+unmodified atomic runtime to reserve patch0.5.1 from published0.5.0. The designated
+owner applied all native version mirrors once. No historical integration ref,
+peer ownership or worktree storage changed. The renderer uses a 125ms animated
+star and short activity phrases; the presentation-only estimate accumulates
+received model-content and tool-call chunk bytes while a run is bound, resets
+when run identity changes, and excludes terminal output and persisted history.
+Focused render/state tests and exact review precede final frozen task verify.
+Local verification does not establish shared integration, main delivery or publication.
+
+## Focused Validation and Final Candidate
+
+Task test:interactive passed the initial implementation, including 138 TUI tests,
+shared steering, commands, plain-mode compatibility and the smoke-script contract.
+The now-unused session-wide meter estimate/cache field was subsequently removed;
+final task verify renews complete evidence after that cleanup and exact review.
+AC-1 through AC-3 have observable render/state regressions. AC-4 remains the
+mandatory frozen-candidate gate before local handoff; no integration is inferred.

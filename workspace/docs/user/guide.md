@@ -841,8 +841,13 @@ attachments (bounded file context) rather than expanding the file into the promp
 string. Unknown and incomplete slash commands remain in the composer and show an error
 instead of becoming agent goals.
 While a turn is running or the TUI is waiting, a one-row meter sits between the
-transcript and the composer and shows a spinner, the current job, plan step, elapsed
-time, a token estimate, and status.
+transcript and the composer, for example `✽ Flowing… (12s · ↓ ~743 tokens)`.
+The animated star and short activity phrase accompany elapsed run time and an
+approximate generated-output count (`~`), derived from received model text and
+tool-call chunks for the current run. It excludes conversation history and terminal
+output and is not billed provider usage. Approval, question and workspace-permission
+waits use explicit labels. Narrow terminals retain the activity before dropping
+details; monochrome output uses the existing ASCII spinner.
 
 Draft history is process-local, retains at most 50 submitted entries, and is never
 persisted or added to model context before a restored draft is submitted again. Press
@@ -859,8 +864,8 @@ calls show the tool name and path or command (`● read_file  src/lib.rs`) witho
 `running` or `ok` on the quiet row. Failed tools still include `failed`. A running
 `run_terminal` nests a spinner line (`Running command…`); the full command stays
 in the expanded body. Expanded results use a slate `·`. Thinking is a folded
-chevron header (`▸ Thought for 14s`, plus `, N tokens` when the waiting meter
-has a count) without a `thought` label. Left/Right expands it. Speech follows Codex communication
+chevron header (`▸ Thought for 14s`, plus `, ~N tokens` when a generated-output estimate
+is available) without a `thought` label. Left/Right expands it. Speech follows Codex communication
 style: a short preamble before tools that says what it is about to do and why,
 then a concise final answer. Speech renders markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring.
