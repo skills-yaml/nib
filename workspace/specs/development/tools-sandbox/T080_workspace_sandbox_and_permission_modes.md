@@ -1155,6 +1155,10 @@ sandbox implementation. Combined review and native gates precede the push.
   `feat/t080-stale-write`) instead of `development`, so they did not reach
   `development`. A follow-up PR from `feat/t080-stale-write`, with
   `development` merged in and a fresh native `task verify`, carries both.
+  Its first CI run failed the interactive release smoke: a heartbeat left
+  by an earlier smoke case added `1 other session in this folder` before
+  the `Ctrl+End follow` hint, and the 50-column terminal clipped the hint.
+  The presence label now comes last in the footer, after every key hint.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;

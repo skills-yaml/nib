@@ -992,6 +992,20 @@ fn activity_styles_keep_text_labels_without_color() {
 }
 
 #[test]
+fn presence_follows_every_footer_key_hint() {
+    // Presence is informational, so a narrow terminal clips it first.
+    let mut viewport = TranscriptViewport::default();
+    viewport.observe_layout(100, 10);
+    viewport.apply(TranscriptViewportAction::PageUp);
+    let mut shared = TuiChrome::fixture();
+    shared.other_sessions = 2;
+    assert_eq!(
+        footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · idle · Ctrl+End follow · 2 other sessions in this folder"
+    );
+}
+
+#[test]
 fn footer_and_completion_follow_the_current_interaction() {
     let mut viewport = TranscriptViewport::default();
     let chrome = TuiChrome::fixture();
