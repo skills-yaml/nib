@@ -8,6 +8,7 @@ pub mod executor;
 pub(crate) mod file_reads;
 pub(crate) mod git_tools;
 pub mod models;
+pub(crate) mod observed_changes;
 pub(crate) mod permission_matching;
 pub(crate) mod permission_rules;
 pub mod registry;

@@ -180,6 +180,9 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
     // only route the planning gate guards. Compaction never changes plans;
     // subagents, background tasks and CLI runs keep failed plans for review.
     let clears_plans = cfg.interactive_request && cfg.mode != "compact";
+    let mut run_started =
+        run_started_workspace(runtime.profile.root_path(), &sessions_dir, session_id);
+    run_started["run_id"] = json!(run_id.clone());
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -191,7 +194,7 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                     "duplicate or replayed run_id".to_string(),
                 ));
             }
-            append_session_event(session, "run_started", json!({"run_id": run_id.clone()}));
+            append_session_event(session, "run_started", run_started);
             // Plans interrupted before T081 cleared them at termination are
             // cleared now, so they cannot trap this request.
             if clears_plans {

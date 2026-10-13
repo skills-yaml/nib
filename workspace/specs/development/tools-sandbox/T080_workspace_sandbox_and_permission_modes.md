@@ -813,10 +813,22 @@ Phase 5 is split like phase 2, so each part stays reviewable.
   presence (AC-6e). Both protect sessions that already share a folder
   today, for example the user editing while nib works, and are needed
   before the in-place default.
-- **5b: in-place by default.** The in-place workspace, `/worktree`,
-  `/land`, path-scoped in-place reconciliation with the terminal-observed
-  diff (AC-3, AC-6b, AC-6h) and the D2 governed-instruction amendments
-  (AC-8). Worktrees stay the default until 5b lands.
+- **5b: in-place reconciliation records.** Path-scoped in-place
+  verification with the terminal-observed diff and the per-run records
+  (AC-6b). It applies wherever nib already works in place (a project that
+  is a linked worktree), so it can land and be tested before the default
+  changes.
+- **5c: in-place by default.** The `execution.workspace` setting,
+  `--worktree` and `/worktree`, mandatory worktrees for subagents,
+  scheduled work and MCP-server calls, instruction-required isolation, the
+  sandbox and subagent-merge changes the default needs, and the D2
+  governed-instruction amendments (AC-3 in part, AC-6h, AC-8).
+- **5d: `/land`.** Preview, then commit to the session branch, merge into
+  the user's branch, or discard, each after a prompt (the rest of AC-3).
+
+Worktrees stay the default until 5c lands. (Re-split on 2026-10-13 after
+mapping the code: 5b as first planned touched the executor, agent loop,
+sandbox, delegation, daemon and interactive layers at once.)
 
 ### Phase 5a Plan
 
@@ -913,6 +925,91 @@ differ in the session worktree.
 **Re-review of `9c37455`: approve.** Its two low notes need no code change:
 the large-file fingerprint's Unix-only fields are now stated above, and a
 patch through a symlinked directory is refused by `git apply` either way.
+
+### Phase 5b Plan
+
+Goal: in place, a session's verification depends only on the files that
+session changed, so another session's edits elsewhere in the folder do not
+make it stale (section 6b, AC-6b).
+
+**Where a call runs.** A call runs *in place* when its execution root is
+not a nib-managed worktree (`.nib/worktrees/<kind>/<name>`). Today that is
+a project that is itself a linked worktree; after 5c it is the default.
+Changed paths are keyed, as in 5a, by the path below the project top.
+
+**Changed paths per call.** Each audited tool record gains an optional
+`changed_paths` field, `{paths, complete}`, recorded only in place:
+- `apply_patch` (not a dry run, succeeded): the patch's target keys.
+  Complete.
+- A `run_terminal` command that is not read-only: the terminal-observed
+  diff (below). Complete unless the observation was cut short.
+- Any other mutating call (a subagent merge, an MCP or unknown mutating
+  tool): incomplete, because nib cannot see what it changed.
+- Calls in a managed worktree record nothing; the worktree is their
+  isolation, and verification keeps covering the whole worktree.
+
+**Terminal-observed diff.** Before and after an in-place command, nib takes
+a metadata snapshot of the project: for every entry, its type, size and
+modification time (plus inode and change time on Unix), and a symlink's
+target. The paths that appear, disappear or differ are the command's
+changed paths.
+- The walk skips `.git`, `.nib`, `target` and `node_modules`, never
+  follows symlinks, and runs on a blocking thread.
+- It stops at 50,000 entries. A snapshot that was cut short, or that
+  failed, makes the call's record incomplete.
+- No Git command runs, so it works without bwrap and on every platform.
+
+**Session changes.** The session's changed paths are the union of its
+in-place records. Any incomplete record makes the set unknown.
+
+**Path-scoped identity.** A verification obligation that covers the whole
+folder (`affected_paths` is `["."]` or empty, for example a required
+command such as `task verify`) is narrowed when it passes in place:
+- it records `identity_paths`, the session's changed paths at that moment,
+  and computes its content identity over exactly those paths, relative to
+  the project top;
+- revalidation recomputes the identity over the same `identity_paths`, so
+  a later change to one of them, by anyone, makes it stale;
+- an edit by another session to any other file does not;
+- if the session changes are unknown, nothing is narrowed: the identity
+  covers the whole folder, as today. The project top is taken from the
+  session's in-place records (the verification command's own first), so a
+  session with no in-place record at all also keeps the whole folder.
+Obligations with planner-declared paths keep those paths. The session's own
+mutations still invalidate its passed checks as today (section 6b only
+narrows what *other* writers can invalidate).
+
+**Run records.** In the session's event log:
+- `run_started` adds `workspace` (`in_place` or `worktree`), the
+  workspace root, the latest checkpoint number before the run (or none),
+  and `other_sessions`, the ids of the other live sessions in the folder
+  from 5a presence.
+- `run_terminal` adds `changed_paths` (the paths this run changed, or
+  `unknown`) and, in place, the content identity over them.
+
+**Accepted limits.**
+- A file another session writes while this session's command runs is
+  attributed to the command. That only widens this session's identity
+  (more invalidation, never less).
+- A same-size rewrite within one modification-time tick is not observed.
+  Nanosecond times and the change time make this rare.
+- Writes into skipped directories (`target`, `node_modules`) are not
+  observed; they are build output.
+- A passing check in place may depend on another session's unverified
+  edits to other files (section 6b). The run record lists the other
+  sessions that were active.
+
+**Tests.**
+- Snapshot diffs: creation, deletion, a rewrite, a symlink retarget,
+  skipped directories, and the entry cap making a record incomplete.
+- Executor: an in-place patch and an in-place command record their changed
+  paths; a managed worktree records none; a dry run records none.
+- Verification: in a shared linked-worktree folder, session A runs a
+  required command after editing `a.txt`. Session B's edit to `b.txt`
+  leaves A's check passed. B's edit to `a.txt` makes it stale. An unknown
+  change set keeps the whole-folder identity.
+- Run records carry the workspace, the checkpoint, the other sessions and
+  the changed paths.
 
 ## User Decisions (2026-10-07)
 

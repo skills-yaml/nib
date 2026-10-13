@@ -777,3 +777,28 @@ and validates collisions before atomic configuration writes. Previous-message
 editing branches a new session without copying execution authority. External
 editor drafts and backups require private storage and terminal recovery. Plain
 mode keeps its explicit steering and queuing grammar.
+
+## 2026-10-13 - T080 phase 5b: path-scoped in-place verification
+
+- Type: decision
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+In place (an execution root that is not a nib-managed worktree), every audited
+call that can edit project files records `changed_paths {root, paths,
+complete}` on its tool record: patch targets for a real `apply_patch`, a
+metadata-snapshot diff for a foreground non-read-only terminal command
+(skipping `.git`, `.nib`, `target`, `node_modules`; 50,000-entry cap; no Git
+command), and an incomplete record for anything nib cannot observe. A passed
+whole-folder obligation (`affected_paths` `["."]`) is narrowed to an
+`identity_scope` of the session's changed paths; incomplete records, a
+foreign project top or more than 1,000 paths keep the whole-folder identity.
+Own mutations still invalidate as before. `run_started` records the
+workspace, the checkpoint before the run and the other live sessions;
+`run_terminal` records the run's changed paths and their identity. Phase 5 is
+re-split: 5b these records, 5c the in-place default, `/worktree` and the D2
+amendments, 5d `/land`.

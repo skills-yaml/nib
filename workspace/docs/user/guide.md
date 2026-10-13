@@ -1166,13 +1166,22 @@ not lock the folder; it protects each file instead.
 - Today sessions edit in their own worktree, so this matters mainly when nib
   runs in place: when the folder is itself a linked Git worktree, or when the
   agent read a file in your checkout that differs in its session worktree.
-  Phase 5b of T080 makes in-place editing the default.
+  Phase 5c of T080 makes in-place editing the default.
 - Terminal commands are not checked this way. A command that rewrites files
   (a formatter, code generation) can overwrite concurrent edits.
 - The footer shows `1 other session in this folder` (or `N other sessions`)
   while other nib sessions, including plain mode and `nib run`, are active
   there. A session that crashed disappears after two minutes. Subagents work
   in their own worktrees and are not counted.
+- In place, nib records which files each edit and each terminal command
+  changed. A passing whole-folder check (such as a required `task verify`)
+  then depends only on the files this session changed: another session's
+  edit to a different file does not undo it, while any change to one of this
+  session's files does. If nib could not see everything the session changed
+  (a background command, an MCP tool), the check covers the whole folder.
+  The check can still have passed against another session's unfinished edits
+  elsewhere; each run's record lists the other sessions active at its start.
+  Use a worktree when you need full isolation.
 
 ## Safety and Persistence
 

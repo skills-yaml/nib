@@ -33,3 +33,6 @@ mod checkpoint_tests;
 
 #[path = "stale_write_tests.rs"]
 mod stale_write_tests;
+
+#[path = "in_place_tests.rs"]
+mod in_place_tests;

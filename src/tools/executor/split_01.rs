@@ -783,6 +783,15 @@ impl ToolExecutor {
         let pending_read =
             self.file_read_before(&call, execution_root, &effective_root, effective_session);
         self.record_checkpoint(&call, risk, execution_root, effective_session);
+        let change_watch = self
+            .watch_changes(
+                &call,
+                risk,
+                execution_root,
+                effective_session,
+                patch_targets.as_deref(),
+            )
+            .await;
         let terminal_capture_limit = (call.tool_name == "run_terminal" && !background_terminal)
             .then(|| core::terminal_output_limit(&dispatch_arguments).ok())
             .flatten();
@@ -825,6 +834,9 @@ impl ToolExecutor {
         if outcome.is_ok() {
             self.record_patched_files(&call, patch_targets.as_deref(), effective_session);
         }
+        let changed_paths = change_watch
+            .finish(outcome.is_ok(), |path| self.redact_text(path))
+            .await;
         let outcome = outcome.map(|output| {
             self.project_authoritative_terminal_output(
                 output,
@@ -933,6 +945,7 @@ impl ToolExecutor {
             level,
             risk,
             plan_id,
+            changed_paths,
         ) {
             result.success = false;
             result.error = Some(format!("audit recording failed: {error}"));
@@ -1229,7 +1242,7 @@ impl ToolExecutor {
         let Some(session_id) = session_id.or(call.session_id.as_deref()) else {
             return Ok(Some(effective_root));
         };
-        if self.project_root.join(".git").is_file() {
+        if Self::edits_in_place(&self.project_root) {
             return Ok(Some(effective_root));
         }
         let Some(worktree_root) = crate::integrations::worktree::with_validated_session_worktree(
@@ -1254,6 +1267,13 @@ impl ToolExecutor {
         Ok(Some(target))
     }
 
+    /// Whether sessions in this project edit the folder in place rather than
+    /// in a managed session worktree. Today that is a project that is itself
+    /// a linked worktree (T080 phase 5c makes in place the default).
+    pub(crate) fn edits_in_place(project_root: &Path) -> bool {
+        project_root.join(".git").is_file()
+    }
+
     pub(crate) async fn ensure_worktree(
         &mut self,
         required: bool,
@@ -1267,7 +1287,7 @@ impl ToolExecutor {
                 Ok(None)
             };
         };
-        if self.project_root.join(".git").is_file() {
+        if Self::edits_in_place(&self.project_root) {
             return Ok(Some(effective_root.to_path_buf()));
         }
         if self.worktree_manager.is_none() {
@@ -1783,7 +1803,7 @@ impl ToolExecutor {
         };
         self.sanitize_tool_result(&mut result);
         if let Err(record_error) = self.record(
-            call, &result, &approval, session_id, worktree, level, risk, plan_id,
+            call, &result, &approval, session_id, worktree, level, risk, plan_id, None,
         ) {
             result.error = Some(format!(
                 "{}; audit recording failed: {record_error}",
@@ -1837,6 +1857,7 @@ impl ToolExecutor {
         level: PermissionLevel,
         risk: ToolRisk,
         plan_id: Option<String>,
+        changed_paths: Option<crate::session::ChangedPaths>,
     ) -> Result<(), String> {
         let Some(session_id) = session_id else {
             return Ok(());
@@ -1938,6 +1959,7 @@ impl ToolExecutor {
             bwrap_args,
             boundaries,
             plan_id,
+            changed_paths,
         };
         store
             .record_tool_call(record)

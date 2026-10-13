@@ -674,3 +674,22 @@ async fn project_mounts_protect_projects_inside_allow_write() {
     let output = run(&worktree, &command, &boundaries).await;
     assert_success(&output);
 }
+
+#[test]
+fn only_nib_managed_worktrees_count_as_managed() {
+    let directory = tempdir().unwrap();
+    let project = directory.path().join("project");
+    let managed = project.join(".nib/worktrees/sessions/one");
+    let linked = directory.path().join("linked");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir_all(managed.join("src")).unwrap();
+    std::fs::write(managed.join(".git"), "gitdir: x\n").unwrap();
+    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::write(linked.join(".git"), "gitdir: x\n").unwrap();
+
+    assert!(super::in_managed_worktree(&managed));
+    assert!(super::in_managed_worktree(&managed.join("src")));
+    assert!(!super::in_managed_worktree(&project));
+    assert!(!super::in_managed_worktree(&linked));
+    assert!(!super::in_managed_worktree(directory.path()));
+}

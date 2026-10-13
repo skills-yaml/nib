@@ -519,17 +519,20 @@ pub(crate) fn runtime_terminal_event(
     run_id: &str,
     outcome: &str,
 ) -> Result<(), String> {
+    // Hash outside the session update; the details only describe the run.
+    let mut details = store.load_result(session_id).ok().flatten().map_or_else(
+        || json!({}),
+        |session| run_terminal_workspace(&session, run_id),
+    );
+    details["run_id"] = json!(run_id);
+    details["outcome"] = json!(outcome);
     store
         .update_session(session_id, |session| {
             if !session.events.iter().any(|event| {
                 event.kind == "run_terminal"
                     && event.details.get("run_id").and_then(Value::as_str) == Some(run_id)
             }) {
-                append_session_event(
-                    session,
-                    "run_terminal",
-                    json!({"run_id": run_id, "outcome": outcome}),
-                );
+                append_session_event(session, "run_terminal", details);
             }
             Ok(())
         })
@@ -1439,6 +1442,7 @@ pub(crate) fn record_curator_tool_call(
             bwrap_args: None,
             boundaries: Some(config.execution.boundaries.clone()),
             plan_id: None,
+            changed_paths: None,
         })
         .map_err(|record_error| {
             let context = error
