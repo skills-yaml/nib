@@ -592,6 +592,8 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   sets whether allow lines shipped in the project apply. Changes apply from the next
   request.
 - `/review` and `/diff` show the git workspace diff (`Show changes (diff)`).
+- `/rewind` lists this session's file checkpoints, and `/rewind <n>` restores files
+  to their state before checkpoint `n`. See [Checkpoints and rewind](#checkpoints-and-rewind).
 - `/continue <plan-id>` optionally continues that exact plan without retyping its goal.
   Answering saved questions or saying `resume` in ordinary conversation also recovers
   the interrupted operation; sets still require Submit.
@@ -1129,6 +1131,32 @@ are refused when nobody can answer), because those files can carry allow lines.
 If a rules file cannot be read, every action asks until it is fixed;
 `/permissions` shows the problem. `git_push` asks even when a rule
 allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`.
+
+### Checkpoints and rewind
+
+Before the first file edit of each request, nib saves a checkpoint of every file
+the agent's edits touch. `/rewind` lists them, newest first, with the request text
+and file count. `/rewind <n>` puts every file edited since checkpoint `n` back as
+it was before that request: changes are undone, files the agent created are
+removed and files it deleted come back. Restored files keep their saved
+permissions.
+
+- A rewind first saves the current files as a new checkpoint, so `/rewind <undo>`
+  reverses it.
+- The conversation is not rewound. nib tells the model which files changed so it
+  re-reads them.
+- Files changed by terminal commands, subagent merges or MCP tools are not
+  restored. When a request ran one of those, `/rewind` says so; check `/diff`.
+- A rewind overwrites later edits to the same files, including your own; its
+  undo checkpoint keeps them. Files whose worktree was landed or removed are
+  listed, not restored.
+- Checkpoints never touch `.git` or `.nib` and are not Git commits. They are
+  stored under `.nib/profiles/<id>/checkpoints/`, which the Linux sandbox hides
+  from tool commands. Commands allowed to run outside the sandbox (macOS,
+  Windows, `full-access`) could change them, but a rewind still writes only
+  inside the session's workspace.
+  A session keeps its last 100 checkpoints and up to 256 MiB of saved files.
+  Files over 16 MiB are not saved.
 
 ## Safety and Persistence
 

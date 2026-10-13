@@ -759,6 +759,7 @@ impl ToolExecutor {
             }
         }
 
+        self.record_checkpoint(&call, risk, execution_root, effective_session);
         let terminal_capture_limit = (call.tool_name == "run_terminal" && !background_terminal)
             .then(|| core::terminal_output_limit(&dispatch_arguments).ok())
             .flatten();

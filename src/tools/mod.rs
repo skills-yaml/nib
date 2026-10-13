@@ -1,5 +1,6 @@
 //! Tool registry, executor, and implementations.
 
+pub(crate) mod checkpoints;
 pub mod classifier;
 pub mod core;
 pub mod delegation;

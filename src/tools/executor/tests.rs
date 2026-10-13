@@ -27,3 +27,6 @@ mod test_part_0;
 
 #[path = "rules_tests.rs"]
 mod rules_tests;
+
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
