@@ -9,10 +9,10 @@ use std::path::Path;
 
 /// Isolates fixtures from the developer's global and system Git config
 /// (signing, hooks, templates), which the tools deliberately inherit.
-struct GitEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+pub(crate) struct GitEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl GitEnvironment {
-    fn isolated() -> Self {
+    pub(crate) fn isolated() -> Self {
         let keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"];
         let previous = keys
             .iter()
@@ -35,7 +35,7 @@ impl Drop for GitEnvironment {
     }
 }
 
-fn git(cwd: &Path, args: &[&str]) -> String {
+pub(crate) fn git(cwd: &Path, args: &[&str]) -> String {
     let mut command = std::process::Command::new("git");
     command
         .args(args)
@@ -61,7 +61,7 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn repository(cwd: &Path) {
+pub(crate) fn repository(cwd: &Path) {
     git(cwd, &["init", "--quiet", "--initial-branch", "main"]);
     git(cwd, &["config", "user.name", "Fixture"]);
     git(cwd, &["config", "user.email", "fixture@example.invalid"]);

@@ -1250,6 +1250,110 @@ of a missing instruction file and F4's working-directory limit were agreed
 as documented; writing the whole project from a subdirectory would need
 the project root passed into the mount plan (a possible follow-up).
 
+### Phase 5d Plan
+
+Goal: work in a session worktree is landed in the folder or discarded,
+each only after the user confirms what they saw (section 1, the rest of
+AC-3).
+
+**`/land` previews.** It is idle-only, like `/rewind`. For the session's
+worktree (recorded, or created by its scheduled work) it shows:
+- the worktree path, its branch `nib/session/<id>`, and the folder's
+  branch it would merge into;
+- the commits on the session branch that the folder does not have;
+- the worktree's uncommitted changes;
+- the change summary (`git diff --stat`) against the folder's branch;
+- the three actions, each with a confirmation code.
+
+The code is a short hash of the session branch tip, the worktree's
+status and the folder's branch and commit. An action whose code no
+longer matches is refused with a fresh preview, so nothing is landed or
+dropped that the user did not see. Like `/rewind`, the command itself is
+the confirmation; there is no extra prompt. Without a worktree, `/land`
+says there is nothing to land; a session that asked for one with
+`/worktree` but never created it can return to the folder with
+`/land discard`.
+
+**`/land commit <message>`.** Commits the worktree's uncommitted
+changes to the session branch with the user's own Git, exactly like
+`git_commit` (hooks, signing, `.nib` never staged). It takes no code: it
+changes only the session branch. It then shows the new preview.
+
+**`/land merge <code>`.** Merges the session branch into the folder's
+current branch with the user's own Git (`git merge --no-edit`, hooks
+run, a fast-forward when possible).
+- The worktree must have no uncommitted changes: commit them first.
+- Uncommitted changes in the folder are allowed only when no file the
+  merge changes is among them, and nothing is staged. Otherwise the
+  merge is refused with the overlapping files.
+- On the default or a protected branch, or a detached HEAD, nib first
+  creates and switches to `nib/<session topic>` and reports it (D6).
+- A conflict aborts the merge, returns to the original branch, keeps
+  the worktree and names the conflicting files.
+- After a merge, or when the folder already contains the branch, the
+  worktree and its branch are removed.
+
+**`/land discard <code>`.** Removes the worktree and deletes its branch,
+dropping its commits and uncommitted changes. The preview says how many
+commits and files that is.
+
+**Afterwards.** The session is recorded `in_place` ("its worktree was
+landed" or "discarded") and its next request works in the folder, unless
+an instruction line or `execution.workspace` still requires a worktree:
+then the next request creates a fresh one, and `/land` says so.
+Removal goes through the managed-worktree ownership receipts, so only
+nib's own worktree and branch are removed. If removal fails, the error
+says what was kept.
+
+**Session branches that moved (a defect found while planning 5d).** The
+ownership receipt pinned the session branch to the commit it was created
+at. After any commit on it (`git_commit` in a worktree session since
+phase 2b, or the user's own), every later load failed with "retained Git
+ref contents changed", so the session could no longer use its worktree.
+Loading a session worktree now adopts the branch's current commit
+through the existing generational-anchor adoption (the same protocol
+subagent merges use), after checking that the worktree is still on its
+branch. A commit during a run is adopted the same way.
+
+**Subagents in a worktree session.** The 5c note was inaccurate: a
+subagent cannot start from a session worktree at all. A managed
+worktree's Git directory must lie inside the folder it starts from, and
+a session worktree's lies in the main checkout, so `spawn_subagent`
+failed with "managed worktree common Git directory escapes the
+repository". Lifting that rule touches the ownership model, so 5d does
+not. Instead, `spawn_subagent` and `invoke_subagent` in a session that
+works in its own worktree fail at once, telling the user to land or
+discard it first. Subagents based on a session branch are a follow-up.
+
+**Out of scope.** Escalation on sandbox block and headless flags
+(phase 6). Landing from `nib run` (it prints the workspace; use the
+TUI or `nib chat`).
+
+**Accepted limits.**
+- Another nib process using the same session (a second TUI on it, or
+  its scheduled work running) is not detected; `/land` checks only that
+  this session is idle.
+- A session branch packed by `git gc` (no loose ref) cannot be adopted:
+  loading its worktree fails, and `/land` says so without removing
+  anything. Land it by hand with Git.
+- A session in its own worktree cannot start subagents (above).
+
+**Tests.**
+- Preview: commits, uncommitted files, the folder's branch, the code; no
+  worktree; a `/worktree` session without one.
+- Commit: commits to the session branch; nothing to commit.
+- Merge: a fast-forward and a true merge into a feature branch; branch
+  first on `main`; refused with uncommitted worktree changes, with an
+  overlapping dirty folder file, and with a stale code; a conflict keeps
+  everything and returns to the branch; the worktree and branch are gone
+  afterwards and the session is in place.
+- Discard: removes both and returns the session to the folder; a
+  required worktree is reported.
+- A session worktree stays valid after a commit, across runs and within
+  one; the landing helpers name its branch and remove both.
+- A worktree session's `spawn_subagent` fails with the `/land` hint and
+  creates nothing.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

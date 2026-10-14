@@ -592,6 +592,10 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
             "/worktree       work in a separate Git worktree",
             muted,
         )),
+        Line::from(Span::styled(
+            "/land           merge or discard the worktree's work",
+            muted,
+        )),
         Line::from(""),
         Line::from(Span::styled("Keys", title)),
         Line::from(Span::styled(

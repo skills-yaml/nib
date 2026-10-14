@@ -1215,16 +1215,37 @@ A session works in its own Git worktree, on a `nib/session/...` branch under
 
 A worktree starts from the last commit, so uncommitted changes in the folder,
 including the session's own earlier edits, stay in the folder. Once a session works
-in a worktree it stays there; its work is not moved back automatically. The status
-line shows `worktree` instead of your branch, and `/status` shows the worktree and
-the reason.
+in a worktree it stays there until you land or discard it with `/land`; its work is
+never moved back on its own. The status line shows `worktree` instead of your
+branch, and `/status` shows the worktree and the reason.
+
+`/land` shows the worktree's branch, the commits your folder does not have, its
+uncommitted changes and a summary of the changes, with a short confirmation code.
+Then:
+
+- `/land commit <message>` commits the worktree's uncommitted changes to its
+  branch, with your own Git (hooks and signing apply);
+- `/land merge <code>` merges the branch into your folder's current branch with
+  your own Git, then removes the worktree and its branch. The worktree's changes
+  must be committed first. Your folder may have uncommitted changes, as long as
+  the merge does not touch those files and nothing is staged. On the default
+  branch, `main`, `master` or a detached HEAD, nib first creates and switches to a
+  `nib/...` branch. A conflict undoes the merge and keeps everything;
+- `/land discard <code>` deletes the worktree and its branch, dropping their
+  work.
+
+The code makes sure nib acts on what you saw: if the worktree or your folder
+changed since the preview, nib shows the new preview instead. Afterwards the
+session works in your folder again, unless the configuration or an instruction
+line still requires a worktree; then its next request gets a new one.
 
 Subagents, scheduled tasks and calls through `nib mcp-server` always use their own
 worktrees. When nib merges a subagent's work into the folder, the folder must have
 no uncommitted changes; on the default branch, `main`, `master` or a detached HEAD,
 nib first creates and switches to a `nib/subagent-...` branch, as it does for
-commits. When the folder is itself a linked Git worktree, nib always works in it
-directly.
+commits. A session working in its own worktree cannot start subagents yet; land or
+discard the worktree first. When the folder is itself a linked Git worktree, nib
+always works in it directly.
 
 ## Safety and Persistence
 

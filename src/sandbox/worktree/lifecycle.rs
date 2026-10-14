@@ -781,6 +781,47 @@ pub(crate) fn load_managed_worktree_ownership(
     }
 }
 
+/// Like `load_managed_worktree_ownership`, but adopts the branch's current
+/// commit when it has moved: a session commits on its own branch (T080
+/// phase 5d). The adoption reopens the ref under the same generational
+/// anchor protocol as any other adopted revision.
+pub(crate) fn load_managed_worktree_ownership_at_branch_tip(
+    project_root: &Path,
+    kind: ManagedWorktreeKind,
+    logical_id: &str,
+) -> Result<Option<Arc<ManagedWorktreeReceipt>>, String> {
+    let Some(revision) = load_durable_ownership_revision(project_root, kind, logical_id)? else {
+        return Ok(None);
+    };
+    if revision.record.phase == DurableOwnershipPhase::Complete {
+        return load_managed_worktree_ownership(project_root, kind, logical_id);
+    }
+    let tip = run_git_bounded_sync(
+        project_root,
+        [
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "--quiet".to_string(),
+            format!("{}^{{commit}}", revision.record.branch_reference),
+        ],
+    )
+    .ok()
+    .and_then(|output| parse_git_oid(&output, "resolve the managed branch").ok())
+    .filter(|tip| *tip != revision.record.current_oid);
+    match rehydrate_owned_worktree(revision, tip.as_deref()) {
+        Ok(ownership) => Ok(Some(Arc::new(ownership))),
+        Err(error) => {
+            let completed = load_durable_ownership_revision(project_root, kind, logical_id)?
+                .is_some_and(|revision| revision.record.phase == DurableOwnershipPhase::Complete);
+            if completed {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 pub(crate) fn managed_worktree_owned_path(ownership: &ManagedWorktreeReceipt) -> PathBuf {
     ownership.path.clone()
 }

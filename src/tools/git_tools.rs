@@ -612,6 +612,9 @@ pub(crate) fn terminal_git_write(command: &str) -> Option<&'static str> {
     None
 }
 
+#[path = "git_land.rs"]
+pub(crate) mod land;
+
 #[cfg(test)]
 #[path = "git_tools_tests.rs"]
 mod tests;

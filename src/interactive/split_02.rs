@@ -1206,6 +1206,9 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         "review" if arguments.is_empty() => InteractiveCommand::Review,
         "diff" if arguments.is_empty() => InteractiveCommand::Diff,
         "worktree" if arguments.is_empty() => InteractiveCommand::Worktree,
+        "land" => InteractiveCommand::Land {
+            action: parse_land_action(&arguments)?,
+        },
         "rewind" => InteractiveCommand::Rewind {
             checkpoint: match arguments.first() {
                 None => None,
@@ -1408,6 +1411,12 @@ pub fn execute_interactive_command_in_state(
                 crate::tools::workspace::COMMAND_REASON,
             )?,
         )),
+        InteractiveCommand::Land { action } => Ok(InteractiveEffect::Output(land(
+            project_root,
+            store,
+            session_id,
+            &action,
+        )?)),
         InteractiveCommand::Compact => Ok(InteractiveEffect::Compact),
         InteractiveCommand::Ps => Ok(InteractiveEffect::Output(format_session_background_tasks(
             store, session_id, false,
