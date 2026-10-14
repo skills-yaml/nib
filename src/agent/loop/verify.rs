@@ -556,10 +556,87 @@ pub(crate) fn audited_tool_evidence(
     Ok((mutates_content, worktree_identity))
 }
 
-#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) fn compute_verification_content_identity(
     worktree_root: &Path,
     affected_paths: &[String],
+) -> Result<String, String> {
+    let requested = if affected_paths.is_empty() {
+        vec![".".to_string()]
+    } else {
+        affected_paths.to_vec()
+    };
+    content_identity_over(worktree_root, requested)
+}
+
+/// The identity a passed obligation is held to: its narrowed in-place scope
+/// when it has one (T080 section 6b), otherwise its affected paths in its
+/// worktree.
+pub(crate) fn obligation_content_identity(
+    obligation: &crate::session::VerificationObligation,
+) -> Result<String, String> {
+    if let Some(scope) = &obligation.identity_scope {
+        return content_identity_over(Path::new(&scope.root), scope.paths.clone());
+    }
+    let root = obligation
+        .worktree_identity
+        .as_deref()
+        .ok_or_else(|| format!("verification {:?} has no worktree", obligation.id))?;
+    compute_verification_content_identity(Path::new(root), &obligation.affected_paths)
+}
+
+/// In place, a check that covers the whole folder is narrowed to the files
+/// this session changed, so another session's edits elsewhere do not make
+/// it stale (T080 section 6b). `None` keeps the whole folder: in a managed
+/// worktree, for planner-declared paths, or when the session's changes are
+/// unknown.
+pub(crate) fn in_place_identity_scope(
+    session: &crate::session::Session,
+    obligation: &crate::session::VerificationObligation,
+    worktree_identity: &str,
+    invocation_id: crate::tools::ToolInvocationId,
+) -> Option<crate::session::IdentityScope> {
+    let whole_folder = obligation.affected_paths.is_empty()
+        || obligation.affected_paths.iter().all(|path| path == ".");
+    if !whole_folder || crate::sandbox::in_managed_worktree(Path::new(worktree_identity)) {
+        return None;
+    }
+    // The project top comes from the session's in-place records, preferring
+    // the verification's own; without one the top is unknown.
+    let records = &session.tool_calls;
+    let top = records
+        .iter()
+        .rev()
+        .find(|record| record.invocation_id == Some(invocation_id))
+        .into_iter()
+        .chain(records.iter().rev())
+        .find_map(|record| record.changed_paths.as_ref())
+        .map(|changed| changed.root.clone())?;
+    if !Path::new(worktree_identity).starts_with(&top) {
+        return None;
+    }
+    let paths = session.in_place_changes(&top, None)?;
+    Some(crate::session::IdentityScope { root: top, paths })
+}
+
+/// A narrowed check covers only the files the session had changed when it
+/// passed. Once the session changes anything else, or its changes become
+/// unknown, the check no longer covers its own work and is stale, even when
+/// the call that made the change failed and so never invalidated it.
+fn scope_outgrown(
+    session: &crate::session::Session,
+    obligation: &crate::session::VerificationObligation,
+) -> Option<String> {
+    let scope = obligation.identity_scope.as_ref()?;
+    match session.in_place_changes(&scope.root, None) {
+        Some(paths) if paths.iter().all(|path| scope.paths.contains(path)) => None,
+        Some(_) => Some("the session changed files outside its verified scope".to_string()),
+        None => Some("the session's in-place changes are no longer known".to_string()),
+    }
+}
+
+pub(crate) fn content_identity_over(
+    worktree_root: &Path,
+    requested: Vec<String>,
 ) -> Result<String, String> {
     use std::io::Read;
     const MAX_ENTRIES: usize = 4_096;
@@ -568,11 +645,6 @@ pub(crate) fn compute_verification_content_identity(
     let root = worktree_root
         .canonicalize()
         .map_err(|error| format!("resolve verification worktree: {error}"))?;
-    let requested = if affected_paths.is_empty() {
-        vec![".".to_string()]
-    } else {
-        affected_paths.to_vec()
-    };
     let mut pending = Vec::new();
     for relative in requested {
         let relative_path = Path::new(&relative);
@@ -694,13 +766,11 @@ pub(crate) fn revalidate_plan_verification_content(
         if obligation.status != crate::session::VerificationStatus::Passed {
             continue;
         }
-        let current = obligation
-            .worktree_identity
-            .as_deref()
-            .ok_or_else(|| format!("verification {:?} has no worktree", obligation.id))
-            .and_then(|root| {
-                compute_verification_content_identity(Path::new(root), &obligation.affected_paths)
-            });
+        if let Some(reason) = scope_outgrown(&snapshot, obligation) {
+            stale.push((obligation.id.clone(), reason));
+            continue;
+        }
+        let current = obligation_content_identity(obligation);
         let mismatch = match &current {
             Ok(identity) => Some(identity.as_str()) != obligation.content_identity.as_deref(),
             Err(_) => true,
@@ -818,14 +888,18 @@ pub(crate) fn finish_plan_verification(
             })
         })
     };
+    let mut identity_scope = None;
     let content_identity = if success {
         let root = worktree_identity.ok_or_else(|| {
             format!("successful verification obligation {obligation_id:?} has no worktree")
         })?;
-        Some(compute_verification_content_identity(
-            Path::new(root),
-            &obligation.affected_paths,
-        )?)
+        identity_scope = in_place_identity_scope(&snapshot, obligation, root, invocation_id);
+        Some(match &identity_scope {
+            Some(scope) => content_identity_over(Path::new(&scope.root), scope.paths.clone())?,
+            None => {
+                compute_verification_content_identity(Path::new(root), &obligation.affected_paths)?
+            }
+        })
     } else {
         None
     };
@@ -860,6 +934,18 @@ pub(crate) fn finish_plan_verification(
                     reason.clone(),
                 )
                 .map_err(crate::session::SessionError::InvalidMutation)?;
+            if let Some(obligation) = session
+                .plan
+                .as_mut()
+                .and_then(|plan| plan.steps.get_mut(step_index))
+                .and_then(|step| {
+                    step.verification_obligations
+                        .iter_mut()
+                        .find(|obligation| obligation.id == obligation_id)
+                })
+            {
+                obligation.identity_scope.clone_from(&identity_scope);
+            }
             append_session_event(
                 session,
                 "verification_finished",
@@ -870,6 +956,7 @@ pub(crate) fn finish_plan_verification(
                     "invocation_id": invocation_id,
                     "worktree_identity": worktree_identity,
                     "content_identity": content_identity,
+                    "identity_scope": identity_scope,
                     "status": if success { "passed" } else { "failed" },
                     "reason": reason,
                 }),

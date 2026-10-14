@@ -159,6 +159,12 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
             .id
     };
 
+    // Interactive sessions in this folder show the run as another session.
+    let _presence = nib::session::presence::PresenceHeartbeat::start(
+        session_store.sessions_dir(),
+        &project,
+        &sid,
+    );
     let mode = nib::interactive::bounded_public_text(&args.mode, &sensitive_values, 32, false);
     println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
 
@@ -240,6 +246,7 @@ fn report_run_summary(
 ) -> Result<(), String> {
     if summary.outcome == "cancelled_by_user" {
         eprintln!("Run cancelled.");
+        nib::session::presence::leave_all();
         std::process::exit(interrupt_exit_status());
     }
     if summary.outcome == "waiting_for_user_input" {

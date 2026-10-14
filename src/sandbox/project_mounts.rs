@@ -310,6 +310,33 @@ fn mode(writable: bool) -> &'static str {
     }
 }
 
+/// Whether `cwd` lies in a nib-managed worktree
+/// (`<project>/.nib/worktrees/<kind>/<name>`), as opposed to the user's own
+/// checkout or a linked worktree nib did not create.
+pub(crate) fn in_managed_worktree(cwd: &Path) -> bool {
+    cwd.ancestors()
+        .find(|candidate| is_git_entry(&candidate.join(".git")))
+        .is_some_and(|worktree| {
+            // Unlike the mount plan, the project may itself be a linked
+            // worktree: its subagent worktrees are still managed.
+            !is_real_directory(&worktree.join(".git")) && managed_worktree_layout(worktree)
+        })
+}
+
+fn managed_worktree_layout(worktree: &Path) -> bool {
+    let layout = || -> Option<bool> {
+        let worktrees = worktree.parent()?.parent()?;
+        let state = worktrees.parent()?;
+        let root = state.parent()?;
+        Some(
+            worktrees.file_name()? == MANAGED_WORKTREE_PARENT[1]
+                && state.file_name()? == MANAGED_WORKTREE_PARENT[0]
+                && is_git_entry(&root.join(".git")),
+        )
+    };
+    layout().unwrap_or(false)
+}
+
 fn managed_worktree_project(worktree: &Path) -> Option<PathBuf> {
     let kind = worktree.parent()?;
     let worktrees = kind.parent()?;

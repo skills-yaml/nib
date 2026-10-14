@@ -295,6 +295,7 @@ impl PlainSignalOwner {
                             if let Some(cancellation) = cancellation {
                                 cancellation.cancel();
                             } else {
+                                nib::session::presence::leave_all();
                                 std::process::exit(130);
                             }
                         }
@@ -601,6 +602,11 @@ pub(crate) fn run_plain_with_input_and_modal_state(
         }
     }
     let mut sid = resolution.session_id().to_string();
+    // Other sessions in this folder see this one (T080 section 6).
+    let start_presence = |sid: &str| {
+        nib::session::presence::PresenceHeartbeat::start(session_store.sessions_dir(), project, sid)
+    };
+    let mut presence = (sid.clone(), start_presence(&sid));
 
     let active = nib::interactive::bounded_public_text(&active, &sensitive_values, 512, false);
     println!("\nnib  |  mode: plain  |  session: {sid}  |  provider: {active}");
@@ -670,6 +676,9 @@ pub(crate) fn run_plain_with_input_and_modal_state(
 
     // Main REPL
     'repl: loop {
+        if presence.0 != sid {
+            presence = (sid.clone(), start_presence(&sid));
+        }
         print!("\nYou> ");
         io::stdout().flush().unwrap();
 

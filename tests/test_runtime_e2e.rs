@@ -1225,7 +1225,10 @@ async fn self_development_failure_repair_verification_and_diff_share_one_worktre
         ),
         failure_fixture_tool_turn(
             "repair-source",
-            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+            vec![
+                ("read_file", json!({"path": "src/lib.rs"})),
+                ("apply_patch", json!({"patch": patch, "dry_run": false})),
+            ],
         ),
         failure_fixture_tool_turn(
             "behavior-test-passes",
@@ -1261,7 +1264,7 @@ async fn self_development_failure_repair_verification_and_diff_share_one_worktre
         run_failure_fixture_with_obligations(root.path(), responses, None, vec![obligation]).await;
 
     assert_eq!(summary.outcome, "completed");
-    assert_eq!(summary.tool_call_count, 4);
+    assert_eq!(summary.tool_call_count, 5);
     assert_eq!(requests.len(), 5);
     let plan = persisted.plan.as_ref().expect("persisted plan");
     assert!(plan.is_complete());
@@ -1850,7 +1853,10 @@ async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan
         root.path(),
         vec![failure_fixture_tool_turn(
             "oversize-worktree-instructions",
-            vec![("apply_patch", json!({"patch": patch, "dry_run": false}))],
+            vec![
+                ("read_file", json!({"path": "AGENTS.md"})),
+                ("apply_patch", json!({"patch": patch, "dry_run": false})),
+            ],
         )],
         None,
         Vec::new(),
@@ -1860,7 +1866,7 @@ async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan
     .await;
 
     assert_eq!(summary.outcome, "instruction_context_missing");
-    assert_eq!(summary.tool_call_count, 1);
+    assert_eq!(summary.tool_call_count, 2);
     assert_eq!(requests.len(), 1);
     assert!(persisted.events.iter().any(|event| {
         event.kind == "instruction_context_missing" && event.details["stage"] == "refresh"
@@ -3802,7 +3808,7 @@ async fn full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_workt
 
     assert_eq!(summary.final_state, AgentState::Done);
     assert_eq!(summary.outcome, "completed");
-    assert_eq!(summary.tool_call_count, 2);
+    assert_eq!(summary.tool_call_count, 3);
     assert_trace_contains_in_order(
         &summary.trace,
         &[
@@ -4068,6 +4074,14 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
         .with_auto_approve(true)
         .with_session_store(store.clone());
     let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    // Edits need a prior read in the session (T080 phase 5a).
+    let read = executor
+        .execute(
+            tool_call(root.path(), "read_file", json!({"path": "note.txt"})),
+            Some(&session.id),
+        )
+        .await;
+    assert!(read.success, "{:?}", read.error);
     let applied = executor
         .execute(
             tool_call(
@@ -4100,12 +4114,12 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
     );
 
     let persisted = store.load(&session.id).expect("tool audit");
-    assert_eq!(persisted.tool_calls.len(), 2);
-    let edit_worktree = persisted.tool_calls[0]
+    assert_eq!(persisted.tool_calls.len(), 3);
+    let edit_worktree = persisted.tool_calls[1]
         .worktree_path
         .as_deref()
         .expect("edit worktree");
-    let verification_worktree = persisted.tool_calls[1]
+    let verification_worktree = persisted.tool_calls[2]
         .worktree_path
         .as_deref()
         .expect("verification worktree");
@@ -4124,7 +4138,7 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
             .iter()
             .filter(|event| event.kind == "tool_attempted")
             .count(),
-        2
+        3
     );
 }
 

@@ -805,6 +805,281 @@ delivery candidate:
 - files keep their saved Unix permission bits (`0o777`, never setuid);
 - the link tests use links to `.git` and `.nib` inside the workspace.
 
+## Phase 5 Delivery Split (2026-10-13)
+
+Phase 5 is split like phase 2, so each part stays reviewable.
+
+- **5a: shared-folder safety.** The stale-write check (AC-6d) and session
+  presence (AC-6e). Both protect sessions that already share a folder
+  today, for example the user editing while nib works, and are needed
+  before the in-place default.
+- **5b: in-place reconciliation records.** Path-scoped in-place
+  verification with the terminal-observed diff and the per-run records
+  (AC-6b). It applies wherever nib already works in place (a project that
+  is a linked worktree), so it can land and be tested before the default
+  changes.
+- **5c: in-place by default.** The `execution.workspace` setting,
+  `--worktree` and `/worktree`, mandatory worktrees for subagents,
+  scheduled work and MCP-server calls, instruction-required isolation, the
+  sandbox and subagent-merge changes the default needs, and the D2
+  governed-instruction amendments (AC-3 in part, AC-6h, AC-8).
+- **5d: `/land`.** Preview, then commit to the session branch, merge into
+  the user's branch, or discard, each after a prompt (the rest of AC-3).
+
+Worktrees stay the default until 5c lands. (Re-split on 2026-10-13 after
+mapping the code: 5b as first planned touched the executor, agent loop,
+sandbox, delegation, daemon and interactive layers at once.)
+
+### Phase 5a Plan
+
+**Stale-write check.**
+- After a successful `read_file`, nib records a fingerprint of the whole
+  file for the session: the SHA-256 of its bytes, or of a symlink's target.
+  Files over 16 MiB are fingerprinted by size and modification time (plus
+  device, inode and change time on Unix) instead, which bounds the work per
+  read. The fingerprint is
+  taken before and after the read and recorded only if both match, so the
+  file did not change during the read. A partial read (a line range, or a
+  file beyond the read limits) still counts as a read, as in Claude Code. A
+  read through a symlink also records the link itself, because a patch
+  addresses the link.
+- Before `apply_patch` runs, dry run or not, every path Git reports for the
+  patch is checked:
+  - an existing file the session never read fails with
+    `read <path> with read_file before editing it; ...`;
+  - a file whose fingerprint changed since the read fails with
+    `file changed since you read it; re-read <path> and retry`;
+  - a path that does not exist is a creation and needs no read, even when
+    the session read it before it was deleted (nothing can be overwritten,
+    and a re-read of a missing file could never succeed);
+  - a path that cannot be keyed (a name Git reports lossily, or one outside
+    the workspace) fails with `cannot check <path> ...`.
+  Nothing is written when the check fails.
+- After a real patch succeeds, nib records the new fingerprints, so
+  consecutive edits need no re-read. Deleted files are forgotten.
+- Records are keyed by the on-disk path below the workspace top. A read in
+  the project and an edit in the session worktree therefore agree when the
+  contents are the same, and must re-read when they differ. Existing patch
+  targets are keyed by their canonical name, as reads are, so a
+  case-insensitive file system cannot make the two disagree.
+- Records live in `.nib/profiles/<id>/file_reads/<session>.json`, one file
+  per session, written atomically. A session keeps at most 10,000 files and
+  forgets the least recently read first. A damaged record is reset, which
+  only costs re-reads.
+- The check is skipped for calls without a session, which cannot edit a
+  shared folder. Terminal commands are not covered (section 6).
+- Accepted limits:
+  - The check and the write are separate steps. A write landing between
+    them is not detected. The window is the duration of one `git apply`.
+  - Likewise, a write landing between `git apply` and the new fingerprint
+    is recorded as the session's own, so its next patch is not flagged.
+  - Fingerprints are computed on the executor's thread. Hashing is bounded
+    by the 16 MiB limit (twice per read); moving it to a blocking thread is
+    a later optimisation, like phase 4's F5.
+  - A patch that fails the check after the user approved it must be
+    approved again once re-read.
+  - On the direct routes, a tool command could rewrite the record. It
+    would only weaken this session's own check.
+- Fingerprints never follow a final symlink, and never open FIFOs or
+  devices, so a check cannot block.
+
+**Session presence.**
+- Each interactive session writes a heartbeat file to
+  `.nib/profiles/<id>/presence/<session>.json` every 30 seconds, naming its
+  canonical folder. The TUI beats from its draw loop; plain mode and
+  `nib run` keep a heartbeat from a background thread, which follows a
+  plain-mode session switch.
+- The TUI footer re-counts the other sessions in the same folder every 5
+  seconds and shows `1 other session in this folder` (or `N other
+  sessions`). It is informational only and blocks nothing.
+- A heartbeat older than 2 minutes is ignored, so a crashed session
+  disappears. Files older than a day are removed by any scan. A session
+  removes its own file when it exits or switches session.
+- Subagents and scheduled work run in worktrees and are not counted.
+- Presence is per profile until T082 moves state to user home.
+
+**Out of scope for 5a:** everything listed under 5b. Until 5b, sessions
+edit in their own worktree, so the check mainly protects in-place runs (a
+project that is itself a linked worktree) and reads in the checkout that
+differ in the session worktree.
+
+**Independent review of `2dbef20`: changes requested, then resolved.**
+- **F1 (high).** A file the session had recorded and that was then deleted
+  (by `/rewind`, a command or another session) could never be created
+  again, since a re-read of a missing file fails. Fixed: a missing target
+  is always a creation.
+- **F2 (medium).** Whole-file hashing of huge files blocked the executor.
+  Fixed with the 16 MiB metadata fingerprint; moving hashing off the async
+  thread is accepted as a later optimisation.
+- **F3 (medium).** Plain interactive mode wrote no heartbeat. Fixed.
+- **F4.** Lossily decoded or unkeyable patch paths skipped the check. They
+  now fail closed.
+- **F5.** The apply-to-record window is listed as an accepted limit.
+- **F6.** Patch targets are keyed by their canonical on-disk name.
+- **F7.** The guide and this plan describe today's worktree default and
+  partial reads accurately.
+- **F8.** Tests added: the footer with other sessions, a read through a
+  link, a refused edit leaves no checkpoint, re-creating a deleted file,
+  unkeyable paths and the large-file fingerprint.
+
+**Re-review of `9c37455`: approve.** Its two low notes need no code change:
+the large-file fingerprint's Unix-only fields are now stated above, and a
+patch through a symlinked directory is refused by `git apply` either way.
+
+### Phase 5b Plan
+
+Goal: in place, a session's verification depends only on the files that
+session changed, so another session's edits elsewhere in the folder do not
+make it stale (section 6b, AC-6b).
+
+**Where a call runs.** A call runs *in place* when its execution root is
+not a nib-managed worktree (`.nib/worktrees/<kind>/<name>`, also when the
+project itself is a linked worktree). Today that is a project that is itself
+a linked worktree; after 5c it is the default.
+Changed paths are keyed, as in 5a, by the path below the project top.
+
+**Changed paths per call.** Each audited tool record gains an optional
+`changed_paths` field, `{root, paths, complete}` (`root` is the project
+top), recorded only in place:
+- `apply_patch` (not a dry run, succeeded): the patch's target keys,
+  including both names of a rename. Complete.
+- A foreground `run_terminal`, `git_commit` or `git_push` that is not
+  read-only: the observed diff (below). Commits and pushes are observed
+  because the user's hooks may rewrite files. Complete unless the
+  observation was cut short.
+- A dry run, a patch that did not apply (`git apply` is all or nothing), a
+  read-only command or built-in tool, or a call refused before it ran: an
+  empty, complete record ("changed nothing").
+- Any other call (a background command, a subagent merge, any MCP tool,
+  an unknown tool): incomplete, because nib cannot see what it changed. MCP
+  tools are always classified as network risk, so even read-only ones
+  disable narrowing for the session.
+- Built-in tools that never edit files (`read_file`, `grep`, plan, task,
+  memory and subagent management) and the profile curator's record record
+  nothing.
+- Calls in a managed worktree record nothing; the worktree is their
+  isolation, and verification keeps covering the whole worktree.
+
+**Terminal-observed diff.** Before and after an in-place command, nib takes
+a metadata snapshot of the project: for every entry, its type, size and
+modification time (plus inode and change time on Unix), and a symlink's
+target. The paths that appear, disappear or differ are the command's
+changed paths.
+- The walk skips `.git`, `.nib`, `target` and `node_modules`, never
+  follows symlinks, and runs on a blocking thread.
+- It stops at 50,000 entries. A snapshot that was cut short, or that
+  failed, makes the call's record incomplete.
+- No Git command runs, so it works without bwrap and on every platform.
+
+**Session changes.** The session's changed paths are the union of its
+in-place records. The set is unknown when:
+- any record is incomplete, or names another project top;
+- a record of a tool that may edit files has no `changed_paths` (written
+  before 5b, or in a managed worktree);
+- a `tool_attempted` event has no matching record (for example a run
+  cancelled mid-command);
+- it grows past 1,000 paths.
+
+**Path-scoped identity.** A verification obligation that covers the whole
+folder (`affected_paths` is `["."]` or empty, for example a required
+command such as `task verify`) is narrowed when it passes in place:
+- it records `identity_scope {root, paths}`, the session's changed paths
+  at that moment, and computes its content identity over exactly those
+  paths, relative to the project top;
+- revalidation recomputes the identity over the same scope, so a later
+  change to one of them, by anyone, makes it stale;
+- revalidation also makes it stale once the session's own changes are
+  unknown or include a path outside the scope, even when the call that
+  changed it failed and so never invalidated the check (review F1);
+- an edit by another session to any other file does not;
+- if the session changes are unknown, nothing is narrowed: the identity
+  covers the whole folder, as today. The project top is taken from the
+  session's in-place records (the verification command's own first), so a
+  session with no in-place record at all also keeps the whole folder.
+Obligations with planner-declared paths keep those paths. The session's own
+successful mutations still invalidate its passed checks as today; section
+6b only narrows what *other* writers can invalidate.
+
+**Run records.** In the session's event log:
+- `run_started` adds `workspace` (`in_place` or `worktree`), the
+  workspace root, the latest checkpoint number before the run (or none),
+  and `other_sessions`, the ids of the other live sessions in the folder
+  from 5a presence.
+- `run_terminal` adds `changed_paths` (the paths this run changed, or
+  `unknown`) and, in place, the content identity over them.
+
+**Accepted limits.**
+- A file another session writes while this session's command runs is
+  attributed to the command. That only widens this session's identity
+  (more invalidation, never less).
+- A same-size rewrite within one modification-time tick is not observed.
+  Nanosecond times and the change time make this rare.
+- Writes into skipped directories (`target`, `node_modules`, at any
+  depth) are not observed; they are build output. A source directory with
+  one of those names is not observed either.
+- Writes made after the second snapshot by a process the command left
+  running are not observed.
+- Non-UTF-8 names, unreadable directories or more than 50,000 entries make
+  every command's record incomplete, which keeps the whole-folder identity.
+- Each in-place command that is not read-only costs two metadata walks.
+- The run-end identity is hashed when the run ends (at most 1,000 paths and
+  64 MiB). A run that is cancelled writes no `run_terminal` event, as
+  before.
+- `workspace_root` is stored unredacted. If redaction changes the project
+  top, tool records and run records disagree and `run_terminal` reports
+  `unknown`.
+- A passing check in place may depend on another session's unverified
+  edits to other files (section 6b). The run record lists the other
+  sessions that were active.
+
+**Tests.**
+- Snapshot diffs: creation, deletion, a rewrite, a symlink retarget,
+  skipped directories, and the entry cap making a record incomplete.
+- Executor: an in-place patch and an in-place command record their changed
+  paths; a managed worktree records none; a dry run and a refused patch
+  record "changed nothing".
+- Verification: in a shared linked-worktree folder, session A runs a
+  required command after editing `a.txt`. Session B's edit to `b.txt`
+  leaves A's check passed. B's edit to `a.txt` makes it stale. An unknown
+  change set, a foreign top and a record without change details keep the
+  whole-folder identity. A's own later change outside its scope (from a
+  failed call) and an attempt without a record make the check stale.
+- Managed worktrees are recognised inside a linked-worktree project.
+- Run records carry the workspace, the checkpoint, the other sessions and
+  the changed paths.
+
+**Independent review of `6955e4f`: changes requested, then resolved.**
+- **F1 (high).** A narrowed check ignored the session's own later change
+  outside its scope when the call that made it failed (and so never
+  invalidated). Fixed: revalidation stales a check whose session changes
+  are unknown or outgrow its scope.
+- **F2 (medium).** A missing record counted as "changed nothing" (legacy
+  records, cancellation). Fixed: dry runs, read-only calls and refusals now
+  record an empty change set; a mutating record without one, or an attempt
+  without a record, makes the set unknown.
+- **F3 (medium).** `git_commit` and `git_push` run the user's hooks and
+  are now observed like commands.
+- **F4 (medium).** Subagent worktrees of a linked-worktree project were not
+  recognised as managed. Fixed and tested.
+- **F5 (low).** Read-only built-in calls record "changed nothing". MCP
+  tools are always network risk and still disable narrowing (safe; stated
+  above).
+- **F6-F8 (low).** Limits, field names and the catalog row are now stated
+  accurately.
+- **F9 (low).** Tests added for F1, F2 and F4. Rename keys are covered by
+  5a's `tracked_patch_paths`; `git_commit` hooks and cancellation timing
+  are covered by the session-level rules rather than end-to-end fixtures.
+
+**Re-review of `625eefc`: F1-F4 confirmed fixed; three new findings, resolved.**
+- A real patch that failed to apply was recorded without change details,
+  making the session's changes unknown and staling passed checks. It now
+  records "changed nothing".
+- The daily profile-curator record (profile state only) is exempt.
+- The F5 note above is corrected: MCP tools still disable narrowing.
+The accepted limits for F7 were agreed.
+
+**Re-review of `54104c6`: approve**, with no new findings.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
@@ -871,6 +1146,25 @@ sandbox implementation. Combined review and native gates precede the push.
   first macOS CI run timed out in the unrelated process-timing test
   `successful_sync_leader_does_not_wait_for_descendant_owned_pipes`; the
   unchanged re-run passed.
+- **Phase 4** (checkpoints, `/rewind`): PR 57 merged the candidate `117f8e1`
+  (the reviewed phase 4 with `development` merged in; PR CI passed Linux
+  Validate and macOS) as `2dd459168eaf60f2f06e3895b54115db70dc24ea` on
+  2026-10-13T12:37:29Z, beside T085's waiting indicator (`6e85d8d`).
+- **Phases 5a and 5b**: PR 59 and PR 60 were merged on 2026-10-13 into
+  their stacked base branches (`feat/t080-checkpoints`,
+  `feat/t080-stale-write`) instead of `development`, so they did not reach
+  `development`. A follow-up PR from `feat/t080-stale-write`, with
+  `development` merged in and a fresh native `task verify`, carries both.
+  Its first CI runs failed the interactive release smoke: the TUI footer
+  showed `3 other sessions in this folder` and lost the `Ctrl+End follow`
+  hint. The heartbeats came from earlier `nib run` cases interrupted with
+  Ctrl+C, whose `std::process::exit` skipped the heartbeat's destructor, so
+  finished sessions stayed "present" for two minutes (a 5a defect; plain
+  mode's Ctrl+C exit had the same gap). Fixed: each process tracks the
+  heartbeats it owns and removes them before those exits. The presence
+  label also now comes last in the footer, after every key hint, so a
+  narrow terminal clips it first. The smoke passed locally against the
+  debug binary.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;

@@ -811,6 +811,7 @@ fn tool_audit_projects_every_auxiliary_metadata_field() {
             PermissionLevel::Destructive,
             ToolRisk::Destructive,
             Some(format!("plan-{SECRET}\u{1b}")),
+            None,
         )
         .expect("record redacted audit metadata");
 

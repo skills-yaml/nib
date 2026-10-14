@@ -887,7 +887,7 @@ async fn send_message(args: &Value, cwd: &Path) -> Result<Value, String> {
     crate::tools::delegation::send_message_to_subagent(args, cwd)
 }
 
-fn resolve_existing_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_existing_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
         .map_err(|error| format!("invalid tool scope {}: {error}", root.display()))?;

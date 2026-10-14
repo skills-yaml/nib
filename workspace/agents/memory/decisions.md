@@ -734,6 +734,33 @@ because host Git on an untrusted repository is unsafe and copying the tree each
 turn is too costly. Bounds: 100 checkpoints, 256 MiB of blobs, 16 MiB per
 file. A storage failure is logged and never blocks the edit.
 
+## 2026-10-13 - Edits require a fresh read; sessions in one folder are visible, never locked
+
+- Type: decision
+- Source: T080 phase 5a
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+`apply_patch`, dry run or not, changes an existing file only when the same
+session read it with `read_file` and its fingerprint (SHA-256 of the bytes,
+or of a symlink target) still matches. Otherwise it writes nothing and tells
+the model to read or re-read the file. Missing targets (including deleted
+files the session read earlier) are creations and need no read; paths that
+cannot be keyed fail closed; files over 16 MiB use a metadata fingerprint. A
+successful patch records the new fingerprints, so consecutive edits need no
+re-read. A read is recorded only when the file was identical before and after
+it. Records are keyed by the path below the workspace top and stored per
+session under `.nib/profiles/<id>/file_reads/`; a damaged record resets.
+Terminal commands are not stale-checked, as in Claude Code. Presence is a
+per-session heartbeat under `.nib/profiles/<id>/presence/` (30 s beat, 2 min
+timeout) written by the TUI, plain mode and `nib run`; the TUI footer shows other live sessions in the same folder and
+blocks nothing. Phase 5 is split: 5a ships these, 5b ships the in-place
+default, `/worktree`, `/land`, path-scoped reconciliation and the D2
+governed-instruction amendments.
+
 ## 2026-10-12 - Codex keymap default with legacy migration
 
 - Type: decision
@@ -750,3 +777,34 @@ and validates collisions before atomic configuration writes. Previous-message
 editing branches a new session without copying execution authority. External
 editor drafts and backups require private storage and terminal recovery. Plain
 mode keeps its explicit steering and queuing grammar.
+
+## 2026-10-13 - T080 phase 5b: path-scoped in-place verification
+
+- Type: decision
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+In place (an execution root that is not a nib-managed worktree), every audited
+call that can edit project files records `changed_paths {root, paths,
+complete}` on its tool record: patch targets for a real `apply_patch`, a
+metadata-snapshot diff for a foreground non-read-only terminal command
+(skipping `.git`, `.nib`, `target`, `node_modules`; 50,000-entry cap; no Git
+command), and an incomplete record for anything nib cannot observe. A passed
+whole-folder obligation (`affected_paths` `["."]`) is narrowed to an
+`identity_scope` of the session's changed paths; incomplete records, a
+foreign project top, a mutating record without change details, an attempt
+without a record or more than 1,000 paths keep the whole-folder identity.
+Dry runs, patches that did not apply, read-only built-in calls and refusals
+record an empty change set; MCP tools always count as unknown;
+`git_commit`/`git_push` are observed because hooks may rewrite files.
+Revalidation also stales a narrowed check once the session's own changes
+are unknown or leave its scope (even from failed calls); own successful
+mutations still invalidate as before. `run_started` records the
+workspace, the checkpoint before the run and the other live sessions;
+`run_terminal` records the run's changed paths and their identity. Phase 5 is
+re-split: 5b these records, 5c the in-place default, `/worktree` and the D2
+amendments, 5d `/land`.

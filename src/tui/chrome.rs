@@ -689,6 +689,11 @@ pub(crate) fn footer_line(
             .unwrap_or_else(|| "unbound".to_string());
         hint.push_str(&format!(" · {binding} follow"));
     }
+    // Presence is informational, so it comes last and a narrow terminal
+    // clips it before any key hint.
+    if let Some(others) = crate::session::presence::other_sessions_label(chrome.other_sessions) {
+        hint = format!("{hint} · {others}");
+    }
     hint
 }
 

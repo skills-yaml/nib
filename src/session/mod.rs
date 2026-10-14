@@ -14,6 +14,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod memory;
+pub mod presence;
 pub(crate) mod question_forms;
 pub(crate) use question_forms::{
     append_question_event, apply_form_outcome, normalized_record_options, public_form_outcome,
@@ -36,8 +37,8 @@ pub(crate) use split_03::*;
 
 pub use split_00::{normalize_plan_goal, normalize_verification_arguments, Plan};
 pub use split_00::{
-    ClarificationRecord, PathAttachment, PlanStep, ToolCallRecord, VerificationAuthority,
-    VerificationStatus,
+    ChangedPaths, ClarificationRecord, IdentityScope, PathAttachment, PlanStep, ToolCallRecord,
+    VerificationAuthority, VerificationStatus,
 };
 pub use split_00::{
     ClarificationStatus, HumanIntentKind, HumanIntentRecord, MessageOrigin, MessageProvenance,

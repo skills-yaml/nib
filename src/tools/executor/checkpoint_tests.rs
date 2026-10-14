@@ -20,6 +20,18 @@ fn patch(root: &Path, session_id: &str, patch: &str, dry_run: bool) -> ToolCall 
     }
 }
 
+async fn read_file(executor: &mut ToolExecutor, root: &Path, session_id: &str, path: &str) {
+    let call = ToolCall {
+        invocation_id: crate::tools::ToolInvocationId::new(),
+        tool_name: "read_file".to_string(),
+        arguments: json!({"path": path}),
+        session_id: Some(session_id.to_string()),
+        project_root: Some(root.to_path_buf()),
+    };
+    let read = executor.execute(call, Some(session_id)).await;
+    assert!(read.success, "{read:?}");
+}
+
 fn rewind(root: &Path, store: &SessionStore, session_id: &str, checkpoint: Option<u64>) -> String {
     match execute_interactive_command(
         InteractiveCommand::Rewind { checkpoint },
@@ -77,6 +89,8 @@ async fn applied_patches_are_checkpointed_per_turn_and_rewound() {
         .with_auto_approve(true);
 
     ask(&store, &session.id, root.path(), "change a and add b");
+    // Edits need a prior read in the session (phase 5a).
+    read_file(&mut executor, root.path(), &session.id, "a.txt").await;
     let edit = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n";
     let create = "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+new\n";
     // A dry run checks the patch and saves nothing.

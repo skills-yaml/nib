@@ -158,7 +158,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         },
         metadata(
             "apply_patch",
-            "Validate or apply a unified diff in the session worktree.",
+            "Validate or apply a unified diff in the session worktree. Read each existing file with read_file first: a patch fails if the file was not read in this session or changed after the read.",
             PermissionLevel::Safe,
             true,
             true,
