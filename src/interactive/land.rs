@@ -189,9 +189,15 @@ fn unusable_worktree(
     action: &LandAction,
     error: &str,
 ) -> Result<String, String> {
+    let current = super::workspace::stored_session_workspace(project_root, store, session_id);
+    if !current.is_worktree() {
+        return Ok(format!(
+            "This session works in your folder, so there is nothing to land. A worktree it used earlier could not be loaded: {error}. If it is off its branch, switch it back; otherwise remove what remains under .nib/worktrees/sessions/ by hand."
+        ));
+    }
     if !matches!(action, LandAction::Discard { .. }) {
         return Err(format!(
-            "nib cannot use this session's worktree: {error}. Fix that, or run /land discard to stop using the worktree without deleting anything."
+            "nib cannot use this session's worktree: {error}. If it is off its branch, switch it back; or run /land discard to stop using the worktree without deleting anything."
         ));
     }
     store

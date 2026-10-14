@@ -40,12 +40,19 @@ pub(crate) fn rewind_files(
     number: u64,
 ) -> Result<String, String> {
     let mut allowed = vec![project_root.to_path_buf()];
-    if let Some(worktree) = crate::integrations::worktree::with_validated_session_worktree(
+    match crate::integrations::worktree::with_validated_session_worktree(
         project_root,
         session_id,
         |worktree| Ok(worktree.to_path_buf()),
-    )? {
-        allowed.push(worktree);
+    ) {
+        Ok(Some(worktree)) => allowed.push(worktree),
+        Ok(None) => {}
+        // A session that stopped using a worktree nib cannot load (`/land
+        // discard`) still rewinds its edits in the folder.
+        Err(_)
+            if !super::workspace::stored_session_workspace(project_root, store, session_id)
+                .is_worktree() => {}
+        Err(error) => return Err(error),
     }
     let checkpoints = CheckpointStore::for_session(store.sessions_dir(), session_id)?;
     let label = checkpoints

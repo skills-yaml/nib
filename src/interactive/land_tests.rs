@@ -347,11 +347,15 @@ fn an_interrupted_removal_is_left_for_the_user_and_the_session_moves_on() {
         .unwrap()
         .next()
         .is_some());
-    let in_place = fixture.land(LandAction::Preview).unwrap_err();
-    assert!(
-        in_place.contains("cannot use this session's worktree"),
-        "{in_place}"
-    );
+    let in_place = fixture.land(LandAction::Preview).unwrap();
+    assert!(in_place.contains("works in your folder"), "{in_place}");
+    assert!(in_place.contains("could not be loaded"), "{in_place}");
+    // `/rewind` no longer trips over the worktree it cannot load.
+    let rewind =
+        crate::interactive::rewind_files(fixture.root(), &fixture.store, &fixture.session_id, 1);
+    if let Err(error) = rewind {
+        assert!(!error.contains("worktree"), "{error}");
+    }
     // Leave the temporary directory removable.
     for entry in walk(fixture.root()) {
         let _ = std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755));

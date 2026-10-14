@@ -833,3 +833,31 @@ subagents keep their own worktrees. A subagent merge never commits directly to
 the default, `main`/`master` or a detached HEAD: it first creates
 `nib/subagent-<id>`, like `git_commit`. `permissions.md` and
 `backend_rust.md` were amended as approved in D2.
+
+## 2026-10-14 - T080 phase 5d: /land and moving session branches
+
+- Type: decision
+- Source: T080 (user decisions D2, D6)
+- Confidence: high
+- Review: independent exact-candidate review and re-review before delivery
+- Supersedes: the fail-closed reuse of a session worktree whose branch moved
+
+Content:
+
+`/land` previews a session worktree and acts only with the preview's
+confirmation code (a hash of the session branch tip, the worktree's status and
+ignored files, and the folder's branch and commit), like `/rewind` taking its
+argument as the confirmation. `/land commit` and `/land merge` run the user's
+own Git; a merge merges the previewed commit with `--no-overwrite-ignore`,
+branches first to `nib/land-<topic>` on a default, protected or detached HEAD,
+refuses overlap with the folder's uncommitted files or staged changes, and is
+undone on conflict or hook failure. Removal goes through the ownership
+receipts and only at the previewed commit. A session worktree whose branch
+moved (any commit on it) is adopted at its current commit when the worktree is
+on that branch at that commit; otherwise loading fails without side effects.
+A worktree nib cannot load (an interrupted removal's quarantine) is never
+deleted automatically: `/land discard` stops the session from using it. A
+subagent cannot start from a session worktree (its Git directory lies outside
+it); sessions that chose a worktree are refused subagents, forced worktrees
+(scheduled, MCP `nib_run`) are not. Session-branch-based subagents are a
+follow-up.

@@ -1414,6 +1414,18 @@ TUI or `nib chat`).
   which cannot clash with `nib/session/...`; single-line commit messages
   are an accepted limit.
 
+**Re-review of `0fe6118`: approve**, accepting the R4 and R8 resolutions,
+with one low finding and two nits, fixed after approval (small,
+test-covered, author-reviewed):
+- **N1 (low).** After `/land discard` on a worktree nib cannot load, the
+  session was in place but `/rewind` and `/land` still failed on the
+  receipt. `/rewind` now ignores that error for an in-place session, and
+  `/land` reports it without failing, suggesting first to switch a
+  worktree back to its branch.
+- The guide says when `/land discard` finishes a removal and when it only
+  stops using the worktree; a missing worktree directory is reported as
+  missing rather than as off its branch.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

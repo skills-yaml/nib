@@ -874,3 +874,16 @@ Content:
 
 Recorded the in-place session default, the workspace decision order, forced
 worktrees and branch-first subagent merges in decisions.md.
+
+## 2026-10-14 - T080 phase 5d /land decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review and re-review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded /land's confirmation-code design, session-branch adoption and the
+never-delete-blindly rule for unloadable worktrees in decisions.md.

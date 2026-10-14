@@ -1242,9 +1242,10 @@ uncommitted changes are checked when merging). Afterwards the session works in
 your folder again, unless the configuration or an instruction line still requires
 a worktree; then its next request gets a new one. If removing the worktree stops
 partway (for example on files nib may not delete), or nib cannot load the worktree,
-`/land` says why; `/land discard` then stops the session from using it without
-deleting anything, and you remove what remains under `.nib/worktrees/sessions/`
-by hand.
+`/land` says why. When nib can still load what remains, `/land discard` finishes
+the removal. Otherwise it stops the session from using the worktree without
+deleting anything: switch a worktree that is off its branch back to it, or remove
+what remains under `.nib/worktrees/sessions/` by hand.
 
 Subagents, scheduled tasks and calls through `nib mcp-server` always use their own
 worktrees. When nib merges a subagent's work into the folder, the folder must have

@@ -813,6 +813,12 @@ pub(crate) fn load_managed_worktree_ownership_at_branch_tip(
     // worktree, so it runs only when the worktree is on its branch at that
     // commit; otherwise a failed validation would leave a stale anchor.
     if let Some(tip) = &tip {
+        if !revision.record.worktree_path.exists() {
+            return Err(format!(
+                "the worktree {} is missing; remove what remains of it, including the branch {reference}, by hand",
+                revision.record.worktree_path.display()
+            ));
+        }
         if !worktree_on_branch_at(&revision.record.worktree_path, &reference, tip) {
             return Err(format!(
                 "the worktree {} is not on its branch {reference} at its latest commit; switch it back (or finish or abort a rebase) and try again",
