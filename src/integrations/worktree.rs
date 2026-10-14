@@ -250,6 +250,22 @@ fn adopt_session_branch_tip(
     .and_then(|output| {
         crate::sandbox::worktree::parse_git_oid(&output, "resolve the session branch")
     })?;
+    let recorded = ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .owned_branch
+        .as_ref()
+        .map(|owned| owned.expected_oid.clone());
+    // See `load_managed_worktree_ownership_at_branch_tip`: adopt only a
+    // worktree that is on its branch at that commit.
+    if recorded.as_deref() != Some(tip.as_str())
+        && !crate::sandbox::worktree::worktree_on_branch_at(&ownership.path, &branch, &tip)
+    {
+        return Err(format!(
+            "the session worktree is not on its branch {branch} at its latest commit; switch it back (or finish or abort a rebase) and try again"
+        ));
+    }
     crate::sandbox::worktree::adopt_managed_worktree_branch(
         ownership,
         &sanitize_component(session_id),
@@ -297,18 +313,58 @@ pub(crate) fn session_worktree_branch(
 
 /// Removes the session's worktree and deletes its branch through the
 /// ownership receipts, so only nib's own worktree and branch are removed.
-pub(crate) fn remove_session_worktree(repo_root: &Path, session_id: &str) -> Result<(), String> {
+/// With `expected_tip`, nothing is removed when the branch has moved since
+/// the preview the user confirmed.
+pub(crate) fn remove_session_worktree(
+    repo_root: &Path,
+    session_id: &str,
+    expected_tip: Option<&str>,
+) -> Result<(), String> {
     let repo_root = repo_root
         .canonicalize()
         .map_err(|error| format!("failed to resolve the project root: {error}"))?;
     let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
         return Ok(());
     };
+    if let Some(expected) = expected_tip {
+        let current = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owned_branch
+            .as_ref()
+            .map(|owned| owned.expected_oid.clone());
+        if current.as_deref() != Some(expected) {
+            return Err(
+                "the session branch moved since the preview, so nothing was removed; run /land to see it now"
+                    .to_string(),
+            );
+        }
+    }
     crate::sandbox::worktree::cleanup_managed_worktree(
         &ownership,
         Instant::now() + SESSION_WORKTREE_REMOVAL_TIMEOUT,
         SESSION_WORKTREE_REMOVAL_TIMEOUT,
     )
+}
+
+/// Whether an earlier removal of the session's worktree stopped partway
+/// (for example on files it could not delete).
+pub(crate) fn session_worktree_removal_started(
+    repo_root: &Path,
+    session_id: &str,
+) -> Result<bool, String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve the project root: {error}"))?;
+    let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
+        return Ok(false);
+    };
+    let state = ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(state.path_removed || state.registration_removed || state.branch_removed)
 }
 
 struct BlockingCreateCancellationGuard {

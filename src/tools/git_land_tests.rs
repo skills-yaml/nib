@@ -207,3 +207,132 @@ async fn a_conflict_is_undone_and_returns_to_the_original_branch() {
         "folder\n"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn merge_never_overwrites_an_ignored_folder_file() {
+    let _environment = GitEnvironment::isolated();
+    let (_directory, folder, worktree) = fixture("feature");
+    commit(&folder, ".gitignore", ".env\n", "ignore env");
+    std::fs::write(folder.join(".env"), "real secret\n").unwrap();
+    git(&worktree, &["merge", "--quiet", "feature"]);
+    // The session stops ignoring .env and commits its own.
+    std::fs::write(worktree.join(".gitignore"), "").unwrap();
+    std::fs::write(worktree.join(".env"), "agent value\n").unwrap();
+    git(&worktree, &["add", ".gitignore", ".env"]);
+    git(&worktree, &["commit", "--quiet", "-m", "track env"]);
+
+    let shown = preview(&folder, &worktree, BRANCH).await.unwrap();
+    let error = merge(&folder, &shown, "topic").await.unwrap_err();
+    assert!(error.contains("were kept"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(folder.join(".env")).unwrap(),
+        "real secret\n"
+    );
+    assert_eq!(git(&folder, &["rev-parse", "HEAD"]), shown.folder_head);
+}
+
+#[tokio::test]
+#[serial]
+async fn preview_shows_ignored_worktree_files_and_large_sessions_merge() {
+    let _environment = GitEnvironment::isolated();
+    let (_directory, folder, worktree) = fixture("feature");
+    std::fs::write(worktree.join(".gitignore"), "build/\n").unwrap();
+    std::fs::create_dir(worktree.join("build")).unwrap();
+    std::fs::write(worktree.join("build/output"), "generated\n").unwrap();
+    // Well over the 16 KiB output cap of the other Git tools.
+    let directory = worktree.join("a-directory-with-a-reasonably-long-name");
+    std::fs::create_dir(&directory).unwrap();
+    for index in 0..400 {
+        std::fs::write(
+            directory.join(format!(
+                "generated-source-file-with-a-long-name-{index:04}.txt"
+            )),
+            format!("{index}\n"),
+        )
+        .unwrap();
+    }
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "--quiet", "-m", "many files"]);
+
+    let shown = preview(&folder, &worktree, BRANCH).await.unwrap();
+    assert_eq!(shown.ignored, vec!["build/".to_string()]);
+    std::fs::write(worktree.join("build/more"), "more\n").unwrap();
+    assert_eq!(
+        preview(&folder, &worktree, BRANCH).await.unwrap().code,
+        shown.code,
+        "a collapsed ignored directory lists the same"
+    );
+    std::fs::write(worktree.join("local.log"), "x\n").unwrap();
+    std::fs::write(worktree.join(".gitignore"), "build/\n*.log\n").unwrap();
+    git(&worktree, &["commit", "--quiet", "-am", "ignore logs"]);
+    let with_log = preview(&folder, &worktree, BRANCH).await.unwrap();
+    assert!(with_log.ignored.contains(&"local.log".to_string()));
+
+    // The folder has many untracked files of its own.
+    for index in 0..400 {
+        std::fs::write(
+            folder.join(format!(
+                "untracked-user-file-with-a-long-name-{index:04}.txt"
+            )),
+            "mine\n",
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        merge(&folder, &with_log, "topic").await.unwrap(),
+        MergeOutcome::Merged { .. }
+    ));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_detached_folder_branches_first_and_a_failed_merge_returns_to_it() {
+    let _environment = GitEnvironment::isolated();
+    let (_directory, folder, worktree) = fixture("feature");
+    git(&folder, &["switch", "--quiet", "--detach"]);
+    let detached = git(&folder, &["rev-parse", "HEAD"]);
+    commit(&worktree, "README.md", "session\n", "session edit");
+    commit(&folder, "README.md", "folder\n", "folder edit");
+    let folder_head = git(&folder, &["rev-parse", "HEAD"]);
+    let shown = preview(&folder, &worktree, BRANCH).await.unwrap();
+    assert!(shown.folder_protected);
+    assert_eq!(shown.folder_branch, None);
+    let error = merge(&folder, &shown, "topic").await.unwrap_err();
+    assert!(error.contains("conflicts in README.md"), "{error}");
+    assert_ne!(folder_head, detached);
+    assert_eq!(git(&folder, &["rev-parse", "HEAD"]), folder_head);
+    let symbolic = std::process::Command::new("git")
+        .current_dir(&folder)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .status()
+        .unwrap();
+    assert!(!symbolic.success(), "still detached");
+    assert_eq!(git(&folder, &["branch", "--list", "nib/topic"]), "");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failing_merge_hook_undoes_the_merge_and_keeps_unrelated_changes() {
+    let _environment = GitEnvironment::isolated();
+    let (_directory, folder, worktree) = fixture("feature");
+    commit(&worktree, "a.txt", "session\n", "session file");
+    commit(&folder, "b.txt", "folder\n", "folder file");
+    std::fs::write(folder.join("README.md"), "user edit\n").unwrap();
+    let hook = folder.join(".git/hooks/pre-merge-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho refused by hook >&2\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shown = preview(&folder, &worktree, BRANCH).await.unwrap();
+    let error = merge(&folder, &shown, "topic").await.unwrap_err();
+    assert!(error.contains("refused by hook"), "{error}");
+    assert_eq!(git(&folder, &["rev-parse", "HEAD"]), shown.folder_head);
+    assert!(!folder.join("a.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(folder.join("README.md")).unwrap(),
+        "user edit\n"
+    );
+}

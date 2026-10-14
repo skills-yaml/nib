@@ -275,3 +275,103 @@ fn without_a_worktree_there_is_nothing_to_land() {
     assert!(in_place.contains("works in your folder"), "{in_place}");
     assert!(in_place.contains("nothing to land"), "{in_place}");
 }
+
+#[test]
+#[serial]
+fn commit_without_changes_and_a_stale_discard_code_change_nothing() {
+    let fixture = Fixture::new();
+    let worktree = fixture.create_worktree();
+    let error = fixture
+        .land(LandAction::Commit {
+            message: "nothing".to_string(),
+        })
+        .unwrap_err();
+    assert!(error.contains("nothing to commit"), "{error}");
+
+    let code = fixture.code();
+    std::fs::write(worktree.join("late.txt"), "written after the preview\n").unwrap();
+    let error = fixture
+        .land(LandAction::Discard { code: Some(code) })
+        .unwrap_err();
+    assert!(error.contains("changed since the preview"), "{error}");
+    assert!(worktree.join("late.txt").exists());
+}
+
+/// Removing a worktree can stop partway (files nib may not delete). nib
+/// then cannot load what remains and never deletes it blindly: `/land`
+/// explains, and `/land discard` only stops the session from using it.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn an_interrupted_removal_is_left_for_the_user_and_the_session_moves_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let worktree = fixture.create_worktree();
+    let locked = worktree.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("file"), "kept\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::remove_file(locked.join("file")).is_ok() {
+        // Running as root: permissions cannot stop the removal.
+        return;
+    }
+
+    let error = fixture
+        .land(LandAction::Discard {
+            code: Some(fixture.code()),
+        })
+        .unwrap_err();
+    assert!(
+        error.starts_with("Removing the session worktree did not finish"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture.workspace(),
+        Some(SessionWorkspace::worktree(workspace::COMMAND_REASON))
+    );
+    let error = fixture.land(LandAction::Preview).unwrap_err();
+    assert!(error.contains("run /land discard to stop using"), "{error}");
+
+    let moved_on = fixture.land(LandAction::Discard { code: None }).unwrap();
+    assert!(moved_on.contains("Nothing was deleted"), "{moved_on}");
+    assert!(moved_on.contains("works in your folder"), "{moved_on}");
+    assert_eq!(
+        fixture.workspace(),
+        Some(SessionWorkspace::in_place(workspace::DISCARDED_REASON))
+    );
+    // What could not be removed is still there for the user to inspect.
+    assert!(fixture
+        .root()
+        .join(".nib/worktrees/sessions")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some());
+    let in_place = fixture.land(LandAction::Preview).unwrap_err();
+    assert!(
+        in_place.contains("cannot use this session's worktree"),
+        "{in_place}"
+    );
+    // Leave the temporary directory removable.
+    for entry in walk(fixture.root()) {
+        let _ = std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        found.push(directory);
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            }
+        }
+    }
+    found
+}

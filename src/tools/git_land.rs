@@ -12,6 +12,9 @@ use std::path::PathBuf;
 
 /// Commits listed in a preview before the rest are counted.
 const MAX_LISTED_COMMITS: usize = 20;
+/// Output kept for listings `/land` checks or hashes. A listing that
+/// reaches it is refused rather than checked in part.
+const MAX_LISTING_BYTES: usize = 16 * 1024 * 1024;
 const TRUNCATED: &str = "[output truncated]";
 
 /// What `/land` shows, and the code that confirms it.
@@ -32,6 +35,9 @@ pub(crate) struct LandPreview {
     pub(crate) commit_count: usize,
     /// `git status --short` lines for the worktree, without nib state.
     pub(crate) uncommitted: Vec<String>,
+    /// Ignored files and directories in the worktree, which are removed
+    /// with it.
+    pub(crate) ignored: Vec<String>,
     /// `git diff --stat` of the session commits against the folder.
     pub(crate) stat: String,
     pub(crate) code: String,
@@ -49,15 +55,23 @@ pub(crate) enum MergeOutcome {
     },
 }
 
-async fn lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>, String> {
-    let output = require(cwd, args, QUERY_TIMEOUT).await?;
-    if output.ends_with(TRUNCATED) {
-        return Err(format!(
-            "git {} listed too much to check",
-            args.first().copied().unwrap_or("")
-        ));
+/// The whole output of a listing, or an error when it is too large to
+/// check completely.
+async fn listing(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let command = args.first().copied().unwrap_or("");
+    let output = git_capped(cwd, args, QUERY_TIMEOUT, MAX_LISTING_BYTES).await?;
+    if !output.success {
+        return Err(format!("git {command} failed: {}", output.stderr));
     }
-    Ok(output
+    if output.stdout.ends_with(TRUNCATED) {
+        return Err(format!("git {command} listed too much to check"));
+    }
+    Ok(output.stdout)
+}
+
+async fn lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    Ok(listing(cwd, args)
+        .await?
         .split(['\0', '\n'])
         .filter(|line| !line.is_empty())
         .map(str::to_string)
@@ -111,7 +125,7 @@ pub(crate) async fn preview(
     .lines()
     .map(str::to_string)
     .collect();
-    let uncommitted = require(
+    let uncommitted = lines(
         worktree,
         &[
             "status",
@@ -121,12 +135,22 @@ pub(crate) async fn preview(
             ".",
             EXCLUDE_NIB_STATE,
         ],
-        QUERY_TIMEOUT,
     )
-    .await?
-    .lines()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
+    .await?;
+    let ignored = lines(
+        worktree,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--",
+            ".",
+            EXCLUDE_NIB_STATE,
+        ],
+    )
+    .await?;
     let stat = require(
         folder,
         &[
@@ -138,7 +162,12 @@ pub(crate) async fn preview(
         QUERY_TIMEOUT,
     )
     .await?;
-    let code = confirmation_code(&tip, &uncommitted, folder_branch.as_deref(), &folder_head);
+    let code = confirmation_code(
+        &tip,
+        &[&uncommitted, &ignored],
+        folder_branch.as_deref(),
+        &folder_head,
+    );
     Ok(LandPreview {
         worktree: worktree.to_path_buf(),
         branch: branch.to_string(),
@@ -149,6 +178,7 @@ pub(crate) async fn preview(
         commits,
         commit_count,
         uncommitted,
+        ignored,
         stat,
         code,
     })
@@ -158,7 +188,7 @@ pub(crate) async fn preview(
 /// exactly the state the user saw.
 fn confirmation_code(
     tip: &str,
-    uncommitted: &[String],
+    listings: &[&[String]],
     folder_branch: Option<&str>,
     folder_head: &str,
 ) -> String {
@@ -167,9 +197,12 @@ fn confirmation_code(
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
-    for line in uncommitted {
-        hasher.update(line.as_bytes());
-        hasher.update([0]);
+    for listing in listings {
+        for line in *listing {
+            hasher.update(line.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update([1]);
     }
     let digest = hasher.finalize();
     digest
@@ -247,7 +280,8 @@ pub(crate) async fn merge(
     } else {
         None
     };
-    // The previewed commit, not whatever the branch points at now.
+    // The previewed commit, not whatever the branch points at now. Ignored
+    // files in the folder (a local `.env`) are never overwritten.
     let message = format!("Merge branch '{}'", preview.branch);
     let merge = git(
         folder,
@@ -255,6 +289,8 @@ pub(crate) async fn merge(
             "merge",
             "--no-edit",
             "--quiet",
+            "--no-overwrite-ignore",
+            "--no-autostash",
             "-m",
             &message,
             &preview.tip,

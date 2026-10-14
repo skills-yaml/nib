@@ -1102,23 +1102,55 @@ async fn a_worktree_session_cannot_start_a_subagent_from_its_worktree() {
             .create_for_session("parent-worktree")
             .expect("session worktree");
 
-    let mut executor = merge_executor(root.path(), store);
+    let mut executor = merge_executor(root.path(), store.clone());
+    for tool in ["spawn_subagent", "invoke_subagent"] {
+        let spawned = executor
+            .execute(
+                ToolCall {
+                    invocation_id: nib::tools::ToolInvocationId::new(),
+                    tool_name: tool.to_string(),
+                    arguments: json!({"prompt": "help"}),
+                    session_id: Some("parent-worktree".to_string()),
+                    project_root: Some(root.path().to_path_buf()),
+                },
+                Some("parent-worktree"),
+            )
+            .await;
+        assert!(!spawned.success, "{tool}");
+        let error = spawned.error.unwrap_or_default();
+        assert!(error.contains("/land"), "{tool}: {error}");
+    }
+    for created in [&session_worktree, root.path()] {
+        assert!(!created.join(".nib/worktrees/subagents").exists());
+        assert!(!created.join(".nib/subagents").exists());
+    }
+
+    // A session that chose a worktree but has not created it yet is refused
+    // too, rather than starting the subagent from the folder.
+    store.create_session_with_id("parent-not-yet");
+    store
+        .update_session("parent-not-yet", |session| {
+            session.workspace = Some(nib::session::SessionWorkspace::worktree(
+                "you ran /worktree",
+            ));
+            Ok(())
+        })
+        .expect("record the worktree workspace");
     let spawned = executor
         .execute(
             ToolCall {
                 invocation_id: nib::tools::ToolInvocationId::new(),
                 tool_name: "spawn_subagent".to_string(),
                 arguments: json!({"prompt": "help"}),
-                session_id: Some("parent-worktree".to_string()),
+                session_id: Some("parent-not-yet".to_string()),
                 project_root: Some(root.path().to_path_buf()),
             },
-            Some("parent-worktree"),
+            Some("parent-not-yet"),
         )
         .await;
     assert!(!spawned.success);
-    let error = spawned.error.unwrap_or_default();
-    assert!(error.contains("/land"), "{error}");
-    assert!(!session_worktree.join(".nib").join("worktrees").exists());
+    assert!(spawned.error.unwrap_or_default().contains("/land"));
+    assert!(!root.path().join(".nib/worktrees/subagents").exists());
 }
 
 #[tokio::test]

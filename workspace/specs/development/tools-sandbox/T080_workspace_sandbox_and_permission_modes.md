@@ -1261,12 +1261,15 @@ worktree (recorded, or created by its scheduled work) it shows:
 - the worktree path, its branch `nib/session/<id>`, and the folder's
   branch it would merge into;
 - the commits on the session branch that the folder does not have;
-- the worktree's uncommitted changes;
+- the worktree's uncommitted changes, and its ignored files (removed
+  with it);
 - the change summary (`git diff --stat`) against the folder's branch;
 - the three actions, each with a confirmation code.
 
 The code is a short hash of the session branch tip, the worktree's
-status and the folder's branch and commit. An action whose code no
+status and ignored files, and the folder's branch and commit. Listings it
+covers or checks are read whole (up to 16 MiB); a larger one is refused
+rather than covered in part. An action whose code no
 longer matches is refused with a fresh preview, so nothing is landed or
 dropped that the user did not see. Like `/rewind`, the command itself is
 the confirmation; there is no extra prompt. Without a worktree, `/land`
@@ -1279,17 +1282,19 @@ changes to the session branch with the user's own Git, exactly like
 `git_commit` (hooks, signing, `.nib` never staged). It takes no code: it
 changes only the session branch. It then shows the new preview.
 
-**`/land merge <code>`.** Merges the session branch into the folder's
-current branch with the user's own Git (`git merge --no-edit`, hooks
-run, a fast-forward when possible).
+**`/land merge <code>`.** Merges the previewed session commit into the
+folder's current branch with the user's own Git (`git merge --no-edit
+--no-overwrite-ignore`, hooks run, a fast-forward when possible), so an
+ignored folder file such as a local `.env` is never overwritten.
 - The worktree must have no uncommitted changes: commit them first.
 - Uncommitted changes in the folder are allowed only when no file the
   merge changes is among them, and nothing is staged. Otherwise the
   merge is refused with the overlapping files.
 - On the default or a protected branch, or a detached HEAD, nib first
-  creates and switches to `nib/<session topic>` and reports it (D6).
-- A conflict aborts the merge, returns to the original branch, keeps
-  the worktree and names the conflicting files.
+  creates and switches to `nib/land-<session topic>` and reports it (D6).
+- A conflict or a failing hook aborts the merge, returns to the original
+  branch (or detached commit), keeps the worktree and names the
+  conflicting files.
 - After a merge, or when the folder already contains the branch, the
   worktree and its branch are removed.
 
@@ -1302,8 +1307,16 @@ landed" or "discarded") and its next request works in the folder, unless
 an instruction line or `execution.workspace` still requires a worktree:
 then the next request creates a fresh one, and `/land` says so.
 Removal goes through the managed-worktree ownership receipts, so only
-nib's own worktree and branch are removed. If removal fails, the error
-says what was kept.
+nib's own worktree and branch are removed, and only when the branch is
+still at the previewed commit. If removal fails, the session keeps its
+worktree and the message says what already happened (a merge) and what
+was kept. A removal that stopped partway (files nib may not delete)
+leaves a cleanup quarantine that the ownership code deliberately does
+not recover on its own. `/land` then explains that it cannot use the
+worktree, and `/land discard` (no code: nothing is deleted) records the
+session in place and leaves what remains for the user to remove. The
+same applies to any worktree nib cannot load. If removal stopped after
+the directory but before the branch, `/land discard` finishes it.
 
 **Session branches that moved (a defect found while planning 5d).** The
 ownership receipt pinned the session branch to the commit it was created
@@ -1313,7 +1326,11 @@ ref contents changed", so the session could no longer use its worktree.
 Loading a session worktree now adopts the branch's current commit
 through the existing generational-anchor adoption (the same protocol
 subagent merges use), after checking that the worktree is still on its
-branch. A commit during a run is adopted the same way.
+branch. A commit during a run is adopted the same way. Adoption runs
+only when the worktree is on its branch at that commit (not detached or
+mid-rebase); otherwise loading fails with that reason and leaves no new
+anchor behind, and it succeeds again once the worktree is back on its
+branch.
 
 **Subagents in a worktree session.** The 5c note was inaccurate: a
 subagent cannot start from a session worktree at all. A managed
@@ -1321,9 +1338,13 @@ worktree's Git directory must lie inside the folder it starts from, and
 a session worktree's lies in the main checkout, so `spawn_subagent`
 failed with "managed worktree common Git directory escapes the
 repository". Lifting that rule touches the ownership model, so 5d does
-not. Instead, `spawn_subagent` and `invoke_subagent` in a session that
-works in its own worktree fail at once, telling the user to land or
-discard it first. Subagents based on a session branch are a follow-up.
+not. Instead, `spawn_subagent` and `invoke_subagent` fail at once,
+telling the user to land or discard the worktree first, in a session
+that chose a worktree (`/worktree`, configuration, instruction line),
+even before it exists, and in any session whose worktree exists. Forced
+worktrees (scheduled work, MCP-server calls such as `nib_run`) still
+start subagents from the folder until their own worktree exists.
+Subagents based on a session branch are a follow-up.
 
 **Out of scope.** Escalation on sandbox block and headless flags
 (phase 6). Landing from `nib run` (it prints the workspace; use the
@@ -1332,7 +1353,11 @@ TUI or `nib chat`).
 **Accepted limits.**
 - Another nib process using the same session (a second TUI on it, or
   its scheduled work running) is not detected; `/land` checks only that
-  this session is idle.
+  this session is idle. Removal still refuses a branch that moved since
+  the preview.
+- `/land commit` joins its words with single spaces, so a message has one
+  line.
+- What an interrupted removal leaves is removed by hand.
 - A session branch packed by `git gc` (no loose ref) cannot be adopted:
   loading its worktree fails, and `/land` says so without removing
   anything. Land it by hand with Git.
@@ -1351,8 +1376,43 @@ TUI or `nib chat`).
   required worktree is reported.
 - A session worktree stays valid after a commit, across runs and within
   one; the landing helpers name its branch and remove both.
-- A worktree session's `spawn_subagent` fails with the `/land` hint and
-  creates nothing.
+- A worktree session's `spawn_subagent` and `invoke_subagent` fail with
+  the `/land` hint and create nothing, also before the worktree exists.
+- Review fixes: an ignored folder file is not overwritten; a session of
+  400 files merges and ignored worktree files are shown and coded; a
+  detached folder branches first and returns on conflict; a failing
+  merge hook is undone and keeps unrelated changes; nothing to commit; a
+  stale discard code; an interrupted removal left for the user while the
+  session moves on; an
+  off-branch worktree is not adopted and recovers; removal refused when
+  the branch moved.
+
+**Independent review of `5c703e9`: changes requested, then resolved.**
+- **R1 (medium).** A merge could overwrite an ignored folder file (a local
+  `.env`) that the session started tracking. Fixed with
+  `--no-overwrite-ignore`; tested.
+- **R2 (medium).** Listings were capped at 16 KiB: a session or folder
+  with a few hundred files could not merge, and the code covered only
+  part of a long status. Listings are now read whole up to 16 MiB and
+  refused beyond.
+- **R3 (medium).** Adopting a moved branch while the worktree was off it
+  left a stale generation anchor that made every later load fail.
+  Adoption now runs only on the branch at that commit.
+- **R4 (medium).** A removal that stopped partway made the session
+  unusable with no way out. A stopped directory removal leaves a
+  quarantine that the ownership code requires a person to recover, so
+  nib does not resume it: `/land` explains, and `/land discard` stops the
+  session from using the worktree without deleting anything. A removal
+  that stopped later (the branch) is finished by `/land discard`.
+- **R5.** Removal is pinned to the previewed commit. **R6.** Ignored
+  worktree files are shown, coded and counted when discarded. **R7.**
+  Messages no longer claim a removal that failed. **R8.** A session that
+  chose a worktree is refused subagents before it exists (forced
+  worktrees are not, so `nib_run` keeps working). **R9.** The missing
+  tests were added. Nits: the guide says "your folder's branch"; a
+  detached HEAD is described as such; merge branches are `nib/land-...`,
+  which cannot clash with `nib/session/...`; single-line commit messages
+  are an accepted limit.
 
 ## User Decisions (2026-10-07)
 

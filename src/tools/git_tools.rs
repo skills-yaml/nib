@@ -50,6 +50,16 @@ struct GitOutput {
 /// agents keep working. The whole process group is killed on timeout and
 /// after Git exits, and output is capped while it streams.
 async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<GitOutput, String> {
+    git_capped(cwd, args, limit, MAX_OUTPUT_BYTES).await
+}
+
+/// `git`, keeping up to `max_output` bytes of each stream.
+async fn git_capped(
+    cwd: &Path,
+    args: &[&str],
+    limit: Duration,
+    max_output: usize,
+) -> Result<GitOutput, String> {
     let mut command = tokio::process::Command::new("git");
     command
         .args(args)
@@ -80,7 +90,11 @@ async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<GitOutput, St
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let finished = tokio::time::timeout(limit, async {
-        tokio::join!(read_capped(stdout), read_capped(stderr), child.wait())
+        tokio::join!(
+            read_capped(stdout, max_output),
+            read_capped(stderr, max_output),
+            child.wait()
+        )
     })
     .await;
     kill_process_group(process_group);
@@ -115,7 +129,7 @@ fn kill_process_group(_leader: Option<u32>) {}
 
 /// Keeps the first bytes of a stream and drains the rest, so a noisy hook
 /// cannot exhaust memory or block on a full pipe.
-async fn read_capped<R: AsyncRead + Unpin>(reader: Option<R>) -> String {
+async fn read_capped<R: AsyncRead + Unpin>(reader: Option<R>, max_output: usize) -> String {
     let Some(mut reader) = reader else {
         return String::new();
     };
@@ -126,7 +140,7 @@ async fn read_capped<R: AsyncRead + Unpin>(reader: Option<R>) -> String {
         match reader.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
             Ok(count) => {
-                let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+                let room = max_output.saturating_sub(kept.len());
                 kept.extend_from_slice(&buffer[..count.min(room)]);
                 truncated |= count > room;
             }

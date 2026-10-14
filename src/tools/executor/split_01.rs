@@ -718,13 +718,26 @@ impl ToolExecutor {
         ) {
             // A subagent's managed worktree must share its Git directory
             // with the folder it starts from; a session worktree's lives in
-            // the main checkout (T080 phase 5d).
-            if execution_root != effective_root.as_path() {
+            // the main checkout. A session that chose a worktree is refused
+            // even before it exists, since starting from the folder would
+            // bypass that choice. Forced worktrees (scheduled work, MCP
+            // server calls) start subagents from the folder until their
+            // own worktree exists (T080 phase 5d).
+            let isolated = effective_session
+                .map(|session| self.session_workspace(session))
+                .filter(|workspace| {
+                    execution_root != effective_root.as_path()
+                        || (self.required_worktree.is_none() && workspace.is_worktree())
+                });
+            if let Some(isolated) = isolated {
                 return self.finish_failure(
                     &call,
                     effective_session,
                     start,
-                    "subagents cannot start from this session's worktree yet; land or discard it with /land, or use them from a session that works in the folder".to_string(),
+                    format!(
+                        "subagents cannot start in a session that works in its own worktree yet ({}); land or discard the worktree with /land, or use subagents from a session that works in the folder",
+                        isolated.reason
+                    ),
                     approval,
                     level,
                     risk,

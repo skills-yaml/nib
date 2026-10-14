@@ -93,7 +93,7 @@ fn landing_helpers_name_the_branch_and_remove_worktree_and_branch() {
     assert_eq!(path, worktree);
     assert!(branch.starts_with("nib/session/landed-"), "{branch}");
 
-    remove_session_worktree(repository.path(), "landed").unwrap();
+    remove_session_worktree(repository.path(), "landed", None).unwrap();
     assert!(!worktree.exists());
     assert_eq!(git(repository.path(), &["branch", "--list", &branch]), "");
     assert_eq!(
@@ -109,4 +109,45 @@ fn landing_helpers_name_the_branch_and_remove_worktree_and_branch() {
         ),
         ""
     );
+}
+
+#[test]
+fn a_worktree_off_its_branch_is_not_adopted_and_recovers_on_it() {
+    let repository = repository();
+    let worktree = WorktreeManager::new(repository.path().to_path_buf())
+        .create_for_session("rebasing")
+        .unwrap();
+    let (_, branch) = session_worktree_branch(repository.path(), "rebasing")
+        .unwrap()
+        .unwrap();
+    std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+    git(&worktree, &["add", "a.txt"]);
+    git(&worktree, &["commit", "--quiet", "-m", "first"]);
+    // Mid-rebase or detached: the branch moved, but the worktree is off it.
+    git(&worktree, &["switch", "--quiet", "--detach"]);
+    let error = session_worktree_branch(repository.path(), "rebasing").unwrap_err();
+    assert!(error.contains("not on its branch"), "{error}");
+
+    git(&worktree, &["switch", "--quiet", &branch]);
+    std::fs::write(worktree.join("b.txt"), "two\n").unwrap();
+    git(&worktree, &["add", "b.txt"]);
+    git(&worktree, &["commit", "--quiet", "-m", "second"]);
+    assert!(session_worktree_branch(repository.path(), "rebasing")
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn removal_is_refused_when_the_branch_moved_since_the_preview() {
+    let repository = repository();
+    let worktree = WorktreeManager::new(repository.path().to_path_buf())
+        .create_for_session("moved")
+        .unwrap();
+    let previewed = git(&worktree, &["rev-parse", "HEAD"]);
+    std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+    git(&worktree, &["add", "a.txt"]);
+    git(&worktree, &["commit", "--quiet", "-m", "after the preview"]);
+    let error = remove_session_worktree(repository.path(), "moved", Some(&previewed)).unwrap_err();
+    assert!(error.contains("moved since the preview"), "{error}");
+    assert!(worktree.join("a.txt").exists());
 }
