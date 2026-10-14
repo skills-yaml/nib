@@ -1245,6 +1245,11 @@ resolved.**
 - **N2 (low).** A merge that failed after its commit left the folder on
   the new branch without saying so. The error now names the branch.
 
+**Re-review of `c1a79f2`: approve**, with no new findings. F3's creation
+of a missing instruction file and F4's working-directory limit were agreed
+as documented; writing the whole project from a subdirectory would need
+the project root passed into the mount plan (a possible follow-up).
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
