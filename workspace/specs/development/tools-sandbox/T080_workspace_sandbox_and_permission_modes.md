@@ -1347,6 +1347,16 @@ sandbox implementation. Combined review and native gates precede the push.
   The two fixes after the 5a/5b reviews were small, test-covered and
   author-reviewed; the user merged them. `development` was re-read and
   equals the candidate with no file difference.
+- **Phase 5c integrated:** PR 63 merged the candidate `2e5ec27` (the
+  approved `e216961` plus a merge of `development` that only reconciled
+  the T080 catalog row with PR 62) as
+  `cafca2163fab310361fa8d288f338b5758de3935` on 2026-10-14T20:21:44Z, by
+  the user. A serial `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` passed
+  on `e216961`; PR CI passed Linux Validate and macOS on `2e5ec27`. On
+  `e216961`, macOS first failed the unrelated timing test
+  `session_display_cache_waits_briefly_for_a_busy_session_lock`, and the
+  unchanged re-run passed. `development` was re-read and equals the
+  candidate with no file difference.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;
