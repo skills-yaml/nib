@@ -113,21 +113,28 @@ pub(crate) async fn merge_on_safe_branch(
             Ok(merged)
         }
         (Err(error), Some(branch)) => {
-            undo_merge_branch(project_root, &branch).await;
-            Err(error)
+            if undo_merge_branch(project_root, &branch).await {
+                Err(error)
+            } else {
+                Err(format!(
+                    "{error}; the folder was left on the new branch {}",
+                    branch.created
+                ))
+            }
         }
         (merged, None) => merged,
     }
 }
 
 /// After a failed merge that left HEAD where it was, returns to the
-/// original branch and removes the created one. Best effort.
-pub(crate) async fn undo_merge_branch(project_root: &Path, branch: &MergeBranch) {
+/// original branch and removes the created one. Best effort; returns
+/// whether the folder is back on the original branch.
+pub(crate) async fn undo_merge_branch(project_root: &Path, branch: &MergeBranch) -> bool {
     let unchanged = git_stdout(project_root, ["rev-parse", "HEAD"])
         .await
         .is_ok_and(|head| head == branch.original_commit);
     if !unchanged {
-        return;
+        return false;
     }
     let switched = match &branch.original {
         Some(original) => git_output(project_root, ["switch", "--quiet", original]).await,
@@ -139,7 +146,9 @@ pub(crate) async fn undo_merge_branch(project_root: &Path, branch: &MergeBranch)
             .await
         }
     };
-    if switched.is_ok_and(|output| output.status.success()) {
-        let _ = git_output(project_root, ["branch", "--quiet", "-D", &branch.created]).await;
+    if !switched.is_ok_and(|output| output.status.success()) {
+        return false;
     }
+    let _ = git_output(project_root, ["branch", "--quiet", "-D", &branch.created]).await;
+    true
 }

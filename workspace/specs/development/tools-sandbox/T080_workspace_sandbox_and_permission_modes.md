@@ -105,9 +105,8 @@ Rules for every level:
   and tested:
   1. home mask;
   2. read-only project;
-  3. workspace (the whole working tree that contains the working
-     directory: the main checkout or the managed worktree; until phase 5c
-     only the working directory in the main checkout);
+  3. workspace (the working directory in the main checkout, or the whole
+     managed worktree);
   4. configured `allow_write`;
   5. `.nib` state masks;
   6. the managed worktree re-bound inside the mask;
@@ -1179,6 +1178,8 @@ requests and work in place like interactive ones.
   restrict; its allow lines apply only in a trusted project. The new file
   shows in `git status` and the run's changed paths. Existing instruction
   files are read-only in the sandbox.
+- In the folder, a sandboxed command writes only inside its working
+  directory (`cwd`, `.` by default), not elsewhere in the project (F4).
 - Without usable `bwrap` (macOS, Windows, `full-access`, `hybrid`
   fallback), commands in place are not confined; this is the existing
   direct-execution posture.
@@ -1209,9 +1210,13 @@ requests and work in place like interactive ones.
   `AGENTS.md`/`CLAUDE.md` and strip deny or tightening lines. Fixed: the
   mount plan binds existing top-level instruction files read-only (also
   in the fallback plan); creating a missing one is an accepted limit.
-- **F4 (medium).** A command started in a subdirectory could not write the
-  rest of the project (for example `target`). Fixed: the whole working
-  tree is writable, as in a managed worktree.
+- **F4 (medium).** A command started in a subdirectory cannot write the
+  rest of the project (for example `target`). First fixed by making the
+  whole working tree writable; re-review N1 showed that the Git top can be
+  a larger repository than nib's project, so that was reverted. Accepted
+  and documented instead: in the folder a command writes only inside its
+  `cwd`; the `run_terminal` schema tells the model to keep `cwd` at `.` and
+  `cd` in the command for builds that write elsewhere.
 - **F5.** Tests added: the run records and an instruction line moving a
   session, a scheduled run leaving the session in place, an MCP-server
   call in a worktree, a default command editing the folder, `--worktree`
@@ -1227,6 +1232,18 @@ requests and work in place like interactive ones.
   reads the tightened configuration; gateways and mixed-version daemons
   are stated above. Branch detection stays separate from `git_tools` on
   purpose (hardened Git versus the user's Git).
+
+**Re-review of `669e651`: F1, F2 and F5-F8 resolved; two new findings,
+resolved.**
+- **N1 (medium).** For a nib project nested in a larger Git repository,
+  the widened writable area exposed the whole repository and protected
+  that repository's instruction files instead of the project's. Fixed:
+  the writable area is the working directory again, and instruction files
+  are protected at its top (those above it are read-only already). A
+  native test covers a nested project, its parent repository and a
+  subdirectory.
+- **N2 (low).** A merge that failed after its commit left the folder on
+  the new branch without saying so. The error now names the branch.
 
 ## User Decisions (2026-10-07)
 

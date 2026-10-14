@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 const MANAGED_WORKTREE_PARENT: [&str; 2] = [".nib", "worktrees"];
 /// Instruction files nib reads permission rules and execution directives
 /// from (`nib-policy:`, `nib-sandbox:`, `nib-boundary:`, `nib-workspace:`).
-/// In place they sit inside the writable workspace, so existing ones are
-/// bound read-only: a sandboxed command cannot strip a deny rule or a
-/// tightening directive. Edits go through `apply_patch`, which always asks.
+/// Existing ones at the top of the writable area are bound read-only, so a
+/// sandboxed command cannot strip a deny rule or a tightening directive;
+/// those above it are already read-only. Edits go through `apply_patch`,
+/// which always asks.
 pub(crate) const POLICY_INSTRUCTION_FILES: [&str; 4] = [
     "AGENTS.md",
     "AGENTS.local.md",
@@ -113,17 +114,21 @@ impl ProjectMounts {
             protect_git_entry(args, &self.worktree.join(".git"))?;
         }
         protect_git_entry(args, &self.root.join(".git"))?;
-        protect_instruction_files(args, &self.worktree)?;
+        protect_instruction_files(args, &workspace)?;
         args.extend(["--chdir".to_string(), utf8(cwd)?.to_string()]);
         Ok(())
     }
 
-    /// The writable area: the whole working tree that contains the working
-    /// directory, a managed worktree or the main checkout (T080 phase 5c:
-    /// sessions work in the main checkout, and a build started in a
-    /// subdirectory writes the project's `target` too).
-    fn workspace(&self, _cwd: &Path) -> PathBuf {
-        self.worktree.clone()
+    /// The writable area: the whole managed worktree, or the working
+    /// directory inside the main checkout. In the main checkout the Git top
+    /// can be a larger repository than nib's project, so nothing above the
+    /// working directory is made writable (T080 phase 5c review N1).
+    fn workspace(&self, cwd: &Path) -> PathBuf {
+        if self.is_managed() {
+            self.worktree.clone()
+        } else {
+            cwd.to_path_buf()
+        }
     }
 }
 

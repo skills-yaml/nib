@@ -175,7 +175,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
         ),
         metadata(
             "run_terminal",
-            "Execute a classified shell command in the session worktree and configured sandbox.",
+            "Execute a classified shell command in the session workspace (the user's folder or the session worktree) and configured sandbox.",
             PermissionLevel::Destructive,
             true,
             true,
@@ -183,7 +183,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, ToolMetadata>> = LazyLock::new(|
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "minLength": 1, "maxLength": 65536},
-                    "cwd": {"type": "string", "minLength": 1, "maxLength": 4096, "default": "."},
+                    "cwd": {"type": "string", "minLength": 1, "maxLength": 4096, "default": ".", "description": "Workspace-relative working directory. In the user's folder the sandbox lets the command write only inside it; for builds that write elsewhere in the project, keep \".\" and cd in the command."},
                     "affected_paths": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1, "maxLength": 4096},
