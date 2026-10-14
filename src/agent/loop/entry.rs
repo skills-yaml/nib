@@ -169,19 +169,41 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
             .try_create_session_with_id(session_id.to_string())
             .map_err(|error| error.to_string())?;
     }
-    let resources = AgentResourceTracker::from_session(
-        &runtime
-            .session_store
-            .load_result(session_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "session disappeared before run resource setup".to_string())?,
+    let session_at_start = runtime
+        .session_store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session disappeared before run resource setup".to_string())?;
+    let resources = AgentResourceTracker::from_session(&session_at_start);
+    // T080 phase 5c: decide where this session works. A forced worktree
+    // (scheduled work) is not recorded on the session.
+    let decided_workspace = crate::tools::workspace::decide(
+        runtime.profile.root_path(),
+        &runtime.nib_cfg.execution.workspace,
+        session_at_start.workspace.as_ref(),
+        session_id,
     );
+    let run_workspace = match cfg.required_worktree.as_deref() {
+        Some(reason)
+            if !crate::tools::workspace::project_is_linked_worktree(
+                runtime.profile.root_path(),
+            ) =>
+        {
+            crate::session::SessionWorkspace::worktree(reason)
+        }
+        _ => decided_workspace.clone(),
+    };
+    let records_workspace = cfg.required_worktree.is_none();
     // T081 clears interrupted plans only for interactive chat requests, the
     // only route the planning gate guards. Compaction never changes plans;
     // subagents, background tasks and CLI runs keep failed plans for review.
     let clears_plans = cfg.interactive_request && cfg.mode != "compact";
-    let mut run_started =
-        run_started_workspace(runtime.profile.root_path(), &sessions_dir, session_id);
+    let mut run_started = run_started_workspace(
+        runtime.profile.root_path(),
+        &sessions_dir,
+        session_id,
+        &run_workspace,
+    );
     run_started["run_id"] = json!(run_id.clone());
     runtime
         .session_store
@@ -195,6 +217,9 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                 ));
             }
             append_session_event(session, "run_started", run_started);
+            if records_workspace {
+                session.workspace = Some(decided_workspace);
+            }
             // Plans interrupted before T081 cleared them at termination are
             // cleared now, so they cannot trap this request.
             if clears_plans {

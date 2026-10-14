@@ -1,5 +1,6 @@
 //! T080 phase 5b: in place, each audited edit records the project files it
-//! changed; in a managed worktree nothing is recorded.
+//! changed; in a managed worktree nothing is recorded. Phase 5c: in place is
+//! the default.
 
 use super::stale_write_tests::{call, executor, git, patch, read, shared_folder};
 use super::*;
@@ -81,21 +82,11 @@ async fn in_place_patches_and_commands_record_what_they_changed() {
 #[tokio::test]
 async fn a_managed_worktree_records_no_changed_paths() {
     let _home = TestNibHome::isolated();
-    let repository = tempfile::tempdir().unwrap();
-    let root = repository.path().join("main");
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(root.join("a.txt"), "one\n").unwrap();
-    git(&root, &["init", "--quiet"]);
-    git(
-        &root,
-        &["config", "user.email", "nib-tests@example.invalid"],
-    );
-    git(&root, &["config", "user.name", "nib tests"]);
-    git(&root, &["add", "a.txt"]);
-    git(&root, &["commit", "--quiet", "-m", "initial"]);
+    let (_repository, root) = main_checkout();
     let store = SessionStore::new(&root);
     let session = store.create_session_with_id("isolated-session");
-    let mut executor = executor(&root, &store);
+    let mut executor =
+        executor(&root, &store).with_workspace(crate::session::SessionWorkspace::worktree("test"));
 
     read(&mut executor, &root, &session.id, "a.txt").await;
     let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
@@ -108,4 +99,71 @@ async fn a_managed_worktree_records_no_changed_paths() {
     assert!(changed_paths(&store, &session.id)
         .iter()
         .all(Option::is_none));
+}
+
+fn main_checkout() -> (tempfile::TempDir, std::path::PathBuf) {
+    let repository = tempfile::tempdir().unwrap();
+    let root = repository.path().join("main");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(&root, &["init", "--quiet"]);
+    git(
+        &root,
+        &["config", "user.email", "nib-tests@example.invalid"],
+    );
+    git(&root, &["config", "user.name", "nib tests"]);
+    git(&root, &["add", "a.txt"]);
+    git(&root, &["commit", "--quiet", "-m", "initial"]);
+    (repository, root)
+}
+
+/// T080 phase 5c: by default a session edits the main checkout directly and
+/// no session worktree is created.
+#[tokio::test]
+async fn a_default_session_edits_the_main_checkout_in_place() {
+    let _home = TestNibHome::isolated();
+    let (_repository, root) = main_checkout();
+    let top = root.canonicalize().unwrap().to_string_lossy().to_string();
+    let store = SessionStore::new(&root);
+    let session = store.create_session_with_id("default-session");
+    let mut executor = executor(&root, &store);
+
+    read(&mut executor, &root, &session.id, "a.txt").await;
+    let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
+    assert!(applied.success, "{applied:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "two\n"
+    );
+    assert!(!root.join(".nib/worktrees/sessions").exists());
+    assert_eq!(
+        changed_paths(&store, &session.id).last().cloned().flatten(),
+        Some(ChangedPaths {
+            root: top,
+            paths: vec!["a.txt".to_string()],
+            complete: true,
+        })
+    );
+}
+
+/// Scheduled runs and MCP-server calls always use a worktree, whatever the
+/// session records.
+#[tokio::test]
+async fn a_required_worktree_overrides_an_in_place_session() {
+    let _home = TestNibHome::isolated();
+    let (_repository, root) = main_checkout();
+    let store = SessionStore::new(&root);
+    let session = store.create_session_with_id("scheduled-session");
+    let mut executor = executor(&root, &store)
+        .with_workspace(crate::session::SessionWorkspace::in_place("default"))
+        .with_required_worktree(crate::tools::workspace::SCHEDULED_REASON);
+
+    read(&mut executor, &root, &session.id, "a.txt").await;
+    let applied = patch(&mut executor, &root, &session.id, ONE_TO_TWO, false).await;
+    assert!(applied.success, "{applied:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(root.join(".nib/worktrees/sessions").is_dir());
 }

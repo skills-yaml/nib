@@ -311,6 +311,12 @@ pub(crate) async fn merge_verified_subagent_worktree(
             return persist_merge_failure(&project_root, &mut record, &mut record_file, error);
         }
     };
+    let branch = match branch_before_merge(&project_root, &record.id).await {
+        Ok(branch) => branch,
+        Err(error) => {
+            return persist_merge_failure(&project_root, &mut record, &mut record_file, error);
+        }
+    };
     begin_pending_merge(
         &mut record,
         verification_command,
@@ -320,14 +326,25 @@ pub(crate) async fn merge_verified_subagent_worktree(
     persist_subagent_record_revision(&project_root, &record, &mut record_file)?;
 
     let intent = pending_merge_intent(&record)?;
-    reconcile_pending_merge(
+    let merged = reconcile_pending_merge(
         &project_root,
         &mut record,
         &mut record_file,
         &intent,
         &evidence,
     )
-    .await
+    .await;
+    match (merged, branch) {
+        (Ok(mut merged), Some(branch)) => {
+            merged["created_branch"] = json!(branch.created);
+            Ok(merged)
+        }
+        (Err(error), Some(branch)) => {
+            undo_merge_branch(&project_root, &branch).await;
+            Err(error)
+        }
+        (merged, None) => merged,
+    }
 }
 
 pub fn send_message_to_subagent(args: &Value, project_root: &Path) -> Result<Value, String> {

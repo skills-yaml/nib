@@ -808,3 +808,28 @@ workspace, the checkpoint before the run and the other live sessions;
 `run_terminal` records the run's changed paths and their identity. Phase 5 is
 re-split: 5b these records, 5c the in-place default, `/worktree` and the D2
 amendments, 5d `/land`.
+
+## 2026-10-14 - T080 phase 5c: sessions work in place by default
+
+- Type: decision
+- Source: T080 (user decisions D2, D6)
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: the worktree-first session default
+
+Content:
+
+Each session records its workspace (`in_place` or `worktree`, with a reason)
+and each run decides it in this order: a linked-worktree project works in
+place; a recorded worktree stays; a `nib-workspace: worktree` line in a
+project instruction file (tighten-only, like `nib-sandbox:`); configuration
+`execution.workspace = "worktree"`; a pre-5c session that already has a
+session worktree keeps it; otherwise in place (default). `/worktree`,
+`nib --worktree` and `nib run --worktree` record a worktree; nothing moves a
+session back before `/land` (5d). Prose such as "keep the primary checkout
+coordination-only" is deliberately not interpreted. Scheduled runs and
+MCP-server calls always use a worktree without recording it on the session;
+subagents keep their own worktrees. A subagent merge never commits directly to
+the default, `main`/`master` or a detached HEAD: it first creates
+`nib/subagent-<id>`, like `git_commit`. `permissions.md` and
+`backend_rust.md` were amended as approved in D2.

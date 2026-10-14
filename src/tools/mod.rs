@@ -12,6 +12,7 @@ pub(crate) mod observed_changes;
 pub(crate) mod permission_matching;
 pub(crate) mod permission_rules;
 pub mod registry;
+pub(crate) mod workspace;
 
 pub use delegation::{merge_subagent_worktree, spawn_subagent};
 pub use executor::{tools_json_schema, ToolExecutor};

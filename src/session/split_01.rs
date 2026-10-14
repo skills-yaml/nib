@@ -492,6 +492,53 @@ pub struct Session {
     /// `approvals.mode` for this session's runs (T080).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Where this session works, decided at its runs (T080 phase 5c).
+    /// Absent for sessions from before phase 5c.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<SessionWorkspace>,
+}
+
+/// A session's workspace: the user's folder or its own managed worktree,
+/// with the reason shown to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionWorkspace {
+    pub mode: WorkspaceMode,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    InPlace,
+    Worktree,
+}
+
+impl SessionWorkspace {
+    pub fn in_place(reason: impl Into<String>) -> Self {
+        Self {
+            mode: WorkspaceMode::InPlace,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn worktree(reason: impl Into<String>) -> Self {
+        Self {
+            mode: WorkspaceMode::Worktree,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn is_worktree(&self) -> bool {
+        self.mode == WorkspaceMode::Worktree
+    }
+
+    /// `in_place` or `worktree`, as recorded in run events.
+    pub fn label(&self) -> &'static str {
+        match self.mode {
+            WorkspaceMode::InPlace => "in_place",
+            WorkspaceMode::Worktree => "worktree",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -599,13 +646,21 @@ pub(crate) fn session_mismatch_field(expected: &Session, published: &Session) ->
     if expected.queued_follow_ups != published.queued_follow_ups {
         return "queued_follow_ups";
     }
+    session_settings_mismatch(expected, published).unwrap_or("unknown field")
+}
+
+fn session_settings_mismatch(expected: &Session, published: &Session) -> Option<&'static str> {
     if expected.display_name != published.display_name {
-        return "display_name";
+        Some("display_name")
+    } else if expected.forked_from != published.forked_from {
+        Some("forked_from")
+    } else if expected.permission_mode != published.permission_mode {
+        Some("permission_mode")
+    } else if expected.workspace != published.workspace {
+        Some("workspace")
+    } else {
+        None
     }
-    if expected.forked_from != published.forked_from {
-        return "forked_from";
-    }
-    "unknown field"
 }
 
 /// A session that changed more files than this in place is treated as
@@ -693,6 +748,7 @@ impl Session {
             display_name: None,
             forked_from: None,
             permission_mode: None,
+            workspace: None,
         }
     }
 

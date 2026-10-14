@@ -20,6 +20,7 @@ use crate::config::BoundaryConfig;
 use crate::tools::executor::ApprovalHandler;
 use crate::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
 
+mod merge_branch;
 mod part_00;
 mod part_01;
 mod part_01b;
@@ -32,6 +33,7 @@ mod part_06;
 mod part_06b;
 mod part_07;
 
+pub(crate) use merge_branch::*;
 #[allow(unused_imports)]
 pub(crate) use part_00::*;
 #[allow(unused_imports)]

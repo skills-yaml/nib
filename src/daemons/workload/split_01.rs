@@ -932,6 +932,7 @@ pub(crate) async fn run_schedule_worker(
                     mode: "plan".to_string(),
                     auto_approve: false,
                     cancellation: Some(cancellation.clone()),
+                    required_worktree: Some(crate::tools::workspace::SCHEDULED_REASON.to_string()),
                     ..AgentLoopConfig::default()
                 },
                 run_lease,

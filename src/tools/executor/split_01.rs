@@ -42,6 +42,8 @@ impl ToolExecutor {
             worktree_manager: None,
             project_read_fallback: false,
             prepared_worktree_for_batch: false,
+            workspace: None,
+            required_worktree: None,
             mcp_manager: None,
             policy_rules: resolved.policy_rules,
             policy_hooks: Vec::new(),
@@ -79,7 +81,12 @@ impl ToolExecutor {
             profile: resolved.config.default_profile,
             network: resolved.config.boundaries.network,
             mutation_plan_gate: resolved.config.plan_mode,
-            mutation_owned_worktree_gate: true,
+            // T080 phase 5c: sessions work in place unless configuration or
+            // project instructions require worktrees.
+            mutation_owned_worktree_gate: !crate::tools::workspace::project_is_linked_worktree(
+                &project_root,
+            ) && (resolved.config.workspace == "worktree"
+                || crate::tools::workspace::instruction_requirement(&project_root).is_some()),
             instruction_posture: resolved.instruction_posture,
             sandbox_route,
             broad_or_off,
@@ -109,6 +116,19 @@ impl ToolExecutor {
 
     pub fn with_approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
         self.approval_handler = handler;
+        self
+    }
+
+    /// Uses the workspace the agent loop decided for this run.
+    pub fn with_workspace(mut self, workspace: crate::session::SessionWorkspace) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
+    /// Always uses a session worktree, for the given reason (scheduled runs
+    /// and MCP-server calls).
+    pub fn with_required_worktree(mut self, reason: impl Into<String>) -> Self {
+        self.required_worktree = Some(reason.into());
         self
     }
 
@@ -1242,7 +1262,7 @@ impl ToolExecutor {
         let Some(session_id) = session_id.or(call.session_id.as_deref()) else {
             return Ok(Some(effective_root));
         };
-        if Self::edits_in_place(&self.project_root) {
+        if !self.session_workspace(session_id).is_worktree() {
             return Ok(Some(effective_root));
         }
         let Some(worktree_root) = crate::integrations::worktree::with_validated_session_worktree(
@@ -1267,11 +1287,33 @@ impl ToolExecutor {
         Ok(Some(target))
     }
 
-    /// Whether sessions in this project edit the folder in place rather than
-    /// in a managed session worktree. Today that is a project that is itself
-    /// a linked worktree (T080 phase 5c makes in place the default).
-    pub(crate) fn edits_in_place(project_root: &Path) -> bool {
-        project_root.join(".git").is_file()
+    /// Where this session works (T080 phase 5c): the folder, or its own
+    /// managed worktree. A project that is itself a linked worktree always
+    /// works in place; scheduled runs and MCP-server calls always use a
+    /// worktree; otherwise the run's decision, or the session file's.
+    pub(crate) fn session_workspace(&self, session_id: &str) -> crate::session::SessionWorkspace {
+        use crate::session::SessionWorkspace;
+        use crate::tools::workspace;
+        if workspace::project_is_linked_worktree(&self.project_root) {
+            return SessionWorkspace::in_place(workspace::LINKED_PROJECT_REASON);
+        }
+        if let Some(reason) = &self.required_worktree {
+            return SessionWorkspace::worktree(reason.clone());
+        }
+        if let Some(decided) = &self.workspace {
+            return decided.clone();
+        }
+        let recorded = self
+            .session_store
+            .as_ref()
+            .and_then(|store| store.load_result(session_id).ok().flatten())
+            .and_then(|session| session.workspace);
+        workspace::decide(
+            &self.project_root,
+            &self.execution_config.workspace,
+            recorded.as_ref(),
+            session_id,
+        )
     }
 
     pub(crate) async fn ensure_worktree(
@@ -1287,7 +1329,7 @@ impl ToolExecutor {
                 Ok(None)
             };
         };
-        if Self::edits_in_place(&self.project_root) {
+        if !self.session_workspace(session_id).is_worktree() {
             return Ok(Some(effective_root.to_path_buf()));
         }
         if self.worktree_manager.is_none() {
@@ -1644,12 +1686,22 @@ impl ToolExecutor {
         reason: &str,
     ) -> ApprovalContext {
         let secrets = normalized_encoded_sensitive_values(self.redaction_secrets());
-        let worktree = if requires_worktree && session_id.is_some() {
-            "required; a session-owned managed worktree will be created or reused after approval"
-        } else if requires_worktree {
-            "required; execution will fail closed without an authoritative session"
-        } else {
-            "not required for this action"
+        let worktree = match session_id {
+            Some(session_id) if requires_worktree => {
+                let workspace = self.session_workspace(session_id);
+                if workspace.is_worktree() {
+                    format!(
+                        "this session's own worktree, created or reused after approval ({})",
+                        workspace.reason
+                    )
+                } else {
+                    "none; this action works directly in your folder".to_string()
+                }
+            }
+            None if requires_worktree => {
+                "required; execution will fail closed without an authoritative session".to_string()
+            }
+            _ => "not required for this action".to_string(),
         };
         let (display_subject, display_location) = normalized_approval_display(call, &secrets);
         let environment = match crate::sandbox::resolve_sandbox_execution_route(
@@ -1675,7 +1727,7 @@ impl ToolExecutor {
                 &effective_execution_config.boundaries.network,
                 &secrets,
             ),
-            worktree: bounded_approval_field(worktree, &secrets),
+            worktree: bounded_approval_field(&worktree, &secrets),
             reason: bounded_approval_field(reason, &secrets),
             choices: "approve once or deny".to_string(),
             details: approval_invocation_details(call, &secrets),

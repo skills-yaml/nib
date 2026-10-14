@@ -157,6 +157,10 @@ pub struct ExecutionConfig {
     pub boundaries: BoundaryConfig,
     #[serde(default)]
     pub boundary_profiles: HashMap<String, BoundaryConfig>,
+    /// Where sessions work (T080 phase 5c): `in_place` edits the folder
+    /// directly; `worktree` gives each session its own managed worktree.
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
 }
 
 impl Default for ExecutionConfig {
@@ -167,8 +171,13 @@ impl Default for ExecutionConfig {
             plan_mode: true,
             boundaries: BoundaryConfig::default(),
             boundary_profiles: HashMap::new(),
+            workspace: default_workspace(),
         }
     }
+}
+
+pub(crate) fn default_workspace() -> String {
+    "in_place".to_string()
 }
 
 pub(crate) fn default_execution_provider() -> String {
@@ -895,6 +904,9 @@ impl NibConfig {
             "restricted" | "internal"
         ) {
             issues.push("execution.default_profile must be restricted or internal".to_string());
+        }
+        if !matches!(self.execution.workspace.as_str(), "in_place" | "worktree") {
+            issues.push("execution.workspace must be in_place or worktree".to_string());
         }
         validate_boundary_config(
             "execution.boundaries",

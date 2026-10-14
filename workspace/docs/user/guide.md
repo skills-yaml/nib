@@ -6,10 +6,10 @@ This guide covers installing, configuring, operating, updating, and removing `ni
 
 The release pipeline publishes pre-built archives for Linux x86_64, macOS x86_64 and
 Apple Silicon, and Windows x86_64. Runtime platform gates outside Linux were not
-executed in this reconciliation. Git is required for isolated worktrees and delegation.
+executed in this reconciliation. Git is required for worktrees and delegation.
 On Linux, the default
 `hybrid` execution provider uses `bwrap` when the host permits it and otherwise runs
-inside the Git worktree without OS-level isolation. Set `execution.provider = "bwrap"`
+in the session's workspace without OS-level isolation. Set `execution.provider = "bwrap"`
 to fail closed when `bwrap` is unavailable.
 
 ### Linux and macOS
@@ -78,7 +78,8 @@ state is project-local:
 - `.nib/profiles/default/memory.json`: durable environment and user memory.
 - `.nib/profiles/default/daemons/`: cron state, pins, and maintenance audit.
 - `.nib/skills/`: project-local skills.
-- `.nib/worktrees/sessions/` and `.nib/worktrees/subagents/`: isolated Git worktrees.
+- `.nib/worktrees/sessions/` and `.nib/worktrees/subagents/`: Git worktrees for
+  sessions that use one, and for subagents.
 - `.nib/subagents/`: linked delegation records.
 
 Configured profiles replace `default` with their profile ID or custom `state_dir`.
@@ -459,9 +460,10 @@ Goals larger than 20,000 UTF-8 bytes are rejected before session persistence. St
 and final one-shot status lines are bounded and control-safe and do not echo the full
 goal.
 
-In a normal Git checkout, edits remain in a `nib/session/*` branch under
-`.nib/worktrees/sessions/` until reviewed and merged manually. When nib is already
-running inside a linked worktree, edits remain in that worktree.
+nib edits the folder it was started in, directly: changes show up in your editor and
+in `git status` right away, uncommitted, on your current branch. `nib run --worktree`
+works in a separate worktree instead (see [Where nib works](#where-nib-works)). The
+first lines of `nib run` say which, and why.
 
 nib is instructed to inspect available information before asking questions, clarify
 missing details that affect the result, and keep plans and tool use proportional to
@@ -471,7 +473,7 @@ blocked. Required approvals and the configured turn limit still apply.
 Plans can carry required verification separately from their step state. `/status`
 shows every requirement's ID, state, and authority together with the saved plan
 and step detail. A required command receives credit only when its
-exact persisted tool call succeeds on the same managed worktree content; an unrelated
+exact persisted tool call succeeds on the same workspace content; an unrelated
 successful command cannot clear it. Later relevant changes make prior evidence stale.
 Absence checks use the typed `grep` result and pass only when the result is empty and
 untruncated.
@@ -495,7 +497,7 @@ change and acceptance criteria, for example:
 nib run "Fix the reported parser bug. Follow AGENTS.md and the development spec, add a regression test, run task verify, and review the diff."
 ```
 
-The same tools and worktree workflow apply to nib's repository. Source changes need
+The same tools and workspace rules apply to nib's repository. Source changes need
 review and a new build before they affect the executable you are running. A successful
 tool call alone does not establish that the whole requested change is correct; review
 the reported checks and remaining limitations.
@@ -534,8 +536,8 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   posture, plan, and queued follow-up count. When a run stops, the transcript
   shows a heading, a reason, and a next action (usually inspect `/status`) instead
   of an internal token such as `local_error`.
-  If managed Git worktree preparation fails, nib records a bounded failure category
-  and rejects tools that require the worktree. Independent project reads may still
+  If a worktree session's Git worktree cannot be prepared, nib records a bounded
+  failure category and rejects tools that require the worktree. Independent project reads may still
   run from the main checkout. If every tool needs the worktree, the run stops and
   advises running `nib doctor`. Doctor checks owned session receipt paths, Git
   registrations, and branches without repairing uncertain state.
@@ -1168,10 +1170,9 @@ not lock the folder; it protects each file instead.
   edit fails with `file changed since you read it` (or asks for a read) and
   writes nothing; the agent re-reads the file and tries again. New files need
   no read, and the agent's own consecutive edits need no re-read.
-- Today sessions edit in their own worktree, so this matters mainly when nib
-  runs in place: when the folder is itself a linked Git worktree, or when the
-  agent read a file in your checkout that differs in its session worktree.
-  Phase 5c of T080 makes in-place editing the default.
+- This matters because sessions edit the folder directly by default. A
+  session in its own worktree (`/worktree`) is not affected by edits in the
+  folder.
 - Terminal commands are not checked this way. A command that rewrites files
   (a formatter, code generation) can overwrite concurrent edits.
 - The footer shows `1 other session in this folder` (or `N other sessions`)
@@ -1188,6 +1189,38 @@ not lock the folder; it protects each file instead.
   elsewhere; each run's record lists the other sessions active at its start.
   Use a worktree when you need full isolation.
 
+### Where nib works
+
+By default a session edits the folder nib was started in, directly, like Claude
+Code: edits appear in your editor and `git status` at once, on your current branch,
+and stay uncommitted until you ask nib to commit. Checkpoints (`/rewind`), the
+stale-write check and the permission mode protect that folder; Git metadata stays
+read-only and `.nib` stays hidden in the sandbox.
+
+A session works in its own Git worktree, on a `nib/session/...` branch under
+`.nib/worktrees/sessions/`, when:
+
+- you run `/worktree` (from the session's next request) or start nib with
+  `nib --worktree` or `nib run --worktree`;
+- `.nib/config.toml` sets `execution.workspace = "worktree"`;
+- the project's `AGENTS.md` (or `CLAUDE.md`, their `.local.md` variants or a project
+  skill) has the line `nib-workspace: worktree`. nib does not read prose such as
+  "keep the main checkout clean" as this requirement; add the line instead;
+- the session already had a worktree before nib worked in place.
+
+A worktree starts from the last commit, so uncommitted changes in the folder,
+including the session's own earlier edits, stay in the folder. Once a session works
+in a worktree it stays there; its work is not moved back automatically. The status
+line shows `worktree` instead of your branch, and `/status` shows the worktree and
+the reason.
+
+Subagents, scheduled tasks and calls through `nib mcp-server` always use their own
+worktrees. When nib merges a subagent's work into the folder, the folder must have
+no uncommitted changes; on the default branch, `main`, `master` or a detached HEAD,
+nib first creates and switches to a `nib/subagent-...` branch, as it does for
+commits. When the folder is itself a linked Git worktree, nib always works in it
+directly.
+
 ## Safety and Persistence
 
 Agent-selected tool calls use `ToolExecutor`. It applies scope checks, tool and shell
@@ -1196,9 +1229,10 @@ optional `bwrap`, redaction, and a session audit record. User-invoked skill inst
 and configured MCP child-process startup are separate trust boundaries described
 above.
 
-Mutating tools use a session worktree. For shell commands, `internal` runs directly in
-that worktree, `hybrid` uses Linux `bwrap` when usable and otherwise runs directly in
-the worktree, and `bwrap` fails closed when unavailable. Only usable `bwrap` provides
+Mutating tools run in the session's workspace: the folder by default, or its own
+worktree. For shell commands, `internal` runs directly there, `hybrid` uses Linux
+`bwrap` when usable and otherwise runs directly, and `bwrap` fails closed when
+unavailable. Only usable `bwrap` provides
 OS-level filesystem and network isolation. `nib doctor` reports the effective
 capability.
 

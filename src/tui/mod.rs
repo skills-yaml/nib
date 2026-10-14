@@ -85,6 +85,7 @@ pub fn run_tui(
     run_goal: Option<String>,
     requested_session: Option<String>,
     update_notice: Option<String>,
+    worktree: bool,
 ) -> io::Result<()> {
     if let Some(session_id) = requested_session.as_deref() {
         crate::config::load_nib_config_full(project_root)
@@ -129,7 +130,17 @@ pub fn run_tui(
             resolve_session(&store, requested_session.as_deref()).map_err(io::Error::other)?;
         let active_session_id = resolution.session_id().to_string();
         let session_origin = resolution.tui_origin().to_string();
-        let session_notice = resolution.tui_notice();
+        let mut session_notice = resolution.tui_notice();
+        // `--worktree` (T080 phase 5c): the session works in its own worktree.
+        if worktree {
+            let summary =
+                crate::interactive::start_in_worktree(project_root, &store, &active_session_id)
+                    .map_err(io::Error::other)?;
+            session_notice = Some(match session_notice {
+                Some(notice) => format!("{notice} {summary}"),
+                None => summary,
+            });
+        }
         let welcome = StartupWelcome::new(project_root, update_notice);
         draw_loop(
             terminal,

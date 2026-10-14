@@ -1004,6 +1004,64 @@ async fn dirty_parent_is_preserved_and_retry_succeeds_after_user_cleans_it() {
     assert!(retried.success, "{:?}", retried.error);
 }
 
+/// T080 phase 5c (D6): a merge never commits directly to a default or
+/// protected branch; it branches first. On another branch it merges there.
+#[tokio::test]
+async fn merge_onto_a_protected_branch_creates_a_nib_branch_first() {
+    let root = git_repository();
+    git(root.path(), &["switch", "-q", "-C", "main"]);
+    let main_before = git_stdout(root.path(), &["rev-parse", "main"]);
+    let store = SessionStore::for_project(root.path()).expect("session store");
+    store.create_session_with_id("parent-protected");
+    let mut executor = merge_executor(root.path(), store);
+
+    let worktree = Worktree::create(root.path(), "sub-protected").expect("worktree");
+    std::fs::write(worktree.path.join("result.txt"), "delegated\n").expect("result");
+    completed_record(root.path(), "sub-protected", &worktree);
+    let merged = execute_merge(
+        &mut executor,
+        root.path(),
+        "parent-protected",
+        "sub-protected",
+        "test -f result.txt",
+    )
+    .await;
+    assert!(merged.success, "{:?}", merged.error);
+    assert_eq!(
+        merged.output.as_ref().unwrap()["created_branch"],
+        "nib/subagent-sub-protected"
+    );
+    assert_eq!(
+        git_stdout(root.path(), &["branch", "--show-current"]),
+        "nib/subagent-sub-protected"
+    );
+    assert_eq!(git_stdout(root.path(), &["rev-parse", "main"]), main_before);
+    assert!(root.path().join("result.txt").is_file());
+
+    let worktree = Worktree::create(root.path(), "sub-feature").expect("worktree");
+    std::fs::write(worktree.path.join("more.txt"), "more\n").expect("result");
+    completed_record(root.path(), "sub-feature", &worktree);
+    let merged = execute_merge(
+        &mut executor,
+        root.path(),
+        "parent-protected",
+        "sub-feature",
+        "test -f more.txt",
+    )
+    .await;
+    assert!(merged.success, "{:?}", merged.error);
+    assert!(merged
+        .output
+        .as_ref()
+        .unwrap()
+        .get("created_branch")
+        .is_none());
+    assert_eq!(
+        git_stdout(root.path(), &["branch", "--show-current"]),
+        "nib/subagent-sub-protected"
+    );
+}
+
 #[tokio::test]
 async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
     let root = git_repository();

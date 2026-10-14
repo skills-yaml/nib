@@ -227,7 +227,8 @@ pub(crate) async fn call_tool(
         .with_session_store(runtime.session_store)
         .with_environment(&runtime.environment)
         .with_sensitive_values(config.public_session_sensitive_values())
-        .with_approval_handler(std::sync::Arc::new(DenyInteractiveApproval));
+        .with_approval_handler(std::sync::Arc::new(DenyInteractiveApproval))
+        .with_required_worktree(crate::tools::workspace::MCP_SERVER_REASON);
     if let Some(cancellation) = cancellation {
         executor = executor.with_cancellation(cancellation.clone());
     }

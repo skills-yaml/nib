@@ -1580,6 +1580,9 @@ pub struct AgentLoopConfig {
     pub continuation_plan_id: Option<String>,
     /// A lease-persisted recovered discussion permits conversation on this exact call.
     pub discussion_invocation_id: Option<crate::tools::ToolInvocationId>,
+    /// Always work in a session worktree, for this reason (scheduled work,
+    /// T080 phase 5c). Not recorded on the session.
+    pub required_worktree: Option<String>,
 }
 
 impl Default for AgentLoopConfig {
@@ -1599,6 +1602,7 @@ impl Default for AgentLoopConfig {
             steering: None,
             continuation_plan_id: None,
             discussion_invocation_id: None,
+            required_worktree: None,
         }
     }
 }

@@ -22,7 +22,7 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Branches nib never commits to directly; it branches first (user decision D6).
-const PROTECTED_BRANCHES: [&str; 2] = ["main", "master"];
+pub(crate) const PROTECTED_BRANCHES: [&str; 2] = ["main", "master"];
 const BRANCH_PREFIX: &str = "nib/";
 /// Pathspec that keeps nib state out of every commit.
 const EXCLUDE_NIB_STATE: &str = ":(exclude,top).nib";

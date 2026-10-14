@@ -22,6 +22,10 @@ pub struct ChatArgs {
     /// Force the full-screen terminal renderer
     #[arg(long, conflicts_with = "plain")]
     pub tui: bool,
+
+    /// Work in the session's own Git worktree instead of this folder
+    #[arg(long)]
+    pub worktree: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +470,7 @@ pub fn run_interactive(args: &ChatArgs) -> Result<(), String> {
             args.run.clone(),
             args.session.clone(),
             crate::updater::startup_update_notice(),
+            args.worktree,
         )
         .map_err(|error| error.to_string()),
     }
@@ -602,6 +607,12 @@ pub(crate) fn run_plain_with_input_and_modal_state(
         }
     }
     let mut sid = resolution.session_id().to_string();
+    if args.worktree {
+        println!(
+            "{}",
+            nib::interactive::start_in_worktree(project, &session_store, &sid)?
+        );
+    }
     // Other sessions in this folder see this one (T080 section 6).
     let start_presence = |sid: &str| {
         nib::session::presence::PresenceHeartbeat::start(session_store.sessions_dir(), project, sid)

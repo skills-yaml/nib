@@ -322,7 +322,15 @@ fn permissions_use_instruction_tightening_and_invalid_directives_fail_closed() {
     assert!(tightened.contains("provider: bwrap"));
     assert!(tightened.contains("network: disabled"));
     assert!(tightened.contains("tightened by project instructions"));
-    assert!(tightened.contains("managed-owned-worktree gate: required"));
+    assert!(tightened.contains("managed-owned-worktree gate: not required"));
+
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "nib-boundary: disable-network\nnib-workspace: worktree\n",
+    )
+    .expect("instruction worktree requirement");
+    let isolated = format_permissions(project.path()).expect("worktree posture");
+    assert!(isolated.contains("managed-owned-worktree gate: required"));
 
     std::fs::write(project.path().join("AGENTS.md"), "nib-boundary: profile\n")
         .expect("invalid instruction boundary");
@@ -395,7 +403,7 @@ fn status_reports_resolved_transport_bounded_context_and_control_safe_values() {
     )
     .expect("status");
     assert!(output.contains("profile status-profile"), "{output}");
-    assert!(output.contains("worktree -"), "{output}");
+    assert!(output.contains("·  in place"), "{output}");
     assert!(!output.contains("stale-historical-worktree"), "{output}");
     assert!(output.contains("transport local"), "{output}");
     assert!(output.contains("context ~"), "{output}");
@@ -575,7 +583,20 @@ fn tui_chrome_never_exposes_a_managed_worktree_session_uuid() {
     assert!(!chrome.folder.contains(&session.id), "{}", chrome.folder);
     assert!(!chrome.branch.contains(&session.id), "{}", chrome.branch);
     assert!(!chrome.model.contains(&session.id), "{}", chrome.model);
-    assert_eq!(chrome.branch, "session");
+    assert_eq!(chrome.branch, "worktree");
+
+    // A session recorded in place shows the folder's branch, even when a
+    // worktree exists for it (for example one a scheduled run created).
+    store
+        .update_session(&session.id, |session| {
+            session.workspace = Some(crate::session::SessionWorkspace::in_place("default"));
+            Ok(())
+        })
+        .expect("record in place");
+    let persisted = store.load(&session.id).expect("persisted session");
+    let chrome = format_tui_interaction_chrome(repository.path(), Some(&persisted), &session.id)
+        .expect("in-place chrome");
+    assert_ne!(chrome.branch, "worktree");
 }
 
 #[test]

@@ -50,7 +50,7 @@ pub use split_00::{
 };
 pub use split_01::{
     QueuedFollowUp, Session, SessionDeleteOutcome, SessionError, SessionEvent, SessionStore,
-    SkillUsageRecord,
+    SessionWorkspace, SkillUsageRecord, WorkspaceMode,
 };
 
 #[cfg(test)]

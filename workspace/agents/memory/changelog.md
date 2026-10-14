@@ -861,3 +861,16 @@ Content:
 
 Recorded the compact animated-star wait-line preference in preferences.md, with
 explicit human-wait labels and approximate current-run generated-token counts.
+
+## 2026-10-14 - T080 phase 5c in-place default decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the in-place session default, the workspace decision order, forced
+worktrees and branch-first subagent merges in decisions.md.

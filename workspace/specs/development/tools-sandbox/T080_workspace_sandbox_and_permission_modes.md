@@ -1080,6 +1080,109 @@ The accepted limits for F7 were agreed.
 
 **Re-review of `54104c6`: approve**, with no new findings.
 
+### Phase 5c Plan
+
+Goal: a session edits the user's folder directly unless isolation is
+requested or required (sections 1 and 7, AC-3 in part, AC-6h, AC-8).
+
+**Where a session works.** Each session records its workspace,
+`in_place` or `worktree`, with the reason, in the session file. At the
+start of every run nib decides, in this order:
+1. A project that is itself a linked Git worktree works in place, as
+   today (nib does not nest session worktrees there).
+2. A session already recorded as `worktree` stays in its worktree. Work
+   there is landed or discarded with `/land` (5d), never dropped silently.
+3. A `nib-workspace: worktree` line in the project's instruction files
+   (`AGENTS.md`, `AGENTS.local.md`, `CLAUDE.md`, `CLAUDE.local.md`, project
+   skills), next to the existing `nib-sandbox:` and `nib-boundary:` lines.
+   Like them it can only tighten, and `/permissions` reports it. nib does
+   not interpret prose such as "keep the primary checkout
+   coordination-only". A project states the requirement with this line.
+4. `execution.workspace = "worktree"` in configuration.
+5. A session from before 5c with no recorded workspace that already has a
+   session worktree keeps it, so its earlier edits stay visible.
+6. Otherwise in place (`execution.workspace = "in_place"`, the default).
+
+The decision is written to the session and to `run_started`
+(`workspace`, `workspace_reason`). Steps 3 and 4 also move an in-place
+session into a worktree at its next run. Nothing moves a session from a
+worktree back into the folder before `/land`.
+
+**Asking for a worktree.**
+- `/worktree` records `worktree` for the current session ("you ran
+  /worktree") from its next request. It is idle-only, like `/rewind`. It
+  says that the worktree starts from the last commit, and that
+  uncommitted changes in the folder stay there.
+- `nib --worktree` (interactive) and `nib run --worktree` do the same
+  for the session they start or resume.
+
+**Always isolated.**
+- Subagents keep their own worktrees, as today.
+- Scheduled runs use a worktree for their session ("scheduled work always
+  runs in a worktree"), without changing the workspace recorded for an
+  interactive session that scheduled them.
+- Tool calls through nib's MCP server use a worktree per call, as today
+  ("MCP server calls always run in a worktree").
+- These forced worktrees are not recorded on the session.
+
+**Stating the reason.**
+- The status line shows the branch in place, and `worktree` in a session
+  worktree. `/status` shows the workspace and its reason.
+- The approval prompt for the first edit in a worktree session names
+  the reason.
+- `nib run` prints the workspace and reason when it starts.
+
+**In place.** Tool calls run in the folder. The phase 1 mount plan
+already treats the main checkout's working directory as the workspace,
+with `.git` read-only and `.nib` masked. Phase 4 checkpoints, phase 5a
+stale-write checks and phase 5b path-scoped verification apply. `/diff`,
+`/review` and the status line follow the recorded workspace, not
+whichever worktree happens to exist.
+
+**Subagent merges in place.** A merge commits on the user's current
+branch, so it follows D6:
+- on the default or a protected branch, or a detached HEAD, nib first
+  creates and switches to `nib/<subagent>`, as `git_commit` does, and
+  reports it;
+- the folder must still be clean outside `.nib`. The error now says to
+  commit or set aside the folder's changes, or to use `/worktree`.
+
+A merge from a session worktree is unchanged. (A pre-existing gap: once a
+session worktree exists, subagents are spawned from it, but the merge
+still targets the main checkout. It is recorded for 5d, which handles
+landing worktree sessions.)
+
+**Agent instructions.** The system prompt stops saying that work happens
+in "the managed worktree". It says that edits go to the session's
+workspace: the user's folder or its worktree.
+
+**Governed instructions (D2).** As approved, only the worktree-first
+mandates change:
+- `workspace/instructions/tech/permissions.md`: principle 5, the Layer 1
+  worktree default, Layer 2 isolation, the Worktree Requirement, the
+  coding-task default and the isolation checklist item;
+- `workspace/instructions/tech/backend_rust.md:24`.
+
+They now say that sessions work in place by default, that worktrees are
+opt-in isolation for sessions and mandatory for subagents, scheduled work
+and MCP-server calls, and that the sandbox and permission modes of this
+spec apply.
+
+**Out of scope.** `/land` (5d); escalation and headless flags beyond
+`--worktree` (phase 6).
+
+**Tests.**
+- The workspace decision: default in place, configuration, instruction
+  line, `/worktree`, a recorded worktree, a pre-5c session with a
+  worktree, a linked-worktree project, and forced worktrees for scheduled
+  and MCP calls.
+- End to end: a default session's patch and command change the folder
+  and create no worktree; a worktree session leaves the folder untouched.
+- Tests that relied on the worktree default now say
+  `execution.workspace = "worktree"`.
+- Subagent merge in place on a protected branch creates `nib/<subagent>`.
+- `/worktree`, the status line and `--worktree` parsing.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.
