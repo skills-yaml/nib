@@ -1742,3 +1742,99 @@ async fn session_plan_mode_refuses_edits_in_the_run() {
         "pub fn answer() -> u32 {\n    41\n}\n"
     );
 }
+
+fn latest_run_started(session: &crate::session::Session) -> Value {
+    session
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "run_started")
+        .expect("run_started event")
+        .details
+        .clone()
+}
+
+/// T080 phase 5c: each run records where the session works and why; a
+/// `nib-workspace: worktree` line moves an in-place session at its next run.
+#[tokio::test]
+async fn runs_record_the_session_workspace_and_instructions_can_require_a_worktree() {
+    use crate::session::SessionWorkspace;
+    use crate::tools::workspace;
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let session = store.create_session_with_id("workspace-record");
+    let config = || AgentLoopConfig {
+        max_steps: 6,
+        auto_approve: true,
+        ..Default::default()
+    };
+
+    run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        "explore the project",
+        config(),
+    )
+    .await
+    .expect("in-place run");
+    let persisted = store.load(&session.id).unwrap();
+    assert_eq!(
+        persisted.workspace,
+        Some(SessionWorkspace::in_place(workspace::DEFAULT_REASON))
+    );
+    let started = latest_run_started(&persisted);
+    assert_eq!(started["workspace"], "in_place");
+    assert_eq!(started["workspace_reason"], workspace::DEFAULT_REASON);
+
+    std::fs::write(dir.path().join("AGENTS.md"), "nib-workspace: worktree\n").unwrap();
+    let _ = run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        "explore the project",
+        config(),
+    )
+    .await;
+    let persisted = store.load(&session.id).unwrap();
+    let required = "AGENTS.md requires a worktree (nib-workspace: worktree)";
+    assert_eq!(
+        persisted.workspace,
+        Some(SessionWorkspace::worktree(required))
+    );
+    let started = latest_run_started(&persisted);
+    assert_eq!(started["workspace"], "worktree");
+    assert_eq!(started["workspace_reason"], required);
+}
+
+/// Scheduled runs use a worktree without moving the session; a session with
+/// no decision yet records its own (in place) first.
+#[tokio::test]
+async fn scheduled_runs_use_a_worktree_without_moving_the_session() {
+    use crate::session::SessionWorkspace;
+    use crate::tools::workspace;
+    let dir = tempdir().unwrap();
+    save_config(dir.path(), &mock_config()).unwrap();
+    let store = SessionStore::for_project(dir.path()).unwrap();
+    let session = store.create_session_with_id("scheduled-workspace");
+
+    let _ = run_agent_loop(
+        dir.path().to_path_buf(),
+        &session.id,
+        "explore the project",
+        AgentLoopConfig {
+            max_steps: 6,
+            auto_approve: true,
+            required_worktree: Some(workspace::SCHEDULED_REASON.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let persisted = store.load(&session.id).unwrap();
+    assert_eq!(
+        persisted.workspace,
+        Some(SessionWorkspace::in_place(workspace::DEFAULT_REASON))
+    );
+    let started = latest_run_started(&persisted);
+    assert_eq!(started["workspace"], "worktree");
+    assert_eq!(started["workspace_reason"], workspace::SCHEDULED_REASON);
+}

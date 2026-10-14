@@ -175,36 +175,15 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "session disappeared before run resource setup".to_string())?;
     let resources = AgentResourceTracker::from_session(&session_at_start);
-    // T080 phase 5c: decide where this session works. A forced worktree
-    // (scheduled work) is not recorded on the session.
-    let decided_workspace = crate::tools::workspace::decide(
-        runtime.profile.root_path(),
-        &runtime.nib_cfg.execution.workspace,
-        session_at_start.workspace.as_ref(),
-        session_id,
-    );
-    let run_workspace = match cfg.required_worktree.as_deref() {
-        Some(reason)
-            if !crate::tools::workspace::project_is_linked_worktree(
-                runtime.profile.root_path(),
-            ) =>
-        {
-            crate::session::SessionWorkspace::worktree(reason)
-        }
-        _ => decided_workspace.clone(),
-    };
-    let records_workspace = cfg.required_worktree.is_none();
+    // T080 phase 5c: where this session works is decided inside the session
+    // update below, so a concurrent `/worktree` is never overwritten.
+    let workspace_root = runtime.profile.root_path().to_path_buf();
+    let configured_workspace = runtime.nib_cfg.execution.workspace.clone();
+    let required_worktree = cfg.required_worktree.clone();
     // T081 clears interrupted plans only for interactive chat requests, the
     // only route the planning gate guards. Compaction never changes plans;
     // subagents, background tasks and CLI runs keep failed plans for review.
     let clears_plans = cfg.interactive_request && cfg.mode != "compact";
-    let mut run_started = run_started_workspace(
-        runtime.profile.root_path(),
-        &sessions_dir,
-        session_id,
-        &run_workspace,
-    );
-    run_started["run_id"] = json!(run_id.clone());
     runtime
         .session_store
         .update_session(session_id, |session| {
@@ -216,9 +195,29 @@ pub(crate) async fn run_agent_loop_with_runtime_and_recovery(
                     "duplicate or replayed run_id".to_string(),
                 ));
             }
+            let decided = crate::tools::workspace::decide(
+                &workspace_root,
+                &configured_workspace,
+                session.workspace.as_ref(),
+                session_id,
+            );
+            let run_workspace = match required_worktree.as_deref() {
+                Some(reason)
+                    if !crate::tools::workspace::project_is_linked_worktree(&workspace_root) =>
+                {
+                    crate::session::SessionWorkspace::worktree(reason)
+                }
+                _ => decided.clone(),
+            };
+            let mut run_started =
+                run_started_workspace(&workspace_root, &sessions_dir, session_id, &run_workspace);
+            run_started["run_id"] = json!(run_id.clone());
             append_session_event(session, "run_started", run_started);
-            if records_workspace {
-                session.workspace = Some(decided_workspace);
+            // A forced worktree (scheduled work) is not recorded, except that
+            // a session without a decision gets one first, so the worktree
+            // the forced run creates is never taken for a pre-5c session's.
+            if required_worktree.is_none() || session.workspace.is_none() {
+                session.workspace = Some(decided);
             }
             // Plans interrupted before T081 cleared them at termination are
             // cleared now, so they cannot trap this request.

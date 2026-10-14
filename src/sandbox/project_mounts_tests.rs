@@ -699,3 +699,49 @@ fn only_nib_managed_worktrees_count_as_managed() {
     std::fs::write(subagent.join(".git"), "gitdir: x\n").unwrap();
     assert!(super::in_managed_worktree(&subagent));
 }
+
+/// T080 phase 5c: in the main checkout the whole project is writable, also
+/// from a subdirectory, while the instruction files nib reads policy from
+/// stay read-only and cannot be removed or renamed away.
+#[tokio::test]
+#[serial]
+async fn main_checkout_is_writable_but_policy_files_are_not() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, _worktree) = project_fixture(&home);
+    std::fs::write(
+        project.join("AGENTS.md"),
+        "nib-policy: deny run_terminal rm\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("CLAUDE.md"), "nib-sandbox: require-bwrap\n").unwrap();
+    let crate_dir = project.join("crates/foo");
+    std::fs::create_dir_all(&crate_dir).unwrap();
+    let _home = HomeGuard::set(home.as_os_str());
+    let command = [
+        "mkdir -p ../../target && printf built > ../../target/out".to_string(),
+        "printf edited > ../../README.md".to_string(),
+        denied("printf x >> ../../AGENTS.md", READ_ONLY),
+        denied("printf x > ../../CLAUDE.md", READ_ONLY),
+        denied("rm -f ../../AGENTS.md", BUSY_OR_READ_ONLY),
+        denied("mv ../../CLAUDE.md ../../moved.md", BUSY_OR_READ_ONLY),
+    ]
+    .join(" && ");
+    assert_success(&run(&crate_dir, &command, &BoundaryConfig::default()).await);
+    assert_eq!(
+        std::fs::read_to_string(project.join("target/out")).unwrap(),
+        "built"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("README.md")).unwrap(),
+        "edited"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("AGENTS.md")).unwrap(),
+        "nib-policy: deny run_terminal rm\n"
+    );
+    assert!(project.join("CLAUDE.md").is_file());
+}

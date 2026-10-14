@@ -141,6 +141,22 @@ mod cli_tests {
     }
 
     #[test]
+    fn interactive_and_run_accept_worktree() {
+        let root = Cli::try_parse_from(["nib", "--worktree"]).expect("interactive worktree");
+        assert!(root.interactive.worktree);
+        let run = Cli::try_parse_from(["nib", "run", "--worktree", "goal"]).expect("run worktree");
+        let Some(Commands::Run(args)) = run.command else {
+            panic!("expected run command");
+        };
+        assert!(args.worktree);
+        let default = Cli::try_parse_from(["nib", "run", "goal"]).expect("run default");
+        let Some(Commands::Run(args)) = default.command else {
+            panic!("expected run command");
+        };
+        assert!(!args.worktree);
+    }
+
+    #[test]
     fn doctor_accepts_explicit_fix_mode() {
         let parsed = Cli::try_parse_from(["nib", "doctor", "--fix"]).expect("doctor repair option");
         let Some(Commands::Doctor(args)) = parsed.command else {

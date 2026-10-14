@@ -1194,8 +1194,12 @@ not lock the folder; it protects each file instead.
 By default a session edits the folder nib was started in, directly, like Claude
 Code: edits appear in your editor and `git status` at once, on your current branch,
 and stay uncommitted until you ask nib to commit. Checkpoints (`/rewind`), the
-stale-write check and the permission mode protect that folder; Git metadata stays
-read-only and `.nib` stays hidden in the sandbox.
+stale-write check and the permission mode protect that folder. Where the Linux
+`bwrap` sandbox applies, commands can write anywhere in the project, but Git
+metadata and the existing `AGENTS.md`, `AGENTS.local.md`, `CLAUDE.md` and
+`CLAUDE.local.md` stay read-only and `.nib` stays hidden; without it (macOS,
+Windows, `full-access`, or `hybrid` without usable `bwrap`) commands are not
+confined this way.
 
 A session works in its own Git worktree, on a `nib/session/...` branch under
 `.nib/worktrees/sessions/`, when:

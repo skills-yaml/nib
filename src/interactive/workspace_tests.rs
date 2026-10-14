@@ -8,7 +8,7 @@ fn worktree_command_moves_the_session_into_a_worktree_from_its_next_request() {
     let session = store.try_create_session().unwrap();
     assert_eq!(
         workspace_label(repository.path(), Some(&session), &session.id).unwrap(),
-        "in place"
+        format!("in place ({})", workspace::DEFAULT_REASON)
     );
 
     let message = request_worktree(

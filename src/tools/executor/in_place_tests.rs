@@ -135,12 +135,34 @@ async fn a_default_session_edits_the_main_checkout_in_place() {
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "two\n"
     );
+    let command = executor
+        .execute(
+            call(
+                &root,
+                &session.id,
+                "run_terminal",
+                json!({"command": "printf x > made.txt"}),
+            ),
+            Some(&session.id),
+        )
+        .await;
+    assert!(command.success, "{command:?}");
+    assert_eq!(std::fs::read_to_string(root.join("made.txt")).unwrap(), "x");
     assert!(!root.join(".nib/worktrees/sessions").exists());
+    let records = changed_paths(&store, &session.id);
     assert_eq!(
-        changed_paths(&store, &session.id).last().cloned().flatten(),
+        records[records.len() - 2].clone(),
+        Some(ChangedPaths {
+            root: top.clone(),
+            paths: vec!["a.txt".to_string()],
+            complete: true,
+        })
+    );
+    assert_eq!(
+        records.last().cloned().flatten(),
         Some(ChangedPaths {
             root: top,
-            paths: vec!["a.txt".to_string()],
+            paths: vec!["made.txt".to_string()],
             complete: true,
         })
     );

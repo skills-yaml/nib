@@ -3,7 +3,13 @@
 //! A merge commits on the parent's current branch. Like `git_commit`, it
 //! never commits directly to the default branch, a protected branch or a
 //! detached HEAD: nib first creates and switches to `nib/<subagent>`. The
-//! parent is clean at this point, so switching changes no files.
+//! parent is clean at this point, so switching changes no files. A retried
+//! pending merge branches first again, because a failed merge returns to the
+//! original branch.
+//!
+//! Detection repeats `git_tools`' branch queries on purpose: subagent merges
+//! use nib's hardened Git (no hooks or ambient configuration), while
+//! `git_commit` runs the user's own Git.
 
 use super::*;
 
@@ -85,6 +91,33 @@ pub(crate) async fn branch_before_merge(
         original: current,
         original_commit,
     }))
+}
+
+/// Runs `merge` on a branch nib may commit to: unless the subagent commit is
+/// already integrated, it branches first when needed, reports the created
+/// branch, and undoes it when the merge fails.
+pub(crate) async fn merge_on_safe_branch(
+    project_root: &Path,
+    subagent_id: &str,
+    branch_commit: &str,
+    merge: impl Future<Output = Result<Value, String>>,
+) -> Result<Value, String> {
+    let branch = if git_is_ancestor(project_root, branch_commit, "HEAD").await? {
+        None
+    } else {
+        branch_before_merge(project_root, subagent_id).await?
+    };
+    match (merge.await, branch) {
+        (Ok(mut merged), Some(branch)) => {
+            merged["created_branch"] = json!(branch.created);
+            Ok(merged)
+        }
+        (Err(error), Some(branch)) => {
+            undo_merge_branch(project_root, &branch).await;
+            Err(error)
+        }
+        (merged, None) => merged,
+    }
 }
 
 /// After a failed merge that left HEAD where it was, returns to the

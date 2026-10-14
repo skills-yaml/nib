@@ -105,8 +105,9 @@ Rules for every level:
   and tested:
   1. home mask;
   2. read-only project;
-  3. workspace (the working directory in the main checkout, or the whole
-     managed worktree);
+  3. workspace (the whole working tree that contains the working
+     directory: the main checkout or the managed worktree; until phase 5c
+     only the working directory in the main checkout);
   4. configured `allow_write`;
   5. `.nib` state masks;
   6. the managed worktree re-bound inside the mask;
@@ -1169,7 +1170,21 @@ and MCP-server calls, and that the sandbox and permission modes of this
 spec apply.
 
 **Out of scope.** `/land` (5d); escalation and headless flags beyond
-`--worktree` (phase 6).
+`--worktree` (phase 6). External messaging gateway requests are user
+requests and work in place like interactive ones.
+
+**Accepted limits.**
+- A sandboxed command can create an instruction file that does not exist
+  yet (for example a new `CLAUDE.md`). Its deny and tightening lines only
+  restrict; its allow lines apply only in a trusted project. The new file
+  shows in `git status` and the run's changed paths. Existing instruction
+  files are read-only in the sandbox.
+- Without usable `bwrap` (macOS, Windows, `full-access`, `hybrid`
+  fallback), commands in place are not confined; this is the existing
+  direct-execution posture.
+- `ExecutionConfig` rejects unknown fields, so a nib binary from before 5c
+  cannot read a configuration or a queued background job that names
+  `execution.workspace`. Only mixed-version daemons are affected.
 
 **Tests.**
 - The workspace decision: default in place, configuration, instruction
@@ -1182,6 +1197,36 @@ spec apply.
   `execution.workspace = "worktree"`.
 - Subagent merge in place on a protected branch creates `nib/<subagent>`.
 - `/worktree`, the status line and `--worktree` parsing.
+
+**Independent review of `c1d49f8`: changes requested, then resolved.**
+- **F1 (high).** A merge that conflicted after branching first returned
+  to `main` and left the record pending; the retry then merged onto
+  `main`. Fixed: the pending path branches first too (unless the commit
+  is already integrated), and the conflict test asserts both branches.
+- **F2.** Early returns after branching skipped the undo. Branching now
+  happens just before the merge, inside the same undo.
+- **F3 (medium, security).** In place, a sandboxed command could rewrite
+  `AGENTS.md`/`CLAUDE.md` and strip deny or tightening lines. Fixed: the
+  mount plan binds existing top-level instruction files read-only (also
+  in the fallback plan); creating a missing one is an accepted limit.
+- **F4 (medium).** A command started in a subdirectory could not write the
+  rest of the project (for example `target`). Fixed: the whole working
+  tree is writable, as in a managed worktree.
+- **F5.** Tests added: the run records and an instruction line moving a
+  session, a scheduled run leaving the session in place, an MCP-server
+  call in a worktree, a default command editing the folder, `--worktree`
+  parsing, a detached HEAD and the retried merge.
+- **F6.** `/status` shows the reason in place too.
+- **F7.** A forced (scheduled) run records the session's own decision
+  first when it has none, so its worktree is never taken for a pre-5c
+  one; `/worktree` says when it reuses a worktree scheduled work created.
+- **F8.** The decision is made inside the session update, so a concurrent
+  `/worktree` is never overwritten.
+- Nits: the docs say the sandbox protections hold where `bwrap` applies;
+  the merge hint no longer suggests `/worktree`; the `/permissions` gate
+  reads the tightened configuration; gateways and mixed-version daemons
+  are stated above. Branch detection stays separate from `git_tools` on
+  purpose (hardened Git versus the user's Git).
 
 ## User Decisions (2026-10-07)
 

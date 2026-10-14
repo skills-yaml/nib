@@ -1686,7 +1686,7 @@ pub(crate) async fn ensure_parent_clean(project_root: &Path) -> Result<String, S
     require_git_success(&status, "inspect parent worktree")?;
     if !status.stdout.is_empty() {
         return Err(format!(
-            "parent worktree and index must be clean before subagent merge; commit or set aside these changes first, or use /worktree so the session's own edits stay out of the folder: {}",
+            "parent worktree and index must be clean before subagent merge; commit or set aside these changes first: {}",
             String::from_utf8_lossy(&status.stdout).trim()
         ));
     }

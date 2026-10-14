@@ -73,8 +73,9 @@ No single layer is sufficient. Dangerous actions must pass **all** applicable la
 - Project-file mutations through `apply_patch` and `run_terminal` execute in the session
   workspace: the user's folder by default, or the session's own worktree. Runtime-state
   tools write only to their bounded `.nib` stores.
-- In-place editing is the default for code edits and build commands. Git metadata stays
-  read-only and `.nib` stays hidden inside the sandbox in both workspaces.
+- In-place editing is the default for code edits and build commands. Where the Linux
+  `bwrap` sandbox applies, Git metadata and the top-level instruction files stay
+  read-only and `.nib` stays hidden in both workspaces.
 
 ### Layer 2: Isolation
 - Sessions edit in place by default. Checkpoints (`/rewind`), the per-file stale-write check

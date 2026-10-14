@@ -82,11 +82,10 @@ impl ToolExecutor {
             network: resolved.config.boundaries.network,
             mutation_plan_gate: resolved.config.plan_mode,
             // T080 phase 5c: sessions work in place unless configuration or
-            // project instructions require worktrees.
-            mutation_owned_worktree_gate: !crate::tools::workspace::project_is_linked_worktree(
-                &project_root,
-            ) && (resolved.config.workspace == "worktree"
-                || crate::tools::workspace::instruction_requirement(&project_root).is_some()),
+            // project instructions (applied by the tightening above) require
+            // worktrees.
+            mutation_owned_worktree_gate: resolved.config.workspace == "worktree"
+                && !crate::tools::workspace::project_is_linked_worktree(&project_root),
             instruction_posture: resolved.instruction_posture,
             sandbox_route,
             broad_or_off,

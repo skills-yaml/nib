@@ -1060,11 +1060,31 @@ async fn merge_onto_a_protected_branch_creates_a_nib_branch_first() {
         git_stdout(root.path(), &["branch", "--show-current"]),
         "nib/subagent-sub-protected"
     );
+
+    // A detached HEAD branches first too.
+    git(root.path(), &["switch", "-q", "--detach"]);
+    let worktree = Worktree::create(root.path(), "sub-detached").expect("worktree");
+    std::fs::write(worktree.path.join("detached.txt"), "detached\n").expect("result");
+    completed_record(root.path(), "sub-detached", &worktree);
+    let merged = execute_merge(
+        &mut executor,
+        root.path(),
+        "parent-protected",
+        "sub-detached",
+        "test -f detached.txt",
+    )
+    .await;
+    assert!(merged.success, "{:?}", merged.error);
+    assert_eq!(
+        git_stdout(root.path(), &["branch", "--show-current"]),
+        "nib/subagent-sub-detached"
+    );
 }
 
 #[tokio::test]
 async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
     let root = git_repository();
+    git(root.path(), &["switch", "-q", "-C", "main"]);
     let worktree = Worktree::create(root.path(), "sub-conflict").expect("worktree");
     std::fs::write(worktree.path.join("README.md"), "child version\n").expect("child change");
     completed_record(root.path(), "sub-conflict", &worktree);
@@ -1105,6 +1125,16 @@ async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
     assert!(!merge_head.status.success());
     let pending = get_subagent_record(root.path(), "sub-conflict").expect("pending record");
     assert_eq!(pending.status, "merge_pending");
+    // The branch created for the failed merge is undone (T080 phase 5c).
+    assert_eq!(
+        git_stdout(root.path(), &["branch", "--show-current"]),
+        "main"
+    );
+    assert!(git_stdout(
+        root.path(),
+        &["branch", "--list", "nib/subagent-sub-conflict"]
+    )
+    .is_empty());
 
     std::fs::write(root.path().join("README.md"), "child version\n").expect("resolve parent");
     git(root.path(), &["add", "README.md"]);
@@ -1124,6 +1154,18 @@ async fn conflicting_merge_aborts_cleanly_and_remains_retryable() {
             .status,
         "merged"
     );
+    // The retried pending merge branches first again instead of committing
+    // onto main (review finding 1).
+    let aligned = git_stdout(root.path(), &["rev-parse", "main"]);
+    assert_eq!(
+        retried.output.as_ref().unwrap()["created_branch"],
+        "nib/subagent-sub-conflict"
+    );
+    assert_eq!(
+        git_stdout(root.path(), &["branch", "--show-current"]),
+        "nib/subagent-sub-conflict"
+    );
+    assert_eq!(git_stdout(root.path(), &["rev-parse", "main"]), aligned);
 }
 
 #[tokio::test]

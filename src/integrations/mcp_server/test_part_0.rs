@@ -1023,6 +1023,25 @@ async fn direct_executor_uses_selected_profile_store_and_environment() {
         })
     }));
     assert!(!root.path().join(".nib/sessions").exists());
+    // T080 phase 5c: MCP-server calls always run in a session worktree,
+    // never in the folder, and record no workspace on their session.
+    let worktrees = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".nib/worktrees/sessions");
+    assert!(store.list().into_iter().any(|id| {
+        store.load(&id).is_some_and(|session| {
+            session.workspace.is_none()
+                && session.tool_calls.iter().any(|call| {
+                    call.tool_name.as_deref() == Some("run_terminal")
+                        && call
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(|path| Path::new(path).starts_with(&worktrees))
+                })
+        })
+    }));
 }
 
 #[tokio::test]

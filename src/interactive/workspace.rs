@@ -58,6 +58,18 @@ pub(crate) fn request_worktree(
             Ok(())
         })
         .map_err(|error| format!("failed to switch the session to a worktree: {error}"))?;
+    // A scheduled run may already have created this session's worktree.
+    let existing = crate::integrations::worktree::with_validated_session_worktree(
+        project_root,
+        session_id,
+        |_| Ok(()),
+    )
+    .ok()
+    .flatten()
+    .is_some();
+    if existing {
+        return Ok("From your next request, this session works in the worktree it already has (created for its scheduled work), on its nib/session branch. Uncommitted changes in this folder, including this session's earlier edits, stay in the folder and are not copied.".to_string());
+    }
     Ok("From your next request, this session works in its own worktree on a nib/session branch, starting from the last commit. Uncommitted changes in this folder, including this session's earlier edits, stay in the folder and are not copied.".to_string())
 }
 
@@ -100,7 +112,7 @@ pub(crate) fn workspace_label(
 ) -> Result<String, String> {
     let current = session_workspace(project_root, session, session_id);
     if !current.is_worktree() {
-        return Ok("in place".to_string());
+        return Ok(format!("in place ({})", current.reason));
     }
     let path = crate::integrations::worktree::with_validated_session_worktree(
         project_root,
