@@ -1335,6 +1335,18 @@ sandbox implementation. Combined review and native gates precede the push.
   label also now comes last in the footer, after every key hint, so a
   narrow terminal clips it first. The smoke passed locally against the
   debug binary.
+- **Phases 5a and 5b integrated:** PR 61 merged the candidate `11c9b25`
+  (5a and 5b, `development` merged in, plus the two fixes above) as
+  `7b6d7e75149d5c366337fa3ea3523daf5d2ef12f` on 2026-10-14T08:33:49Z, by
+  the user. Before the merge, a serial `task verify` with
+  `NIB_REQUIRE_BWRAP_TESTS=1` passed on `11c9b25`, and PR CI passed Linux
+  Validate (including the interactive release smoke) and macOS; macOS
+  first failed the unrelated race
+  `scripted_form_fixture_waits_for_delayed_payload_on_a_nonblocking_accepted_socket`
+  (`accept` on a non-blocking listener), and the unchanged re-run passed.
+  The two fixes after the 5a/5b reviews were small, test-covered and
+  author-reviewed; the user merged them. `development` was re-read and
+  equals the candidate with no file difference.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;
