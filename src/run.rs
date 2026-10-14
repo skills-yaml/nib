@@ -128,6 +128,10 @@ pub struct RunArgs {
 
     #[arg(short, long)]
     pub yes: bool,
+
+    /// Work in the session's own Git worktree instead of this folder
+    #[arg(long)]
+    pub worktree: bool,
 }
 
 pub fn run_agent(args: &RunArgs) -> Result<(), String> {
@@ -167,6 +171,13 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
     );
     let mode = nib::interactive::bounded_public_text(&args.mode, &sensitive_values, 32, false);
     println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
+    // T080 phase 5c: say where the run works and why.
+    let workspace = if args.worktree {
+        nib::interactive::start_in_worktree(&project, &session_store, &sid)?
+    } else {
+        nib::interactive::workspace_summary(&project, &session_store, &sid)
+    };
+    println!("{workspace}");
 
     // We use the Rust agent loop directly
     let rt = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
@@ -335,6 +346,7 @@ mod tests {
             provider: Some("mock".to_string()),
             model: Some("mock-model".to_string()),
             yes: true,
+            worktree: false,
         })
         .expect("mock agent run");
 
@@ -360,6 +372,7 @@ mod tests {
             provider: Some("not-a-provider".to_string()),
             model: None,
             yes: true,
+            worktree: false,
         })
         .expect_err("unsupported provider");
         assert!(error.contains("LLM request failed [LLM-CONFIG]"), "{error}");
@@ -450,6 +463,7 @@ mod tests {
                 provider: Some("mock".to_string()),
                 model: Some("mock-model".to_string()),
                 yes: true,
+                worktree: false,
             },
             ConsoleInput::new(Cursor::new(b"2\n".to_vec())),
         )
@@ -490,6 +504,7 @@ mod tests {
                 provider: Some("mock".to_string()),
                 model: Some("mock-model".to_string()),
                 yes: true,
+                worktree: false,
             },
             ConsoleInput::new(Cursor::new(Vec::<u8>::new())),
         )
@@ -567,6 +582,7 @@ mod tests {
             provider: Some("mock".to_string()),
             model: Some("mock-model".to_string()),
             yes: true,
+            worktree: false,
         })
         .expect_err("credential-derived session id");
 
@@ -601,6 +617,7 @@ mod tests {
             provider: Some("mock".to_string()),
             model: Some("mock-model".to_string()),
             yes: true,
+            worktree: false,
         })
         .expect_err("oversized goal");
 

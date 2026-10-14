@@ -262,6 +262,12 @@ pub(crate) async fn run_agent_loop_inner(
     {
         executor = executor.with_approval_mode(mode);
     }
+    // T080 phase 5c: work where the run started decided.
+    if let Some(reason) = cfg.required_worktree.clone() {
+        executor = executor.with_required_worktree(reason);
+    } else if let Some(workspace) = session_before_request.workspace.clone() {
+        executor = executor.with_workspace(workspace);
+    }
     if let Some(stream_tx) = cfg.stream_tx.clone() {
         let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(64);
         executor = executor.with_terminal_output_sender(terminal_tx);

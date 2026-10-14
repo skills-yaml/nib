@@ -53,13 +53,8 @@ pub fn format_interaction_chrome(
     } else {
         "local"
     };
-    let worktree = crate::integrations::worktree::with_validated_session_worktree(
-        project_root,
-        session_id,
-        |path| Ok(path.display().to_string()),
-    )?
-    .unwrap_or_else(|| "-".to_string());
-    let worktree = bounded_sensitive_status_value(&worktree, &sensitive_values);
+    let workspace = super::workspace::workspace_label(project_root, session, session_id)?;
+    let workspace = bounded_sensitive_status_value(&workspace, &sensitive_values);
     let project = bounded_sensitive_status_value(
         project_root
             .file_name()
@@ -70,7 +65,7 @@ pub fn format_interaction_chrome(
     let session_id = bounded_sensitive_status_value(session_id, &sensitive_values);
     let runtime_profile_id = bounded_sensitive_status_value(runtime_profile_id, &sensitive_values);
     let header = format!(
-        "{project}  ·  profile {runtime_profile_id}  ·  sess {session_id}{name}  ·  {origin}  ·  worktree {worktree}"
+        "{project}  ·  profile {runtime_profile_id}  ·  sess {session_id}{name}  ·  {origin}  ·  {workspace}"
     );
     let plan = session
         .and_then(|session| session.plan.as_ref())
@@ -505,17 +500,22 @@ pub(crate) fn bounded_workspace_diff(
     Ok(diff)
 }
 
+/// The diff of the session's workspace: its worktree when it works in one,
+/// otherwise the folder (T080 phase 5c).
 pub(crate) fn bounded_session_workspace_diff(
     project_root: &Path,
+    store: &SessionStore,
     session_id: &str,
     sensitive_values: &[String],
 ) -> Result<String, String> {
-    if let Some(diff) = crate::integrations::worktree::with_validated_session_worktree(
-        project_root,
-        session_id,
-        |worktree| bounded_workspace_diff(worktree, sensitive_values),
-    )? {
-        return Ok(diff);
+    if super::workspace::stored_session_workspace(project_root, store, session_id).is_worktree() {
+        if let Some(diff) = crate::integrations::worktree::with_validated_session_worktree(
+            project_root,
+            session_id,
+            |worktree| bounded_workspace_diff(worktree, sensitive_values),
+        )? {
+            return Ok(diff);
+        }
     }
     bounded_workspace_diff(project_root, sensitive_values)
 }
@@ -570,6 +570,8 @@ pub(crate) fn fork_session(
             // A fork keeps its permission mode, except `auto`, which must be
             // chosen again explicitly.
             session.permission_mode = source.permission_mode.clone().filter(|mode| mode != "auto");
+            // A fork of a worktree session gets its own worktree.
+            session.workspace = source.workspace.clone();
             session.queued_follow_ups.clear();
             Ok(())
         })
@@ -1203,6 +1205,7 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
         },
         "review" if arguments.is_empty() => InteractiveCommand::Review,
         "diff" if arguments.is_empty() => InteractiveCommand::Diff,
+        "worktree" if arguments.is_empty() => InteractiveCommand::Worktree,
         "rewind" => InteractiveCommand::Rewind {
             checkpoint: match arguments.first() {
                 None => None,
@@ -1381,6 +1384,7 @@ pub fn execute_interactive_command_in_state(
         InteractiveCommand::Review | InteractiveCommand::Diff => {
             Ok(InteractiveEffect::Output(bounded_session_workspace_diff(
                 project_root,
+                store,
                 session_id,
                 store.public_sensitive_values(),
             )?))
@@ -1396,6 +1400,14 @@ pub fn execute_interactive_command_in_state(
             session_id,
             number,
         )?)),
+        InteractiveCommand::Worktree => Ok(InteractiveEffect::Output(
+            super::workspace::request_worktree(
+                project_root,
+                store,
+                session_id,
+                crate::tools::workspace::COMMAND_REASON,
+            )?,
+        )),
         InteractiveCommand::Compact => Ok(InteractiveEffect::Compact),
         InteractiveCommand::Ps => Ok(InteractiveEffect::Output(format_session_background_tasks(
             store, session_id, false,

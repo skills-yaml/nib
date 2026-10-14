@@ -199,8 +199,10 @@ fn runs_record_their_workspace_other_sessions_and_changed_paths() {
     let mut other = crate::session::presence::Presence::new(store.sessions_dir(), &root);
     other.tick("other-session", std::time::Instant::now());
 
-    let started = run_started_workspace(&root, store.sessions_dir(), &session.id);
+    let in_place = crate::session::SessionWorkspace::in_place("default");
+    let started = run_started_workspace(&root, store.sessions_dir(), &session.id, &in_place);
     assert_eq!(started["workspace"], "in_place");
+    assert_eq!(started["workspace_reason"], "default");
     assert_eq!(started["workspace_root"], json!(root.to_string_lossy()));
     assert_eq!(started["checkpoint_before"], Value::Null);
     assert_eq!(started["other_sessions"], json!(["other-session"]));
@@ -240,8 +242,15 @@ fn worktree_runs_record_no_in_place_details() {
     let directory = tempfile::tempdir().unwrap();
     let store = SessionStore::new(&directory.path().join("state"));
     let session = store.create_session_with_id("isolated");
-    let started = run_started_workspace(directory.path(), store.sessions_dir(), &session.id);
+    let worktree = crate::session::SessionWorkspace::worktree("you ran /worktree");
+    let started = run_started_workspace(
+        directory.path(),
+        store.sessions_dir(),
+        &session.id,
+        &worktree,
+    );
     assert_eq!(started["workspace"], "worktree");
+    assert_eq!(started["workspace_reason"], "you ran /worktree");
     assert_eq!(started["workspace_root"], Value::Null);
 }
 

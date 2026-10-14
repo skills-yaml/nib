@@ -1,6 +1,6 @@
 //! T080 phase 5b: what each run records about its workspace (section 6b).
 //!
-//! `run_started` names the workspace, the checkpoint before the run and the
+//! `run_started` names the workspace and why, the checkpoint before the run and the
 //! other live sessions in the folder. `run_terminal` names the files the run
 //! changed in place and their content identity, so a reviewer can tell what
 //! a run verified and what else was going on in a shared folder.
@@ -12,12 +12,12 @@ pub(crate) fn run_started_workspace(
     project_root: &Path,
     sessions_dir: &Path,
     session_id: &str,
+    workspace: &crate::session::SessionWorkspace,
 ) -> Value {
     let root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let in_place =
-        ToolExecutor::edits_in_place(&root) && !crate::sandbox::in_managed_worktree(&root);
+    let in_place = !workspace.is_worktree() && !crate::sandbox::in_managed_worktree(&root);
     let checkpoint_before =
         crate::tools::checkpoints::CheckpointStore::for_session(sessions_dir, session_id)
             .and_then(|store| store.list())
@@ -25,6 +25,7 @@ pub(crate) fn run_started_workspace(
             .and_then(|checkpoints| checkpoints.last().map(|checkpoint| checkpoint.number));
     json!({
         "workspace": if in_place { "in_place" } else { "worktree" },
+        "workspace_reason": workspace.reason,
         "workspace_root": in_place.then(|| root.to_string_lossy().to_string()),
         "checkpoint_before": checkpoint_before,
         "other_sessions": crate::session::presence::other_sessions_in(sessions_dir, &root, session_id),

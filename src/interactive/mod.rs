@@ -21,9 +21,11 @@ use uuid::Uuid;
 mod question_form;
 mod question_recovery;
 mod rewind;
+mod workspace;
 pub use question_form::*;
 pub(crate) use question_recovery::plan_has_recoverable_question;
 pub(crate) use rewind::*;
+pub use workspace::{start_in_worktree, workspace_summary};
 mod split_00;
 mod split_01;
 mod split_02;
@@ -118,7 +120,7 @@ pub use split_03::{
 
 #[cfg(test)]
 #[path = "tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 mod question_state;
 pub use question_recovery::{

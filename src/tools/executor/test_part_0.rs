@@ -71,7 +71,7 @@ async fn approval_context_is_redacted_bounded_and_preserves_decision_behavior() 
     assert!(rendered.contains("Action: run_terminal command="));
     assert!(rendered.contains("destructive / destructive"));
     assert!(rendered.contains("Network: restricted"));
-    assert!(rendered.contains("session-owned managed worktree will be created or reused"));
+    assert!(rendered.contains("Worktree: none; this action works directly in your folder"));
     assert!(!rendered.contains("provider-private-sentinel"));
     assert!(!rendered.contains("provider%2Dprivate"));
     assert!(!rendered.contains(&base64_secret));
@@ -1906,8 +1906,12 @@ async fn git_commit_preview_describes_the_session_worktree() {
     fixture_git(&root, &["commit", "--quiet", "-m", "start"]);
 
     let capture = Arc::new(ContextCapturingApprovalHandler::default());
-    let mut executor = ToolExecutor::new(root.clone(), ExecutionConfig::default())
-        .with_approval_handler(capture.clone());
+    let worktree_sessions = ExecutionConfig {
+        workspace: "worktree".to_string(),
+        ..ExecutionConfig::default()
+    };
+    let mut executor =
+        ToolExecutor::new(root.clone(), worktree_sessions).with_approval_handler(capture.clone());
     let worktree = executor
         .ensure_worktree(true, &root, Some("preview-session"))
         .await

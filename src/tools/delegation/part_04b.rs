@@ -252,12 +252,18 @@ pub(crate) async fn merge_verified_subagent_worktree(
                 );
             }
         }
-        return reconcile_pending_merge(
+        let subagent_id = record.id.clone();
+        return merge_on_safe_branch(
             &project_root,
-            &mut record,
-            &mut record_file,
-            &intent,
-            &evidence,
+            &subagent_id,
+            &intent.branch_commit,
+            reconcile_pending_merge(
+                &project_root,
+                &mut record,
+                &mut record_file,
+                &intent,
+                &evidence,
+            ),
         )
         .await;
     }
@@ -320,12 +326,18 @@ pub(crate) async fn merge_verified_subagent_worktree(
     persist_subagent_record_revision(&project_root, &record, &mut record_file)?;
 
     let intent = pending_merge_intent(&record)?;
-    reconcile_pending_merge(
+    let subagent_id = record.id.clone();
+    merge_on_safe_branch(
         &project_root,
-        &mut record,
-        &mut record_file,
-        &intent,
-        &evidence,
+        &subagent_id,
+        &verified_commit,
+        reconcile_pending_merge(
+            &project_root,
+            &mut record,
+            &mut record_file,
+            &intent,
+            &evidence,
+        ),
     )
     .await
 }

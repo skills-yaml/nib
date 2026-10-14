@@ -7,6 +7,8 @@ async fn worktree_preflight_failure_reconciles_without_running_proposed_tool() {
     let store = SessionStore::for_project(directory.path()).expect("session store");
     let goal = "safe terminal approval";
     let mut session = store.create_session_with_id("failed-worktree-preflight");
+    // A worktree session (T080 phase 5c); in place, a folder without Git works.
+    session.workspace = Some(crate::session::SessionWorkspace::worktree("test"));
     let mut plan = pending_plan(goal, goal);
     plan.approve();
     session.plan = Some(plan);
@@ -62,6 +64,7 @@ async fn mixed_preflight_failure_preserves_independent_project_read() {
         save_config(directory.path(), &mock_config()).expect("mock config");
         let store = SessionStore::for_project(directory.path()).expect("session store");
         let mut session = store.create_session_with_id(goal.replace(' ', "-"));
+        session.workspace = Some(crate::session::SessionWorkspace::worktree("test"));
         let mut plan = pending_plan(goal, goal);
         plan.approve();
         session.plan = Some(plan);

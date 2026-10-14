@@ -5,7 +5,7 @@ mod project_mounts;
 #[cfg(test)]
 #[path = "project_mounts_tests.rs"]
 mod project_mounts_tests;
-pub(crate) use project_mounts::in_managed_worktree;
+pub(crate) use project_mounts::{in_managed_worktree, POLICY_INSTRUCTION_FILES};
 pub(crate) mod protected_owner;
 #[cfg(windows)]
 #[doc(hidden)]

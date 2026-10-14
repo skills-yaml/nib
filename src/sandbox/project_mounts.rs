@@ -17,6 +17,18 @@ use std::path::{Path, PathBuf};
 
 /// Directories created by nib for managed worktrees, relative to the project.
 const MANAGED_WORKTREE_PARENT: [&str; 2] = [".nib", "worktrees"];
+/// Instruction files nib reads permission rules and execution directives
+/// from (`nib-policy:`, `nib-sandbox:`, `nib-boundary:`, `nib-workspace:`).
+/// Existing ones at the top of the writable area are bound read-only, so a
+/// sandboxed command cannot strip a deny rule or a tightening directive;
+/// those above it are already read-only. Edits go through `apply_patch`,
+/// which always asks.
+pub(crate) const POLICY_INSTRUCTION_FILES: [&str; 4] = [
+    "AGENTS.md",
+    "AGENTS.local.md",
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProjectMounts {
@@ -102,12 +114,15 @@ impl ProjectMounts {
             protect_git_entry(args, &self.worktree.join(".git"))?;
         }
         protect_git_entry(args, &self.root.join(".git"))?;
+        protect_instruction_files(args, &workspace)?;
         args.extend(["--chdir".to_string(), utf8(cwd)?.to_string()]);
         Ok(())
     }
 
     /// The writable area: the whole managed worktree, or the working
-    /// directory inside the main checkout.
+    /// directory inside the main checkout. In the main checkout the Git top
+    /// can be a larger repository than nib's project, so nothing above the
+    /// working directory is made writable (T080 phase 5c review N1).
     fn workspace(&self, cwd: &Path) -> PathBuf {
         if self.is_managed() {
             self.worktree.clone()
@@ -131,7 +146,8 @@ pub(super) fn append_fallback_protections(
 ) -> Result<(), String> {
     let plan = MaskPlan::new(cwd, cwd, mode(writable), &[], allowed, hidden_home);
     plan.append(args, Some(mode(writable)))?;
-    protect_git_entry(args, &cwd.join(".git"))
+    protect_git_entry(args, &cwd.join(".git"))?;
+    protect_instruction_files(args, cwd)
 }
 
 /// Directory names never descended into while looking for nested state and
@@ -384,6 +400,18 @@ fn protect_git_entry(args: &mut Vec<String>, path: &Path) -> Result<(), String> 
         Ok(_) => push_mount(args, "--ro-bind", path),
         Err(_) => Ok(()),
     }
+}
+
+/// Binds the existing instruction files at the top of `dir` read-only. A
+/// symbolic link is left alone: nib refuses to read policy through one.
+fn protect_instruction_files(args: &mut Vec<String>, dir: &Path) -> Result<(), String> {
+    for name in POLICY_INSTRUCTION_FILES {
+        let path = dir.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            push_mount(args, "--ro-bind", &path)?;
+        }
+    }
+    Ok(())
 }
 
 fn push_mount(args: &mut Vec<String>, kind: &str, path: &Path) -> Result<(), String> {

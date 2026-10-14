@@ -1683,7 +1683,7 @@ pub(crate) fn format_effective_execution_posture(posture: &EffectiveExecutionPos
         bounded_status_value(&posture.profile),
         bounded_status_value(&posture.network),
         if posture.mutation_plan_gate { "required" } else { "not configured" },
-        if posture.mutation_owned_worktree_gate { "required for tool-declared mutations" } else { "not required" },
+        if posture.mutation_owned_worktree_gate { "required for tool-declared mutations" } else { "not required; sessions work in place unless /worktree is used" },
         sandbox_posture_label(posture),
         instruction_posture_label(posture),
     )
@@ -1741,10 +1741,12 @@ pub(crate) fn folder_label(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// The status line names a session worktree `worktree` (T080 section 8);
+/// in place it shows the folder's branch.
 pub(crate) fn chrome_branch_label(branch: &str, session_id: &str) -> String {
     if (!session_id.is_empty() && branch.contains(session_id)) || branch.starts_with("nib/session/")
     {
-        "session".to_string()
+        "worktree".to_string()
     } else {
         branch.to_string()
     }
@@ -1837,19 +1839,17 @@ pub fn format_tui_interaction_chrome(
         &config.approvals,
     );
     let folder = bounded_sensitive_status_value(&folder_label(project_root), &sensitive_values);
-    let managed_worktree = crate::integrations::worktree::with_validated_session_worktree(
-        project_root,
-        session_id,
-        |path| Ok(path.to_path_buf()),
-    )?;
-    let git_cwd = match managed_worktree {
-        Some(path) => path,
-        None => project_root.to_path_buf(),
-    };
-    let branch = bounded_sensitive_status_value(
-        &chrome_branch_label(&git_head_branch(&git_cwd), session_id),
-        &sensitive_values,
-    );
+    // In a session worktree the status line says `worktree`, also before the
+    // worktree is created; in place it shows the folder's branch.
+    let branch =
+        if super::workspace::session_workspace(project_root, session, session_id).is_worktree() {
+            "worktree".to_string()
+        } else {
+            bounded_sensitive_status_value(
+                &chrome_branch_label(&git_head_branch(project_root), session_id),
+                &sensitive_values,
+            )
+        };
     let model = bounded_sensitive_status_value(&diagnostics.model, &sensitive_values);
     let snapshot = session.and_then(crate::context::snapshot::latest_from_session);
     let window = snapshot

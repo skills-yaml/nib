@@ -583,12 +583,13 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
     lines.extend([
         Line::from(""),
         Line::from(Span::styled("Session", title)),
+        Line::from(Span::styled("/new            new session", muted)),
         Line::from(Span::styled(
-            "/new            new session and worktree",
+            "/session        switch or resume a session",
             muted,
         )),
         Line::from(Span::styled(
-            "/session        switch or resume a session",
+            "/worktree       work in a separate Git worktree",
             muted,
         )),
         Line::from(""),

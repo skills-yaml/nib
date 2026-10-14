@@ -21,9 +21,11 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
   compatibility re-export of that same trait, not a second contract.
 - **Data Serialization**: `serde` and `serde_json` for LLM APIs, profile-scoped session storage, daemon state, and tool calling formats.
 - **Error Handling**: `thiserror` for robust error modeling.
-- **Sandboxing**: Git worktrees isolate mutations. The hybrid provider adds `bwrap`
-  OS isolation on usable Linux hosts and otherwise falls back to direct execution in
-  the worktree; the strict `bwrap` provider fails closed.
+- **Sandboxing**: Sessions work in the user's folder by default; Git worktrees isolate
+  sessions on request or when instructions require it, and always isolate subagents,
+  scheduled work and MCP-server calls. The hybrid provider adds `bwrap` OS isolation on
+  usable Linux hosts and otherwise falls back to direct execution in the session
+  workspace; the strict `bwrap` provider fails closed.
 
 ### Project Structure (Rust specific)
 

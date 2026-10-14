@@ -35,6 +35,8 @@ pub(crate) fn fork_before_last_user(
             session.active_skills = source.active_skills.clone();
             session.display_name = source.display_name.clone();
             session.permission_mode = source.permission_mode.clone().filter(|m| m != "auto");
+            // A fork of a worktree session gets its own worktree.
+            session.workspace = source.workspace.clone();
             session.forked_from = Some(source.id.clone());
             Ok(())
         })

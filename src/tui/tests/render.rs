@@ -540,7 +540,8 @@ fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
     assert!(rendered.contains("Working directory"));
     assert!(rendered.contains("~/project"));
     assert!(rendered.contains("/new"));
-    assert!(rendered.contains("new session and worktree"));
+    assert!(rendered.contains("new session"));
+    assert!(rendered.contains("work in a separate Git worktree"));
     assert!(rendered.contains("/session"));
     assert!(rendered.contains("Ctrl+C"));
     assert!(rendered.contains("Keymap Codex"));

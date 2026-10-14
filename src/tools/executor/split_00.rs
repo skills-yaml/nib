@@ -818,6 +818,12 @@ pub struct ToolExecutor {
     pub(crate) worktree_manager: Option<WorktreeManager>,
     pub(crate) project_read_fallback: bool,
     pub(crate) prepared_worktree_for_batch: bool,
+    /// The session workspace decided at the start of the run (T080 phase
+    /// 5c). Without it, the workspace is decided from the session file.
+    pub(crate) workspace: Option<crate::session::SessionWorkspace>,
+    /// Set for scheduled runs and MCP-server calls, which always use a
+    /// worktree; the reason is shown to the user.
+    pub(crate) required_worktree: Option<String>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub(crate) policy_rules: Vec<PolicyRule>,
     pub(crate) policy_hooks: Vec<Arc<dyn ToolPolicyHook>>,

@@ -859,6 +859,11 @@ async fn run_failure_fixture_with_approver(
     });
     let mut config = mock_runtime_config();
     config.execution.provider = "internal".to_string();
+    // A test that asked for worktree sessions keeps them (T080 phase 5c).
+    if let Ok(existing) = nib::config::load_nib_config_full(root) {
+        config.execution.workspace = existing.execution.workspace;
+        config.revision = existing.revision;
+    }
     config.llm.active_provider = Some("openai".to_string());
     config.llm.providers = HashMap::from([(
         "openai".to_string(),
@@ -918,6 +923,14 @@ async fn run_failure_fixture_with_approver(
         .collect();
     let stream_events = stream_collector.await.expect("stream collector");
     (summary, persisted, requests, stream_events)
+}
+
+/// Sessions work in their own worktree (T080 phase 5c makes in place the
+/// default); for tests about worktree isolation.
+fn use_worktree_sessions(root: &Path) {
+    let mut config = NibConfig::default();
+    config.execution.workspace = "worktree".to_string();
+    save_nib_config_full(root, &mut config).expect("worktree sessions config");
 }
 
 fn approved_mock_session(root: &Path, goal: &str, context_length: usize) -> (SessionStore, String) {
@@ -1200,6 +1213,7 @@ async fn exact_corrective_verification_resolves_the_failed_obligation() {
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 async fn self_development_failure_repair_verification_and_diff_share_one_worktree() {
     let root = git_repository();
+    use_worktree_sessions(root.path());
     let cargo_command = "mkdir -p .tmp && TMPDIR=\"$PWD/.tmp\" cargo test --quiet";
     let patch = concat!(
         "--- a/src/lib.rs\n",
@@ -1661,6 +1675,7 @@ async fn nested_instructions_are_loaded_before_the_scoped_tool_executes() {
 #[tokio::test]
 async fn instructions_refresh_from_the_same_managed_worktree_used_by_mutations() {
     let root = git_repository();
+    use_worktree_sessions(root.path());
     let patch = concat!(
         "--- /dev/null\n",
         "+++ b/nested/AGENTS.md\n",
@@ -1844,6 +1859,7 @@ async fn instruction_prompt_fit_failure_blocks_without_a_model_or_tool_attempt()
 #[tokio::test]
 async fn instruction_refresh_failure_after_mutation_blocks_the_same_managed_plan() {
     let root = git_repository();
+    use_worktree_sessions(root.path());
     let oversized = "x".repeat(64 * 1024 + 1);
     let patch = format!(
         "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1 +1 @@\n-Runtime fixture rule: preserve the physical verification record.\n+{oversized}\n"
@@ -3764,6 +3780,7 @@ async fn full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_workt
     config.llm.context_length = 16_000;
     config.compression.threshold = 0.05;
     config.compression.target_ratio = 0.02;
+    config.execution.workspace = "worktree".to_string();
     save_nib_config_full(root.path(), &mut config).expect("runtime config");
 
     let store = SessionStore::for_project(root.path()).expect("session store");
@@ -4070,7 +4087,11 @@ async fn approved_patch_physically_changes_only_the_session_worktree_and_is_veri
     session.plan = Some(plan);
     store.save(&mut session).expect("approved plan");
 
-    let mut executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())
+    let worktree_sessions = ExecutionConfig {
+        workspace: "worktree".to_string(),
+        ..ExecutionConfig::default()
+    };
+    let mut executor = ToolExecutor::new(root.path().to_path_buf(), worktree_sessions)
         .with_auto_approve(true)
         .with_session_store(store.clone());
     let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-old\n+new\n";
@@ -4800,6 +4821,7 @@ async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() 
 #[tokio::test]
 async fn task_listing_without_affected_paths_executes_in_the_session_worktree() {
     let root = git_repository();
+    use_worktree_sessions(root.path());
     std::fs::write(root.path().join("Taskfile.yml"),
         "version: '3'\ntasks:\n  inventory:\n    desc: T060 listing fixture\n    cmds:\n      - echo unexpected > listing-mutation.txt\n"
     ).expect("Task listing fixture");

@@ -18,7 +18,7 @@ Key principles:
 2. **Defense in Depth** — Multiple independent layers must all agree before a dangerous action happens.
 3. **Explicit Consent** — Destructive or high-impact actions require either (a) direct user approval in the moment or (b) an explicit, auditable policy the user has previously granted.
 4. **Workload Accountability** — Every agent-selected action is recorded against its session and persisted plan in nib's workload model.
-5. **Isolation First** — Prefer executing changes in isolated environments (git worktrees) rather than the user's main checkout.
+5. **Contained Changes** — Sessions work in the user's folder by default, inside the sandbox, with checkpoints, per-file stale-write checks and permission modes. Git worktrees isolate a session on request or when project instructions require it, and always isolate subagents, scheduled work and MCP-server calls.
 6. **Transparency** — The user should always be able to answer "what did the agent just do and why was it allowed?"
 7. **Graduated Autonomy** — Start manual, move to smart/policy-based only after the user has built trust.
 
@@ -53,7 +53,7 @@ Every tool call or action must be classified into one of these levels:
 | Level          | Examples                                      | Default Approval | Can be auto-approved? |
 |----------------|-----------------------------------------------|------------------|-----------------------|
 | **Read-only**  | read_file, list_directory, grep, git_status   | Never            | Yes (always)         |
-| **Safe**       | apply_patch (clean, in worktree), write new file in allowed dir, git add | Policy-based     | Yes (with limits)    |
+| **Safe**       | apply_patch (clean, in the session workspace), write new file in allowed dir, git add | Policy-based     | Yes (with limits)    |
 | **Destructive**| rm, git reset --hard, force push, global npm install, dropping tables | **Always manual or explicit policy** | Only with very strong explicit grant |
 | **Network/Exfil** | curl, wget, sending data to external services, cloning private repos | Strict manual or policy | Rarely |
 
@@ -71,11 +71,19 @@ No single layer is sufficient. Dangerous actions must pass **all** applicable la
 - Agent is restricted to the current **project root** by default.
 - Tool paths must remain under the selected profile workspace. Symlinks and canonical paths are checked before access.
 - Project-file mutations through `apply_patch` and `run_terminal` execute in the session
-  worktree. Runtime-state tools write only to their bounded `.nib` stores.
-- Worktree mode is the default for code edits and build commands.
+  workspace: the user's folder by default, or the session's own worktree. Runtime-state
+  tools write only to their bounded `.nib` stores.
+- In-place editing is the default for code edits and build commands. Where the Linux
+  `bwrap` sandbox applies, Git metadata and the top-level instruction files stay
+  read-only and `.nib` stays hidden in both workspaces.
 
 ### Layer 2: Isolation
-- Use `git worktree` for almost all implementation work (prevents polluting main branch, easy rollback, parallel agents).
+- Sessions edit in place by default. Checkpoints (`/rewind`), the per-file stale-write check
+  and the permission modes contain those edits.
+- A session uses its own `git worktree` when the user asks (`/worktree`, `--worktree`,
+  `execution.workspace = "worktree"`) or project instructions require it
+  (`nib-workspace: worktree`); nib states the reason.
+- Subagents, scheduled work and MCP-server calls always run in worktrees.
 - Consider additional isolation for very high-risk commands (e.g. temporary Docker containers, though this has UX cost).
 - Background/cron tasks should run with even stricter scoping.
 
@@ -110,6 +118,8 @@ AGENTS.md can also tighten the execution envelope:
   `execution.boundary_profiles.<name>` overlay. Network policy may only become stricter
   and writable paths may only be removed; invalid, unknown, conflicting, or weaker
   selections deny execution before approval or worktree creation.
+
+- `nib-workspace: worktree` runs every session in its own managed worktree.
 
 These directives are tighten-only; project instructions cannot weaken configured isolation.
 
@@ -169,9 +179,10 @@ When tools are exposed via MCP (so other agents can call nib):
 Focus on `run_terminal` and broad file changes:
 
 1. **Command Parsing** — Maintain a growing list of known dangerous patterns (`rm -rf`, `git reset --hard`, `DROP DATABASE`, `sudo`, `curl ... | sh`, force pushes, etc.). Use regex + simple AST for shell commands where possible.
-2. **Worktree Requirement** — Project-file mutations through `apply_patch` and
-   `run_terminal` execute inside the current session's dedicated worktree. Memory,
-   scheduling, and other runtime-state tools use their bounded `.nib` stores instead.
+2. **Workspace Requirement** — Project-file mutations through `apply_patch` and
+   `run_terminal` execute inside the current session's workspace: the user's folder by
+   default, or its dedicated worktree. Memory, scheduling, and other runtime-state tools
+   use their bounded `.nib` stores instead.
 3. **Preview + Confirmation** — Before approval, show a dry-run or diff where possible.
 4. **Chained Actions** — If the agent wants to do several destructive things, require approval for the whole plan, or force step-by-step.
 5. **Post-Action Verification** — After a destructive or build action, strongly encourage (or require) running verification (tests, lint) as part of the same step.
@@ -225,7 +236,8 @@ This durable local record is critical for trust and debugging.
 ## Recommended Defaults for nib
 
 - `approvals.mode = "manual"` (conservative)
-- Worktree mode on by default for coding tasks
+- In-place editing by default for coding tasks, with checkpoints and the stale-write check;
+  worktrees on request, when instructions require them, and for subagents and scheduled work
 - Secret redaction on
 - Strong preference for `apply_patch` over raw writes
 - All destructive `run_terminal` calls start blocked until user or explicit policy allows
@@ -244,7 +256,7 @@ This durable local record is critical for trust and debugging.
 To perform a destructive action, the following must all be true:
 
 1. The action is in scope for the current project/worktree.
-2. The action is isolated (preferably in a worktree).
+2. The action is contained: sandboxed and checkpointed in place, or isolated in a worktree.
 3. The action is classified as destructive (or higher).
 4. Either:
    a. The user explicitly approves in the moment, **or**

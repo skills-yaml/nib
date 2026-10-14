@@ -530,12 +530,7 @@ pub(crate) fn validate_instruction_policy_metadata(
 
 pub(crate) fn instruction_policy_files(project_root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for name in [
-        "AGENTS.md",
-        "AGENTS.local.md",
-        "CLAUDE.md",
-        "CLAUDE.local.md",
-    ] {
+    for name in crate::sandbox::POLICY_INSTRUCTION_FILES {
         let path = project_root.join(name);
         if path.is_file() {
             files.push(path);
@@ -620,7 +615,10 @@ pub(crate) fn apply_instruction_execution_tightening(
         };
         for line in contents.lines() {
             let trimmed = line.trim().trim_start_matches(['-', '*']).trim();
-            if trimmed == "nib-sandbox: require-bwrap" {
+            if trimmed == crate::tools::workspace::WORKTREE_DIRECTIVE {
+                // T080 phase 5c: sessions use their own worktrees.
+                config.workspace = "worktree".to_string();
+            } else if trimmed == "nib-sandbox: require-bwrap" {
                 require_bwrap = true;
             } else if trimmed == "nib-boundary: disable-network" {
                 require_bwrap = true;
