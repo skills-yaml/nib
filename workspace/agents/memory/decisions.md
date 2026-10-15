@@ -861,3 +861,34 @@ subagent cannot start from a session worktree (its Git directory lies outside
 it); sessions that chose a worktree are refused subagents, forced worktrees
 (scheduled, MCP `nib_run`) are not. Session-branch-based subagents are a
 follow-up.
+
+## 2026-10-15 - T080 phase 6: sandbox levels, escalation and headless flags
+
+- Type: decision
+- Source: T080 (sections 2, 3 and 8; AC-7)
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: `nib run`'s console handler failing closed for pushes (phase 2b F8)
+
+Content:
+
+`execution.sandbox` is `read-only`, `workspace-write` (default, the phase 1
+mount plan unchanged) or `full-access` (direct execution with network, chosen
+explicitly; any instruction tightening, `provider = "bwrap"` or a disabled
+network turn it back into `workspace-write`, a configuration file selects it
+only in a trusted project, and `nib run --sandbox full-access` is refused
+where the sandbox is pinned). `read-only` binds nothing writable except a private
+`/tmp`, has no network, refuses `apply_patch`, `git_commit`, `git_push` and
+subagent merges, and without bwrap runs only read-only-classified commands.
+A foreground command that fails inside bwrap with a sandbox-block signature
+(read-only file system, name resolution or unreachable network) is offered
+for a retry outside the sandbox by a prompt that is never remembered and is
+asked in every mode except `plan`, including `auto` and `--yes`; it shows
+the matched output lines. No prompt is offered at `read-only`, when an
+approval ceiling refuses destructive actions, when nobody can answer, when `execution.provider = "bwrap"` or
+instructions require bwrap, or with a disabled network; the failure then
+carries a note. `nib run` takes `--permission-mode` (not `--mode`, which
+stays the agent mode) and `--sandbox`, and prompts only when stdin can
+answer (a terminal or a pipe); with stdin closed or `/dev/null` every prompt
+is an immediate denial. The D4 network
+default (spec: on; shipped: `restricted`) is left unchanged as an open point.

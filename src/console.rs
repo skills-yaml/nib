@@ -13,7 +13,7 @@ use nib::interactive::{
 };
 use nib::tools::executor::{ApprovalContext, ApprovalHandler};
 use nib::tools::models::{ApprovalDecision, PermissionLevel, ToolCall};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
 
 const MAX_CONSOLE_LINE_BYTES: usize = 16 * 1024 + 2;
@@ -22,6 +22,10 @@ const MAX_BUFFERED_CONSOLE_LINES: usize = 16;
 #[derive(Clone)]
 pub struct ConsoleInput {
     state: Arc<ConsoleInputState>,
+    /// Whether approval prompts can be answered on this input: a terminal
+    /// or a pipe can, a closed stdin or `/dev/null` cannot, so headless
+    /// `nib run` denies at once (T080 phase 6).
+    answerable: bool,
 }
 
 type ConsoleLine = Result<String, String>;
@@ -35,7 +39,13 @@ struct ConsoleInputState {
 
 impl ConsoleInput {
     pub fn stdin() -> Self {
-        Self::new(io::BufReader::new(io::stdin()))
+        Self::new(io::BufReader::new(io::stdin())).answerable(stdin_answerable())
+    }
+
+    /// Sets whether approval prompts may be shown on this input.
+    pub fn answerable(mut self, answerable: bool) -> Self {
+        self.answerable = answerable;
+        self
     }
 
     pub fn new(reader: impl BufRead + Send + 'static) -> Self {
@@ -45,6 +55,7 @@ impl ConsoleInput {
                 lines: tokio::sync::Mutex::new(line_rx),
                 pending_reader: std::sync::Mutex::new(Some((Box::new(reader), line_tx))),
             }),
+            answerable: true,
         }
     }
 
@@ -118,6 +129,31 @@ impl ConsoleInput {
     }
 }
 
+/// Whether stdin can carry answers: a terminal, a pipe or a file can; a
+/// closed stdin or a non-terminal device such as `/dev/null` (cron, CI,
+/// service managers) cannot.
+fn stdin_answerable() -> bool {
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::FileTypeExt;
+        stdin
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|file| file.metadata())
+            .is_ok_and(|metadata| !metadata.file_type().is_char_device())
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn read_bounded_console_line(reader: &mut (impl BufRead + ?Sized)) -> io::Result<Option<String>> {
     let mut bytes = Vec::with_capacity(256);
     loop {
@@ -167,8 +203,15 @@ impl ConsoleApprovalHandler {
     }
 }
 
+/// Denial for a prompt `nib run` cannot show.
+pub const HEADLESS_APPROVAL_DENIAL: &str = "nib run has no input to ask on; allow this with a permission rule, --permission-mode, or --yes";
+
 #[async_trait::async_trait]
 impl ApprovalHandler for ConsoleApprovalHandler {
+    fn can_prompt(&self) -> bool {
+        self.input.answerable
+    }
+
     async fn handle_approval(&self, call: &ToolCall, level: PermissionLevel) -> ApprovalDecision {
         let context = ApprovalContext::compatibility(call, level);
         self.prompt(&context).await
@@ -186,6 +229,9 @@ impl ApprovalHandler for ConsoleApprovalHandler {
 
 impl ConsoleApprovalHandler {
     async fn prompt(&self, context: &ApprovalContext) -> ApprovalDecision {
+        if !self.input.answerable {
+            return ApprovalDecision::denied_by_policy(HEADLESS_APPROVAL_DENIAL);
+        }
         if context.shown_command.is_some() {
             return self.prompt_command_card(context).await;
         }
@@ -752,6 +798,30 @@ mod tests {
             .await;
         assert!(!denied.granted);
         assert_eq!(denied.source, "input_closed");
+    }
+
+    /// T080 phase 6: input nobody can answer (closed, `/dev/null`) denies
+    /// every prompt at once, without reading it.
+    #[tokio::test]
+    async fn unanswerable_console_input_denies_without_reading() {
+        let call = ToolCall {
+            invocation_id: nib::tools::ToolInvocationId::new(),
+            tool_name: "run_terminal".to_string(),
+            arguments: json!({"command": "task test"}),
+            session_id: None,
+            project_root: None,
+        };
+        let context = ApprovalContext::compatibility(&call, PermissionLevel::Destructive);
+        let input = ConsoleInput::new(Cursor::new(b"y\n")).answerable(false);
+        let handler = ConsoleApprovalHandler::new(input.clone());
+        assert!(!handler.can_prompt());
+        let denied = handler
+            .handle_approval_with_context(&call, PermissionLevel::Destructive, &context)
+            .await;
+        assert!(!denied.granted);
+        assert_eq!(denied.note.as_deref(), Some(HEADLESS_APPROVAL_DENIAL));
+        assert!(!input.broker_started());
+        assert!(ConsoleApprovalHandler::new(ConsoleInput::new(Cursor::new(b""))).can_prompt());
     }
 
     #[tokio::test]

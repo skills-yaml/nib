@@ -1,5 +1,6 @@
 //! Hybrid sandbox: executable bwrap isolation with a documented direct fallback.
 
+pub mod level;
 pub mod process;
 mod project_mounts;
 #[cfg(test)]
@@ -13,6 +14,7 @@ pub mod windows_job;
 pub mod worktree;
 
 use crate::config::BoundaryConfig;
+pub use level::{looks_blocked_by_sandbox, SandboxLevel, READ_ONLY_PROFILE};
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -993,19 +995,17 @@ fn build_bwrap_args(
     boundaries: &BoundaryConfig,
     profile: &str,
 ) -> Result<Vec<String>, String> {
-    build_bwrap_args_with_mode(command, cwd, boundaries, profile, true)
+    build_bwrap_args_with_mode(
+        command,
+        cwd,
+        boundaries,
+        profile,
+        profile != READ_ONLY_PROFILE,
+    )
 }
 
-/// Builds the bwrap arguments. `writable` selects whether the working tree and
-/// common Git directory are writable; read-only callers get no writable binds.
-fn build_bwrap_args_with_mode(
-    command: &str,
-    cwd: &Path,
-    boundaries: &BoundaryConfig,
-    _profile: &str,
-    writable: bool,
-) -> Result<Vec<String>, String> {
-    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
+/// The namespaces and read-only root every sandboxed command starts from.
+fn base_bwrap_args(boundaries: &BoundaryConfig, profile: &str) -> Vec<String> {
     let mut args = vec![
         "--ro-bind".to_string(),
         "/".to_string(),
@@ -1020,11 +1020,28 @@ fn build_bwrap_args_with_mode(
         "--die-with-parent".to_string(),
         "--new-session".to_string(),
     ];
-
     if matches!(boundaries.network.as_str(), "restricted" | "disabled") {
         args.push("--unshare-net".to_string());
     }
+    // The read-only level's private scratch space; later binds, such as a
+    // project under /tmp, are mounted over it.
+    if profile == READ_ONLY_PROFILE {
+        args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
+    }
+    args
+}
 
+/// Builds the bwrap arguments. `writable` selects whether the working tree and
+/// common Git directory are writable; read-only callers get no writable binds.
+fn build_bwrap_args_with_mode(
+    command: &str,
+    cwd: &Path,
+    boundaries: &BoundaryConfig,
+    profile: &str,
+    writable: bool,
+) -> Result<Vec<String>, String> {
+    let cwd_str = cwd.to_str().ok_or("sandbox cwd is not valid UTF-8")?;
+    let mut args = base_bwrap_args(boundaries, profile);
     let home_isolation = append_home_isolation(&mut args, cwd)?;
     let home = std::env::var_os("HOME").and_then(|home| PathBuf::from(home).canonicalize().ok());
     let project = project_mounts::ProjectMounts::resolve(cwd, home.as_deref());
@@ -2270,6 +2287,37 @@ mod tests {
                 .unwrap()
                 .contains(&"--unshare-net".to_string())
         );
+    }
+
+    /// T080 phase 6: the read-only profile binds nothing writable and adds
+    /// a private /tmp; the workspace-write profile binds the workspace.
+    #[test]
+    fn read_only_profile_binds_nothing_writable_and_a_private_tmp() {
+        let cwd = tempdir().expect("cwd");
+        let cwd_str = cwd
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let read_only = build_bwrap_args(
+            "true",
+            cwd.path(),
+            &BoundaryConfig::default(),
+            READ_ONLY_PROFILE,
+        )
+        .unwrap();
+        assert!(read_only.windows(2).any(|pair| pair == ["--tmpfs", "/tmp"]));
+        assert!(
+            !read_only.iter().any(|arg| arg == "--bind"),
+            "{read_only:?}"
+        );
+        let writable =
+            build_bwrap_args("true", cwd.path(), &BoundaryConfig::default(), "restricted").unwrap();
+        assert!(!writable.windows(2).any(|pair| pair == ["--tmpfs", "/tmp"]));
+        assert!(writable
+            .windows(2)
+            .any(|pair| pair[0] == "--bind" && pair[1] == cwd_str));
     }
 
     #[test]

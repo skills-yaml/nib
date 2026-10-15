@@ -1426,6 +1426,153 @@ test-covered, author-reviewed):
   stops using the worktree; a missing worktree directory is reported as
   missing rather than as off its branch.
 
+## Phase 6 Plan: Escalation and Headless Flags (2026-10-15)
+
+Goal: a command the sandbox blocks can be retried outside it, only after
+the user says yes (AC-7); the sandbox level of section 2 becomes a setting
+and a flag; `nib run` takes the mode and sandbox from flags and never waits
+on a prompt nobody can answer (section 8).
+
+**Sandbox levels.** Until now the level was implied by `execution.provider`
+and `default_profile`. Phase 6 adds `execution.sandbox = "read-only" |
+"workspace-write" | "full-access"`, default `workspace-write`, which keeps
+today's behavior exactly.
+- `read-only`: commands run in bwrap with nothing writable except a private
+  `/tmp`, and without network. `apply_patch`, `git_commit` and `git_push` are
+  refused ("the read-only sandbox allows no changes"). `allow_write` entries
+  do not apply. Without bwrap (macOS, Windows, `hybrid` fallback), only
+  commands classified read-only run; others are refused, so the level is
+  enforced by the tools (section 2 exclusions).
+- `workspace-write`: today's mount plan and network setting. The D4 default
+  (network on) is not changed by this phase; see Open Points.
+- `full-access`: commands run directly on the host with network, including
+  the ones that would otherwise be moved into the sandbox. It must be
+  chosen explicitly (setting or flag), and nib shows it as a warning in the
+  status line, `/status`, `nib run` and `nib doctor`.
+- Instructions win: any instruction tightening (`nib-sandbox:
+  require-bwrap`, `nib-boundary: disable-network` or a named boundary
+  profile), `execution.provider = "bwrap"` and a disabled network turn
+  `full-access` into `workspace-write`, and the status surfaces say why.
+  From a configuration file, which a project can ship, `full-access` applies
+  only in a trusted project; `nib run --sandbox full-access` applies it for
+  one run and is refused where the sandbox is pinned.
+
+**Escalation (AC-7).** After a foreground `run_terminal` command fails
+inside bwrap, nib looks at its output for a sandbox block: `Read-only file
+system`, or a network failure (`Could not resolve host`, `Temporary failure
+in name resolution`, `Network is unreachable`). Then:
+- With a person to ask, nib prompts "The sandbox blocked this command.
+  Retry it outside the sandbox?" The prompt shows the command and says the
+  retry has full access to the user's files and network. It is never
+  remembered and is asked in every mode, including `auto`, with `--yes` and
+  with allow rules (section 3: escalation is never silent). On yes, the
+  command runs again directly on the host; the result records
+  `escalated: true` and the approval. On no, the original failure is
+  returned with the user's reason.
+- Without a person to ask, nib does not prompt. The original failure is
+  returned with a note: the sandbox blocked it, and how to allow it (`--sandbox
+  full-access`, or an interactive session).
+- No escalation in `plan` mode, at the `read-only` level (it makes no
+  changes; review of `080c50a`), in `full-access` (no sandbox), for
+  background commands, when `execution.provider = "bwrap"`, instructions
+  require bwrap or the network is disabled, when the approval handler's
+  ceiling refuses a destructive action, or when deny rules match the command
+  (they are applied before the first run).
+- The prompt shows the matched output lines (redacted) and says the retry
+  runs the command and anything it starts on the host with network, since
+  a command chooses its own output.
+- A false match only costs a prompt; nothing runs outside the sandbox
+  without a yes. The command runs twice, so the prompt says so; checkpoints
+  and the change watch cover both runs.
+
+**Headless `nib run`.**
+- `--permission-mode <plan|ask|accept-edits|auto>` sets the permission mode
+  for the run, overriding the session and `approvals.mode`. `--mode` stays
+  the agent mode (`execute|plan`), as it already is a public flag; the
+  spec's `--mode <mode>` is spelled `--permission-mode`, the Claude Code
+  name, to keep both.
+- `--sandbox <read-only|workspace-write|full-access>` sets the level for
+  the run.
+- `nib run` asks only when its input can answer: a terminal or a pipe (the
+  existing one-shot approval contract, which test harnesses use). With no
+  input (stdin closed or `/dev/null`, as under cron, CI and service
+  managers), every prompt is an immediate denial that says why and how to
+  allow the action (an allow rule, `--permission-mode`, `--yes`), instead of
+  waiting. With input it can now also ask for `git push`, escalation and
+  edits to instruction files, which closes the phase 2b F8 fail-closed note.
+- The start line shows the permission mode and the sandbox level.
+
+**Visibility.** The status line shows `mode <mode> · <sandbox level>` when
+the level was chosen (`read-only`, `full-access`); the default
+`workspace-write`, including its platform limits such as a missing bwrap on
+macOS, goes unmentioned there so the key hints fit narrow terminals (CI
+smoke on PR67: the longer footer clipped `Ctrl+End follow` on Linux and
+macOS), as Claude Code shows only non-default modes;
+`/status` and `/permissions` show the level and whether it is enforced on
+this platform. `nib doctor` reports the effective mode (and, for an old
+`approvals.mode` value, the new name to use, the AC-8 notice), the sandbox
+level, and whether its protections are enforceable here (bwrap present, or
+tool-level only, or none for `full-access`).
+
+**Review of `080c50a` (request changes), and the resolutions.**
+- **R1, High.** A named boundary profile from the instructions did not turn
+  `full-access` off. Fixed: every tightened instruction posture keeps the
+  sandbox (`settle_full_access`).
+- **R2, Medium.** `nib run --sandbox full-access` got past the config check
+  against `provider = "bwrap"` or a disabled network. Fixed: such a pin
+  keeps the sandbox, and `nib run` refuses the flag with the reason.
+- **R3, Low.** Escalation ignored the handler's approval ceiling. Fixed: a
+  ceiling that refuses destructive actions refuses the retry.
+- **R4, Low.** A command chooses its own output, so the prompt gave nothing
+  to judge. Fixed: the prompt shows the matched lines (redacted) and says
+  the retry runs project scripts on the host with network.
+- **R5, Low (decision).** `read-only` offered a full-access retry. Resolved
+  safe: the read-only level offers no retry.
+- **R6, Low.** `read-only` was not a reserved boundary profile name. Fixed.
+- **R7, Low (decision).** A shipped project configuration could select
+  `full-access`. Resolved safe: configured `full-access` needs a trusted
+  project; the flag does not.
+- **R8, Low.** Missing tests: added for allow rules, a disabled network,
+  the read-only rule without bwrap, R1 to R7 and the audit record.
+- **R9, Nit.** Guide approvals names, the headless note's wording, and
+  labels for `provider = "internal"` ("safe commands direct"). Fixed.
+
+Re-review of `2f9b493`: approve with fixes; R1 to R9 confirmed resolved.
+- **N1, Low.** A worktree-only instruction counted as sandbox tightening.
+  Fixed: only changes to the provider, profile, boundaries or level (or an
+  invalid directive) keep `full-access` off.
+- **N2, Low.** The escalation prompt replaced the default details (command,
+  working directory). Fixed: the evidence is appended.
+- **N3, Nit.** Matched lines were truncated before redaction. Fixed.
+- **N4, Nit, rejected with evidence.** Allow-rule escalation and the
+  persisted `escalated` fields are tested since `2f9b493`
+  (`a_blocked_command_is_offered_outside_the_sandbox_only_by_prompt`,
+  `a_sandbox_blocked_write_runs_on_the_host_only_after_a_yes`); remembered
+  grants are never consulted by the retry.
+
+**Out of scope.** macOS and Windows sandboxes (section 2 exclusions);
+remembering escalations; an interactive `--sandbox` flag (interactive
+sessions use the setting); changing the D4 network default.
+
+**Open Points (for the user).** D4 says network is on in `workspace-write`,
+but the shipped default (`boundaries.network = "restricted"`) runs commands
+without network unless the classifier marks them as network actions.
+Phase 6 keeps the shipped default; escalation now offers a way through when
+a command needs network.
+
+**Tests.**
+- Unit: level parsing and validation; the effective execution config per
+  level (full-access stays direct for elevated commands, read-only is
+  never writable); instruction tightening downgrades full-access;
+  block detection on output samples; escalation decisions per mode,
+  `--yes`, allow rules and headless handlers (prompts counted).
+- bwrap (gated by `NIB_REQUIRE_BWRAP_TESTS`): a write to the project in
+  `read-only` fails and `/tmp` works; a write to `.git` fails, is offered for
+  retry and, on yes, runs on the host; on no or headless, nothing changes.
+- `nib run`: flags parse; input that cannot answer denies a prompt without
+  reading it; the existing piped one-shot approval tests keep passing.
+- `nib doctor` output for each level and the old-name notice.
+
 ## User Decisions (2026-10-07)
 
 - **D1: one spec.** All six phases are delivered under T080, with no split.

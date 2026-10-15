@@ -884,6 +884,7 @@ fn header_shows_folder_and_branch_left_and_model_right() {
         model: "mock-model".to_string(),
         context: "ctx ~12/100".to_string(),
         approval: "ask".to_string(),
+        sandbox: "workspace-write".to_string(),
         agent_mode: "idle".to_string(),
         other_sessions: 0,
     };
@@ -1003,6 +1004,26 @@ fn presence_follows_every_footer_key_hint() {
     assert_eq!(
         footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
         "mode ask · idle · Ctrl+End follow · 2 other sessions in this folder"
+    );
+}
+
+/// T080 phase 6: the footer shows a chosen sandbox level (read-only,
+/// full-access) next to the mode, never the default level.
+#[test]
+fn footer_shows_a_non_default_sandbox_level() {
+    let viewport = TranscriptViewport::default();
+    let mut full = TuiChrome::fixture();
+    full.sandbox = "FULL ACCESS (no sandbox)".to_string();
+    assert_eq!(
+        footer_line(&full, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · FULL ACCESS (no sandbox) · idle"
+    );
+    // A platform without bwrap (macOS) keeps the default footer.
+    let mut unsandboxed = TuiChrome::fixture();
+    unsandboxed.sandbox = "workspace-write (unsandboxed)".to_string();
+    assert_eq!(
+        footer_line(&unsandboxed, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · idle"
     );
 }
 

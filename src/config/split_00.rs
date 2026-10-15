@@ -161,6 +161,15 @@ pub struct ExecutionConfig {
     /// directly; `worktree` gives each session its own managed worktree.
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    /// How much tool commands may touch (T080 phase 6): `read-only`,
+    /// `workspace-write` (the mount plan) or `full-access` (no sandbox).
+    #[serde(default = "default_sandbox")]
+    pub sandbox: String,
+    /// Set when `sandbox` was chosen for this run on the command line rather
+    /// than read from a configuration file, which a project can ship; only
+    /// a trusted project's configuration may select `full-access`.
+    #[serde(skip)]
+    pub sandbox_explicit: bool,
 }
 
 impl Default for ExecutionConfig {
@@ -172,8 +181,14 @@ impl Default for ExecutionConfig {
             boundaries: BoundaryConfig::default(),
             boundary_profiles: HashMap::new(),
             workspace: default_workspace(),
+            sandbox: default_sandbox(),
+            sandbox_explicit: false,
         }
     }
+}
+
+pub(crate) fn default_sandbox() -> String {
+    "workspace-write".to_string()
 }
 
 pub(crate) fn default_workspace() -> String {
@@ -907,6 +922,22 @@ impl NibConfig {
         }
         if !matches!(self.execution.workspace.as_str(), "in_place" | "worktree") {
             issues.push("execution.workspace must be in_place or worktree".to_string());
+        }
+        match crate::sandbox::SandboxLevel::parse(&self.execution.sandbox) {
+            None => issues.push(format!(
+                "execution.sandbox must be {}",
+                crate::sandbox::SandboxLevel::NAMES
+            )),
+            Some(crate::sandbox::SandboxLevel::FullAccess)
+                if self.execution.boundaries.network == "disabled"
+                    || self.execution.provider == "bwrap" =>
+            {
+                issues.push(
+                    "execution.sandbox = \"full-access\" runs commands without a sandbox, so it cannot be combined with execution.provider = \"bwrap\" or a disabled network"
+                        .to_string(),
+                );
+            }
+            Some(_) => {}
         }
         validate_boundary_config(
             "execution.boundaries",
