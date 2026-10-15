@@ -781,6 +781,78 @@ pub(crate) fn load_managed_worktree_ownership(
     }
 }
 
+/// Like `load_managed_worktree_ownership`, but adopts the branch's current
+/// commit when it has moved: a session commits on its own branch (T080
+/// phase 5d). The adoption reopens the ref under the same generational
+/// anchor protocol as any other adopted revision.
+pub(crate) fn load_managed_worktree_ownership_at_branch_tip(
+    project_root: &Path,
+    kind: ManagedWorktreeKind,
+    logical_id: &str,
+) -> Result<Option<Arc<ManagedWorktreeReceipt>>, String> {
+    let Some(revision) = load_durable_ownership_revision(project_root, kind, logical_id)? else {
+        return Ok(None);
+    };
+    if revision.record.phase == DurableOwnershipPhase::Complete {
+        return load_managed_worktree_ownership(project_root, kind, logical_id);
+    }
+    let reference = revision.record.branch_reference.clone();
+    let tip = run_git_bounded_sync(
+        project_root,
+        [
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "--quiet".to_string(),
+            format!("{reference}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .and_then(|output| parse_git_oid(&output, "resolve the managed branch").ok())
+    .filter(|tip| *tip != revision.record.current_oid);
+    // Adoption links the next generation anchor before it validates the
+    // worktree, so it runs only when the worktree is on its branch at that
+    // commit; otherwise a failed validation would leave a stale anchor.
+    if let Some(tip) = &tip {
+        if !revision.record.worktree_path.exists() {
+            return Err(format!(
+                "the worktree {} is missing; remove what remains of it, including the branch {reference}, by hand",
+                revision.record.worktree_path.display()
+            ));
+        }
+        if !worktree_on_branch_at(&revision.record.worktree_path, &reference, tip) {
+            return Err(format!(
+                "the worktree {} is not on its branch {reference} at its latest commit; switch it back (or finish or abort a rebase) and try again",
+                revision.record.worktree_path.display()
+            ));
+        }
+    }
+    match rehydrate_owned_worktree(revision, tip.as_deref()) {
+        Ok(ownership) => Ok(Some(Arc::new(ownership))),
+        Err(error) => {
+            let completed = load_durable_ownership_revision(project_root, kind, logical_id)?
+                .is_some_and(|revision| revision.record.phase == DurableOwnershipPhase::Complete);
+            if completed {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Whether the worktree at `path` has `reference` checked out at `tip`.
+pub(crate) fn worktree_on_branch_at(path: &Path, reference: &str, tip: &str) -> bool {
+    let on_branch = run_git_bounded_sync(path, ["symbolic-ref", "--quiet", "HEAD"])
+        .ok()
+        .and_then(|output| parse_symbolic_head(&output).ok())
+        .is_some_and(|head| head == reference);
+    on_branch
+        && run_git_bounded_sync(path, ["rev-parse", "--verify", "HEAD^{commit}"])
+            .ok()
+            .and_then(|output| parse_git_oid(&output, "inspect the worktree HEAD").ok())
+            .is_some_and(|head| head == tip)
+}
+
 pub(crate) fn managed_worktree_owned_path(ownership: &ManagedWorktreeReceipt) -> PathBuf {
     ownership.path.clone()
 }

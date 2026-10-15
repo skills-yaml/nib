@@ -145,11 +145,7 @@ impl WorktreeManager {
 
     fn cached_path(&mut self, session_id: &str) -> Result<Option<PathBuf>, String> {
         if !self.worktrees.contains_key(session_id) {
-            if let Some(ownership) = crate::sandbox::worktree::load_managed_worktree_ownership(
-                &self.repo_root,
-                crate::sandbox::worktree::ManagedWorktreeKind::Session,
-                session_id,
-            )? {
+            if let Some(ownership) = load_session_ownership(&self.repo_root, session_id)? {
                 let path = crate::sandbox::worktree::managed_worktree_owned_path(&ownership);
                 self.worktrees.insert(
                     session_id.to_string(),
@@ -166,7 +162,11 @@ impl WorktreeManager {
                     .to_string(),
             );
         }
-        crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership)
+        // nib may have committed on the session branch during this run.
+        adopt_session_branch_tip(&self.repo_root, &worktree.ownership, session_id)
+            .and_then(|()| {
+                crate::sandbox::worktree::validate_managed_worktree_ownership(&worktree.ownership)
+            })
             .map_err(|error| {
                 format!("cached session worktree ownership changed; it was preserved: {error}")
             })?;
@@ -192,12 +192,7 @@ pub(crate) fn with_validated_session_worktree<T>(
     let repo_root = repo_root
         .canonicalize()
         .map_err(|error| format!("failed to resolve the project root: {error}"))?;
-    let Some(ownership) = crate::sandbox::worktree::load_managed_worktree_ownership(
-        &repo_root,
-        crate::sandbox::worktree::ManagedWorktreeKind::Session,
-        session_id,
-    )?
-    else {
+    let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
         return Ok(None);
     };
     let path = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
@@ -215,6 +210,161 @@ pub(crate) fn with_validated_session_worktree<T>(
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(ownership_error)) => Err(format!("{error}; {ownership_error}")),
     }
+}
+
+/// Time allowed to remove a landed or discarded session worktree, which may
+/// hold build output.
+const SESSION_WORKTREE_REMOVAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Loads the session's worktree ownership receipt from `repo_root`
+/// (canonical), adopting its branch's current commit.
+fn load_session_ownership(
+    repo_root: &Path,
+    session_id: &str,
+) -> Result<Option<std::sync::Arc<crate::sandbox::worktree::ManagedWorktreeReceipt>>, String> {
+    crate::sandbox::worktree::load_managed_worktree_ownership_at_branch_tip(
+        repo_root,
+        crate::sandbox::worktree::ManagedWorktreeKind::Session,
+        session_id,
+    )
+}
+
+/// A session works on its branch: commits made there (by `git_commit`,
+/// `/land commit` or the user) move it. The receipt records the branch's
+/// current commit, after checking that the worktree is still on that
+/// branch, so the worktree stays valid (T080 phase 5d).
+fn adopt_session_branch_tip(
+    repo_root: &Path,
+    ownership: &crate::sandbox::worktree::ManagedWorktreeReceipt,
+    session_id: &str,
+) -> Result<(), String> {
+    let branch = owned_branch_reference(ownership)?;
+    let tip = crate::sandbox::worktree::run_git_bounded_sync(
+        repo_root,
+        [
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            format!("{branch}^{{commit}}"),
+        ],
+    )
+    .and_then(|output| {
+        crate::sandbox::worktree::parse_git_oid(&output, "resolve the session branch")
+    })?;
+    let recorded = ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .owned_branch
+        .as_ref()
+        .map(|owned| owned.expected_oid.clone());
+    // See `load_managed_worktree_ownership_at_branch_tip`: adopt only a
+    // worktree that is on its branch at that commit.
+    if recorded.as_deref() != Some(tip.as_str())
+        && !crate::sandbox::worktree::worktree_on_branch_at(&ownership.path, &branch, &tip)
+    {
+        return Err(format!(
+            "the session worktree is not on its branch {branch} at its latest commit; switch it back (or finish or abort a rebase) and try again"
+        ));
+    }
+    crate::sandbox::worktree::adopt_managed_worktree_branch(
+        ownership,
+        &sanitize_component(session_id),
+        &tip,
+    )
+    .map_err(|error| format!("the session branch {branch} could not be adopted: {error}"))
+}
+
+fn owned_branch_reference(
+    ownership: &crate::sandbox::worktree::ManagedWorktreeReceipt,
+) -> Result<String, String> {
+    ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .owned_branch
+        .as_ref()
+        .map(|branch| branch.reference.clone())
+        .ok_or_else(|| "session worktree has no branch receipt".to_string())
+}
+
+/// The session's worktree and the short name of its branch, for `/land`.
+pub(crate) fn session_worktree_branch(
+    repo_root: &Path,
+    session_id: &str,
+) -> Result<Option<(PathBuf, String)>, String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve the project root: {error}"))?;
+    let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
+        return Ok(None);
+    };
+    let path = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
+        .map_err(|error| format!("session worktree ownership is invalid: {error}"))?;
+    if !path.starts_with(&repo_root) {
+        return Err("session worktree ownership escapes the project root".to_string());
+    }
+    let reference = owned_branch_reference(&ownership)?;
+    let short = reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&reference)
+        .to_string();
+    Ok(Some((path, short)))
+}
+
+/// Removes the session's worktree and deletes its branch through the
+/// ownership receipts, so only nib's own worktree and branch are removed.
+/// With `expected_tip`, nothing is removed when the branch has moved since
+/// the preview the user confirmed.
+pub(crate) fn remove_session_worktree(
+    repo_root: &Path,
+    session_id: &str,
+    expected_tip: Option<&str>,
+) -> Result<(), String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve the project root: {error}"))?;
+    let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
+        return Ok(());
+    };
+    if let Some(expected) = expected_tip {
+        let current = ownership
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owned_branch
+            .as_ref()
+            .map(|owned| owned.expected_oid.clone());
+        if current.as_deref() != Some(expected) {
+            return Err(
+                "the session branch moved since the preview, so nothing was removed; run /land to see it now"
+                    .to_string(),
+            );
+        }
+    }
+    crate::sandbox::worktree::cleanup_managed_worktree(
+        &ownership,
+        Instant::now() + SESSION_WORKTREE_REMOVAL_TIMEOUT,
+        SESSION_WORKTREE_REMOVAL_TIMEOUT,
+    )
+}
+
+/// Whether an earlier removal of the session's worktree stopped partway
+/// (for example on files it could not delete).
+pub(crate) fn session_worktree_removal_started(
+    repo_root: &Path,
+    session_id: &str,
+) -> Result<bool, String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve the project root: {error}"))?;
+    let Some(ownership) = load_session_ownership(&repo_root, session_id)? else {
+        return Ok(false);
+    };
+    let state = ownership
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(state.path_removed || state.registration_removed || state.branch_removed)
 }
 
 struct BlockingCreateCancellationGuard {
@@ -680,6 +830,10 @@ fn sanitize_component(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "worktree_session_tests.rs"]
+mod session_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -936,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_session_branch_keeps_uncommitted_work_on_reuse_failure() {
+    fn committed_session_branch_is_reused_with_its_uncommitted_work() {
         let repository = repository();
         let session_id = "committed-branch";
         let mut manager = WorktreeManager::new(repository.path().to_path_buf());
@@ -948,10 +1102,14 @@ mod tests {
         git_stdout(&path, &["commit", "-m", "session work"]);
         std::fs::write(path.join("pending.txt"), b"pending\n").expect("uncommitted file");
 
-        let error = manager
-            .create_for_session(session_id)
-            .expect_err("changed branch receipt requires reconciliation");
-        assert!(error.contains("ownership changed"), "{error}");
+        // T080 phase 5d: a session commits on its own branch, so its
+        // worktree is reused at the new commit instead of failing closed.
+        assert_eq!(
+            manager
+                .create_for_session(session_id)
+                .expect("committed session worktree is reused"),
+            path
+        );
         assert_eq!(
             std::fs::read(path.join("pending.txt")).expect("pending file"),
             b"pending\n"
