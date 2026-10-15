@@ -874,16 +874,18 @@ Content:
 
 `execution.sandbox` is `read-only`, `workspace-write` (default, the phase 1
 mount plan unchanged) or `full-access` (direct execution with network, chosen
-explicitly; instructions that require bwrap turn it back into
-`workspace-write`, and config refuses it with `provider = "bwrap"` or a
-disabled network). `read-only` binds nothing writable except a private
+explicitly; any instruction tightening, `provider = "bwrap"` or a disabled
+network turn it back into `workspace-write`, a configuration file selects it
+only in a trusted project, and `nib run --sandbox full-access` is refused
+where the sandbox is pinned). `read-only` binds nothing writable except a private
 `/tmp`, has no network, refuses `apply_patch`, `git_commit`, `git_push` and
 subagent merges, and without bwrap runs only read-only-classified commands.
 A foreground command that fails inside bwrap with a sandbox-block signature
 (read-only file system, name resolution or unreachable network) is offered
 for a retry outside the sandbox by a prompt that is never remembered and is
-asked in every mode except `plan`, including `auto` and `--yes`. No prompt
-is offered when nobody can answer, when `execution.provider = "bwrap"` or
+asked in every mode except `plan`, including `auto` and `--yes`; it shows
+the matched output lines. No prompt is offered at `read-only`, when an
+approval ceiling refuses destructive actions, when nobody can answer, when `execution.provider = "bwrap"` or
 instructions require bwrap, or with a disabled network; the failure then
 carries a note. `nib run` takes `--permission-mode` (not `--mode`, which
 stays the agent mode) and `--sandbox`, and prompts only when stdin can

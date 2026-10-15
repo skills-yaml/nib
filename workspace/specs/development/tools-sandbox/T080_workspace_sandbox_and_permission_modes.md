@@ -1449,9 +1449,13 @@ today's behavior exactly.
   the ones that would otherwise be moved into the sandbox. It must be
   chosen explicitly (setting or flag), and nib shows it as a warning in the
   status line, `/status`, `nib run` and `nib doctor`.
-- Instructions win: `nib-sandbox: require-bwrap` and `nib-boundary:
-  disable-network` turn `full-access` into `workspace-write`, and the
-  status surfaces say so.
+- Instructions win: any instruction tightening (`nib-sandbox:
+  require-bwrap`, `nib-boundary: disable-network` or a named boundary
+  profile), `execution.provider = "bwrap"` and a disabled network turn
+  `full-access` into `workspace-write`, and the status surfaces say why.
+  From a configuration file, which a project can ship, `full-access` applies
+  only in a trusted project; `nib run --sandbox full-access` applies it for
+  one run and is refused where the sandbox is pinned.
 
 **Escalation (AC-7).** After a foreground `run_terminal` command fails
 inside bwrap, nib looks at its output for a sandbox block: `Read-only file
@@ -1468,9 +1472,15 @@ in name resolution`, `Network is unreachable`). Then:
 - Without a person to ask, nib does not prompt. The original failure is
   returned with a note: the sandbox blocked it, and how to allow it (`--sandbox
   full-access`, or an interactive session).
-- No escalation in `plan` mode, in `full-access` (no sandbox), for background
-  commands, when instructions require bwrap, or when deny rules match the
-  command (they are applied before the first run).
+- No escalation in `plan` mode, at the `read-only` level (it makes no
+  changes; review of `080c50a`), in `full-access` (no sandbox), for
+  background commands, when `execution.provider = "bwrap"`, instructions
+  require bwrap or the network is disabled, when the approval handler's
+  ceiling refuses a destructive action, or when deny rules match the command
+  (they are applied before the first run).
+- The prompt shows the matched output lines (redacted) and says the retry
+  runs the command and anything it starts on the host with network, since
+  a command chooses its own output.
 - A false match only costs a prompt; nothing runs outside the sandbox
   without a yes. The command runs twice, so the prompt says so; checkpoints
   and the change watch cover both runs.
@@ -1498,6 +1508,29 @@ this platform. `nib doctor` reports the effective mode (and, for an old
 `approvals.mode` value, the new name to use, the AC-8 notice), the sandbox
 level, and whether its protections are enforceable here (bwrap present, or
 tool-level only, or none for `full-access`).
+
+**Review of `080c50a` (request changes), and the resolutions.**
+- **R1, High.** A named boundary profile from the instructions did not turn
+  `full-access` off. Fixed: every tightened instruction posture keeps the
+  sandbox (`settle_full_access`).
+- **R2, Medium.** `nib run --sandbox full-access` got past the config check
+  against `provider = "bwrap"` or a disabled network. Fixed: such a pin
+  keeps the sandbox, and `nib run` refuses the flag with the reason.
+- **R3, Low.** Escalation ignored the handler's approval ceiling. Fixed: a
+  ceiling that refuses destructive actions refuses the retry.
+- **R4, Low.** A command chooses its own output, so the prompt gave nothing
+  to judge. Fixed: the prompt shows the matched lines (redacted) and says
+  the retry runs project scripts on the host with network.
+- **R5, Low (decision).** `read-only` offered a full-access retry. Resolved
+  safe: the read-only level offers no retry.
+- **R6, Low.** `read-only` was not a reserved boundary profile name. Fixed.
+- **R7, Low (decision).** A shipped project configuration could select
+  `full-access`. Resolved safe: configured `full-access` needs a trusted
+  project; the flag does not.
+- **R8, Low.** Missing tests: added for allow rules, a disabled network,
+  the read-only rule without bwrap, R1 to R7 and the audit record.
+- **R9, Nit.** Guide approvals names, the headless note's wording, and
+  labels for `provider = "internal"` ("safe commands direct"). Fixed.
 
 **Out of scope.** macOS and Windows sandboxes (section 2 exclusions);
 remembering escalations; an interactive `--sandbox` flag (interactive

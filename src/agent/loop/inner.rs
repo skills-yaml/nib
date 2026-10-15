@@ -241,6 +241,7 @@ pub(crate) async fn run_agent_loop_inner(
     let mut execution = nib_cfg.execution.clone();
     if let Some(sandbox) = cfg.sandbox {
         execution.sandbox = sandbox.as_str().to_string();
+        execution.sandbox_explicit = true;
     }
     let mut executor = ToolExecutor::new(project_root.clone(), execution)
         .with_auto_approve(cfg.auto_approve)

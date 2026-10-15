@@ -1667,6 +1667,9 @@ pub(crate) fn sandbox_level_label(posture: &EffectiveExecutionPosture) -> String
     match (posture.sandbox, &posture.sandbox_route) {
         (SandboxLevel::FullAccess, _) => "FULL ACCESS (no sandbox)".to_string(),
         (level, SandboxExecutionRoute::Bwrap) => level.as_str().to_string(),
+        (level, SandboxExecutionRoute::Direct) if posture.safe_commands_direct => {
+            format!("{} (safe commands direct)", level.as_str())
+        }
         (SandboxLevel::ReadOnly, SandboxExecutionRoute::Direct) => {
             "read-only (tool-enforced)".to_string()
         }
@@ -1698,7 +1701,13 @@ pub(crate) fn format_effective_execution_posture(posture: &EffectiveExecutionPos
         bounded_status_value(&posture.provider),
         bounded_status_value(&posture.profile),
         bounded_status_value(&posture.network),
-        sandbox_level_label(posture),
+        match posture.sandbox_note {
+            Some(note) => format!(
+                "{}; full-access is not applied: {note}",
+                sandbox_level_label(posture)
+            ),
+            None => sandbox_level_label(posture),
+        },
         if posture.mutation_plan_gate { "required" } else { "not configured" },
         if posture.mutation_owned_worktree_gate { "required for tool-declared mutations" } else { "not required; sessions work in place unless /worktree is used" },
         sandbox_posture_label(posture),

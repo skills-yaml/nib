@@ -63,6 +63,9 @@ fn sandbox_level_line(posture: &nib::tools::executor::EffectiveExecutionPosture)
         (_, SandboxExecutionRoute::Bwrap) => {
             "enforced by bwrap: read-only Git metadata, masked .nib and $HOME".to_string()
         }
+        (_, SandboxExecutionRoute::Direct) if posture.safe_commands_direct => {
+            "enforced by bwrap except for commands classified safe, which run directly".to_string()
+        }
         (SandboxLevel::ReadOnly, SandboxExecutionRoute::Direct) => {
             "not enforceable here; only read-only commands run".to_string()
         }
@@ -73,7 +76,12 @@ fn sandbox_level_line(posture: &nib::tools::executor::EffectiveExecutionPosture)
             format!("unavailable; commands fail closed: {error}")
         }
     };
-    format!("Sandbox level: {level} ({enforcement})")
+    match posture.sandbox_note {
+        Some(note) => {
+            format!("Sandbox level: {level} ({enforcement}; full-access is not applied: {note})")
+        }
+        None => format!("Sandbox level: {level} ({enforcement})"),
+    }
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -951,6 +959,8 @@ mod tests {
             profile: "restricted".to_string(),
             network: "restricted".to_string(),
             sandbox,
+            sandbox_note: None,
+            safe_commands_direct: false,
             mutation_plan_gate: true,
             mutation_owned_worktree_gate: false,
             instruction_posture: nib::tools::executor::InstructionExecutionPosture::Configured,

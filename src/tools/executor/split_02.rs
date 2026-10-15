@@ -412,11 +412,42 @@ pub(crate) fn resolve_execution_config(
                 InstructionExecutionPosture::InvalidFailClosed
             }
         };
+    let sandbox_note = settle_full_access(project_root, &mut execution_config, instruction_posture);
     ResolvedExecutionConfig {
         config: execution_config,
         policy_rules,
         instruction_posture,
+        sandbox_note,
     }
+}
+
+/// Turns a `full-access` sandbox level into `workspace-write`, with the
+/// reason, when anything else asks for the sandbox: project instructions
+/// that tighten execution, `provider = "bwrap"` or a disabled network, or a
+/// configuration file in a project the user has not trusted (T080 phase 6).
+fn settle_full_access(
+    project_root: &Path,
+    config: &mut ExecutionConfig,
+    instruction_posture: InstructionExecutionPosture,
+) -> Option<&'static str> {
+    if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+        != crate::sandbox::SandboxLevel::FullAccess
+    {
+        return None;
+    }
+    let reason = if instruction_posture != InstructionExecutionPosture::Configured {
+        "project instructions tighten the sandbox"
+    } else if config.provider == "bwrap" || config.boundaries.network == "disabled" {
+        "execution.provider = \"bwrap\" or a disabled network keeps the sandbox"
+    } else if !config.sandbox_explicit
+        && !crate::tools::permission_rules::project_trusted(project_root)
+    {
+        "full-access from configuration applies only in a trusted project (/permissions trust)"
+    } else {
+        return None;
+    };
+    leave_full_access(config);
+    Some(reason)
 }
 
 pub(crate) fn load_instruction_policy_rules(project_root: &Path) -> Vec<PolicyRule> {
@@ -574,7 +605,10 @@ fn leave_full_access(config: &mut ExecutionConfig) {
 pub(crate) fn valid_boundary_profile_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
-        && !matches!(name, "internal" | "restricted")
+        && !matches!(
+            name,
+            "internal" | "restricted" | crate::sandbox::READ_ONLY_PROFILE
+        )
         && name.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })

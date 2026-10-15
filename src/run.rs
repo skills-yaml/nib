@@ -172,7 +172,10 @@ fn print_run_start(
 ) -> Result<(), String> {
     let mode = nib::interactive::bounded_public_text(&args.mode, sensitive_values, 32, false);
     println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
-    println!("{}", run_posture(args, config, project, session_store, sid));
+    println!(
+        "{}",
+        run_posture(args, config, project, session_store, sid)?
+    );
     // T080 phase 5c: say where the run works and why.
     let workspace = if args.worktree {
         nib::interactive::start_in_worktree(project, session_store, sid)?
@@ -192,7 +195,7 @@ fn run_posture(
     project: &std::path::Path,
     session_store: &nib::session::SessionStore,
     session_id: &str,
-) -> String {
+) -> Result<String, String> {
     let session_mode = session_store
         .load_result(session_id)
         .ok()
@@ -210,13 +213,22 @@ fn run_posture(
     let mut execution = config.execution.clone();
     if let Some(sandbox) = args.sandbox {
         execution.sandbox = sandbox.as_str().to_string();
+        execution.sandbox_explicit = true;
     }
-    let sandbox = nib::tools::executor::ToolExecutor::effective_execution_posture(
+    let posture = nib::tools::executor::ToolExecutor::effective_execution_posture(
         project,
         execution,
         &config.approvals,
-    )
-    .sandbox;
+    );
+    let sandbox = posture.sandbox;
+    if let (Some(requested), Some(note)) = (args.sandbox, posture.sandbox_note) {
+        if requested != sandbox {
+            return Err(format!(
+                "--sandbox {} cannot apply here: {note}",
+                requested.as_str()
+            ));
+        }
+    }
     let mut line = format!(
         "permission={} sandbox={}",
         nib::tools::executor::permission_mode_label(mode),
@@ -224,8 +236,10 @@ fn run_posture(
     );
     if sandbox == nib::sandbox::SandboxLevel::FullAccess {
         line.push_str("\nwarning: full-access runs commands on this machine without a sandbox");
+    } else if let Some(note) = posture.sandbox_note {
+        line.push_str(&format!("\nnote: full-access is not applied: {note}"));
     }
-    line
+    Ok(line)
 }
 
 pub fn run_agent(args: &RunArgs) -> Result<(), String> {
@@ -701,6 +715,42 @@ mod tests {
             .list_result()
             .expect("session list")
             .is_empty());
+    }
+
+    /// T080 phase 6 review R2: `--sandbox full-access` is refused, not
+    /// silently applied, where the configuration keeps the sandbox.
+    #[test]
+    #[serial]
+    fn run_refuses_full_access_where_the_sandbox_is_required() {
+        let project = tempdir().expect("project");
+        let mut config = NibConfig::default();
+        config
+            .llm
+            .add_or_update_provider("mock".to_string(), "mock-model".to_string(), None);
+        config.execution.provider = "bwrap".to_string();
+        config.skills.enabled = false;
+        config.daemons.cron_enabled = false;
+        config.daemons.curator_enabled = false;
+        save_nib_config_full(project.path(), &mut config).expect("mock config");
+        let _cwd = CurrentDirGuard::enter(project.path());
+
+        let error = run_agent(&RunArgs {
+            goal: "list project files".to_string(),
+            session: None,
+            max_steps: 1,
+            mode: "execute".to_string(),
+            provider: Some("mock".to_string()),
+            model: Some("mock-model".to_string()),
+            yes: true,
+            worktree: false,
+            permission_mode: None,
+            sandbox: Some(nib::sandbox::SandboxLevel::FullAccess),
+        })
+        .expect_err("full-access under a bwrap provider");
+        assert!(
+            error.starts_with("--sandbox full-access cannot apply here"),
+            "{error}"
+        );
     }
 
     #[test]

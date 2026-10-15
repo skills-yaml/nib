@@ -374,7 +374,8 @@ The main sections are:
 - `agent`: turn bound and tool-use enforcement.
 - `terminal`: backend and default command timeout.
 - `execution`: sandbox level, provider, profile, plan gate, and writable boundaries.
-- `approvals`: `manual`, `smart`, `policy`, or `off` mode.
+- `approvals`: the permission mode, `ask`, `accept-edits`, `plan`, `auto` or `policy`
+  (the older names `manual`, `smart` and `off` still work; `nib doctor` names the new one).
 - `compression` and `memory`: long-session context and durable facts.
 - `daemons`: scheduler and curator policy.
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
@@ -1152,19 +1153,23 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
   (macOS, Windows), only commands classified read-only run.
 - `full-access`: commands run directly on your machine with network. Choose it
   only when you trust the task; the footer shows `FULL ACCESS (no sandbox)`.
-  Project instructions that require `bwrap` turn it back into `workspace-write`.
+  From a configuration file it applies only in a project you trusted with
+  `/permissions trust`; `nib run --sandbox full-access` applies it for one run.
+  Project instructions that restrict execution, `execution.provider = "bwrap"`
+  and a disabled network keep the sandbox (`nib run` refuses the flag then).
 
 The footer, `/status`, `/permissions` and `nib doctor` show the level and
 whether this machine can enforce it.
 
 When the sandbox blocks a command (a read-only file system, or no network),
-nib asks whether to retry it outside the sandbox. The retry runs the command
-again on your machine, so say yes only if you would run it yourself. The
-question comes in every mode, including `auto` and with `--yes`, and it is never
-remembered. It is not offered in `plan` mode, when `execution.provider =
-"bwrap"` or project instructions require the sandbox, or when nobody can answer
-(`nib run` without input, MCP, subagents); then the failure says the sandbox
-blocked it.
+nib asks whether to retry it outside the sandbox, showing the output line that
+matched. The retry runs the command, and any project scripts it starts, again on
+your machine, so say yes only if you would run it yourself. The question comes in
+every mode, including `auto` and with `--yes`, and it is never remembered. It is
+not offered in `plan` mode, at the `read-only` level, when `execution.provider =
+"bwrap"`, project instructions require the sandbox or the network is disabled, or
+when nobody can answer (`nib run` without input, MCP, subagents); then the
+failure says the sandbox blocked it.
 
 ### Checkpoints and rewind
 

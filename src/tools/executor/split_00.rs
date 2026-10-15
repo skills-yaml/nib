@@ -25,6 +25,11 @@ pub struct EffectiveExecutionPosture {
     pub network: String,
     /// The sandbox level after project instructions (T080 phase 6).
     pub sandbox: crate::sandbox::SandboxLevel,
+    /// Why a requested `full-access` level does not apply, if it does not.
+    pub sandbox_note: Option<&'static str>,
+    /// Commands classified safe run directly (`provider` or `profile` is
+    /// `internal`) while the others still use bwrap.
+    pub safe_commands_direct: bool,
     pub mutation_plan_gate: bool,
     pub mutation_owned_worktree_gate: bool,
     pub instruction_posture: InstructionExecutionPosture,
@@ -36,6 +41,8 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) config: ExecutionConfig,
     pub(crate) policy_rules: Vec<PolicyRule>,
     pub(crate) instruction_posture: InstructionExecutionPosture,
+    /// Why a `full-access` level was turned into `workspace-write`.
+    pub(crate) sandbox_note: Option<&'static str>,
 }
 
 pub(crate) struct CommandPresentation {

@@ -37,6 +37,23 @@ pub(crate) fn read_only_sandbox_refuses(config: &ExecutionConfig, tool_name: &st
             ))
 }
 
+/// Refusal for a command that would change something at the `read-only`
+/// level without bwrap: the level is then kept by the tools, so only
+/// commands classified read-only run (T080 phase 6).
+pub(crate) const READ_ONLY_UNENFORCEABLE_DENIAL: &str =
+    "the read-only sandbox cannot be enforced on this platform, so only read-only commands run";
+
+pub(crate) fn read_only_direct_refusal(
+    route: &crate::sandbox::SandboxExecutionRoute,
+    config: &ExecutionConfig,
+    risk: ToolRisk,
+) -> Option<ApprovalDecision> {
+    (matches!(route, crate::sandbox::SandboxExecutionRoute::Direct)
+        && config.default_profile == crate::sandbox::READ_ONLY_PROFILE
+        && risk != ToolRisk::ReadOnly)
+        .then(|| ApprovalDecision::denied_by_policy(READ_ONLY_UNENFORCEABLE_DENIAL))
+}
+
 /// Applies `execution.sandbox` to a resolved configuration (T080 phase 6).
 /// `full-access` runs commands directly with network; it is chosen
 /// explicitly, and config validation and instruction tightening keep it away
@@ -117,6 +134,10 @@ impl ToolExecutor {
             &leveled.default_profile,
             &leveled.boundaries,
         );
+        let safe_commands_direct = sandbox != crate::sandbox::SandboxLevel::FullAccess
+            && matches!(sandbox_route, crate::sandbox::SandboxExecutionRoute::Direct)
+            && (leveled.provider == "internal" || leveled.default_profile == "internal")
+            && crate::sandbox::detect_capabilities().bwrap_available;
         let broad_or_off = approval_mode == ApprovalMode::Off
             || matches!(sandbox_route, crate::sandbox::SandboxExecutionRoute::Direct)
             || leveled.boundaries.network == "enabled";
@@ -127,6 +148,8 @@ impl ToolExecutor {
             profile: leveled.default_profile,
             network: leveled.boundaries.network,
             sandbox,
+            sandbox_note: resolved.sandbox_note,
+            safe_commands_direct,
             mutation_plan_gate: resolved.config.plan_mode,
             // T080 phase 5c: sessions work in place unless configuration or
             // project instructions (applied by the tightening above) require
@@ -1716,26 +1739,16 @@ impl ToolExecutor {
         if !presentation.offer_grant {
             return Some(ApprovalDecision::denied_unshowable());
         }
-        match crate::sandbox::resolve_sandbox_execution_route(
+        let route = crate::sandbox::resolve_sandbox_execution_route(
             &config.provider,
             &config.default_profile,
             &config.boundaries,
-        ) {
+        );
+        match route {
             crate::sandbox::SandboxExecutionRoute::FailClosed(error) => {
                 Some(ApprovalDecision::denied_by_policy(error))
             }
-            // Without bwrap, the read-only level is kept by the tools: only
-            // commands classified read-only run (T080 phase 6).
-            crate::sandbox::SandboxExecutionRoute::Direct
-                if config.default_profile == crate::sandbox::READ_ONLY_PROFILE
-                    && classify_tool_call(call) != ToolRisk::ReadOnly =>
-            {
-                Some(ApprovalDecision::denied_by_policy(
-                    "the read-only sandbox cannot be enforced on this platform, so only read-only commands run",
-                ))
-            }
-            crate::sandbox::SandboxExecutionRoute::Direct
-            | crate::sandbox::SandboxExecutionRoute::Bwrap => None,
+            route => read_only_direct_refusal(&route, config, classify_tool_call(call)),
         }
     }
 

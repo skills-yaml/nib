@@ -165,6 +165,11 @@ pub struct ExecutionConfig {
     /// `workspace-write` (the mount plan) or `full-access` (no sandbox).
     #[serde(default = "default_sandbox")]
     pub sandbox: String,
+    /// Set when `sandbox` was chosen for this run on the command line rather
+    /// than read from a configuration file, which a project can ship; only
+    /// a trusted project's configuration may select `full-access`.
+    #[serde(skip)]
+    pub sandbox_explicit: bool,
 }
 
 impl Default for ExecutionConfig {
@@ -177,6 +182,7 @@ impl Default for ExecutionConfig {
             boundary_profiles: HashMap::new(),
             workspace: default_workspace(),
             sandbox: default_sandbox(),
+            sandbox_explicit: false,
         }
     }
 }
