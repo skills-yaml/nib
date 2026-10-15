@@ -1158,8 +1158,9 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
   Project instructions that restrict execution, `execution.provider = "bwrap"`
   and a disabled network keep the sandbox (`nib run` refuses the flag then).
 
-The footer, `/status`, `/permissions` and `nib doctor` show the level and
-whether this machine can enforce it.
+`/status`, `/permissions` and `nib doctor` show the level and whether this
+machine can enforce it; the footer shows it next to the mode whenever it is
+not the default `workspace-write` enforced by `bwrap`.
 
 When the sandbox blocks a command (a read-only file system, or no network),
 nib asks whether to retry it outside the sandbox, showing the output line that

@@ -1502,7 +1502,11 @@ in name resolution`, `Network is unreachable`). Then:
   edits to instruction files, which closes the phase 2b F8 fail-closed note.
 - The start line shows the permission mode and the sandbox level.
 
-**Visibility.** The status line shows `mode <mode> · <sandbox level>`;
+**Visibility.** The status line shows `mode <mode> · <sandbox level>` for
+every level except the default `workspace-write` enforced by bwrap, which
+goes unmentioned so the key hints fit narrow terminals (CI macOS smoke on
+PR67: the longer footer clipped `Ctrl+End follow`), as Claude Code shows
+only non-default modes;
 `/status` and `/permissions` show the level and whether it is enforced on
 this platform. `nib doctor` reports the effective mode (and, for an old
 `approvals.mode` value, the new name to use, the AC-8 notice), the sandbox

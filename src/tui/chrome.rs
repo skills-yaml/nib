@@ -665,10 +665,17 @@ pub(crate) fn footer_line(
             .unwrap_or_else(|| waiting_keys(waiting))
             .to_string();
     }
-    let mut hint = format!(
-        "mode {} · {} · {}",
-        chrome.approval, chrome.sandbox, chrome.agent_mode
-    );
+    // The default, bwrap-enforced sandbox goes unmentioned so key hints fit
+    // narrow terminals; any other level is shown next to the mode (T080
+    // phase 6). /status always shows it.
+    let mut hint = if chrome.sandbox == crate::sandbox::SandboxLevel::WorkspaceWrite.as_str() {
+        format!("mode {} · {}", chrome.approval, chrome.agent_mode)
+    } else {
+        format!(
+            "mode {} · {} · {}",
+            chrome.approval, chrome.sandbox, chrome.agent_mode
+        )
+    };
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {

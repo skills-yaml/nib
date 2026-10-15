@@ -1003,7 +1003,20 @@ fn presence_follows_every_footer_key_hint() {
     shared.other_sessions = 2;
     assert_eq!(
         footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · workspace-write · idle · Ctrl+End follow · 2 other sessions in this folder"
+        "mode ask · idle · Ctrl+End follow · 2 other sessions in this folder"
+    );
+}
+
+/// T080 phase 6: the footer shows any sandbox level but the enforced
+/// default next to the mode.
+#[test]
+fn footer_shows_a_non_default_sandbox_level() {
+    let viewport = TranscriptViewport::default();
+    let mut full = TuiChrome::fixture();
+    full.sandbox = "FULL ACCESS (no sandbox)".to_string();
+    assert_eq!(
+        footer_line(&full, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · FULL ACCESS (no sandbox) · idle"
     );
 }
 
@@ -1013,29 +1026,29 @@ fn footer_and_completion_follow_the_current_interaction() {
     let chrome = TuiChrome::fixture();
     assert_eq!(
         footer_line(&chrome, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · workspace-write · idle"
+        "mode ask · idle"
     );
     let mut running = chrome.clone();
     running.agent_mode = "execute".to_string();
     assert_eq!(
         footer_line(&running, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · workspace-write · execute"
+        "mode ask · execute"
     );
     assert_eq!(
         footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
-        "queue 2 · mode ask · workspace-write · execute"
+        "queue 2 · mode ask · execute"
     );
     let mut shared = chrome.clone();
     shared.other_sessions = 2;
     assert_eq!(
         footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · workspace-write · idle · 2 other sessions in this folder"
+        "mode ask · idle · 2 other sessions in this folder"
     );
     let mut waiting = chrome.clone();
     waiting.agent_mode = "WAITING APPROVAL".to_string();
     assert_eq!(
         footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
-        "mode ask · workspace-write · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
+        "mode ask · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
     );
     let mut question = chrome.clone();
     question.agent_mode = "WAITING QUESTION".to_string();
@@ -1054,7 +1067,7 @@ fn footer_and_completion_follow_the_current_interaction() {
             None,
             false
         ),
-        "mode ask · workspace-write · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
+        "mode ask · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
     );
     assert!(footer_line(
         &chrome,
