@@ -884,6 +884,7 @@ fn header_shows_folder_and_branch_left_and_model_right() {
         model: "mock-model".to_string(),
         context: "ctx ~12/100".to_string(),
         approval: "ask".to_string(),
+        sandbox: "workspace-write".to_string(),
         agent_mode: "idle".to_string(),
         other_sessions: 0,
     };
@@ -1002,7 +1003,7 @@ fn presence_follows_every_footer_key_hint() {
     shared.other_sessions = 2;
     assert_eq!(
         footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · idle · Ctrl+End follow · 2 other sessions in this folder"
+        "mode ask · workspace-write · idle · Ctrl+End follow · 2 other sessions in this folder"
     );
 }
 
@@ -1012,29 +1013,29 @@ fn footer_and_completion_follow_the_current_interaction() {
     let chrome = TuiChrome::fixture();
     assert_eq!(
         footer_line(&chrome, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · idle"
+        "mode ask · workspace-write · idle"
     );
     let mut running = chrome.clone();
     running.agent_mode = "execute".to_string();
     assert_eq!(
         footer_line(&running, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · execute"
+        "mode ask · workspace-write · execute"
     );
     assert_eq!(
         footer_line(&running, &viewport, 2, WaitingKind::None, None, false),
-        "queue 2 · mode ask · execute"
+        "queue 2 · mode ask · workspace-write · execute"
     );
     let mut shared = chrome.clone();
     shared.other_sessions = 2;
     assert_eq!(
         footer_line(&shared, &viewport, 0, WaitingKind::None, None, false),
-        "mode ask · idle · 2 other sessions in this folder"
+        "mode ask · workspace-write · idle · 2 other sessions in this folder"
     );
     let mut waiting = chrome.clone();
     waiting.agent_mode = "WAITING APPROVAL".to_string();
     assert_eq!(
         footer_line(&waiting, &viewport, 0, WaitingKind::Approval, None, false),
-        "mode ask · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
+        "mode ask · workspace-write · WAITING APPROVAL · Enter deny · select Approve once then Enter · Esc deny"
     );
     let mut question = chrome.clone();
     question.agent_mode = "WAITING QUESTION".to_string();
@@ -1053,7 +1054,7 @@ fn footer_and_completion_follow_the_current_interaction() {
             None,
             false
         ),
-        "mode ask · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
+        "mode ask · workspace-write · WAITING PERMISSION · Enter decline · select Allow then Enter · Esc decline"
     );
     assert!(footer_line(
         &chrome,

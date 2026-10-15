@@ -883,3 +883,55 @@ fn failed_plain_child_diagnostic(child: &mut std::process::Child) -> String {
         String::from_utf8_lossy(&stderr)
     )
 }
+
+/// T080 phase 6: a run with no input (stdin `/dev/null`, as under cron or CI)
+/// denies a prompt at once instead of waiting, and runs nothing.
+#[test]
+fn one_shot_without_input_denies_prompts_instead_of_waiting() {
+    let project = configured_project();
+    initialize_interrupt_repository(project.path());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nib"))
+        .args([
+            "run",
+            "one-shot interrupt approval",
+            "--provider",
+            "mock",
+            "--model",
+            "mock-model",
+            "--max-steps",
+            "3",
+            "--permission-mode",
+            "ask",
+        ])
+        .env("NIB_NO_UPDATE_CHECK", "1")
+        .current_dir(project.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn headless one-shot run");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while child.try_wait().expect("poll headless run").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("a headless run waited on a prompt");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("headless output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("permission=ask sandbox=workspace-write"),
+        "{stdout}"
+    );
+    assert!(!project.path().join("one-shot-approval-ran.txt").exists());
+    let store = SessionStore::for_project(project.path()).expect("session store");
+    let session_id = store
+        .list_result()
+        .expect("sessions")
+        .pop()
+        .expect("run session");
+    let session = store.load(&session_id).expect("headless session");
+    let recorded = serde_json::to_string(&session.tool_calls).expect("tool calls");
+    assert!(recorded.contains("no input to ask on"), "{recorded}");
+}

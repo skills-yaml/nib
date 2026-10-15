@@ -23,6 +23,8 @@ pub struct EffectiveExecutionPosture {
     pub provider: String,
     pub profile: String,
     pub network: String,
+    /// The sandbox level after project instructions (T080 phase 6).
+    pub sandbox: crate::sandbox::SandboxLevel,
     pub mutation_plan_gate: bool,
     pub mutation_owned_worktree_gate: bool,
     pub instruction_posture: InstructionExecutionPosture,

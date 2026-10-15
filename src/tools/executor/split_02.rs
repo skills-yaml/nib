@@ -325,7 +325,7 @@ pub(crate) fn approval_mode_from_config(config: &ApprovalsConfig) -> ApprovalMod
 /// Parses a configured or user-selected mode. Both the original config names
 /// (`manual`, `smart`, `policy`, `off`) and the permission-mode names
 /// (`ask`, `accept-edits`, `plan`, `auto`) are accepted (T080).
-pub(crate) fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
+pub fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
     match name.trim().to_ascii_lowercase().as_str() {
         // The legacy `smart` preset always behaved exactly like `manual`;
         // keeping that avoids silently auto-applying edits for existing
@@ -352,7 +352,7 @@ pub(crate) fn approval_mode_label(mode: ApprovalMode) -> &'static str {
 }
 
 /// User-facing permission-mode name shown in the footer and by `/mode`.
-pub(crate) fn permission_mode_label(mode: ApprovalMode) -> &'static str {
+pub fn permission_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Manual => "ask",
         ApprovalMode::Smart => "accept-edits",
@@ -556,6 +556,19 @@ pub(crate) fn fail_closed_execution_config(config: &mut ExecutionConfig) {
     config.default_profile = "restricted".to_string();
     config.boundaries.network = "disabled".to_string();
     config.boundaries.allow_write.clear();
+    leave_full_access(config);
+}
+
+/// Instructions that require bwrap win over a `full-access` sandbox level,
+/// which would otherwise run commands directly (T080 phase 6).
+fn leave_full_access(config: &mut ExecutionConfig) {
+    if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+        == crate::sandbox::SandboxLevel::FullAccess
+    {
+        config.sandbox = crate::sandbox::SandboxLevel::WorkspaceWrite
+            .as_str()
+            .to_string();
+    }
 }
 
 pub(crate) fn valid_boundary_profile_name(name: &str) -> bool {
@@ -662,10 +675,12 @@ pub(crate) fn apply_instruction_execution_tightening(
         if config.default_profile == "internal" {
             config.default_profile = "restricted".to_string();
         }
+        leave_full_access(config);
     }
     if disable_network {
         config.provider = "bwrap".to_string();
         config.boundaries.network = "disabled".to_string();
+        leave_full_access(config);
     }
     Ok(())
 }

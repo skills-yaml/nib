@@ -462,6 +462,7 @@ async fn agents_named_boundary_profile_preserves_approval_worktree_and_audit() {
         },
         boundary_profiles: HashMap::new(),
         workspace: "worktree".to_string(),
+        sandbox: "workspace-write".to_string(),
     };
     config.boundary_profiles.insert(
         "locked".to_string(),

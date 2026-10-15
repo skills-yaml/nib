@@ -132,6 +132,100 @@ pub struct RunArgs {
     /// Work in the session's own Git worktree instead of this folder
     #[arg(long)]
     pub worktree: bool,
+
+    /// Permission mode for this run: plan, ask, accept-edits or auto
+    #[arg(long, value_parser = parse_permission_mode)]
+    pub permission_mode: Option<nib::tools::models::ApprovalMode>,
+
+    /// Sandbox level for commands: read-only, workspace-write or full-access
+    #[arg(long, value_parser = parse_sandbox_level)]
+    pub sandbox: Option<nib::sandbox::SandboxLevel>,
+}
+
+fn parse_permission_mode(name: &str) -> Result<nib::tools::models::ApprovalMode, String> {
+    match name {
+        "plan" | "ask" | "accept-edits" | "auto" => {
+            nib::tools::executor::permission_mode_from_name(name)
+                .ok_or_else(|| format!("unknown permission mode {name}"))
+        }
+        _ => Err("expected plan, ask, accept-edits or auto".to_string()),
+    }
+}
+
+fn parse_sandbox_level(name: &str) -> Result<nib::sandbox::SandboxLevel, String> {
+    match name {
+        "read-only" | "workspace-write" | "full-access" => nib::sandbox::SandboxLevel::parse(name)
+            .ok_or_else(|| format!("unknown sandbox level {name}")),
+        _ => Err(format!("expected {}", nib::sandbox::SandboxLevel::NAMES)),
+    }
+}
+
+/// Prints the run's session, agent mode, permission mode, sandbox level and
+/// where it works, creating the worktree for `--worktree`.
+fn print_run_start(
+    args: &RunArgs,
+    config: &nib::config::NibConfig,
+    project: &std::path::Path,
+    session_store: &nib::session::SessionStore,
+    sid: &str,
+    sensitive_values: &[String],
+) -> Result<(), String> {
+    let mode = nib::interactive::bounded_public_text(&args.mode, sensitive_values, 32, false);
+    println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
+    println!("{}", run_posture(args, config, project, session_store, sid));
+    // T080 phase 5c: say where the run works and why.
+    let workspace = if args.worktree {
+        nib::interactive::start_in_worktree(project, session_store, sid)?
+    } else {
+        nib::interactive::workspace_summary(project, session_store, sid)
+    };
+    println!("{workspace}");
+    Ok(())
+}
+
+/// The start line's permission mode (flag, then the session's, then
+/// `approvals.mode`) and the sandbox level after project instructions, with a
+/// warning for `full-access`.
+fn run_posture(
+    args: &RunArgs,
+    config: &nib::config::NibConfig,
+    project: &std::path::Path,
+    session_store: &nib::session::SessionStore,
+    session_id: &str,
+) -> String {
+    let session_mode = session_store
+        .load_result(session_id)
+        .ok()
+        .flatten()
+        .and_then(|session| session.permission_mode);
+    let mode = args
+        .permission_mode
+        .or_else(|| {
+            session_mode
+                .as_deref()
+                .and_then(nib::tools::executor::permission_mode_from_name)
+        })
+        .or_else(|| nib::tools::executor::permission_mode_from_name(&config.approvals.mode))
+        .unwrap_or_default();
+    let mut execution = config.execution.clone();
+    if let Some(sandbox) = args.sandbox {
+        execution.sandbox = sandbox.as_str().to_string();
+    }
+    let sandbox = nib::tools::executor::ToolExecutor::effective_execution_posture(
+        project,
+        execution,
+        &config.approvals,
+    )
+    .sandbox;
+    let mut line = format!(
+        "permission={} sandbox={}",
+        nib::tools::executor::permission_mode_label(mode),
+        sandbox.as_str()
+    );
+    if sandbox == nib::sandbox::SandboxLevel::FullAccess {
+        line.push_str("\nwarning: full-access runs commands on this machine without a sandbox");
+    }
+    line
 }
 
 pub fn run_agent(args: &RunArgs) -> Result<(), String> {
@@ -169,15 +263,14 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         &project,
         &sid,
     );
-    let mode = nib::interactive::bounded_public_text(&args.mode, &sensitive_values, 32, false);
-    println!("session={} mode={} max_steps={}", sid, mode, args.max_steps);
-    // T080 phase 5c: say where the run works and why.
-    let workspace = if args.worktree {
-        nib::interactive::start_in_worktree(&project, &session_store, &sid)?
-    } else {
-        nib::interactive::workspace_summary(&project, &session_store, &sid)
-    };
-    println!("{workspace}");
+    print_run_start(
+        args,
+        &config,
+        &project,
+        &session_store,
+        &sid,
+        &sensitive_values,
+    )?;
 
     // We use the Rust agent loop directly
     let rt = nib::agent::build_agent_runtime("failed to initialize the async runtime")?;
@@ -190,6 +283,8 @@ fn run_agent_with_input(args: &RunArgs, input: ConsoleInput) -> Result<(), Strin
         provider: args.provider.clone(),
         model: args.model.clone(),
         auto_approve: args.yes,
+        permission_mode: args.permission_mode,
+        sandbox: args.sandbox,
         approval_handler: Some(Arc::new(ConsoleApprovalHandler::new(input.clone()))),
         question_handler: Some(Arc::new(ConsoleQuestionHandler::with_sensitive_values(
             input,
@@ -347,6 +442,8 @@ mod tests {
             model: Some("mock-model".to_string()),
             yes: true,
             worktree: false,
+            permission_mode: None,
+            sandbox: None,
         })
         .expect("mock agent run");
 
@@ -373,6 +470,8 @@ mod tests {
             model: None,
             yes: true,
             worktree: false,
+            permission_mode: None,
+            sandbox: None,
         })
         .expect_err("unsupported provider");
         assert!(error.contains("LLM request failed [LLM-CONFIG]"), "{error}");
@@ -464,6 +563,8 @@ mod tests {
                 model: Some("mock-model".to_string()),
                 yes: true,
                 worktree: false,
+                permission_mode: None,
+                sandbox: None,
             },
             ConsoleInput::new(Cursor::new(b"2\n".to_vec())),
         )
@@ -505,6 +606,8 @@ mod tests {
                 model: Some("mock-model".to_string()),
                 yes: true,
                 worktree: false,
+                permission_mode: None,
+                sandbox: None,
             },
             ConsoleInput::new(Cursor::new(Vec::<u8>::new())),
         )
@@ -583,6 +686,8 @@ mod tests {
             model: Some("mock-model".to_string()),
             yes: true,
             worktree: false,
+            permission_mode: None,
+            sandbox: None,
         })
         .expect_err("credential-derived session id");
 
@@ -618,6 +723,8 @@ mod tests {
             model: Some("mock-model".to_string()),
             yes: true,
             worktree: false,
+            permission_mode: None,
+            sandbox: None,
         })
         .expect_err("oversized goal");
 

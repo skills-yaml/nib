@@ -1583,6 +1583,12 @@ pub struct AgentLoopConfig {
     /// Always work in a session worktree, for this reason (scheduled work,
     /// T080 phase 5c). Not recorded on the session.
     pub required_worktree: Option<String>,
+    /// Permission mode for this run (`nib run --permission-mode`), over the
+    /// session's mode and `approvals.mode`. Not recorded on the session.
+    pub permission_mode: Option<crate::tools::models::ApprovalMode>,
+    /// Sandbox level for this run (`nib run --sandbox`), over
+    /// `execution.sandbox`. Project instructions still apply on top.
+    pub sandbox: Option<crate::sandbox::SandboxLevel>,
 }
 
 impl Default for AgentLoopConfig {
@@ -1603,6 +1609,8 @@ impl Default for AgentLoopConfig {
             continuation_plan_id: None,
             discussion_invocation_id: None,
             required_worktree: None,
+            permission_mode: None,
+            sandbox: None,
         }
     }
 }

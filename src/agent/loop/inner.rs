@@ -238,7 +238,11 @@ pub(crate) async fn run_agent_loop_inner(
     } else {
         None
     };
-    let mut executor = ToolExecutor::new(project_root.clone(), nib_cfg.execution.clone())
+    let mut execution = nib_cfg.execution.clone();
+    if let Some(sandbox) = cfg.sandbox {
+        execution.sandbox = sandbox.as_str().to_string();
+    }
+    let mut executor = ToolExecutor::new(project_root.clone(), execution)
         .with_auto_approve(cfg.auto_approve)
         .with_terminal_config(&nib_cfg.terminal)
         .with_approvals_config(&nib_cfg.approvals)
@@ -260,6 +264,9 @@ pub(crate) async fn run_agent_loop_inner(
         .as_deref()
         .and_then(crate::tools::executor::permission_mode_from_name)
     {
+        executor = executor.with_approval_mode(mode);
+    }
+    if let Some(mode) = cfg.permission_mode {
         executor = executor.with_approval_mode(mode);
     }
     // T080 phase 5c: work where the run started decided.

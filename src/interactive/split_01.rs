@@ -1659,6 +1659,22 @@ pub(crate) fn sandbox_posture_label(posture: &EffectiveExecutionPosture) -> &'st
     }
 }
 
+/// The sandbox level as the status line shows it: the level's name, marked
+/// when this platform cannot enforce it, and a warning for `full-access`
+/// (T080 phase 6).
+pub(crate) fn sandbox_level_label(posture: &EffectiveExecutionPosture) -> String {
+    use crate::sandbox::{SandboxExecutionRoute, SandboxLevel};
+    match (posture.sandbox, &posture.sandbox_route) {
+        (SandboxLevel::FullAccess, _) => "FULL ACCESS (no sandbox)".to_string(),
+        (level, SandboxExecutionRoute::Bwrap) => level.as_str().to_string(),
+        (SandboxLevel::ReadOnly, SandboxExecutionRoute::Direct) => {
+            "read-only (tool-enforced)".to_string()
+        }
+        (level, SandboxExecutionRoute::Direct) => format!("{} (unsandboxed)", level.as_str()),
+        (_, SandboxExecutionRoute::FailClosed(_)) => "sandbox unavailable".to_string(),
+    }
+}
+
 pub(crate) fn instruction_posture_label(posture: &EffectiveExecutionPosture) -> &'static str {
     match posture.instruction_posture {
         InstructionExecutionPosture::Configured => "configured",
@@ -1676,12 +1692,13 @@ pub(crate) fn format_effective_execution_posture(posture: &EffectiveExecutionPos
         ""
     };
     format!(
-        "Configured approval preset: {}\nEffective execution posture:\n  approval behavior: {}\n  provider: {}\n  profile: {}\n  network: {}\n  mutation plan gate: {}\n  mutation managed-owned-worktree gate: {}\n  platform sandbox: {}\n  instruction boundary: {}\nPer-action AGENTS.md, skill, tool policy, worktree, and platform controls may only tighten this posture; the configured preset never overrides them.{warning}",
+        "Configured approval preset: {}\nEffective execution posture:\n  approval behavior: {}\n  provider: {}\n  profile: {}\n  network: {}\n  sandbox level: {}\n  mutation plan gate: {}\n  mutation managed-owned-worktree gate: {}\n  platform sandbox: {}\n  instruction boundary: {}\nPer-action AGENTS.md, skill, tool policy, worktree, and platform controls may only tighten this posture; the configured preset never overrides them.{warning}",
         bounded_status_value(&posture.configured_approval_preset),
         posture.effective_approval_mode,
         bounded_status_value(&posture.provider),
         bounded_status_value(&posture.profile),
         bounded_status_value(&posture.network),
+        sandbox_level_label(posture),
         if posture.mutation_plan_gate { "required" } else { "not configured" },
         if posture.mutation_owned_worktree_gate { "required for tool-declared mutations" } else { "not required; sessions work in place unless /worktree is used" },
         sandbox_posture_label(posture),
@@ -1781,6 +1798,8 @@ pub struct TuiChrome {
     pub model: String,
     pub context: String,
     pub approval: String,
+    /// The sandbox level label (T080 phase 6), from [`sandbox_level_label`].
+    pub sandbox: String,
     pub agent_mode: String,
     /// Other live nib sessions in this folder (T080 section 6), refreshed
     /// every frame from presence heartbeats rather than cached.
@@ -1797,6 +1816,7 @@ impl TuiChrome {
             model: "mock-model".to_string(),
             context: "ctx ?".to_string(),
             approval: "ask".to_string(),
+            sandbox: "workspace-write".to_string(),
             agent_mode: "idle".to_string(),
             other_sessions: 0,
             keymap: crate::config::keymap::TuiConfig::default(),
@@ -1810,6 +1830,7 @@ impl TuiChrome {
             model: "-".to_string(),
             context: "ctx ?".to_string(),
             approval: "-".to_string(),
+            sandbox: "-".to_string(),
             agent_mode: "idle".to_string(),
             other_sessions: 0,
             keymap: crate::config::keymap::TuiConfig::default(),
@@ -1870,12 +1891,14 @@ pub fn format_tui_interaction_chrome(
         .and_then(crate::tools::executor::permission_mode_from_name)
         .map(|mode| crate::tools::executor::permission_mode_label(mode).to_string())
         .unwrap_or_else(|| posture.effective_approval_mode.to_string());
+    let sandbox = sandbox_level_label(&posture);
     Ok(TuiChrome {
         folder,
         branch,
         model,
         context,
         approval,
+        sandbox,
         agent_mode: "idle".to_string(),
         other_sessions: 0,
         keymap: config.tui,

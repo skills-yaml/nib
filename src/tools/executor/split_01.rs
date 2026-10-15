@@ -21,6 +21,50 @@ pub(crate) fn plan_mode_refuses(
         && tool_name != "ask_question"
 }
 
+/// Refusal returned for changes while the sandbox level is `read-only`.
+pub(crate) const READ_ONLY_SANDBOX_DENIAL: &str =
+    "the read-only sandbox allows no changes; set execution.sandbox or pass --sandbox workspace-write to make them";
+
+/// Whether the `read-only` sandbox level refuses this tool: the tools that
+/// change files or Git outside a command's sandbox (T080 phase 6).
+pub(crate) fn read_only_sandbox_refuses(config: &ExecutionConfig, tool_name: &str) -> bool {
+    crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+        == crate::sandbox::SandboxLevel::ReadOnly
+        && (is_file_edit_tool(tool_name)
+            || matches!(
+                tool_name,
+                "git_commit" | "git_push" | "merge_subagent_worktree"
+            ))
+}
+
+/// Applies `execution.sandbox` to a resolved configuration (T080 phase 6).
+/// `full-access` runs commands directly with network; it is chosen
+/// explicitly, and config validation and instruction tightening keep it away
+/// from a disabled network or required bwrap. `read-only` always uses the
+/// sandbox, with nothing writable and no network. `workspace-write` keeps
+/// the configuration as it is.
+pub(crate) fn apply_sandbox_level(mut config: ExecutionConfig) -> ExecutionConfig {
+    match crate::sandbox::SandboxLevel::from_config(&config.sandbox) {
+        crate::sandbox::SandboxLevel::FullAccess => {
+            config.provider = "internal".to_string();
+            config.default_profile = "internal".to_string();
+            config.boundaries.network = "enabled".to_string();
+        }
+        crate::sandbox::SandboxLevel::ReadOnly => {
+            if config.provider == "internal" {
+                config.provider = "hybrid".to_string();
+            }
+            config.default_profile = crate::sandbox::READ_ONLY_PROFILE.to_string();
+            if config.boundaries.network != "disabled" {
+                config.boundaries.network = "restricted".to_string();
+            }
+            config.boundaries.allow_write.clear();
+        }
+        crate::sandbox::SandboxLevel::WorkspaceWrite => {}
+    }
+    config
+}
+
 impl ToolExecutor {
     pub fn new(project_root: PathBuf, execution_config: ExecutionConfig) -> Self {
         let project_root = project_root.canonicalize().unwrap_or(project_root);
@@ -66,20 +110,23 @@ impl ToolExecutor {
             .unwrap_or_else(|_| project_root.to_path_buf());
         let resolved = resolve_execution_config(&project_root, execution_config);
         let approval_mode = approval_mode_from_config(approvals_config);
+        let sandbox = crate::sandbox::SandboxLevel::from_config(&resolved.config.sandbox);
+        let leveled = apply_sandbox_level(resolved.config.clone());
         let sandbox_route = crate::sandbox::resolve_sandbox_execution_route(
-            &resolved.config.provider,
-            &resolved.config.default_profile,
-            &resolved.config.boundaries,
+            &leveled.provider,
+            &leveled.default_profile,
+            &leveled.boundaries,
         );
         let broad_or_off = approval_mode == ApprovalMode::Off
             || matches!(sandbox_route, crate::sandbox::SandboxExecutionRoute::Direct)
-            || resolved.config.boundaries.network == "enabled";
+            || leveled.boundaries.network == "enabled";
         EffectiveExecutionPosture {
             configured_approval_preset: approvals_config.mode.clone(),
             effective_approval_mode: approval_mode_label(approval_mode),
-            provider: resolved.config.provider,
-            profile: resolved.config.default_profile,
-            network: resolved.config.boundaries.network,
+            provider: leveled.provider,
+            profile: leveled.default_profile,
+            network: leveled.boundaries.network,
+            sandbox,
             mutation_plan_gate: resolved.config.plan_mode,
             // T080 phase 5c: sessions work in place unless configuration or
             // project instructions (applied by the tightening above) require
@@ -354,6 +401,7 @@ impl ToolExecutor {
             .iter()
             .any(|rule| rule.effect == PolicyEffect::Deny)
             || plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk)
+            || read_only_sandbox_refuses(&self.execution_config, &call.tool_name)
         {
             return false;
         }
@@ -843,7 +891,7 @@ impl ToolExecutor {
         let terminal_capture_limit = (call.tool_name == "run_terminal" && !background_terminal)
             .then(|| core::terminal_output_limit(&dispatch_arguments).ok())
             .flatten();
-        let (terminal_output_callback, terminal_projection) =
+        let (terminal_output_callback, mut terminal_projection) =
             self.redacted_terminal_output_projection(terminal_capture_limit);
         let outcome = if matches!(
             call.tool_name.as_str(),
@@ -856,7 +904,7 @@ impl ToolExecutor {
         } else if is_mcp_tool {
             match &self.mcp_manager {
                 Some(mcp) => mcp
-                    .call_tool(&call.tool_name, dispatch_arguments)
+                    .call_tool(&call.tool_name, dispatch_arguments.clone())
                     .await
                     .map_err(|error| error.to_string()),
                 None => Err("MCP tool called but manager is not initialized".to_string()),
@@ -876,6 +924,65 @@ impl ToolExecutor {
             )
             .await
         };
+        // A command the sandbox blocked may be retried outside it, only
+        // after the user says yes (T080 phase 6). The checkpoint and change
+        // watch above cover both runs; the retry's output is captured on
+        // its own.
+        let mut escalation_note = None;
+        let outcome = match outcome {
+            Ok(output) if !background_terminal => {
+                match self
+                    .sandbox_escalation(
+                        &call,
+                        level,
+                        risk,
+                        (
+                            &effective_root,
+                            &effective_execution_config,
+                            requires_worktree,
+                        ),
+                        effective_session,
+                        &output,
+                    )
+                    .await
+                {
+                    Some(Escalation::Retry(decision, escalated)) => {
+                        let (retry_callback, retry_projection) =
+                            self.redacted_terminal_output_projection(terminal_capture_limit);
+                        terminal_projection = retry_projection;
+                        core::dispatch(
+                            &call.tool_name,
+                            call.invocation_id,
+                            &dispatch_arguments,
+                            execution_root,
+                            &escalated,
+                            &self.terminal_backend,
+                            self.terminal_timeout_secs,
+                            &self.environment,
+                            retry_callback.as_ref(),
+                            self.cancellation.as_ref(),
+                        )
+                        .await
+                        .map(|mut output| {
+                            if let Some(object) = output.as_object_mut() {
+                                object.insert("escalated".to_string(), Value::Bool(true));
+                                object.insert(
+                                    "escalation_approval".to_string(),
+                                    Value::String(decision.source.clone()),
+                                );
+                            }
+                            output
+                        })
+                    }
+                    Some(Escalation::Note(note)) => {
+                        escalation_note = Some(note);
+                        Ok(output)
+                    }
+                    None => Ok(output),
+                }
+            }
+            outcome => outcome,
+        };
         if let Some(read) = pending_read {
             read.finish(outcome.is_ok());
         }
@@ -886,11 +993,15 @@ impl ToolExecutor {
             .finish(outcome.is_ok(), |path| self.redact_text(path))
             .await;
         let outcome = outcome.map(|output| {
-            self.project_authoritative_terminal_output(
+            let mut output = self.project_authoritative_terminal_output(
                 output,
                 terminal_projection.as_ref(),
                 terminal_capture_limit,
-            )
+            );
+            if let Some(note) = escalation_note.as_deref() {
+                add_escalation_note(&mut output, note);
+            }
+            output
         });
         let mut prepared_task = PreparedTaskGuard::from_output(
             background_terminal || call.tool_name == "schedule",
@@ -1440,6 +1551,9 @@ impl ToolExecutor {
         if plan_mode_refuses(self.approval_mode, &call.tool_name, level, risk) {
             return ApprovalDecision::denied_by_policy(PLAN_MODE_DENIAL);
         }
+        if read_only_sandbox_refuses(&self.execution_config, &call.tool_name) {
+            return ApprovalDecision::denied_by_policy(READ_ONLY_SANDBOX_DENIAL);
+        }
         if let Some(rule) = evaluations
             .iter()
             .find(|rule| rule.effect == PolicyEffect::RequireApproval)
@@ -1559,7 +1673,7 @@ impl ToolExecutor {
     }
 
     /// Prompts with a fixed reason and never offers to remember the grant.
-    async fn prompt_without_remembering(
+    pub(crate) async fn prompt_without_remembering(
         &self,
         call: &ToolCall,
         level: PermissionLevel,
@@ -1609,6 +1723,16 @@ impl ToolExecutor {
         ) {
             crate::sandbox::SandboxExecutionRoute::FailClosed(error) => {
                 Some(ApprovalDecision::denied_by_policy(error))
+            }
+            // Without bwrap, the read-only level is kept by the tools: only
+            // commands classified read-only run (T080 phase 6).
+            crate::sandbox::SandboxExecutionRoute::Direct
+                if config.default_profile == crate::sandbox::READ_ONLY_PROFILE
+                    && classify_tool_call(call) != ToolRisk::ReadOnly =>
+            {
+                Some(ApprovalDecision::denied_by_policy(
+                    "the read-only sandbox cannot be enforced on this platform, so only read-only commands run",
+                ))
             }
             crate::sandbox::SandboxExecutionRoute::Direct
             | crate::sandbox::SandboxExecutionRoute::Bwrap => None,
@@ -1800,6 +1924,11 @@ impl ToolExecutor {
         risk: ToolRisk,
     ) -> ExecutionConfig {
         let mut config = self.execution_config.clone();
+        if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+            == crate::sandbox::SandboxLevel::FullAccess
+        {
+            return apply_sandbox_level(config);
+        }
         let elevated = matches!(
             level,
             PermissionLevel::Destructive | PermissionLevel::Network
@@ -1822,7 +1951,7 @@ impl ToolExecutor {
         {
             config.boundaries.network = "restricted".to_string();
         }
-        config
+        apply_sandbox_level(config)
     }
 
     pub(crate) fn classifier_auto_approval_allowed(

@@ -156,6 +156,45 @@ mod cli_tests {
         assert!(!args.worktree);
     }
 
+    /// T080 phase 6: `nib run` takes the permission mode and sandbox level.
+    #[test]
+    fn run_accepts_permission_mode_and_sandbox() {
+        let run = Cli::try_parse_from([
+            "nib",
+            "run",
+            "--permission-mode",
+            "accept-edits",
+            "--sandbox",
+            "read-only",
+            "goal",
+        ])
+        .expect("run flags");
+        let Some(Commands::Run(args)) = run.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            args.permission_mode,
+            Some(nib::tools::models::ApprovalMode::Smart)
+        );
+        assert_eq!(args.sandbox, Some(nib::sandbox::SandboxLevel::ReadOnly));
+        assert_eq!(args.mode, "execute");
+
+        let default = Cli::try_parse_from(["nib", "run", "goal"]).expect("run default");
+        let Some(Commands::Run(args)) = default.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.permission_mode, None);
+        assert_eq!(args.sandbox, None);
+
+        for invalid in [
+            ["nib", "run", "--permission-mode", "manual", "goal"],
+            ["nib", "run", "--permission-mode", "yolo", "goal"],
+            ["nib", "run", "--sandbox", "off", "goal"],
+        ] {
+            assert!(Cli::try_parse_from(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
     #[test]
     fn doctor_accepts_explicit_fix_mode() {
         let parsed = Cli::try_parse_from(["nib", "doctor", "--fix"]).expect("doctor repair option");

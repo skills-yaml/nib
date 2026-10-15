@@ -35,6 +35,47 @@ impl ApprovalHandler for DoctorDenyApproval {
     }
 }
 
+/// The configured permission mode under its current name, with the AC-8
+/// migration notice for an old `approvals.mode` value (T080).
+fn permission_mode_line(configured: &str) -> String {
+    let Some(mode) = nib::tools::executor::permission_mode_from_name(configured) else {
+        return format!("Permission mode: unknown approvals.mode {configured:?}");
+    };
+    let name = nib::tools::executor::permission_mode_label(mode);
+    if configured.trim().eq_ignore_ascii_case(name) {
+        format!("Permission mode: {name}")
+    } else {
+        format!(
+            "Permission mode: {name} (approvals.mode = {configured:?} is an old name; set it to {name:?})"
+        )
+    }
+}
+
+/// The sandbox level after project instructions and how this platform
+/// enforces it (T080 phase 6).
+fn sandbox_level_line(posture: &nib::tools::executor::EffectiveExecutionPosture) -> String {
+    use nib::sandbox::{SandboxExecutionRoute, SandboxLevel};
+    let level = posture.sandbox.as_str();
+    let enforcement = match (posture.sandbox, &posture.sandbox_route) {
+        (SandboxLevel::FullAccess, _) => {
+            "WARNING: commands run on this machine without a sandbox".to_string()
+        }
+        (_, SandboxExecutionRoute::Bwrap) => {
+            "enforced by bwrap: read-only Git metadata, masked .nib and $HOME".to_string()
+        }
+        (SandboxLevel::ReadOnly, SandboxExecutionRoute::Direct) => {
+            "not enforceable here; only read-only commands run".to_string()
+        }
+        (_, SandboxExecutionRoute::Direct) => {
+            "not enforceable here; commands run directly".to_string()
+        }
+        (_, SandboxExecutionRoute::FailClosed(error)) => {
+            format!("unavailable; commands fail closed: {error}")
+        }
+    };
+    format!("Sandbox level: {level} ({enforcement})")
+}
+
 #[derive(clap::Args, Debug, Default)]
 pub struct DoctorArgs {
     /// Apply narrowly scoped, deterministic configuration repairs before validation
@@ -144,7 +185,7 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
                 "  Terminal: {} (timeout: {}s)",
                 config.terminal.backend, config.terminal.timeout
             );
-            println!("  Approvals: {}", config.approvals.mode);
+            println!("  {}", permission_mode_line(&config.approvals.mode));
             config
         }
         Err(e) => {
@@ -435,6 +476,12 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         "Execution provider: {} (profile: {})",
         nib_cfg.execution.provider, nib_cfg.execution.default_profile
     );
+    let posture = nib::tools::executor::ToolExecutor::effective_execution_posture(
+        project,
+        nib_cfg.execution.clone(),
+        &nib_cfg.approvals,
+    );
+    println!("{}", sandbox_level_line(&posture));
 
     println!("==========");
     if all_passed {
@@ -878,6 +925,56 @@ mod tests {
             .status()
             .expect("git init");
         assert!(status.success());
+    }
+
+    #[test]
+    fn doctor_names_the_permission_mode_with_the_old_name_notice() {
+        assert_eq!(permission_mode_line("ask"), "Permission mode: ask");
+        assert_eq!(permission_mode_line("policy"), "Permission mode: policy");
+        assert_eq!(
+            permission_mode_line("manual"),
+            "Permission mode: ask (approvals.mode = \"manual\" is an old name; set it to \"ask\")"
+        );
+        assert_eq!(
+            permission_mode_line("off"),
+            "Permission mode: auto (approvals.mode = \"off\" is an old name; set it to \"auto\")"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_the_sandbox_level_and_its_enforcement() {
+        use nib::sandbox::{SandboxExecutionRoute, SandboxLevel};
+        let posture = |sandbox, route| nib::tools::executor::EffectiveExecutionPosture {
+            configured_approval_preset: "ask".to_string(),
+            effective_approval_mode: "manual",
+            provider: "hybrid".to_string(),
+            profile: "restricted".to_string(),
+            network: "restricted".to_string(),
+            sandbox,
+            mutation_plan_gate: true,
+            mutation_owned_worktree_gate: false,
+            instruction_posture: nib::tools::executor::InstructionExecutionPosture::Configured,
+            sandbox_route: route,
+            broad_or_off: false,
+        };
+        let line = sandbox_level_line(&posture(
+            SandboxLevel::WorkspaceWrite,
+            SandboxExecutionRoute::Bwrap,
+        ));
+        assert!(
+            line.starts_with("Sandbox level: workspace-write (enforced by bwrap"),
+            "{line}"
+        );
+        let line = sandbox_level_line(&posture(
+            SandboxLevel::ReadOnly,
+            SandboxExecutionRoute::Direct,
+        ));
+        assert!(line.contains("only read-only commands run"), "{line}");
+        let line = sandbox_level_line(&posture(
+            SandboxLevel::FullAccess,
+            SandboxExecutionRoute::Direct,
+        ));
+        assert!(line.contains("WARNING"), "{line}");
     }
 
     #[test]

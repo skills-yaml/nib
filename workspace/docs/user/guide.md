@@ -373,7 +373,7 @@ The main sections are:
 - `llm` and `llm.providers`: active provider, model, context length, and credentials.
 - `agent`: turn bound and tool-use enforcement.
 - `terminal`: backend and default command timeout.
-- `execution`: sandbox provider, profile, plan gate, and writable boundaries.
+- `execution`: sandbox level, provider, profile, plan gate, and writable boundaries.
 - `approvals`: `manual`, `smart`, `policy`, or `off` mode.
 - `compression` and `memory`: long-session context and durable facts.
 - `daemons`: scheduler and curator policy.
@@ -420,6 +420,12 @@ Useful options include `--session <id>` to resume, `--provider <name>`, `--mode 
 Default manual mode prompts only when the request is unclear or a call is not
 auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
+`--permission-mode plan|ask|accept-edits|auto` sets the permission mode for the run
+(`--mode` remains the agent mode, `execute` or `plan`), and `--sandbox
+read-only|workspace-write|full-access` sets the [sandbox level](#sandbox-levels).
+The first lines show both. `nib run` asks for approval on a terminal or piped
+input; with no input (stdin closed or `/dev/null`, as under cron or CI), an action
+that would need a prompt is denied at once with the reason, instead of waiting.
 
 Interactive execute requests use a bounded tool-free answer before planning by
 default, independently of `execution.plan_mode`. A clear information question can receive
@@ -1134,6 +1140,32 @@ If a rules file cannot be read, every action asks until it is fixed;
 `/permissions` shows the problem. `git_push` asks even when a rule
 allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`.
 
+### Sandbox levels
+
+`execution.sandbox` (or `nib run --sandbox`) sets how much commands may touch:
+
+- `workspace-write` (default): commands run in the Linux `bwrap` sandbox and can
+  write the workspace; Git metadata stays read-only, and `.nib` and your home
+  folder are hidden.
+- `read-only`: commands can read the project but write only a private `/tmp`,
+  without network. File edits, commits and pushes are refused. Without `bwrap`
+  (macOS, Windows), only commands classified read-only run.
+- `full-access`: commands run directly on your machine with network. Choose it
+  only when you trust the task; the footer shows `FULL ACCESS (no sandbox)`.
+  Project instructions that require `bwrap` turn it back into `workspace-write`.
+
+The footer, `/status`, `/permissions` and `nib doctor` show the level and
+whether this machine can enforce it.
+
+When the sandbox blocks a command (a read-only file system, or no network),
+nib asks whether to retry it outside the sandbox. The retry runs the command
+again on your machine, so say yes only if you would run it yourself. The
+question comes in every mode, including `auto` and with `--yes`, and it is never
+remembered. It is not offered in `plan` mode, when `execution.provider =
+"bwrap"` or project instructions require the sandbox, or when nobody can answer
+(`nib run` without input, MCP, subagents); then the failure says the sandbox
+blocked it.
+
 ### Checkpoints and rewind
 
 Before the first file edit of each request, nib saves a checkpoint of every file
@@ -1336,6 +1368,9 @@ nib doctor
 
 Doctor validates configuration, credential presence, Git/worktrees, MCP commands,
 skills, profile paths, persistence, daemons, the command shell, and sandbox capability.
+It reports the permission mode (with the new name to use for an old
+`approvals.mode` value such as `manual`), the sandbox level, and whether this
+machine can enforce it.
 It creates missing profile directories and temporary write probes, but does not call
 provider APIs or run destructive cleanup. It exits nonzero for required checks that
 fail.
