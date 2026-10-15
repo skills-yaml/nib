@@ -412,7 +412,14 @@ pub(crate) fn resolve_execution_config(
                 InstructionExecutionPosture::InvalidFailClosed
             }
         };
-    let sandbox_note = settle_full_access(project_root, &mut execution_config, instruction_posture);
+    // Only instructions that change the command sandbox (provider, profile or
+    // boundaries) count; a worktree directive does not.
+    let sandbox_tightened = instruction_posture == InstructionExecutionPosture::InvalidFailClosed
+        || execution_config.provider != configured.provider
+        || execution_config.default_profile != configured.default_profile
+        || execution_config.boundaries != configured.boundaries
+        || execution_config.sandbox != configured.sandbox;
+    let sandbox_note = settle_full_access(project_root, &mut execution_config, sandbox_tightened);
     ResolvedExecutionConfig {
         config: execution_config,
         policy_rules,
@@ -428,14 +435,14 @@ pub(crate) fn resolve_execution_config(
 fn settle_full_access(
     project_root: &Path,
     config: &mut ExecutionConfig,
-    instruction_posture: InstructionExecutionPosture,
+    sandbox_tightened: bool,
 ) -> Option<&'static str> {
     if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
         != crate::sandbox::SandboxLevel::FullAccess
     {
         return None;
     }
-    let reason = if instruction_posture != InstructionExecutionPosture::Configured {
+    let reason = if sandbox_tightened {
         "project instructions tighten the sandbox"
     } else if config.provider == "bwrap" || config.boundaries.network == "disabled" {
         "execution.provider = \"bwrap\" or a disabled network keeps the sandbox"

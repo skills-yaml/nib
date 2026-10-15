@@ -188,6 +188,21 @@ fn every_instruction_tightening_and_sandbox_pin_keeps_full_access_off() {
     assert_ne!(config.provider, "internal");
     assert_eq!(config.boundaries.network, "restricted");
 
+    // A worktree directive changes where sessions work, not the sandbox.
+    let worktree_only = tempfile::tempdir().expect("worktree only");
+    std::fs::write(
+        worktree_only.path().join("AGENTS.md"),
+        format!("- {}\n", crate::tools::workspace::WORKTREE_DIRECTIVE),
+    )
+    .expect("instructions");
+    let posture = ToolExecutor::effective_execution_posture(
+        worktree_only.path(),
+        with_sandbox("full-access"),
+        &ApprovalsConfig::default(),
+    );
+    assert_eq!(posture.sandbox, crate::sandbox::SandboxLevel::FullAccess);
+    assert_eq!(posture.sandbox_note, None);
+
     let plain = tempfile::tempdir().expect("plain");
     for pin in ["bwrap", "disabled"] {
         let mut config = with_sandbox("full-access");

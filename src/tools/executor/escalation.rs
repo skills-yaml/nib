@@ -38,7 +38,8 @@ pub(crate) fn escalated_config(config: &ExecutionConfig) -> ExecutionConfig {
 }
 
 /// The output lines of a failure inside bwrap that look like a sandbox
-/// block, at most three, each bounded; empty when it is not such a failure.
+/// block, at most three; empty when it is not such a failure. Callers
+/// redact before bounding them.
 pub(crate) fn sandbox_block_lines(output: &Value) -> Vec<String> {
     if output.get("command_success").and_then(Value::as_bool) != Some(false)
         || output.get("provider").and_then(Value::as_str) != Some("bwrap")
@@ -56,7 +57,7 @@ pub(crate) fn sandbox_block_lines(output: &Value) -> Vec<String> {
                 && !lines.iter().any(|seen| seen == line)
                 && lines.len() < 3
             {
-                lines.push(line.chars().take(200).collect());
+                lines.push(line.to_string());
             }
         }
     }
@@ -130,14 +131,16 @@ impl ToolExecutor {
             session_id,
             ESCALATION_REASON,
         );
-        context.details = blocked
+        let evidence: Vec<String> = blocked
             .iter()
-            .map(|line| format!("Blocked: {}", self.redact_text(line)))
+            .map(|line| {
+                let line: String = self.redact_text(line).chars().take(200).collect();
+                format!("Blocked: {line}")
+            })
             .chain(std::iter::once(ESCALATION_WARNING.to_string()))
             .collect();
-        context
-            .command_extras
-            .extend(context.details.iter().cloned());
+        context.details.extend(evidence.iter().cloned());
+        context.command_extras.extend(evidence);
         context.remember_exact = None;
         let mut decision = self.prompt_approval(call, level, context, session_id).await;
         decision.remember_command = None;

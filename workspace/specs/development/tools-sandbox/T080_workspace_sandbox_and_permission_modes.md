@@ -1532,6 +1532,19 @@ tool-level only, or none for `full-access`).
 - **R9, Nit.** Guide approvals names, the headless note's wording, and
   labels for `provider = "internal"` ("safe commands direct"). Fixed.
 
+Re-review of `2f9b493`: approve with fixes; R1 to R9 confirmed resolved.
+- **N1, Low.** A worktree-only instruction counted as sandbox tightening.
+  Fixed: only changes to the provider, profile, boundaries or level (or an
+  invalid directive) keep `full-access` off.
+- **N2, Low.** The escalation prompt replaced the default details (command,
+  working directory). Fixed: the evidence is appended.
+- **N3, Nit.** Matched lines were truncated before redaction. Fixed.
+- **N4, Nit, rejected with evidence.** Allow-rule escalation and the
+  persisted `escalated` fields are tested since `2f9b493`
+  (`a_blocked_command_is_offered_outside_the_sandbox_only_by_prompt`,
+  `a_sandbox_blocked_write_runs_on_the_host_only_after_a_yes`); remembered
+  grants are never consulted by the retry.
+
 **Out of scope.** macOS and Windows sandboxes (section 2 exclusions);
 remembering escalations; an interactive `--sandbox` flag (interactive
 sessions use the setting); changing the D4 network default.
