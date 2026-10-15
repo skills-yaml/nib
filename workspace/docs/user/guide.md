@@ -1159,8 +1159,8 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
   and a disabled network keep the sandbox (`nib run` refuses the flag then).
 
 `/status`, `/permissions` and `nib doctor` show the level and whether this
-machine can enforce it; the footer shows it next to the mode whenever it is
-not the default `workspace-write` enforced by `bwrap`.
+machine can enforce it; the footer shows it next to the mode when you chose
+`read-only` or `full-access`.
 
 When the sandbox blocks a command (a read-only file system, or no network),
 nib asks whether to retry it outside the sandbox, showing the output line that

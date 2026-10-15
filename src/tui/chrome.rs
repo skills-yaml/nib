@@ -665,10 +665,14 @@ pub(crate) fn footer_line(
             .unwrap_or_else(|| waiting_keys(waiting))
             .to_string();
     }
-    // The default, bwrap-enforced sandbox goes unmentioned so key hints fit
-    // narrow terminals; any other level is shown next to the mode (T080
-    // phase 6). /status always shows it.
-    let mut hint = if chrome.sandbox == crate::sandbox::SandboxLevel::WorkspaceWrite.as_str() {
+    // Only a level the user chose (read-only, full-access) is shown next to
+    // the mode, so key hints fit narrow terminals; the default level and
+    // platform limits such as a missing bwrap are in /status, /permissions
+    // and nib doctor (T080 phase 6).
+    let mut hint = if chrome
+        .sandbox
+        .starts_with(crate::sandbox::SandboxLevel::WorkspaceWrite.as_str())
+    {
         format!("mode {} · {}", chrome.approval, chrome.agent_mode)
     } else {
         format!(

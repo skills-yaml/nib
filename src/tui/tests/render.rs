@@ -1007,8 +1007,8 @@ fn presence_follows_every_footer_key_hint() {
     );
 }
 
-/// T080 phase 6: the footer shows any sandbox level but the enforced
-/// default next to the mode.
+/// T080 phase 6: the footer shows a chosen sandbox level (read-only,
+/// full-access) next to the mode, never the default level.
 #[test]
 fn footer_shows_a_non_default_sandbox_level() {
     let viewport = TranscriptViewport::default();
@@ -1017,6 +1017,13 @@ fn footer_shows_a_non_default_sandbox_level() {
     assert_eq!(
         footer_line(&full, &viewport, 0, WaitingKind::None, None, false),
         "mode ask · FULL ACCESS (no sandbox) · idle"
+    );
+    // A platform without bwrap (macOS) keeps the default footer.
+    let mut unsandboxed = TuiChrome::fixture();
+    unsandboxed.sandbox = "workspace-write (unsandboxed)".to_string();
+    assert_eq!(
+        footer_line(&unsandboxed, &viewport, 0, WaitingKind::None, None, false),
+        "mode ask · idle"
     );
 }
 
