@@ -62,23 +62,30 @@ pub(crate) fn quit_arm_for_consumer(
     armed.filter(|armed| armed.consumer == consumer)
 }
 
+/// An available channel update, announced in a box on the startup screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupUpdate {
+    pub current: String,
+    pub latest: String,
+    pub release_notes: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupWelcome {
     pub(crate) version: String,
     pub(crate) working_directory: String,
-    pub(crate) update_notice: Option<String>,
+    pub(crate) update: Option<StartupUpdate>,
     pub(crate) consent_directory: Option<String>,
     pub(crate) consent_selected: usize,
     pub(crate) keymap: crate::config::keymap::TuiConfig,
 }
 
 impl StartupWelcome {
-    pub(crate) fn new(project_root: &Path, update_notice: Option<String>) -> Self {
+    pub(crate) fn new(project_root: &Path, update: Option<StartupUpdate>) -> Self {
         Self {
-            version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             working_directory: crate::interactive::folder_label(project_root),
-            update_notice: update_notice
-                .map(|notice| notice.strip_prefix("[nib] ").unwrap_or(&notice).to_string()),
+            update,
             consent_directory: None,
             consent_selected: 1,
             keymap: crate::config::load_nib_config_or_default(project_root)
@@ -90,9 +97,9 @@ impl StartupWelcome {
     #[cfg(test)]
     pub(crate) fn fixture() -> Self {
         Self {
-            version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             working_directory: "~/project".to_string(),
-            update_notice: None,
+            update: None,
             consent_directory: None,
             consent_selected: 1,
             keymap: crate::config::keymap::TuiConfig::default(),

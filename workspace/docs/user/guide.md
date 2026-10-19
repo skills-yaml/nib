@@ -825,10 +825,11 @@ operation`; the editor footer reads `Enter submit · Esc interrupt operation`.
 when idle and steers an active turn in the Codex preset (legacy Enter queues).
 
 The composer has focus initially, a top border, and a `> ` prompt. An empty session
-shows a startup welcome with `Nib <version>`, the working directory, an update
-notice and `nib update` when a newer build is available, `/new` to start a fresh
-session and worktree, `/session` to switch sessions, and the most-used keys, plus
-the prompt. The first interactive start in a project asks permission to work in
+shows a Codex-style startup screen: when a newer build is available on your channel,
+a box reading `✨ Update available! <current> -> <latest>` with `Run nib update to
+update.` and a link to the channel's release notes; then `>_ nib (v<version>)` with
+the working directory under it; then `/new` to start a fresh session and worktree,
+`/session` to switch sessions, and the most-used keys, plus the prompt. The first interactive start in a project asks permission to work in
 that directory before any goal runs. The composer shows the path and Allow/Decline
 choices sit under the input with Decline focused first. Select Allow and press Enter
 to persist `workspace.allowed`; Enter on the default, or Escape, quits. Later starts
