@@ -22,7 +22,10 @@ reads), update checking, channels, workspace consent and workload state.
 `src/updater.rs` (structured startup update), `src/chat/split_00.rs` and
 `src/tui/mod.rs` (plumbing), `src/tui/state.rs` (`StartupWelcome`),
 `src/tui/chrome.rs` (`empty_state_lines`), TUI render and updater tests, and the
-user guide. Version mirrors, release ledger, catalog and memory records reconcile
+user guide, and `scripts/check-interactive-release.sh`, whose footer-word
+normalization now matches bytes (`LC_ALL=C`): under a UTF-8 locale GNU sed left
+escapes unstripped on lines carrying the case's invalid UTF-8 paste, failing
+`Ctrl+End follow` locally on the base 0.5.1 binary as well. Version mirrors, release ledger, catalog and memory records reconcile
 delivery. No governed instructions change.
 
 ## Acceptance Criteria
