@@ -179,13 +179,31 @@
       "target": "0.5.2",
       "impact": "patch",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t086-startup",
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/test/interactive/T086_codex_style_startup_screen.md"
       ],
-      "evidence": "User-requested Codex-style startup screen on 2026-10-19. The published development-latest nib-release.json reports 0.5.1 at 82aadb79e9548db604d20b05babde296eb8ffb56, so published 0.5.1 cannot be reused; this fresh patch 0.5.2 is reserved from it. The peer board is not initialized on this machine and the runtime refuses to recreate lost state, so the single-author reservation is recorded here directly and validated by task versions:check. Owner t086-startup applied Cargo.toml, Cargo.lock and skills.yaml once at development start. Application is not integration, main delivery or publication. Confirmed shared development integration at fc10185118d1102fca7b9815d29652e03df6b742 via PR68 on 2026-10-22, merged pinned to the independently reviewed and CI-qualified head ff70dee; T086 moves to test without a second bump. Main delivery and publication remain separate."
+      "evidence": "User-requested Codex-style startup screen on 2026-10-19. The published development-latest nib-release.json reports 0.5.1 at 82aadb79e9548db604d20b05babde296eb8ffb56, so published 0.5.1 cannot be reused; this fresh patch 0.5.2 is reserved from it. The peer board is not initialized on this machine and the runtime refuses to recreate lost state, so the single-author reservation is recorded here directly and validated by task versions:check. Owner t086-startup applied Cargo.toml, Cargo.lock and skills.yaml once at development start. Application is not integration, main delivery or publication. Confirmed shared development integration at fc10185118d1102fca7b9815d29652e03df6b742 via PR68 on 2026-10-22, merged pinned to the independently reviewed and CI-qualified head ff70dee; T086 moves to test without a second bump. Main delivery and publication remain separate. Observed on 2026-10-22: the public development-latest nib-release.json binds 0.5.2 to commit 0af60f5ea448a6617e0ee546b71a197759f9cbdc, so 0.5.2 is released on the development channel."
+    },
+    {
+      "id": "nib-goal-minor",
+      "component": "nib",
+      "baseline": "0.5.2",
+      "target": "0.6.0",
+      "impact": "minor",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "goal-base",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md",
+        "workspace/specs/development/build-quality/T087_dead_code_and_test_cleanup.md",
+        "workspace/specs/development/model-routing/ft_021_cost_controlled_model_escalation.md",
+        "workspace/specs/development/prompt-caching/ft_022_provider_prompt_caching.md"
+      ],
+      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication."
     }
   ]
 }

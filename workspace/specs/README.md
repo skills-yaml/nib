@@ -33,15 +33,16 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
+| [T087](development/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | development | Started 2026-10-22 under the user-requested goal: zero-test Task filters, unused exports, obsolete context/skill tests and the flaky editor smoke cases; shared minor 0.6.0. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
 | [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
 | [T085](test/interactive/T085_claude_style_waiting_indicator.md) | interactive | test | Confirmed shared development push93151e0 after exact review and full native task verify; main merge and publication remain separate. |
 | [T084](test/interactive/T084_codex_keymap_alignment.md) | interactive | test | Confirmed shared development merge 252c62b via PR58 after exact review and Linux/macOS CI38363488692; main delivery and publication remain separate. |
-| [FT-021](backlog/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | backlog | Inactive proposal awaiting scoped development decisions. |
-| [FT-022](backlog/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | backlog | Inactive proposal awaiting scoped development decisions. |
+| [FT-021](development/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | development | Started 2026-10-22 under the user-requested goal with agent-picked defaults (escalation off unless configured, at most 2 per run); shared minor 0.6.0; offline evaluation only, live measurement needs paid calls. |
+| [FT-022](development/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | development | Started 2026-10-22 under the user-requested goal with agent-picked defaults (Anthropic and OpenAI first, short retention on by default); shared minor 0.6.0; offline evaluation only. |
 | [T080](development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md) | tools-sandbox | development | Phase 1 integrated via PR52 at 045e0e21d6e51488fcfcc544e2fceb35f0eb2d3d (2026-10-08) and phase 2a (permission modes) via PR54 at 21ccf1dcd4599900a242e889554f0fcd52ca4660 (2026-10-09), each after independent review and full native gates; phase 2b (host-side Git tools) via PR55 at 6e14f30e013b3699760d54563f542035e93ab32a (2026-10-10); phase 3 (permission rules, trust, always-allow) via PR56 at 8c0eabb4d1ea768dee9b5d20872aa49a8181bc44 (2026-10-12); phase 4 (checkpoints, /rewind) via PR57 at 2dd459168eaf60f2f06e3895b54115db70dc24ea (2026-10-13); phase 5 split into 5a (stale-write check, session presence; approved after independent review and re-review with a passing native task verify on 3dbb486, integrated with 5b via PR61 at 7b6d7e75149d5c366337fa3ea3523daf5d2ef12f on 2026-10-14), 5b (path-scoped in-place reconciliation and run records; approved after independent review and two re-reviews at 54104c6, native task verify passed on 1edcf8d, integrated via PR61 at 7b6d7e75149d5c366337fa3ea3523daf5d2ef12f on 2026-10-14), 5c (in-place default, /worktree, `nib-workspace: worktree`, forced worktrees for scheduled and MCP-server work, branch-first subagent merges, D2 amendments; approved after independent review and two re-reviews at c1a79f2, integrated via PR63 at cafca2163fab310361fa8d288f338b5758de3935 on 2026-10-14) and 5d (/land, session-branch adoption, subagent refusal in worktree sessions; approved after independent review and re-review at 0fe6118, integrated via PR65 at 82aadb79e9548db604d20b05babde296eb8ffb56 on 2026-10-15); phase 6 remains under shared minor 0.4.0; main delivery not observed. |
 | [T081](test/agent-runtime/T081_clear_interrupted_plans.md) | agent-runtime | test | Confirmed shared development integration 90e49be0b90df60371d23eb2344378c173662fde (PR53) on 2026-10-09T08:29:15Z after three independent review rounds and fresh full native gates on the exact candidate; shared minor 0.4.0; main delivery and publication separate. |
-| [T082](backlog/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md) | architecture | backlog | Requested 2026-10-07: move runtime state and credentials to ~/.nib with SQLite sessions, project .nib preferences only; five open user decisions block development. |
+| [T082](development/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md) | architecture | development | Started 2026-10-22 after the user accepted all five recommended decisions, including the scoped backend_rust.md amendment for bundled rusqlite; shared minor 0.6.0. |
 | [T061](done/interactive/T061_question_form.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T067](done/interactive/T067_question_form_runtime_implementation.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T073](test/llm-providers/T073_provider_specific_model_selection.md) | llm-providers | test | Confirmed shared development integration 81c37a1908ec1032809e97cdf0b0b39d5253603b on 2026-10-08T17:02:18Z after independent exact review and fresh full native gates; shared minor 0.4.0 with T080; T073 supersedes earlier retention contracts; main delivery and publication separate. |
@@ -151,7 +152,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 6 test (T069-T073, T086), 2 development (T023, T080), and 4 backlog**. Publication is separate.
+Current catalog: **78 done, 6 test (T069-T073, T086), 6 development (T023, T080, T082, T087, FT-021, FT-022), and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
@@ -261,11 +262,11 @@ work or narrower guarantees.
 
 ### Feature specs
 
-- [FT-022: Provider Prompt Caching](backlog/prompt-caching/ft_022_provider_prompt_caching.md)
+- [FT-022: Provider Prompt Caching](development/prompt-caching/ft_022_provider_prompt_caching.md)
   — backlog proposal for stable request prefixes, opt-in provider cache controls,
   and cache-read/write evidence; coverage, retention, and evaluation targets remain
   open before development.
-- [FT-021: Cost-Controlled Model Escalation](backlog/model-routing/ft_021_cost_controlled_model_escalation.md)
+- [FT-021: Cost-Controlled Model Escalation](development/model-routing/ft_021_cost_controlled_model_escalation.md)
   — backlog proposal for mostly cheaper/open-weight execution and bounded costly
   assistance; hosting, budget, and quality targets remain open before development.
 - [FT-001: Basic Agent Tools](done/agent-runtime/ft_001_basic_agent_tools.md)

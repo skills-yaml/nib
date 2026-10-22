@@ -1,11 +1,10 @@
 # FT-022: Provider Prompt Caching
 
-**Status:** Backlog — specification requested on 2026-10-02. This is a proposal;
+**Status:** Development. Started on 2026-10-22 under a user-requested multi-agent goal;
+the user delegated the open decisions to the agent ("you pick").
 
-State: backlog
+State: development
 Primary Feature: prompt-caching
-implementation and paid qualification have not started. Provider coverage,
-retention policy, and evaluation targets must be settled before development.
 
 ## Summary
 
@@ -286,6 +285,24 @@ This proposal authorizes no paid requests.
 After these decisions and a scoped implementation plan, the next allowed lifecycle
 transition is `backlog -> development`. No implementation starts from this proposal.
 
+## Decisions (2026-10-22)
+
+The user asked the agent to pick these defaults.
+
+1. Coverage: Anthropic (explicit `cache_control` breakpoints on the stable
+   system, tool and instruction prefix) and OpenAI-compatible providers
+   (stable prefix ordering, automatic caching, and reported cached tokens)
+   first. Other providers get the stable prefix ordering only.
+2. Rollout and retention: on by default with the provider's short retention
+   (Anthropic's 5-minute ephemeral cache); longer retention is opt-in
+   through configuration, and `off` disables cache controls entirely.
+3. Evaluation: offline only. Request-shape and usage-accounting tests use
+   recorded or scripted provider responses; live savings and latency
+   measurement stays an open qualification item because paid calls are not
+   authorized.
+4. Usage schema: one shared contract that adds cache-read and cache-write
+   token counts to model usage, used by FT-021's budget accounting.
+
 ## Prior Memory Notes
 
 Pending. The request and current evidence are captured here. Do not record proposed
@@ -314,9 +331,10 @@ implementation begins. Model minimums, retention, and prices are provider-specif
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Backlog proposal only; no shipped artifact changes until separately scoped development and reservation. |
+| nib | minor | nib-goal-minor | Additive cache configuration and usage fields; shares the goal minor 0.6.0 from published 0.5.2. |
 
 ## Memory Impact
 
-Status: none
-Rationale: The proposal records open choices without adopting new policy; approved durable decisions will be classified during development.
+Status: pending
+Rationale: The decisions recorded above are durable; they are written to project
+memory when this spec is verified.

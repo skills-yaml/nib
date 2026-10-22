@@ -1,8 +1,8 @@
 # T082: User-Home Runtime State and SQLite Sessions
 
-**Status:** Backlog. Open decisions are listed below and must be resolved
-before development.
-State: backlog
+**Status:** Development. Started on 2026-10-22 after the user accepted every
+recommended decision below.
+State: development
 Primary Feature: architecture
 
 ## Problem and Authority
@@ -129,6 +129,16 @@ longer the only identity.
    which matches the request, or platform data directories. Recommended:
    `~/.nib` everywhere, with a `NIB_HOME` override.
 
+### Decisions (2026-10-22)
+
+The user accepted every recommendation: (1) existing worktrees stay where they
+are as legacy and remain manageable, while new ones go to the user home; (2) a
+JSON document per session plus append-only events and messages; (3) approvals
+and trust are user-level per project; (4) `rusqlite` with the `bundled`
+feature, and the user approved the scoped amendment to the governed
+`workspace/instructions/tech/backend_rust.md` that records this dependency;
+(5) `~/.nib` on every platform, with a `NIB_HOME` override.
+
 ## Exclusions and Compatibility
 
 - No change to session semantics, plan or workload models, or tool contracts.
@@ -211,9 +221,10 @@ because this touches data integrity, credentials and a public layout.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Backlog proposal; expected minor reserved at development start. Changes the persisted state layout and storage backend, with automatic migration; user-visible config location change. |
+| nib | minor | nib-goal-minor | Persisted state layout, storage backend and config location change with automatic migration; shares the goal minor 0.6.0 from published 0.5.2. |
 
 ## Memory Impact
 
-Status: none
-Rationale: Backlog proposal; the durable decision is classified as pending at development start and recorded when implemented.
+Status: pending
+Rationale: The decisions recorded above are durable; they are written to project
+memory when this spec is verified.
