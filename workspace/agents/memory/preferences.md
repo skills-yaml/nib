@@ -64,4 +64,4 @@
   update (`✨ Update available! <current> -> <latest>`, the update command and
   release notes), then `>_ nib (v<version>)` with the working directory under it.
 - Clarification: Keep the Session and Keys hints below the header.
-- Reference: [T086](../../specs/development/interactive/T086_codex_style_startup_screen.md).
+- Reference: [T086](../../specs/test/interactive/T086_codex_style_startup_screen.md).

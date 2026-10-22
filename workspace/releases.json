@@ -183,9 +183,9 @@
       "owner": "t086-startup",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T086_codex_style_startup_screen.md"
+        "workspace/specs/test/interactive/T086_codex_style_startup_screen.md"
       ],
-      "evidence": "User-requested Codex-style startup screen on 2026-10-19. The published development-latest nib-release.json reports 0.5.1 at 82aadb79e9548db604d20b05babde296eb8ffb56, so published 0.5.1 cannot be reused; this fresh patch 0.5.2 is reserved from it. The peer board is not initialized on this machine and the runtime refuses to recreate lost state, so the single-author reservation is recorded here directly and validated by task versions:check. Owner t086-startup applied Cargo.toml, Cargo.lock and skills.yaml once at development start. Application is not integration, main delivery or publication."
+      "evidence": "User-requested Codex-style startup screen on 2026-10-19. The published development-latest nib-release.json reports 0.5.1 at 82aadb79e9548db604d20b05babde296eb8ffb56, so published 0.5.1 cannot be reused; this fresh patch 0.5.2 is reserved from it. The peer board is not initialized on this machine and the runtime refuses to recreate lost state, so the single-author reservation is recorded here directly and validated by task versions:check. Owner t086-startup applied Cargo.toml, Cargo.lock and skills.yaml once at development start. Application is not integration, main delivery or publication. Confirmed shared development integration at fc10185118d1102fca7b9815d29652e03df6b742 via PR68 on 2026-10-22, merged pinned to the independently reviewed and CI-qualified head ff70dee; T086 moves to test without a second bump. Main delivery and publication remain separate."
     }
   ]
 }
