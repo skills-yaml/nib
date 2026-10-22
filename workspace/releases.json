@@ -164,13 +164,28 @@
       "target": "0.5.1",
       "impact": "patch",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t085-waiting",
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/test/interactive/T085_claude_style_waiting_indicator.md"
       ],
-      "evidence": "User requested compact Claude-style waiting status on 2026-10-13. Independent prospective review verified published development0.5.0 at252c62b and approved the bounded reserve-only read basis3c3c963. The unmodified atomic runtime reserve returned fresh patch0.5.1 from0.5.0. Only that single reservation used the committed publication ledger; no historical integration ref, ownership or worktree storage changed. Owner t085-waiting applied Cargo.toml, Cargo.lock and skills.yaml once before implementation artifacts. Application is not integration, main delivery or publication. Confirmed shared development integration at93151e020f281669521961d5c89c1606f497eb77 via normal fast-forward push on 2026-10-13T10:51:18.912984+00:00 after independent exact review and complete native task verify. Remote ref was re-read at the same revision. T085 moves to test without a second bump. Main delivery and publication remain separate; push-triggered CI is not claimed complete here."
+      "evidence": "User requested compact Claude-style waiting status on 2026-10-13. Independent prospective review verified published development0.5.0 at252c62b and approved the bounded reserve-only read basis3c3c963. The unmodified atomic runtime reserve returned fresh patch0.5.1 from0.5.0. Only that single reservation used the committed publication ledger; no historical integration ref, ownership or worktree storage changed. Owner t085-waiting applied Cargo.toml, Cargo.lock and skills.yaml once before implementation artifacts. Application is not integration, main delivery or publication. Confirmed shared development integration at93151e020f281669521961d5c89c1606f497eb77 via normal fast-forward push on 2026-10-13T10:51:18.912984+00:00 after independent exact review and complete native task verify. Remote ref was re-read at the same revision. T085 moves to test without a second bump. Main delivery and publication remain separate; push-triggered CI is not claimed complete here. Observed on 2026-10-19: the public development-latest nib-release.json binds version 0.5.1 to commit 82aadb79e9548db604d20b05babde296eb8ffb56, so 0.5.1 is released on the development channel and later changes need a fresh reservation."
+    },
+    {
+      "id": "nib-startup-screen",
+      "component": "nib",
+      "baseline": "0.5.1",
+      "target": "0.5.2",
+      "impact": "patch",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t086-startup",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/interactive/T086_codex_style_startup_screen.md"
+      ],
+      "evidence": "User-requested Codex-style startup screen on 2026-10-19. The published development-latest nib-release.json reports 0.5.1 at 82aadb79e9548db604d20b05babde296eb8ffb56, so published 0.5.1 cannot be reused; this fresh patch 0.5.2 is reserved from it. The peer board is not initialized on this machine and the runtime refuses to recreate lost state, so the single-author reservation is recorded here directly and validated by task versions:check. Owner t086-startup applied Cargo.toml, Cargo.lock and skills.yaml once at development start. Application is not integration, main delivery or publication."
     }
   ]
 }

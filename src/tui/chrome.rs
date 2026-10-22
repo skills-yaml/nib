@@ -560,27 +560,70 @@ pub(crate) fn agent_mode_label(
     }
 }
 
+/// The Codex-style update box: rounded borders sized to the widest line by
+/// display width.
+fn update_box_lines(update: &StartupUpdate, no_color: bool) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let (headline, command) = if no_color {
+        (bold, Style::default())
+    } else {
+        (bold.fg(Color::Yellow), Style::default().fg(Color::Cyan))
+    };
+    let rows: Vec<Vec<Span<'static>>> = vec![
+        vec![
+            Span::styled("✨ Update available!", headline),
+            Span::raw(format!(" {} -> {}", update.current, update.latest)),
+        ],
+        vec![
+            Span::raw("Run "),
+            Span::styled("nib update", command),
+            Span::raw(" to update."),
+        ],
+        Vec::new(),
+        vec![Span::raw("See full release notes:")],
+        vec![Span::styled(update.release_notes.clone(), command)],
+    ];
+    let width = |row: &[Span<'static>]| {
+        row.iter()
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>()
+    };
+    let inner = rows.iter().map(|row| width(row)).max().unwrap_or(0);
+    let border = muted_style(no_color);
+    let rule = "─".repeat(inner + 2);
+    let mut lines = vec![Line::from(Span::styled(format!("╭{rule}╮"), border))];
+    for row in rows {
+        let padding = " ".repeat(inner - width(&row) + 1);
+        let mut spans = vec![Span::styled("│ ", border)];
+        spans.extend(row);
+        spans.push(Span::raw(padding));
+        spans.push(Span::styled("│", border));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(Span::styled(format!("╰{rule}╯"), border)));
+    lines
+}
+
 pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec<Line<'static>> {
     let muted = muted_style(no_color);
     let title = Style::default().add_modifier(Modifier::BOLD);
-    let mut lines = vec![
-        Line::from(Span::styled(welcome.version.clone(), title)),
-        Line::from(""),
-        Line::from(Span::styled("Working directory", muted)),
-        Line::from(welcome.working_directory.clone()),
-    ];
-    if let Some(notice) = &welcome.update_notice {
-        let update_style = if no_color {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        };
+    let mut lines = Vec::new();
+    if let Some(update) = &welcome.update {
+        lines.extend(update_box_lines(update, no_color));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(notice.clone(), update_style)));
     }
     lines.extend([
+        Line::from(vec![
+            Span::styled("  >_ ", muted),
+            Span::styled("nib", title),
+            Span::styled(format!(" (v{})", welcome.version), muted),
+        ]),
+        Line::from(Span::styled(
+            format!("     {}", welcome.working_directory),
+            muted,
+        )),
+    ]);
+    let hints = [
         Line::from(""),
         Line::from(Span::styled("Session", title)),
         Line::from(Span::styled("/new            new session", muted)),
@@ -648,7 +691,14 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
         )),
         Line::from(Span::styled("drag            copy chat on release", muted)),
         Line::from(Span::styled("Y / N           approve or deny", muted)),
-    ]);
+    ];
+    // The hints line up with the header, two columns in.
+    lines.extend(hints.into_iter().map(|mut line| {
+        if line.width() > 0 {
+            line.spans.insert(0, Span::raw("  "));
+        }
+        line
+    }));
     lines
 }
 

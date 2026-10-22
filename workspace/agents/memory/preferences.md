@@ -55,3 +55,13 @@
 - Implementation: Preserve explicit human-wait labels; mark generated estimates
   with `~` and keep the current run separate from history.
 - Reference: [T085](../../specs/test/interactive/T085_claude_style_waiting_indicator.md).
+
+## 2026-10-19 - Codex-style startup screen
+
+- Source: user, explicit display example
+- Confidence: high
+- Preference: The TUI startup screen follows Codex: a rounded box for an available
+  update (`✨ Update available! <current> -> <latest>`, the update command and
+  release notes), then `>_ nib (v<version>)` with the working directory under it.
+- Clarification: Keep the Session and Keys hints below the header.
+- Reference: [T086](../../specs/development/interactive/T086_codex_style_startup_screen.md).

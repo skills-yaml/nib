@@ -69,12 +69,42 @@ fn strict_manifest_distinguishes_current_and_available_builds() {
         startup_notice(&available).as_deref(),
         Some("[nib] Channel update available: 0.1.0 (prod, 2222222). Run `nib update`.")
     );
+    assert_eq!(
+        startup_update_from(&available),
+        Some(StartupUpdate {
+            current: "0.1.0 (1111111)".to_string(),
+            latest: "0.1.0 (2222222)".to_string(),
+            release_notes: "https://github.com/skills-yaml/nib/releases/tag/prod-latest"
+                .to_string(),
+        })
+    );
     assert!(startup_notice(&Availability::Current(BuildIdentity {
         channel: ReleaseChannel::Prod,
         version: "0.1.0".to_string(),
         commit: latest_commit,
     }))
     .is_none());
+}
+
+#[test]
+fn startup_update_names_versions_and_the_channel_release_page() {
+    let identity = |version: &str, commit: char| BuildIdentity {
+        channel: ReleaseChannel::Development,
+        version: version.to_string(),
+        commit: commit.to_string().repeat(40),
+    };
+    let update = startup_update_from(&Availability::Available {
+        current: identity("0.5.1", '1'),
+        latest: identity("0.5.2", '2'),
+    })
+    .expect("available update");
+    assert_eq!(update.current, "0.5.1");
+    assert_eq!(update.latest, "0.5.2");
+    assert_eq!(
+        update.release_notes,
+        "https://github.com/skills-yaml/nib/releases/tag/development-latest"
+    );
+    assert!(startup_update_from(&Availability::Current(identity("0.5.1", '1'))).is_none());
 }
 
 #[test]

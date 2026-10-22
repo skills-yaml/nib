@@ -536,8 +536,9 @@ fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(!rendered.contains("Your AI agent for this project."));
-    assert!(rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))));
-    assert!(rendered.contains("Working directory"));
+    assert!(rendered.contains(&format!(">_ nib (v{})", env!("CARGO_PKG_VERSION"))));
+    assert!(!rendered.contains("Working directory"));
+    assert!(!rendered.contains("Update available"));
     assert!(rendered.contains("~/project"));
     assert!(rendered.contains("/new"));
     assert!(rendered.contains("new session"));
@@ -558,9 +559,9 @@ fn startup_asks_permission_to_work_in_the_working_directory() {
     let mut viewport = TranscriptViewport::default();
     let welcome = StartupWelcome {
         keymap: crate::config::keymap::TuiConfig::default(),
-        version: format!("Nib {}", env!("CARGO_PKG_VERSION")),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         working_directory: "~/work/nib".to_string(),
-        update_notice: None,
+        update: None,
         consent_directory: Some("~/work/nib".to_string()),
         consent_selected: 0,
     };
@@ -605,7 +606,7 @@ fn startup_asks_permission_to_work_in_the_working_directory() {
         "{rendered}"
     );
     assert!(
-        rendered.contains(&format!("Nib {}", env!("CARGO_PKG_VERSION"))),
+        rendered.contains(&format!(">_ nib (v{})", env!("CARGO_PKG_VERSION"))),
         "{rendered}"
     );
 }
@@ -656,14 +657,17 @@ fn workspace_consent_key_reducer_persists_the_gate_before_a_goal_can_start() {
 }
 
 #[test]
-fn empty_state_includes_update_notice_and_install_instruction() {
+fn empty_state_boxes_the_update_above_the_codex_style_header() {
     let welcome = StartupWelcome {
         keymap: crate::config::keymap::TuiConfig::default(),
-        version: "Nib 0.1.0".to_string(),
-        working_directory: "~/work/nib".to_string(),
-        update_notice: Some(
-            "Channel update available: 0.1.1 (development, abcdef0). Run `nib update`.".to_string(),
-        ),
+        version: "0.5.1".to_string(),
+        working_directory: "~/work/projects/heila".to_string(),
+        update: Some(StartupUpdate {
+            current: "0.5.1".to_string(),
+            latest: "0.5.2".to_string(),
+            release_notes: "https://github.com/skills-yaml/nib/releases/tag/development-latest"
+                .to_string(),
+        }),
         consent_directory: None,
         consent_selected: 0,
     };
@@ -675,16 +679,32 @@ fn empty_state_includes_update_notice_and_install_instruction() {
                 .map(|span| span.content.to_string())
                 .collect::<String>()
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("Nib 0.1.0"), "{rendered}");
-    assert!(rendered.contains("~/work/nib"), "{rendered}");
-    assert!(
-        rendered.contains("Channel update available: 0.1.1"),
-        "{rendered}"
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered[..10],
+        [
+            "╭────────────────────────────────────────────────────────────────────╮",
+            "│ ✨ Update available! 0.5.1 -> 0.5.2                                │",
+            "│ Run nib update to update.                                          │",
+            "│                                                                    │",
+            "│ See full release notes:                                            │",
+            "│ https://github.com/skills-yaml/nib/releases/tag/development-latest │",
+            "╰────────────────────────────────────────────────────────────────────╯",
+            "",
+            "  >_ nib (v0.5.1)",
+            "     ~/work/projects/heila",
+        ]
     );
-    assert!(rendered.contains("Run `nib update`"), "{rendered}");
-    assert!(rendered.contains("/new"), "{rendered}");
+    // Every box row is as wide as its border, counting the sparkle as two cells.
+    for row in &rendered[..7] {
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(row.as_str()),
+            70,
+            "{row}"
+        );
+    }
+    let rendered = rendered.join("\n");
+    assert!(rendered.contains("\n  Session\n  /new"), "{rendered}");
     assert!(rendered.contains("Ctrl+C"), "{rendered}");
 }
 
@@ -734,19 +754,15 @@ fn ctrl_q_requires_two_uninterrupted_presses() {
 }
 
 #[test]
-fn startup_welcome_strips_stderr_prefix_from_update_notice() {
-    let welcome = StartupWelcome::new(
-        Path::new("/tmp/project"),
-        Some("[nib] Channel update available: 0.1.1. Run `nib update`.".to_string()),
-    );
-    assert_eq!(
-        welcome.version,
-        format!("Nib {}", env!("CARGO_PKG_VERSION"))
-    );
-    assert_eq!(
-        welcome.update_notice.as_deref(),
-        Some("Channel update available: 0.1.1. Run `nib update`.")
-    );
+fn startup_welcome_carries_the_bare_version_and_update() {
+    let update = StartupUpdate {
+        current: "0.1.0".to_string(),
+        latest: "0.1.1".to_string(),
+        release_notes: "https://github.com/skills-yaml/nib/releases/tag/prod-latest".to_string(),
+    };
+    let welcome = StartupWelcome::new(Path::new("/tmp/project"), Some(update.clone()));
+    assert_eq!(welcome.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(welcome.update, Some(update));
 }
 
 #[test]

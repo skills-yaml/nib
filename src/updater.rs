@@ -1,4 +1,5 @@
 use clap::{Args, ValueEnum};
+use nib::tui::StartupUpdate;
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::{Attempt, Policy};
 use reqwest::Url;
@@ -402,28 +403,24 @@ fn completed_update_message(current: &BuildIdentity, latest: &BuildIdentity) -> 
     format!("{action}: {} -> {}", current.display(), latest.display())
 }
 
-pub fn startup_update_notice() -> Option<String> {
+fn startup_availability() -> Option<Availability> {
     if std::env::var_os("NIB_NO_UPDATE_CHECK").as_deref() == Some(std::ffi::OsStr::new("1")) {
         return None;
     }
-    let Ok(current) = managed_current_identity() else {
-        return None;
-    };
-    let Ok(transport) = Transport::startup() else {
-        return None;
-    };
-    let Ok(manifest) = fetch_manifest(&transport, current.channel) else {
-        return None;
-    };
+    let current = managed_current_identity().ok()?;
+    let transport = Transport::startup().ok()?;
+    let manifest = fetch_manifest(&transport, current.channel).ok()?;
     let channel = current.channel;
-    let Ok(availability) = classify(current, channel, &manifest) else {
-        return None;
-    };
-    startup_notice(&availability)
+    classify(current, channel, &manifest).ok()
+}
+
+/// The update the TUI announces at startup, if any.
+pub fn startup_update() -> Option<StartupUpdate> {
+    startup_update_from(&startup_availability()?)
 }
 
 pub fn maybe_print_startup_notice() {
-    if let Some(notice) = startup_update_notice() {
+    if let Some(notice) = startup_availability().as_ref().and_then(startup_notice) {
         if io::stderr().is_terminal() {
             eprintln!("{notice}");
         }
@@ -438,6 +435,29 @@ fn startup_notice(availability: &Availability) -> Option<String> {
             latest.display()
         )),
     }
+}
+
+/// Versions alone, or with short commits when a channel republished the
+/// same version, so the two sides always differ.
+fn startup_update_from(availability: &Availability) -> Option<StartupUpdate> {
+    let Availability::Available { current, latest } = availability else {
+        return None;
+    };
+    let label = |identity: &BuildIdentity| {
+        if current.version == latest.version {
+            format!("{} ({})", identity.version, short_commit(&identity.commit))
+        } else {
+            identity.version.clone()
+        }
+    };
+    Some(StartupUpdate {
+        current: label(current),
+        latest: label(latest),
+        release_notes: format!(
+            "https://github.com/skills-yaml/nib/releases/tag/{}",
+            latest.channel.tag()
+        ),
+    })
 }
 
 fn managed_current_identity() -> Result<BuildIdentity, UpdateError> {

@@ -887,3 +887,16 @@ Content:
 
 Recorded /land's confirmation-code design, session-branch adoption and the
 never-delete-blindly rule for unloadable worktrees in decisions.md.
+
+## 2026-10-19 - Codex-style startup screen preference
+
+- Type: changelog
+- Source: T086
+- Confidence: high
+- Review: author self-review of a presentation-only change
+- Supersedes: none
+
+Content:
+
+Recorded the user's Codex-style startup screen preference, keeping the Session
+and Keys hints, in preferences.md.

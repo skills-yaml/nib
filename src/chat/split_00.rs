@@ -469,7 +469,7 @@ pub fn run_interactive(args: &ChatArgs) -> Result<(), String> {
             &project,
             args.run.clone(),
             args.session.clone(),
-            crate::updater::startup_update_notice(),
+            crate::updater::startup_update(),
             args.worktree,
         )
         .map_err(|error| error.to_string()),
