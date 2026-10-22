@@ -900,3 +900,16 @@ Content:
 
 Recorded the sandbox levels, the prompt-only escalation rule and when
 `nib run` may prompt in decisions.md.
+
+## 2026-10-19 - Codex-style startup screen preference
+
+- Type: changelog
+- Source: T086
+- Confidence: high
+- Review: author self-review of a presentation-only change
+- Supersedes: none
+
+Content:
+
+Recorded the user's Codex-style startup screen preference, keeping the Session
+and Keys hints, in preferences.md.

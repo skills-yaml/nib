@@ -78,13 +78,15 @@ pub(crate) use state::*;
 pub(crate) use worker::*;
 
 pub use clipboard::copy_text_to_clipboard;
-pub use state::{TuiApprovalHandler, TuiApprovalRequest, TuiQuestionHandler, TuiQuestionRequest};
+pub use state::{
+    StartupUpdate, TuiApprovalHandler, TuiApprovalRequest, TuiQuestionHandler, TuiQuestionRequest,
+};
 
 pub fn run_tui(
     project_root: &Path,
     run_goal: Option<String>,
     requested_session: Option<String>,
-    update_notice: Option<String>,
+    update: Option<StartupUpdate>,
     worktree: bool,
 ) -> io::Result<()> {
     if let Some(session_id) = requested_session.as_deref() {
@@ -141,7 +143,7 @@ pub fn run_tui(
                 None => summary,
             });
         }
-        let welcome = StartupWelcome::new(project_root, update_notice);
+        let welcome = StartupWelcome::new(project_root, update);
         draw_loop(
             terminal,
             project_root,

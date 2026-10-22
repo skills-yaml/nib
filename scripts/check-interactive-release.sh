@@ -831,11 +831,13 @@ tui_composer_input() {
 run_tui_case tui-composer-scroll-history tui_composer_input '--tui' yes
 # Ratatui can position the cursor over blank cells instead of writing spaces.
 # Normalize CSI boundaries for word assertions; key-driven state checks and exact
-# terminal restoration below continue to use their original evidence.
+# terminal restoration below continue to use their original evidence. Match bytes:
+# the pasted NUL/BEL beside an emoji leaves invalid UTF-8, on which a UTF-8 locale
+# stops sed from stripping later escapes on that line.
 terminal_escape="$(printf '\033')"
 composer_words="$fixture/tui-composer-scroll-history.words"
-sed "s/${terminal_escape}\\[[0-9;?]*[ -/]*[@-~]/ /g" \
-  "$fixture/tui-composer-scroll-history.txt" | tr -s '[:space:]' ' ' >"$composer_words"
+LC_ALL=C sed "s/${terminal_escape}\\[[0-9;?]*[ -/]*[@-~]/ /g" \
+  "$fixture/tui-composer-scroll-history.txt" | LC_ALL=C tr -s '[:space:]' ' ' >"$composer_words"
 grep -Fq 'Tab insert' "$composer_words"
 grep -Fq 'Enter run' "$composer_words"
 grep -Fq 'Ctrl+End follow' "$composer_words"
