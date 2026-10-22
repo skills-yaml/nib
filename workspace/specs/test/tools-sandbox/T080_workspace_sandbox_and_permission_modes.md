@@ -1608,9 +1608,16 @@ a command needs network.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Phase 1's sandbox decision (read-only Git metadata, trusted-layout
-mounts) is recorded in decisions.md and changelog.md (2026-10-08). User decisions D1-D6 (in-place default after checkpoints, `ask` default, network on, a shared folder without a lock, the Claude Code branch and commit rules, and host-side commit/push) and the sandbox mount-plan contract are durable decisions. They are recorded in project memory when each phase is verified.
+Status: updated
+Rationale: Each phase recorded its durable decisions in
+[decisions.md](../../../agents/memory/decisions.md) with matching
+[changelog.md](../../../agents/memory/changelog.md) entries: read-only Git
+metadata and trusted-layout mounts (2026-10-08), permission modes (2026-10-09),
+host-side commit and push (2026-10-09), permission rules and trust
+(2026-10-11), checkpoints (2026-10-12), fresh-read edits and session presence
+(2026-10-13), path-scoped in-place verification (5b), the in-place default (5c),
+/land (5d) and sandbox levels with escalation (6). User decisions D1-D6 are
+recorded in this spec and in those entries.
 
 ## Phase 1 Shared Integration (2026-10-08)
 
