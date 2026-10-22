@@ -1533,6 +1533,13 @@ sandbox implementation. Combined review and native gates precede the push.
   `session_display_cache_waits_briefly_for_a_busy_session_lock`, and the
   unchanged re-run passed. `development` was re-read and equals the
   candidate with no file difference.
+- **Phase 5d integrated:** PR 65 merged the candidate `5a4dca3` (the
+  reviewed `0fe6118` plus the small, test-covered re-review fixes) as
+  `82aadb79e9548db604d20b05babde296eb8ffb56` on 2026-10-15T00:22:51Z, by
+  the user. A serial `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` passed
+  on `5a4dca3`, and PR CI passed Linux Validate and macOS on it.
+  `development` was re-read and equals the candidate with no file
+  difference.
 
 For each phase, before the merge:
 - independent exact-candidate review approved it;
