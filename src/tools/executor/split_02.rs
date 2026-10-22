@@ -325,7 +325,7 @@ pub(crate) fn approval_mode_from_config(config: &ApprovalsConfig) -> ApprovalMod
 /// Parses a configured or user-selected mode. Both the original config names
 /// (`manual`, `smart`, `policy`, `off`) and the permission-mode names
 /// (`ask`, `accept-edits`, `plan`, `auto`) are accepted (T080).
-pub(crate) fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
+pub fn permission_mode_from_name(name: &str) -> Option<ApprovalMode> {
     match name.trim().to_ascii_lowercase().as_str() {
         // The legacy `smart` preset always behaved exactly like `manual`;
         // keeping that avoids silently auto-applying edits for existing
@@ -352,7 +352,7 @@ pub(crate) fn approval_mode_label(mode: ApprovalMode) -> &'static str {
 }
 
 /// User-facing permission-mode name shown in the footer and by `/mode`.
-pub(crate) fn permission_mode_label(mode: ApprovalMode) -> &'static str {
+pub fn permission_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Manual => "ask",
         ApprovalMode::Smart => "accept-edits",
@@ -412,11 +412,49 @@ pub(crate) fn resolve_execution_config(
                 InstructionExecutionPosture::InvalidFailClosed
             }
         };
+    // Only instructions that change the command sandbox (provider, profile or
+    // boundaries) count; a worktree directive does not.
+    let sandbox_tightened = instruction_posture == InstructionExecutionPosture::InvalidFailClosed
+        || execution_config.provider != configured.provider
+        || execution_config.default_profile != configured.default_profile
+        || execution_config.boundaries != configured.boundaries
+        || execution_config.sandbox != configured.sandbox;
+    let sandbox_note = settle_full_access(project_root, &mut execution_config, sandbox_tightened);
     ResolvedExecutionConfig {
         config: execution_config,
         policy_rules,
         instruction_posture,
+        sandbox_note,
     }
+}
+
+/// Turns a `full-access` sandbox level into `workspace-write`, with the
+/// reason, when anything else asks for the sandbox: project instructions
+/// that tighten execution, `provider = "bwrap"` or a disabled network, or a
+/// configuration file in a project the user has not trusted (T080 phase 6).
+fn settle_full_access(
+    project_root: &Path,
+    config: &mut ExecutionConfig,
+    sandbox_tightened: bool,
+) -> Option<&'static str> {
+    if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+        != crate::sandbox::SandboxLevel::FullAccess
+    {
+        return None;
+    }
+    let reason = if sandbox_tightened {
+        "project instructions tighten the sandbox"
+    } else if config.provider == "bwrap" || config.boundaries.network == "disabled" {
+        "execution.provider = \"bwrap\" or a disabled network keeps the sandbox"
+    } else if !config.sandbox_explicit
+        && !crate::tools::permission_rules::project_trusted(project_root)
+    {
+        "full-access from configuration applies only in a trusted project (/permissions trust)"
+    } else {
+        return None;
+    };
+    leave_full_access(config);
+    Some(reason)
 }
 
 pub(crate) fn load_instruction_policy_rules(project_root: &Path) -> Vec<PolicyRule> {
@@ -556,12 +594,28 @@ pub(crate) fn fail_closed_execution_config(config: &mut ExecutionConfig) {
     config.default_profile = "restricted".to_string();
     config.boundaries.network = "disabled".to_string();
     config.boundaries.allow_write.clear();
+    leave_full_access(config);
+}
+
+/// Instructions that require bwrap win over a `full-access` sandbox level,
+/// which would otherwise run commands directly (T080 phase 6).
+fn leave_full_access(config: &mut ExecutionConfig) {
+    if crate::sandbox::SandboxLevel::from_config(&config.sandbox)
+        == crate::sandbox::SandboxLevel::FullAccess
+    {
+        config.sandbox = crate::sandbox::SandboxLevel::WorkspaceWrite
+            .as_str()
+            .to_string();
+    }
 }
 
 pub(crate) fn valid_boundary_profile_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
-        && !matches!(name, "internal" | "restricted")
+        && !matches!(
+            name,
+            "internal" | "restricted" | crate::sandbox::READ_ONLY_PROFILE
+        )
         && name.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
@@ -662,10 +716,12 @@ pub(crate) fn apply_instruction_execution_tightening(
         if config.default_profile == "internal" {
             config.default_profile = "restricted".to_string();
         }
+        leave_full_access(config);
     }
     if disable_network {
         config.provider = "bwrap".to_string();
         config.boundaries.network = "disabled".to_string();
+        leave_full_access(config);
     }
     Ok(())
 }

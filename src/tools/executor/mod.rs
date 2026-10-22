@@ -23,12 +23,14 @@ use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use uuid::Uuid;
 
+mod escalation;
 mod in_place;
 mod skills;
 mod split_00;
 mod split_01;
 mod split_02;
 
+pub(crate) use escalation::*;
 pub(crate) use split_00::*;
 pub(crate) use split_01::*;
 pub(crate) use split_02::*;
@@ -39,6 +41,7 @@ pub use split_00::{
 };
 pub use split_00::{StdinApprovalHandler, ToolExecutor};
 pub use split_01::tools_json_schema;
+pub use split_02::{permission_mode_from_name, permission_mode_label};
 
 #[cfg(test)]
 #[path = "tests.rs"]

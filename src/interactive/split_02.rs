@@ -85,12 +85,13 @@ pub fn format_interaction_chrome(
         .unwrap_or_default();
     let context_used = persisted_context_usage(session, config.llm.context_length);
     let status = format!(
-        "{}  ·  {provider}/{model} transport {transport} reasoning {reasoning}  ·  effective {}/{}:{} net {} sandbox {}  ·  context ~{context_used}/{}  ·  queue {queued}{plan}",
+        "{}  ·  {provider}/{model} transport {transport} reasoning {reasoning}  ·  effective {}/{}:{} net {} sandbox {} ({})  ·  context ~{context_used}/{}  ·  queue {queued}{plan}",
         bounded_sensitive_status_value(lifecycle, &sensitive_values),
         posture.effective_approval_mode,
         bounded_sensitive_status_value(&posture.provider, &sensitive_values),
         bounded_sensitive_status_value(&posture.profile, &sensitive_values),
         bounded_sensitive_status_value(&posture.network, &sensitive_values),
+        sandbox_level_label(&posture),
         sandbox_posture_label(&posture),
         config.llm.context_length,
     );

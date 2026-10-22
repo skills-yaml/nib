@@ -1713,3 +1713,27 @@ fn config_temporary_paths(directory: &Path) -> Vec<PathBuf> {
         })
         .collect()
 }
+
+/// T080 phase 6: `execution.sandbox` names a level; `full-access` runs
+/// without a sandbox, so it cannot also require bwrap or a disabled network.
+#[test]
+fn execution_sandbox_levels_validate() {
+    let mut cfg = NibConfig::default();
+    assert_eq!(cfg.execution.sandbox, "workspace-write");
+    for level in ["read-only", "workspace-write", "full-access"] {
+        cfg.execution.sandbox = level.to_string();
+        cfg.validate().expect(level);
+    }
+    cfg.execution.sandbox = "off".to_string();
+    assert!(cfg
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("execution.sandbox must be"));
+    cfg.execution.sandbox = "full-access".to_string();
+    cfg.execution.provider = "bwrap".to_string();
+    assert!(cfg.validate().is_err());
+    cfg.execution.provider = "hybrid".to_string();
+    cfg.execution.boundaries.network = "disabled".to_string();
+    assert!(cfg.validate().is_err());
+}

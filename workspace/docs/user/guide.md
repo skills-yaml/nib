@@ -373,8 +373,9 @@ The main sections are:
 - `llm` and `llm.providers`: active provider, model, context length, and credentials.
 - `agent`: turn bound and tool-use enforcement.
 - `terminal`: backend and default command timeout.
-- `execution`: sandbox provider, profile, plan gate, and writable boundaries.
-- `approvals`: `manual`, `smart`, `policy`, or `off` mode.
+- `execution`: sandbox level, provider, profile, plan gate, and writable boundaries.
+- `approvals`: the permission mode, `ask`, `accept-edits`, `plan`, `auto` or `policy`
+  (the older names `manual`, `smart` and `off` still work; `nib doctor` names the new one).
 - `compression` and `memory`: long-session context and durable facts.
 - `daemons`: scheduler and curator policy.
 - `skills`, `mcp`, `profiles`, and `workload`: ecosystem and persistence settings.
@@ -420,6 +421,12 @@ Useful options include `--session <id>` to resume, `--provider <name>`, `--mode 
 Default manual mode prompts only when the request is unclear or a call is not
 auto-classified as safe. `--yes` bypasses interactive tool approval; use it
 only in an already trusted environment. Explicit deny policies still take precedence.
+`--permission-mode plan|ask|accept-edits|auto` sets the permission mode for the run
+(`--mode` remains the agent mode, `execute` or `plan`), and `--sandbox
+read-only|workspace-write|full-access` sets the [sandbox level](#sandbox-levels).
+The first lines show both. `nib run` asks for approval on a terminal or piped
+input; with no input (stdin closed or `/dev/null`, as under cron or CI), an action
+that would need a prompt is denied at once with the reason, instead of waiting.
 
 Interactive execute requests use a bounded tool-free answer before planning by
 default, independently of `execution.plan_mode`. A clear information question can receive
@@ -1135,6 +1142,37 @@ If a rules file cannot be read, every action asks until it is fixed;
 `/permissions` shows the problem. `git_push` asks even when a rule
 allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`.
 
+### Sandbox levels
+
+`execution.sandbox` (or `nib run --sandbox`) sets how much commands may touch:
+
+- `workspace-write` (default): commands run in the Linux `bwrap` sandbox and can
+  write the workspace; Git metadata stays read-only, and `.nib` and your home
+  folder are hidden.
+- `read-only`: commands can read the project but write only a private `/tmp`,
+  without network. File edits, commits and pushes are refused. Without `bwrap`
+  (macOS, Windows), only commands classified read-only run.
+- `full-access`: commands run directly on your machine with network. Choose it
+  only when you trust the task; the footer shows `FULL ACCESS (no sandbox)`.
+  From a configuration file it applies only in a project you trusted with
+  `/permissions trust`; `nib run --sandbox full-access` applies it for one run.
+  Project instructions that restrict execution, `execution.provider = "bwrap"`
+  and a disabled network keep the sandbox (`nib run` refuses the flag then).
+
+`/status`, `/permissions` and `nib doctor` show the level and whether this
+machine can enforce it; the footer shows it next to the mode when you chose
+`read-only` or `full-access`.
+
+When the sandbox blocks a command (a read-only file system, or no network),
+nib asks whether to retry it outside the sandbox, showing the output line that
+matched. The retry runs the command, and any project scripts it starts, again on
+your machine, so say yes only if you would run it yourself. The question comes in
+every mode, including `auto` and with `--yes`, and it is never remembered. It is
+not offered in `plan` mode, at the `read-only` level, when `execution.provider =
+"bwrap"`, project instructions require the sandbox or the network is disabled, or
+when nobody can answer (`nib run` without input, MCP, subagents); then the
+failure says the sandbox blocked it.
+
 ### Checkpoints and rewind
 
 Before the first file edit of each request, nib saves a checkpoint of every file
@@ -1337,6 +1375,9 @@ nib doctor
 
 Doctor validates configuration, credential presence, Git/worktrees, MCP commands,
 skills, profile paths, persistence, daemons, the command shell, and sandbox capability.
+It reports the permission mode (with the new name to use for an old
+`approvals.mode` value such as `manual`), the sandbox level, and whether this
+machine can enforce it.
 It creates missing profile directories and temporary write probes, but does not call
 provider APIs or run destructive cleanup. It exits nonzero for required checks that
 fail.

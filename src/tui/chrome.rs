@@ -715,7 +715,21 @@ pub(crate) fn footer_line(
             .unwrap_or_else(|| waiting_keys(waiting))
             .to_string();
     }
-    let mut hint = format!("mode {} · {}", chrome.approval, chrome.agent_mode);
+    // Only a level the user chose (read-only, full-access) is shown next to
+    // the mode, so key hints fit narrow terminals; the default level and
+    // platform limits such as a missing bwrap are in /status, /permissions
+    // and nib doctor (T080 phase 6).
+    let mut hint = if chrome
+        .sandbox
+        .starts_with(crate::sandbox::SandboxLevel::WorkspaceWrite.as_str())
+    {
+        format!("mode {} · {}", chrome.approval, chrome.agent_mode)
+    } else {
+        format!(
+            "mode {} · {} · {}",
+            chrome.approval, chrome.sandbox, chrome.agent_mode
+        )
+    };
     if waiting != WaitingKind::None {
         hint = format!("{hint} · {}", waiting_keys(waiting));
     } else if selecting {

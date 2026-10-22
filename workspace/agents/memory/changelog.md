@@ -888,6 +888,19 @@ Content:
 Recorded /land's confirmation-code design, session-branch adoption and the
 never-delete-blindly rule for unloadable worktrees in decisions.md.
 
+## 2026-10-15 - T080 phase 6 decision
+
+- Type: changelog
+- Source: T080
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the sandbox levels, the prompt-only escalation rule and when
+`nib run` may prompt in decisions.md.
+
 ## 2026-10-19 - Codex-style startup screen preference
 
 - Type: changelog

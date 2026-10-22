@@ -36,3 +36,6 @@ mod stale_write_tests;
 
 #[path = "in_place_tests.rs"]
 mod in_place_tests;
+
+#[path = "escalation_tests.rs"]
+mod escalation_tests;
