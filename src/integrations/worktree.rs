@@ -395,11 +395,7 @@ fn create_session_worktree(
     let safe_session = sanitize_component(session_id);
     let suffix = &Uuid::new_v4().simple().to_string()[..8];
     let worktree_name = format!("{safe_session}-{suffix}");
-    let worktree_path = repo_root
-        .join(".nib")
-        .join("worktrees")
-        .join("sessions")
-        .join(&worktree_name);
+    let worktree_path = crate::paths::NibPaths::session_worktrees(repo_root).join(&worktree_name);
     let expected_worktree_path = worktree_path.clone();
     let parent = worktree_path
         .parent()

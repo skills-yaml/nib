@@ -88,8 +88,7 @@ pub struct DaemonAuditLog {
 impl DaemonAuditLog {
     pub fn new(project_root: &Path) -> Self {
         Self::at_path(
-            project_root
-                .join(".nib")
+            crate::paths::NibPaths::project_state(project_root)
                 .join("daemons")
                 .join("audit.jsonl"),
         )

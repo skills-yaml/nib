@@ -176,7 +176,7 @@ impl Curator {
         retention_days: i64,
         policy: CuratorPolicy,
     ) -> Self {
-        let state_dir = project_root.join(".nib");
+        let state_dir = crate::paths::NibPaths::project_state(project_root);
         Self::at_profile_paths(
             state_dir.join("sessions"),
             state_dir.join("memory.json"),

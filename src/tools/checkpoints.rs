@@ -627,7 +627,9 @@ pub(crate) fn safe_relative(path: &str) -> Option<PathBuf> {
         };
         let name = part.to_string_lossy();
         let name = name.trim_end_matches(['.', ' ']);
-        if name.is_empty() || name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".nib")
+        if name.is_empty()
+            || name.eq_ignore_ascii_case(".git")
+            || crate::paths::NibPaths::is_project_dir_name_ignore_case(name)
         {
             return None;
         }

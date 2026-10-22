@@ -15,7 +15,12 @@ pub(crate) const MAX_ENTRIES: usize = 50_000;
 /// Names skipped at any depth: Git and nib state, and common build output.
 /// Changed paths therefore never name a directory the verification
 /// identity would have to walk in full.
-const SKIPPED: &[&str] = &[".git", ".nib", "target", "node_modules"];
+const SKIPPED: &[&str] = &[
+    ".git",
+    crate::paths::PROJECT_DIR_NAME,
+    "target",
+    "node_modules",
+];
 
 /// Built-in tools (and the profile curator's record) that never edit
 /// project files. Any other tool's record

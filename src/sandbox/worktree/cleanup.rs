@@ -863,7 +863,7 @@ pub(crate) fn prove_managed_worktree_namespace_absent_until(
     deadline: Instant,
     timeout: Duration,
 ) -> Result<(), String> {
-    let path = project_root.join(".nib/worktrees/subagents").join(safe_id);
+    let path = crate::paths::NibPaths::subagent_worktrees(project_root).join(safe_id);
     if crate::fs_security::path_entry_exists(&path)
         .map_err(|error| format!("failed to inspect reconciled worktree path: {error}"))?
     {
@@ -1463,11 +1463,7 @@ pub(crate) fn cleanup_partial_create_sync(
     deadline: Instant,
     cleanup_timeout: Duration,
 ) -> Result<(), String> {
-    let path = project_root
-        .join(".nib")
-        .join("worktrees")
-        .join("subagents")
-        .join(id);
+    let path = crate::paths::NibPaths::subagent_worktrees(project_root).join(id);
     if let Some(ownership) = ownership {
         return cleanup_managed_worktree(ownership, deadline, cleanup_timeout);
     }

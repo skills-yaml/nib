@@ -543,7 +543,7 @@ fn openai_transport_repair_needed(config: &NibConfig) -> bool {
 }
 
 fn check_managed_session_worktrees(project: &Path) -> Result<usize, String> {
-    let directory = project.join(".nib/worktree-ownership");
+    let directory = nib::paths::NibPaths::project_state(project).join("worktree-ownership");
     match fs::symlink_metadata(&directory) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -620,7 +620,7 @@ fn check_owned_session_receipt(
             "worktree",
             "worktree_path",
             "worktree_identity",
-            project.join(".nib/worktrees/sessions"),
+            nib::paths::NibPaths::session_worktrees(project),
             true,
         ),
         (

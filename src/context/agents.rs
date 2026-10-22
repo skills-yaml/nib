@@ -601,7 +601,7 @@ pub fn tool_instruction_scopes(
             paths
         }
         "apply_patch" => patch_scopes(project_root, arguments)?,
-        "write_plan" => vec![project_root.join(".nib/plans")],
+        "write_plan" => vec![crate::paths::NibPaths::project_plans(project_root)],
         _ => vec![project_root.to_path_buf()],
     };
     scopes.sort();

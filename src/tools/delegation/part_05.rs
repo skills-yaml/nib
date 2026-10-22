@@ -73,7 +73,7 @@ pub(crate) fn sweep_owner_lease_artifacts_with_timeout_and_guard(
     timeout: Duration,
     mut before_namespace_step: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
-    let nib_path = project_root.join(".nib");
+    let nib_path = crate::paths::NibPaths::project_state(project_root);
     match std::fs::symlink_metadata(&nib_path) {
         Ok(metadata)
             if crate::fs_security::metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() =>
@@ -1418,8 +1418,7 @@ pub(crate) fn with_subagent_record_lock_bridge_in_deadline<T>(
     ) -> Result<T, String>,
 ) -> Result<T, String> {
     ensure_subagent_reconciliation_deadline(Some(deadline))?;
-    let migration_lock = project_root
-        .join(".nib")
+    let migration_lock = crate::paths::NibPaths::project_state(project_root)
         .join(".subagent-legacy-lock-migration.lock");
     let modern_lock = record_lock_path(project_root, id)?;
     let mut after_migration = Some(after_migration);

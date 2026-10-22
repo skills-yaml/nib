@@ -580,7 +580,8 @@ async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
     if let Some(path) = paths.iter().find(|path| {
         path.split(['/', '\\']).any(|part| {
             let part = part.trim_end_matches(['.', ' ']);
-            part.eq_ignore_ascii_case(".nib") || part.eq_ignore_ascii_case(".git")
+            crate::paths::NibPaths::is_project_dir_name_ignore_case(part)
+                || part.eq_ignore_ascii_case(".git")
         })
     }) {
         return Err(format!(
@@ -635,7 +636,7 @@ async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
         return Err("Plan content is empty".to_string());
     }
 
-    let nib_dir = cwd.join(".nib");
+    let nib_dir = crate::paths::NibPaths::project_state(cwd);
     let plans_dir = nib_dir.join("plans");
     tokio::fs::create_dir_all(&plans_dir)
         .await

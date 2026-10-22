@@ -12,7 +12,7 @@ pub(crate) fn open_owner_lease_directories(
     ),
     String,
 > {
-    let nib = project_root.join(".nib");
+    let nib = crate::paths::NibPaths::project_state(project_root);
     let visible = owner_lease_directory(project_root);
     if create {
         crate::fs_security::ensure_directory_without_symlinks(&visible)
@@ -61,9 +61,11 @@ pub(crate) fn owner_lease_anchor_path(
     if parsed.to_string() != lease_id {
         return Err("subagent owner lease identifier is not canonical".to_string());
     }
-    Ok(project_root.join(".nib").join(format!(
-        "{OWNER_LEASE_ANCHOR_PREFIX}{lease_id}{OWNER_LEASE_ANCHOR_SUFFIX}"
-    )))
+    Ok(
+        crate::paths::NibPaths::project_state(project_root).join(format!(
+            "{OWNER_LEASE_ANCHOR_PREFIX}{lease_id}{OWNER_LEASE_ANCHOR_SUFFIX}"
+        )),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -445,7 +447,10 @@ pub(crate) fn with_delegation_lock_in_deadline_with_setup_hook<T>(
 pub(crate) fn delegation_lock_project_root(lock_path: &Path) -> Result<PathBuf, String> {
     let mut current = lock_path.parent();
     while let Some(directory) = current {
-        if directory.file_name() == Some(std::ffi::OsStr::new(".nib")) {
+        if directory
+            .file_name()
+            .is_some_and(crate::paths::NibPaths::is_project_dir_name)
+        {
             return directory.parent().map(Path::to_path_buf).ok_or_else(|| {
                 format!(
                     "delegation state directory has no project root: {}",
@@ -531,9 +536,7 @@ pub(crate) fn repository_merge_lock_timeout(path: &Path, timeout: Duration) -> S
 }
 
 pub(crate) fn repository_merge_lock_anchor_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".nib")
-        .join(".subagents.merge.lock.anchor")
+    crate::paths::NibPaths::project_state(project_root).join(".subagents.merge.lock.anchor")
 }
 
 #[cfg(all(test, any(unix, windows)))]

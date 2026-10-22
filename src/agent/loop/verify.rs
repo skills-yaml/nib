@@ -634,6 +634,9 @@ fn scope_outgrown(
     }
 }
 
+/// Directory names the content identity never descends into.
+const UNHASHED: [&str; 3] = [".git", crate::paths::PROJECT_DIR_NAME, "target"];
+
 pub(crate) fn content_identity_over(
     worktree_root: &Path,
     requested: Vec<String>,
@@ -690,7 +693,7 @@ pub(crate) fn content_identity_over(
                 children.sort_by_key(std::fs::DirEntry::file_name);
                 for child in children.into_iter().rev() {
                     let name = child.file_name();
-                    if matches!(name.to_str(), Some(".git" | ".nib" | "target")) {
+                    if name.to_str().is_some_and(|name| UNHASHED.contains(&name)) {
                         continue;
                     }
                     pending.push(child.path());

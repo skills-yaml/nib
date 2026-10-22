@@ -36,7 +36,7 @@ impl SessionStore {
     }
 
     pub fn new(project_root: &Path) -> Self {
-        let nib = project_root.join(".nib");
+        let nib = crate::paths::NibPaths::project_state(project_root);
         let sessions_dir = nib.join("sessions");
         Self::at_dir(sessions_dir)
     }

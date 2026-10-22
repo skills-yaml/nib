@@ -949,7 +949,7 @@ pub(crate) fn selected_child_runtime_config(
             })?;
         let mut selected = selected;
         selected.root = PathBuf::from(".");
-        selected.state_dir = Some(PathBuf::from(".nib").join("profiles").join(&selected.id));
+        selected.state_dir = Some(crate::paths::NibPaths::relative_profile_state(&selected.id));
         selected.env_file = selected
             .env_file
             .filter(|path| worktree_path.join(path).is_file());
@@ -1228,7 +1228,7 @@ pub(crate) fn persist_unstarted_after_preparation_unlock(
         return Err("pending subagent record lost its execution ownership".to_string());
     };
     ensure_subagent_reconciliation_deadline(Some(deadline))?;
-    let nib_path = project_root.join(".nib");
+    let nib_path = crate::paths::NibPaths::project_state(project_root);
     let nib = crate::daemons::state::StableDirectory::open(&nib_path)?;
     let scope_directory = nib_path.join("process-scopes");
     let scope = match nib.entry_kind(&scope_directory)? {
@@ -1420,10 +1420,7 @@ pub(crate) fn validate_verification_evidence(
             .ok_or("successful verification evidence is missing terminal cwd")?
             .canonicalize()
             .map_err(|error| format!("verification terminal cwd is unavailable: {error}"))?;
-        let allowed_session_root = expected_worktree
-            .join(".nib")
-            .join("worktrees")
-            .join("sessions");
+        let allowed_session_root = crate::paths::NibPaths::session_worktrees(&expected_worktree);
         let isolated_session_worktree = allow_session_worktree
             && output_cwd.starts_with(&allowed_session_root)
             && crate::fs_security::verify_directory_without_symlinks(&output_cwd).is_ok();
@@ -1649,15 +1646,33 @@ pub(crate) async fn ensure_child_snapshot_unchanged(
 pub(crate) async fn unstage_nib_runtime_state(worktree: &Path) -> Result<(), String> {
     let staged_nib = git_output(
         worktree,
-        ["diff", "--cached", "--name-only", "-z", "--", ".nib"],
+        [
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--",
+            crate::paths::PROJECT_DIR_NAME,
+        ],
     )
     .await?;
     require_git_success(&staged_nib, "inspect staged .nib paths")?;
     if !staged_nib.stdout.is_empty() {
-        git_checked(worktree, ["reset", "-q", "HEAD", "--", ".nib"]).await?;
+        git_checked(
+            worktree,
+            ["reset", "-q", "HEAD", "--", crate::paths::PROJECT_DIR_NAME],
+        )
+        .await?;
         let remaining = git_output(
             worktree,
-            ["diff", "--cached", "--name-only", "-z", "--", ".nib"],
+            [
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                "--",
+                crate::paths::PROJECT_DIR_NAME,
+            ],
         )
         .await?;
         require_git_success(&remaining, "verify staged .nib exclusion")?;

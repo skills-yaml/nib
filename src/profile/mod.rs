@@ -67,7 +67,7 @@ impl Profile {
         let state_relative = config
             .state_dir
             .clone()
-            .unwrap_or_else(|| PathBuf::from(".nib").join("profiles").join(&config.id));
+            .unwrap_or_else(|| crate::paths::NibPaths::relative_profile_state(&config.id));
         validate_relative_path(&state_relative, "state_dir")?;
         let state_dir = resolve_scoped_path(&root_path, &state_relative, "state_dir")?;
 
@@ -277,7 +277,7 @@ impl ProfileRegistry {
             let state_relative = entry
                 .state_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from(".nib").join("profiles").join(&entry.id));
+                .unwrap_or_else(|| crate::paths::NibPaths::relative_profile_state(&entry.id));
             let state_dir = resolve_scoped_path(&root, &state_relative, "state_dir")?;
             if let Some(existing) = state_owners.insert(state_dir.clone(), entry.id.clone()) {
                 return Err(ProfileError::Invalid(format!(

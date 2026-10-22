@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 /// Directories created by nib for managed worktrees, relative to the project.
-const MANAGED_WORKTREE_PARENT: [&str; 2] = [".nib", "worktrees"];
+const MANAGED_WORKTREE_PARENT: [&str; 2] = [crate::paths::PROJECT_DIR_NAME, "worktrees"];
 /// Instruction files nib reads permission rules and execution directives
 /// from (`nib-policy:`, `nib-sandbox:`, `nib-boundary:`, `nib-workspace:`).
 /// Existing ones at the top of the writable area are bound read-only, so a
@@ -59,7 +59,7 @@ impl ProjectMounts {
     }
 
     fn state(&self) -> PathBuf {
-        self.root.join(".nib")
+        crate::paths::NibPaths::project_state(&self.root)
     }
 
     fn is_managed(&self) -> bool {
@@ -76,7 +76,8 @@ impl ProjectMounts {
         writable: bool,
     ) -> Result<(), String> {
         let unmanaged_state = !self.is_managed() && cwd.starts_with(self.state());
-        if unmanaged_state || cwd.starts_with(self.worktree.join(".nib")) {
+        if unmanaged_state || cwd.starts_with(crate::paths::NibPaths::project_state(&self.worktree))
+        {
             return Err(format!(
                 "sandbox working directory is inside nib runtime state: {}",
                 cwd.display()
@@ -152,7 +153,13 @@ pub(super) fn append_fallback_protections(
 
 /// Directory names never descended into while looking for nested state and
 /// repositories: they are large dependency or build trees.
-const SKIPPED_DIRECTORIES: [&str; 5] = [".git", ".nib", "node_modules", "target", ".venv"];
+const SKIPPED_DIRECTORIES: [&str; 5] = [
+    ".git",
+    crate::paths::PROJECT_DIR_NAME,
+    "node_modules",
+    "target",
+    ".venv",
+];
 /// Depth below each scan root searched for nested `.nib` and `.git` entries.
 const NESTED_SCAN_DEPTH: usize = 3;
 /// Upper bound on directories visited per scan root, keeping command start-up
@@ -211,7 +218,7 @@ impl<'a> MaskPlan<'a> {
         let mut states: Vec<PathBuf> = self
             .cwd
             .ancestors()
-            .map(|ancestor| ancestor.join(".nib"))
+            .map(crate::paths::NibPaths::project_state)
             .filter(|state| std::fs::symlink_metadata(state).is_ok())
             .collect();
         let mut nested_git = Vec::new();
@@ -304,7 +311,7 @@ fn scan_nested(root: &Path, states: &mut Vec<PathBuf>, git: &mut Vec<PathBuf>) {
             };
             let path = entry.path();
             let name = entry.file_name();
-            if name == ".nib" && file_type.is_dir() && nested {
+            if crate::paths::NibPaths::is_project_dir_name(&name) && file_type.is_dir() && nested {
                 states.push(path);
             } else if name == ".git" && (file_type.is_dir() || file_type.is_file()) && nested {
                 git.push(path);

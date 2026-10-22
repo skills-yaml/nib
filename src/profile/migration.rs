@@ -37,7 +37,7 @@ pub(super) fn migrate_legacy_state(base: &Path, profile: &Profile) -> Result<(),
     }
 
     let base = base.canonicalize()?;
-    let legacy_state = base.join(".nib");
+    let legacy_state = crate::paths::NibPaths::project_state(&base);
     let mut candidates = legacy_session_candidates(&legacy_state, profile)?;
     let memory_copied = if let Some(memory) = legacy_memory_candidate(&legacy_state, profile)? {
         candidates.push(memory);

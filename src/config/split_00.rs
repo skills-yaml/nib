@@ -444,7 +444,7 @@ impl Default for SkillsConfig {
 }
 
 pub(crate) fn default_skill_paths() -> Vec<PathBuf> {
-    vec![PathBuf::from(".nib/skills")]
+    vec![crate::paths::NibPaths::relative_project_skills()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1636,7 +1636,7 @@ impl LlmConfig {
 }
 
 pub fn config_paths(project_root: &Path) -> ConfigPaths {
-    let nib_dir = project_root.join(".nib");
+    let nib_dir = crate::paths::NibPaths::project_prefs(project_root);
     ConfigPaths {
         toml: nib_dir.join("config.toml"),
         json: nib_dir.join("config.json"),

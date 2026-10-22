@@ -13,6 +13,7 @@ pub mod interaction_card;
 pub mod interactive;
 pub mod llm;
 pub mod mcp_cmd;
+pub mod paths;
 pub mod profile;
 pub mod sandbox;
 pub mod session;

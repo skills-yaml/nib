@@ -191,8 +191,13 @@ Each phase is independently reviewable and keeps `task verify` green.
   interruption.
 - [ ] AC-5: Copying or moving the project directory does not break nib.
   `nib doctor` detects the mismatch and `--fix` re-links with confirmation.
-- [ ] AC-6: No `.join(".nib")` remains outside `NibPaths`, and a test enforces
-  this.
+- [x] AC-6: No `.join(".nib")` remains outside `NibPaths`, and a test enforces
+  this. Evidence (phase 1): every production path site uses
+  `crate::paths::NibPaths` (`src/paths.rs`), and
+  `paths::tests::no_hand_built_nib_paths_outside_this_module` fails on any
+  `".nib"` or `".nib/…"` literal in production code outside that module. Test
+  fixtures that build a legacy project tree on purpose keep their literal
+  paths; the scan skips test-only files and inline test modules.
 - [ ] AC-7: Linux, macOS and Windows CI pass with the bundled SQLite. Doctor
   reports the new layout. Guide, tech docs, catalog, versions and memory are
   reconciled, and an independent review is complete (data integrity and
@@ -216,6 +221,33 @@ because this touches data integrity, credentials and a public layout.
 - **Native build impact of bundled SQLite.**
 - **Rollback.** Revert the binary and restore from the legacy directory.
   `nib.db` is kept. Published versions are never reused.
+
+## Implementation Notes
+
+### Phase 1: one path authority (2026-10-22)
+
+- `src/paths.rs` adds `NibPaths` with `user_home`, `project_state`,
+  `project_prefs` and the derived locations (`project_skills`,
+  `project_plans`, `managed_worktrees`, `session_worktrees`,
+  `subagent_worktrees`, `relative_profile_state`,
+  `relative_project_skills`), plus `PROJECT_DIR_NAME`,
+  `PROJECT_DIR_EXCLUDE_PATHSPEC` and the directory-name checks used by the
+  patch, commit, checkpoint, sandbox-mask and lock-anchor guards.
+- `user_home` moved from `tools::permission_rules::nib_home` unchanged
+  (`$NIB_HOME`, else `~/.nib`; unit tests see only `TestNibHome`), and
+  `TestNibHome` moved with it.
+- All production `.join(".nib")` sites (config, profiles, sessions, memory,
+  daemons, curator, delegation, process scopes, worktree ownership and
+  cleanup, sandbox mounts, interaction card, doctor, MCP test fixture) now
+  call `NibPaths`. `project_state` and `project_prefs` still both return
+  `<project>/.nib`, so the layout is unchanged.
+- Validation: `task check` passed; focused lib tests for `paths`, `config`,
+  `profile`, `session`, `sandbox`, `tools::delegation`,
+  `tools::permission_rules`, `interaction_card`, `daemons`, `context::skill`,
+  `integrations::worktree`, `tools::git*`, `tools::checkpoints`,
+  `tools::observed*` and `tools::core` passed (849 tests; three delegation
+  fault-injection tests that need `--test-threads=1` passed when rerun
+  serially); `cargo test --bin nib doctor:: auth::` passed.
 
 ## Version Impact
 

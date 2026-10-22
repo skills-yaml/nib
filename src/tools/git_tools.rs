@@ -289,7 +289,7 @@ fn validate_paths(args: &Value) -> Result<Vec<String>, String> {
             }
             if relative
                 .components()
-                .any(|component| component.as_os_str() == ".nib")
+                .any(|component| crate::paths::NibPaths::is_project_dir_name(component.as_os_str()))
             {
                 return Err(format!("git_commit never commits nib state: {path}"));
             }

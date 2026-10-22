@@ -363,7 +363,7 @@ impl DurableTaskStore {
             .canonicalize()
             .map_err(|error| format!("failed to resolve originating sessions: {error}"))?;
         for candidate in sessions_dir.ancestors().skip(1) {
-            if !candidate.join(".nib").is_dir() {
+            if !crate::paths::NibPaths::project_state(candidate).is_dir() {
                 continue;
             }
             let Ok(config) = crate::config::load_nib_config_full(candidate) else {

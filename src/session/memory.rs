@@ -65,7 +65,7 @@ struct OpenedMemoryStore {
 
 impl MemoryStore {
     pub fn new(project_root: &Path) -> Self {
-        Self::at_path(project_root.join(".nib").join("memory.json"))
+        Self::at_path(crate::paths::NibPaths::project_state(project_root).join("memory.json"))
     }
 
     pub fn at_path(path: PathBuf) -> Self {

@@ -10,7 +10,7 @@ const ACTIVATION_TOKEN: &str = "nib-mcp-client-lifecycle-fixture-v1";
 const MODE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_MODE";
 const HEARTBEAT_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_HEARTBEAT";
 const TRACE_ENV: &str = "NIB_INTERNAL_MCP_LIFECYCLE_TRACE";
-const GIT_WRAPPER_MARKER: &str = ".nib/mcp-git-lifecycle-fixture.json";
+const GIT_WRAPPER_MARKER: &str = "mcp-git-lifecycle-fixture.json";
 const GIT_WRAPPER_TOKEN: &str = "nib-mcp-git-lifecycle-fixture-v1";
 
 pub(crate) fn run_if_requested() -> Option<i32> {
@@ -155,7 +155,7 @@ fn run_git_wrapper_if_requested() -> Option<io::Result<()>> {
     }
 
     let marker = match std::env::current_dir() {
-        Ok(directory) => directory.join(GIT_WRAPPER_MARKER),
+        Ok(directory) => nib::paths::NibPaths::project_state(&directory).join(GIT_WRAPPER_MARKER),
         Err(error) => return Some(Err(error)),
     };
     let encoded = match std::fs::read(&marker) {

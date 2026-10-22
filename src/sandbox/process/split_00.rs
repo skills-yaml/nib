@@ -361,7 +361,7 @@ impl ProcessScopeStore {
             )
         })?;
         ensure_process_scope_deadline(lock_deadline)?;
-        let nib = project_root.join(".nib");
+        let nib = crate::paths::NibPaths::project_state(&project_root);
         let directory = nib.join(SCOPE_DIRECTORY);
         let directory_capability = if lock_deadline.is_some() {
             let project_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
@@ -411,7 +411,8 @@ impl ProcessScopeStore {
     ) -> Result<Option<Self>, String> {
         ensure_process_scope_deadline(Some(deadline))?;
         records.verify_visible()?;
-        let expected_records = project_root.join(".nib").join("subagents");
+        let expected_records =
+            crate::paths::NibPaths::project_state(project_root).join("subagents");
         if records.path() != expected_records {
             return Err(
                 "managed-process records capability is bound to another project".to_string(),
@@ -567,7 +568,7 @@ impl ProcessScopeStore {
         }
         let project = crate::daemons::state::StableDirectory::open(project_root)?;
         ensure_process_scope_deadline(Some(deadline))?;
-        let nib_path = project_root.join(".nib");
+        let nib_path = crate::paths::NibPaths::project_state(project_root);
         let nib = project.open_owned_child(&nib_path)?;
         ensure_process_scope_deadline(Some(deadline))?;
         let directory = nib_path.join(SCOPE_DIRECTORY);
@@ -1683,7 +1684,7 @@ impl ProcessScopeStore {
         operation: impl FnOnce(&crate::daemons::state::StableDirectory) -> Result<T, String>,
         mut before_setup_step: impl FnMut() -> Result<(), String>,
     ) -> Result<T, String> {
-        let lock = self.project_root.join(".nib").join(SCOPE_STORE_LOCK);
+        let lock = crate::paths::NibPaths::project_state(&self.project_root).join(SCOPE_STORE_LOCK);
         ensure_process_scope_deadline(Some(deadline))?;
         crate::daemons::state::with_file_lock_in_until_with_setup_hook(
             &lock,

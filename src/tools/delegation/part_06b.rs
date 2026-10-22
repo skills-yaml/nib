@@ -458,7 +458,7 @@ pub(crate) fn persist_merge_failure(
 }
 
 pub(crate) fn records_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".nib").join("subagents")
+    crate::paths::NibPaths::project_state(project_root).join("subagents")
 }
 
 pub(crate) fn ensure_records_directory(project_root: &Path) -> Result<PathBuf, String> {
@@ -546,7 +546,7 @@ pub(crate) fn open_or_create_records_directory_capability_with_setup_hook(
             .unwrap_or(started)
     });
     ensure_subagent_reconciliation_deadline(Some(setup_deadline))?;
-    let nib = project_root.join(".nib");
+    let nib = crate::paths::NibPaths::project_state(project_root);
     let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
     let mut setup_guard = || ensure_subagent_reconciliation_deadline(Some(setup_deadline));
     let nib_directory = project_directory.open_or_create_descendant_directory_with_guard(
@@ -713,7 +713,7 @@ pub(crate) fn record_lock_path(project_root: &Path, id: &str) -> Result<PathBuf,
     if !is_valid_subagent_id(id) {
         return Err("invalid subagent id".to_string());
     }
-    let directory = project_root.join(".nib");
+    let directory = crate::paths::NibPaths::project_state(project_root);
     crate::fs_security::ensure_directory_without_symlinks(&directory)
         .map_err(|error| error.to_string())?;
     let metadata = std::fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
