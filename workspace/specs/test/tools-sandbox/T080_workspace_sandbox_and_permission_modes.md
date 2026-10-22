@@ -1,8 +1,9 @@
 # T080: Claude Code / Codex-Style Workspace, Sandbox and Permission Modes
 
-**Status:** Development. Implementation started on 2026-10-08 with phase 1, after the
-user requested implementation.
-State: development
+**Status:** Test. Implementation started on 2026-10-08 with phase 1, after the
+user requested implementation; every phase was integrated into shared
+`development` by 2026-10-22 (see Integration Evidence).
+State: test
 Primary Feature: tools-sandbox
 
 ## Problem and Authority
@@ -372,59 +373,59 @@ Each phase is independently reviewable and keeps `task verify` green.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: In `workspace-write`, Git read commands (`status`, `log`, `diff`)
+- [x] AC-1: In `workspace-write`, Git read commands (`status`, `log`, `diff`)
   work in place and in managed worktrees under `$HOME`. Every write to Git
   metadata fails with a read-only error: hooks, config, `commondir`, refs,
   rebase state, the worktree `.git` pointer, and renaming or removing `.git`.
   Git writes are available only through the phase 2 host-side tools. `<project>/.nib` runtime and credential files are
   unreadable from every tool-command sandbox. `$HOME` stays masked.
-- [ ] AC-2: A rewritten `.git` pointer, or a symlink in the workspace,
+- [x] AC-2: A rewritten `.git` pointer, or a symlink in the workspace,
   cannot expose paths outside the mount plan (adversarial fixtures).
-- [ ] AC-3: A default session edits the user's folder directly. Several
+- [x] AC-3: A default session edits the user's folder directly. Several
   sessions may share a folder. `/worktree` sessions and subagents stay
   isolated, and `/land` commits or merges only after confirmation.
-- [ ] AC-4: Each mode enforces the matrix in section 3. Shift+Tab cycles modes
+- [x] AC-4: Each mode enforces the matrix in section 3. Shift+Tab cycles modes
   and the status line reflects the change within the same turn. `auto` never
   silently performs an outside-sandbox action.
-- [ ] AC-5: Rules follow their precedence and layering, untrusted project rules
+- [x] AC-5: Rules follow their precedence and layering, untrusted project rules
   are ignored, and deny always wins. "Always allow" persists per project.
   `git status; git log` runs without prompting.
-- [ ] AC-6: `/rewind` restores file contents, creations and deletions to a
+- [x] AC-6: `/rewind` restores file contents, creations and deletions to a
   chosen checkpoint, and leaves `.git` untouched.
-- [ ] AC-6b: In place, each run records its checkpoint, changed paths, the
+- [x] AC-6b: In place, each run records its checkpoint, changed paths, the
   other active sessions and a content identity scoped to its own changed
   paths. A later change to one of those paths invalidates the verification.
   Another session's edits to other files do not.
-- [ ] AC-6d: `apply_patch` fails, writing nothing, when the target was not read
+- [x] AC-6d: `apply_patch` fails, writing nothing, when the target was not read
   in the session or changed on disk after the read. Consecutive edits by the
   same session do not need a re-read. Two sessions editing the same file in
   place cannot silently overwrite each other.
-- [ ] AC-6e: With two nib sessions active in one folder, each status line shows
+- [x] AC-6e: With two nib sessions active in one folder, each status line shows
   the other. A crashed session disappears after the heartbeat timeout.
-- [ ] AC-6c: `allow_write` entries that cover the project or `.git` cannot
+- [x] AC-6c: `allow_write` entries that cover the project or `.git` cannot
   expose `.nib` or make Git metadata writable. Entries covering `$HOME` are
   rejected. Ancestor `.nib` directories stay hidden from nested repositories,
   and unmanaged worktree pointers stay read-only.
-- [ ] AC-6f: Editing never creates a branch or commit. A commit happens only
+- [x] AC-6f: Editing never creates a branch or commit. A commit happens only
   after an explicit request or approval. On the default or a protected branch,
   a `nib/<topic>` branch is created first and reported. On another branch, the
   commit lands there. Push always prompts.
-- [ ] AC-6g: `git_commit` and `git_push` run on the host with the user's
+- [x] AC-6g: `git_commit` and `git_push` run on the host with the user's
   signing, credential helpers and hooks. Flags that bypass hooks or rewrite
   history are rejected unless the user explicitly requested them. `git
   commit` and `git push` in `run_terminal` are redirected.
-- [ ] AC-6h: A worktree is created only by user request, for subagents and
+- [x] AC-6h: A worktree is created only by user request, for subagents and
   scheduled work, or when project instructions require isolation, and nib
   states the reason. Explicit user or project instructions override the
   defaults.
-- [ ] AC-7: A command blocked by the sandbox offers a retry outside it through a
+- [x] AC-7: A command blocked by the sandbox offers a retry outside it through a
   prompt. Headless runs deny instead of hanging.
-- [ ] AC-8: Existing `approvals.mode` values migrate with a doctor notice.
+- [x] AC-8: Existing `approvals.mode` values migrate with a doctor notice.
   Governed instructions are amended exactly as scoped by D2, and only in
   phase 5.
   T063's `git_status` guarantees (no fsmonitor, no hooks, no network) still
   hold.
-- [ ] AC-9: An independent exact-candidate security review, the native Linux
+- [x] AC-9: An independent exact-candidate security review, the native Linux
   bwrap fixtures (`NIB_REQUIRE_BWRAP_TESTS=1`), `task verify`,
   `task docs:check` and `task versions:check` pass. Guide, catalog and memory
   are reconciled.
@@ -1622,7 +1623,13 @@ publication. Synchronization combines that phase with T069-T073 under the
 same applied minor 0.4.0 release and preserves the independent reviewed
 sandbox implementation. Combined review and native gates precede the push.
 
-## Integration Evidence (per phase)
+## Integration Evidence
+
+Revision: fb54e71b5db0fb586b592f0a112cc6e673fcd84a
+Outcome: passed
+
+The revision is the phase 6 merge, the last phase to integrate; each phase
+is recorded below.
 
 - **Phase 1** (sandbox mount plan): PR 52 merged the verified candidate
   `ea2ac61` into `development` as
@@ -1694,5 +1701,103 @@ For each phase, before the merge:
 - PR CI passed Linux Validate and macOS; the workflow skipped Windows.
 
 After each merge, `development` was re-read and contained the candidate
-with no file difference. T080 stays in development until every phase is
-integrated.
+with no file difference.
+
+- **Phase 6 integrated:** PR 67 merged the candidate `9f1e978` (the
+  approved `76250f2` plus a merge of `development` whose only conflict was
+  two appended `changelog.md` entries, both kept) as
+  `fb54e71` on 2026-10-22, by the user ("merge all prs"). The final
+  independent review approved `e06db83..76250f2`. On `9f1e978`, a serial
+  `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` and the interactive
+  release smoke passed locally, and PR CI passed Linux Validate and macOS.
+  The merged tree differs from `9f1e978` only by PR 66's records
+  (catalog row and this spec).
+
+Every phase is now integrated, so T080 moves to test. Main delivery and
+publication remain separate.
+
+## Acceptance Evidence
+
+Each criterion was delivered by the phase named, and is backed by these
+tests (all present on `development` at `0af60f5`). The mount-plan tests
+fail instead of skipping under `NIB_REQUIRE_BWRAP_TESTS=1`, which every
+phase's `task verify` set.
+
+- AC-1 (phase 1, 2b): `project_mounts_keep_main_git_metadata_read_only`,
+  `project_mounts_prevent_replacing_git_metadata`,
+  `project_mounts_hide_state_in_place`,
+  `project_mounts_enable_git_reads_in_managed_worktree_under_home`,
+  `git_status_reports_managed_worktree_under_home`.
+- AC-2 (phase 1): `project_mounts_prevent_replacing_git_metadata` (writing
+  `gitdir: /tmp/evil` is denied), `project_mounts_ignore_unmanaged_linked_worktrees`,
+  `only_nib_managed_worktrees_count_as_managed`,
+  `project_mounts_fail_closed_on_symlinked_state`,
+  `project_mounts_never_mount_home_or_its_ancestors`.
+- AC-3 (5c, 5d): `a_default_session_edits_the_main_checkout_in_place`,
+  `sessions_work_in_place_by_default`,
+  `worktree_command_moves_the_session_into_a_worktree_from_its_next_request`,
+  `a_worktree_session_is_previewed_committed_and_merged_into_the_folder`.
+- AC-4 (2a, 6): `permission_modes_decide_edits_commands_and_reads`,
+  `permission_mode_names_parse_label_and_cycle`,
+  `session_permission_mode_command_cycle_and_chrome`,
+  `a_blocked_command_is_offered_outside_the_sandbox_only_by_prompt`.
+- AC-5 (3): `deny_beats_ask_beats_allow_and_is_hard_to_step_around`,
+  `layers_load_from_nib_home_and_trust_is_per_project`,
+  `always_allow_saves_a_project_prefix_rule_that_skips_later_prompts`,
+  `read_only_sequences_and_pipelines_are_read_only`.
+- AC-6 (4): `rewind_restores_contents_creations_and_deletions`,
+  `git_and_nib_paths_are_never_saved_or_written`,
+  `rewind_does_not_enter_a_parent_linked_to_git_metadata`,
+  `applied_patches_are_checkpointed_per_turn_and_rewound`.
+- AC-6b (5b): `runs_record_their_workspace_other_sessions_and_changed_paths`,
+  `another_sessions_edit_elsewhere_keeps_the_check_and_an_edit_to_its_files_stales_it`,
+  `in_place_patches_and_commands_record_what_they_changed`.
+- AC-6c (1, 5c): `project_mounts_keep_protections_over_allow_write`,
+  `project_mounts_reject_allow_write_covering_home`,
+  `project_mounts_hide_ancestor_state_outside_home`,
+  `project_mounts_protect_unmanaged_worktree_pointer`.
+- AC-6d (5a): `edits_need_a_read_and_consecutive_edits_do_not_need_another`,
+  `a_change_after_the_read_refuses_the_patch_until_a_re_read`,
+  `two_sessions_in_one_folder_cannot_overwrite_each_other`.
+- AC-6e (5a): `sessions_in_one_folder_see_each_other_and_leave_on_drop`,
+  `other_folders_and_stale_heartbeats_do_not_count`,
+  `presence_follows_every_footer_key_hint`.
+- AC-6f (2b, 5d): `commit_branches_first_on_main_and_commits_in_place_elsewhere`,
+  `git_tools_follow_modes_and_push_always_asks`, `merge_on_main_branches_first`.
+- AC-6g (2b): `branch_slugs_and_terminal_redirects`,
+  `commit_rejects_unsafe_input_and_empty_changes`,
+  `push_sets_upstream_on_a_local_remote_and_refuses_bad_input`,
+  `failed_commit_rolls_back_the_new_branch` (a host pre-commit hook runs),
+  `a_failing_merge_hook_undoes_the_merge_and_keeps_unrelated_changes`.
+  Deviation: the Git tools expose no hook-bypass or history-rewriting flag
+  at all, which is stricter than "rejected unless explicitly requested".
+  Signing and credential helpers come from the user's own Git
+  configuration, which the host-side tools inherit; no fixture exercises
+  them.
+- AC-6h (5c): `configuration_and_instructions_require_a_worktree`,
+  `prose_about_isolation_is_not_a_requirement`,
+  `a_required_worktree_overrides_an_in_place_session`,
+  `scheduled_runs_use_a_worktree_without_moving_the_session`,
+  `runs_record_the_session_workspace_and_instructions_can_require_a_worktree`;
+  subagents keep their existing worktree suite, plus
+  `a_worktree_session_cannot_start_a_subagent_from_its_worktree`. Gap: no
+  dedicated test was identified for the forced MCP-server worktree.
+- AC-7 (6): `a_blocked_command_is_offered_outside_the_sandbox_only_by_prompt`
+  (headless runs see no prompt), `a_sandbox_blocked_write_runs_on_the_host_only_after_a_yes`,
+  `no_escalation_in_plan_mode_for_other_failures_or_when_bwrap_is_required`,
+  `one_shot_without_input_denies_prompts_instead_of_waiting`.
+- AC-8 (5c, 6): `doctor_names_the_permission_mode_with_the_old_name_notice`;
+  T063 guarantees by `git_status_disables_fsmonitor_and_preserves_index` and
+  `git_status_isolates_process_filter_and_host_network`. The D2 amendments
+  are commits `c1d49f8` and `669e651` (`permissions.md`, `backend_rust.md`),
+  both in phase 5c, user-approved and independently reviewed.
+- AC-9: each phase's independent exact-candidate review, serial
+  `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` (which includes
+  `task docs:check` and `task versions:check`), and PR CI, as recorded
+  above; guide, catalog and memory were reconciled per phase.
+
+Deviations from the Validation Gates: the development CI workflow skips
+Windows tests by policy (T059), so Windows evidence comes with main
+delivery. Phases 5d and 6 were integrated after 0.4.0 (the
+`nib-catalog-refresh` release T080 joined) was published; they ship in the
+next development build (0.5.2), and no second bump was applied for T080.
