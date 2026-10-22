@@ -1610,8 +1610,8 @@ a command needs network.
 
 Status: updated
 Rationale: Each phase recorded its durable decisions in
-[decisions.md](../../../agents/memory/decisions.md) with matching
-[changelog.md](../../../agents/memory/changelog.md) entries: read-only Git
+[workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md) with matching
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md) entries: read-only Git
 metadata and trusted-layout mounts (2026-10-08), permission modes (2026-10-09),
 host-side commit and push (2026-10-09), permission rules and trust
 (2026-10-11), checkpoints (2026-10-12), fresh-read edits and session presence
