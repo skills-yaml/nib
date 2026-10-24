@@ -275,7 +275,6 @@ impl SessionStorePreparation {
         Self::cleanup_durable_with_guard(receipt, deadline, || Ok(()))
     }
 
-    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn cleanup_durable_with_guard(
         receipt: &SessionPreparationReceipt,
         deadline: Instant,
@@ -382,6 +381,7 @@ impl SessionStorePreparation {
 
     /// Removes the JSON session a durable preparation published, unless it
     /// changed.
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     fn cleanup_durable_session_file(
         receipt: &SessionPreparationReceipt,
         directory: &crate::daemons::state::StableDirectory,
@@ -872,45 +872,13 @@ impl SessionStorePreparation {
             external_guard()?;
             ensure_session_store_open_deadline(deadline)
         };
-        if let Some((session_path, handle)) = self.created_session_file.as_ref() {
-            match (handle, &store_database, &self.planned_session) {
-                (SessionHandle::File(session_file), None, _) => directory
-                    .remove_file_if_matches_with_guard(
-                        session_path,
-                        session_file,
-                        ".nib-session-preparation-delete-",
-                        &mut guard,
-                    )?,
-                (SessionHandle::Row(row), Some(store), Some(planned)) => {
-                    guard()?;
-                    store
-                        .database
-                        .remove_prepared(&store.scope, planned, Some(&row.generation))
-                        .map_err(|error| error.to_string())?;
-                    guard()?;
-                }
-                _ => {
-                    return Err(format!(
-                        "prepared session does not match its store and was preserved: {}",
-                        session_path.display()
-                    ))
-                }
-            }
+        if self.created_session_file.is_some() {
+            self.remove_created_session(store_database.as_ref(), directory, &mut guard)?;
             self.created_session_file.take();
         }
         if let Some(identity_file) = self.created_identity_file.as_ref() {
-            let mut has_shared_entries = match (&store_database, &self.planned_session) {
-                (Some(store), Some(planned)) => store
-                    .database
-                    .has_other_sessions(&store.scope, &planned.id)
-                    .map_err(|error| error.to_string())?,
-                (Some(store), None) => !store
-                    .database
-                    .list(&store.scope)
-                    .map_err(|error| error.to_string())?
-                    .is_empty(),
-                (None, _) => false,
-            };
+            let mut has_shared_entries =
+                self.has_other_database_sessions(store_database.as_ref())?;
             directory.for_each_entry_bounded(1_024, 255, |name| {
                 if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
                     has_shared_entries = true;
@@ -972,6 +940,64 @@ impl SessionStorePreparation {
         guard()?;
         self.armed = false;
         Ok(())
+    }
+}
+
+impl SessionStorePreparation {
+    /// Removes the session this preparation published (its file, or its row
+    /// of the session database), unless it changed.
+    fn remove_created_session(
+        &self,
+        store_database: Option<&StoreDatabase>,
+        directory: &crate::daemons::state::StableDirectory,
+        guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some((session_path, handle)) = self.created_session_file.as_ref() else {
+            return Ok(());
+        };
+        match (handle, store_database, &self.planned_session) {
+            (SessionHandle::File(session_file), None, _) => directory
+                .remove_file_if_matches_with_guard(
+                    session_path,
+                    session_file,
+                    ".nib-session-preparation-delete-",
+                    guard,
+                ),
+            (SessionHandle::Row(row), Some(store), Some(planned)) => {
+                guard()?;
+                store
+                    .database
+                    .remove_prepared(&store.scope, planned, Some(&row.generation))
+                    .map_err(|error| error.to_string())?;
+                guard()
+            }
+            _ => Err(format!(
+                "prepared session does not match its store and was preserved: {}",
+                session_path.display()
+            )),
+        }
+    }
+
+    /// Whether the session database holds sessions of this namespace other
+    /// than the planned one: another spawn adopted the namespace.
+    fn has_other_database_sessions(
+        &self,
+        store_database: Option<&StoreDatabase>,
+    ) -> Result<bool, String> {
+        let Some(store) = store_database else {
+            return Ok(false);
+        };
+        match &self.planned_session {
+            Some(planned) => store
+                .database
+                .has_other_sessions(&store.scope, &planned.id)
+                .map_err(|error| error.to_string()),
+            None => Ok(!store
+                .database
+                .list(&store.scope)
+                .map_err(|error| error.to_string())?
+                .is_empty()),
+        }
     }
 }
 

@@ -608,7 +608,21 @@ fn print_layout(project: &Path) {
     for line in &report.legacy {
         println!("  Legacy: {line}");
     }
+    // States of deleted folders accumulate; name a few of them.
+    const MAX_ORPHANED_LINES: usize = 3;
+    let orphaned = report
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.kind == StateLinkKind::Orphaned)
+        .count();
+    let mut orphaned_listed = 0;
     for candidate in &report.candidates {
+        if candidate.kind == StateLinkKind::Orphaned {
+            orphaned_listed += 1;
+            if orphaned_listed > MAX_ORPHANED_LINES {
+                continue;
+            }
+        }
         let root = candidate.recorded_root.display();
         match candidate.kind {
             StateLinkKind::Moved | StateLinkKind::Orphaned => println!(
@@ -631,6 +645,12 @@ fn print_layout(project: &Path) {
                 candidate.key
             ),
         }
+    }
+    if orphaned > MAX_ORPHANED_LINES {
+        println!(
+            "  ... and {} more states of folders that no longer exist",
+            orphaned - MAX_ORPHANED_LINES
+        );
     }
 }
 

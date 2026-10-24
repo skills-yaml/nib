@@ -374,7 +374,9 @@ impl DurableTaskStore {
     }
 
     fn resolve_profile(sessions_dir: &Path) -> Result<crate::profile::Profile, String> {
-        let sessions_dir = sessions_dir
+        let sessions_dir = crate::state_migration::moved_sessions_dir(sessions_dir)
+            .as_deref()
+            .unwrap_or(sessions_dir)
             .canonicalize()
             .map_err(|error| format!("failed to resolve originating sessions: {error}"))?;
         // Sessions in nib's user home belong to the project its state

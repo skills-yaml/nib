@@ -267,6 +267,9 @@ impl SessionStore {
     pub fn at_dir(sessions_dir: PathBuf) -> Self {
         let requested = crate::fs_security::absolute_path(&sessions_dir)
             .unwrap_or_else(|_| sessions_dir.clone());
+        // A session directory recorded before its sessions moved into the
+        // session database resolves to where they are now (T082).
+        let requested = crate::state_migration::moved_sessions_dir(&requested).unwrap_or(requested);
         let opened = open_session_directory(&requested).and_then(|opened| {
             let database = StoreDatabase::for_sessions_dir(&opened.0)?;
             Ok((opened, database))

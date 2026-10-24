@@ -895,7 +895,7 @@ async fn patch_defaults_to_dry_run_and_terminal_nonzero_is_failure() {
         .contains("after-tool hook from failing-skill failed"));
 
     let raw_audit =
-        std::fs::read_to_string(store.sessions_dir().join("edit-test.json")).expect("raw audit");
+        serde_json::to_string(&store.load("edit-test").expect("audit session")).expect("raw audit");
     assert!(raw_audit.contains("NIB_HOOK_VALUE"));
     assert!(!raw_audit.contains("profile-value"));
 }

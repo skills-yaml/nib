@@ -192,7 +192,7 @@ fn unusable_worktree(
     let current = super::workspace::stored_session_workspace(project_root, store, session_id);
     if !current.is_worktree() {
         return Ok(format!(
-            "This session works in your folder, so there is nothing to land. A worktree it used earlier could not be loaded: {error}. If it is off its branch, switch it back; otherwise remove what remains under .nib/worktrees/sessions/ by hand."
+            "This session works in your folder, so there is nothing to land. A worktree it used earlier could not be loaded: {error}. If it is off its branch, switch it back; otherwise remove what remains of it under worktrees/sessions/ in nib's state folder (`nib doctor` shows where; older worktrees are in .nib/worktrees/sessions/) by hand."
         ));
     }
     if !matches!(action, LandAction::Discard { .. }) {
@@ -218,7 +218,7 @@ fn unusable_worktree(
         "Its next request works in your folder.".to_string()
     };
     Ok(format!(
-        "This session no longer uses its worktree, which nib could not load: {error}. Nothing was deleted: remove what remains under .nib/worktrees/sessions/ (and its nib/session/ branch, if it is still there) by hand when you no longer need them. {next}"
+        "This session no longer uses its worktree, which nib could not load: {error}. Nothing was deleted: remove what remains of it under worktrees/sessions/ in nib's state folder (`nib doctor` shows where; older worktrees are in .nib/worktrees/sessions/), and its nib/session/ branch if it is still there, by hand when you no longer need them. {next}"
     ))
 }
 

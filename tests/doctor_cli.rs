@@ -241,3 +241,61 @@ fn doctor_fix_preserves_explicit_chat_without_reasoning() {
         Some(LlmApiMode::ChatCompletions)
     );
 }
+
+/// T082 AC-5: a moved project starts with fresh state; doctor reports where
+/// its earlier state is, and `--fix --relink <old folder>` brings it along.
+#[test]
+fn doctor_cli_reports_a_moved_project_and_relinks_its_sessions() {
+    let nib_home = tempfile::tempdir().expect("nib home");
+    let home = tempfile::tempdir().expect("home");
+    let first = tempfile::tempdir().expect("first parent");
+    let second = tempfile::tempdir().expect("second parent");
+    let original = first.path().canonicalize().unwrap().join("moved-project");
+    std::fs::create_dir(&original).expect("project");
+    initialize_git(&original);
+    let mut config = NibConfig::default();
+    config.skills.enabled = false;
+    save_nib_config_full(&original, &mut config).expect("save config");
+    let doctor = |project: &Path, args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_nib"))
+            .arg("doctor")
+            .args(args)
+            .current_dir(project)
+            .env("HOME", home.path())
+            .env("NIB_HOME", nib_home.path())
+            .env("NIB_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("run doctor");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "doctor {args:?} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+    };
+    // Doctor records its own audit session in the original folder.
+    let before = doctor(&original, &[]);
+    assert!(before.contains("Checking nib layout... OK"), "{before}");
+    assert!(before.contains("(1 sessions of this folder)"), "{before}");
+
+    let moved = second.path().canonicalize().unwrap().join("moved-project");
+    std::fs::rename(&original, &moved).expect("move project");
+    let report = doctor(&moved, &[]);
+    assert!(report.contains("Moved?"), "{report}");
+    assert!(
+        report.contains(&format!("nib doctor --fix --relink {}", original.display())),
+        "{report}"
+    );
+
+    let fixed = doctor(
+        &moved,
+        &["--fix", "--relink", &original.display().to_string()],
+    );
+    assert!(fixed.contains("FIXED (1 sessions moved"), "{fixed}");
+    assert!(fixed.contains("own earlier state was kept"), "{fixed}");
+
+    let after = doctor(&moved, &[]);
+    assert!(!after.contains("Moved?"), "{after}");
+    assert!(after.contains("Checking nib layout... OK"), "{after}");
+}

@@ -177,12 +177,16 @@ Each phase is independently reviewable and keeps `task verify` green.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: A fresh project using the new version creates no runtime state or
+- [x] AC-1: A fresh project using the new version creates no runtime state or
   secrets under `<project>/.nib`. Only preference files may appear there.
-  Progress (phase 3): runtime state other than sessions lives in
-  `~/.nib/projects/<key>/` (`state_migration::tests::a_fresh_project_records_its_state_in_the_user_home`);
-  `.nib/profiles/<id>/sessions` (with checkpoints, read records and
-  presence) remains until phase 4.
+  Evidence (phases 3 and 4): runtime state lives in `~/.nib/projects/<key>/`
+  and sessions in `~/.nib/nib.db`
+  (`state_migration::tests::a_fresh_project_records_its_state_in_the_user_home`,
+  `session::database::tests::default_user_home_sessions_live_in_the_database_and_others_in_files`);
+  `doctor::tests::doctor_accepts_healthy_default_runtime` runs doctor (which
+  records an audit session) on a fresh project and finds no
+  `.nib/profiles` or `.nib/sessions`. Credentials stay in the user layers
+  (AC-2).
 - [x] AC-2: `nib auth` stores credentials only in `~/.nib/config.toml` with
   mode 0600. Project config that sets credentials, endpoints, approvals,
   sandbox or trust is rejected with a diagnostic. Evidence (phase 2):
@@ -192,21 +196,59 @@ Each phase is independently reviewable and keeps `task verify` green.
   `project_preference_edits_cannot_set_user_only_values` and
   `user_values_added_after_the_migration_are_rejected`. Existing untracked
   legacy files are migrated instead of rejected (see phase 2 notes).
-- [ ] AC-3: Sessions are persisted in `~/.nib/nib.db`. Concurrent writers are
+- [x] AC-3: Sessions are persisted in `~/.nib/nib.db`. Concurrent writers are
   rejected on revision conflict, and run leases are exclusive across
   processes. Existing session tests pass against the SQLite backend.
-- [ ] AC-4: The migration imports every existing JSON session (count and
+  Evidence (phase 4): `session::database::tests` (10):
+  `a_stale_snapshot_is_rejected_by_the_revision_guard` (store-level stale
+  snapshot and the row guard below the locks),
+  `database_sessions_are_guarded_across_processes` (a second process sees
+  the run lease held and its stale write is rejected),
+  `a_failing_commit_check_rolls_the_whole_write_back`,
+  `appending_a_message_writes_only_the_new_row`, round trip with exact
+  floats, delete, corrupt rows, newer schema refused, re-link. Every store
+  opened through a profile (`for_project`, the agent loop, gateway, MCP,
+  TUI, delegation audits, durable tasks, curator) now uses the database, so
+  their existing tests run against it (`cargo test --lib`: 1617 of 1618
+  with two threads, the remaining delegation fault-injection test passes
+  serially as before). The session-directory tests that construct a store
+  in a temporary folder keep exercising the JSON file backend, which stays
+  for configured `state_dir` profiles and managed worktrees.
+- [x] AC-4: The migration imports every existing JSON session (count and
   content parity checked), moves runtime state and credentials, keeps the
   originals in the legacy directory, and is idempotent and resumable after
-  interruption. Progress (phases 2 and 3): credentials and safety values
-  move with the configuration migration; runtime state moves by rename
-  (`state_migration::tests::a_populated_legacy_layout_moves_to_the_user_home_without_loss`,
-  `a_second_run_changes_nothing`,
-  `an_interrupted_migration_resumes_and_keeps_identical_leftovers`). A
-  rename leaves no second original; identical leftovers are kept in the
-  legacy directory. The JSON session import is phase 4.
-- [ ] AC-5: Copying or moving the project directory does not break nib.
+  interruption. Evidence (phases 2 to 4): from a populated legacy layout
+  (`state_migration::tests::a_populated_legacy_layout_moves_to_the_user_home_without_loss`:
+  every readable session in the database equal to its file, the original
+  `sessions/` folder with an unreadable file, locks and identity marker
+  kept byte for byte in `.nib/legacy-<time>/sessions/`, state moved with
+  directory identity kept), `a_second_run_changes_nothing`,
+  `an_interrupted_session_import_resumes_without_duplicates`,
+  `an_interrupted_migration_resumes_and_keeps_identical_leftovers`,
+  `a_session_the_database_holds_differently_stops_the_first_migration`,
+  `a_session_run_in_progress_defers_the_session_import`,
+  `pre_profile_sessions_reach_the_session_database`,
+  `a_recorded_legacy_session_directory_reaches_the_imported_sessions`;
+  credentials and safety values move with the configuration migration
+  (phase 2, AC-2). Runtime state moves by rename, so no second copy of a
+  moved entry exists; identical leftovers and all session originals are
+  kept in the legacy directory.
+- [x] AC-5: Copying or moving the project directory does not break nib.
   `nib doctor` detects the mismatch and `--fix` re-links with confirmation.
+  Evidence (phase 5): a copy keeps its own state and the original is never
+  re-linked (`state_migration::relink::tests::a_copy_keeps_its_own_state_and_is_never_relinked`);
+  a moved project is found and re-linked with its sessions and memory, its
+  own newer state kept aside
+  (`a_moved_project_is_found_and_relinked_with_its_sessions_and_memory`),
+  refused while the old state is in use
+  (`relink_waits_while_the_old_state_is_in_use`), and an interrupted
+  re-link finishes on the next profile load
+  (`an_interrupted_relink_finishes_when_the_profiles_load`). End to end,
+  `doctor_cli::doctor_cli_reports_a_moved_project_and_relinks_its_sessions`
+  runs the binary: doctor reports "Moved?" with the command, and
+  `nib doctor --fix --relink <old folder>` (naming the old folder is the
+  confirmation) moves the session. Doctor passes on a copied or moved
+  project because receipts are keyed by folder.
 - [x] AC-6: No `.join(".nib")` remains outside `NibPaths`, and a test enforces
   this. Evidence (phase 1): every production path site uses
   `crate::paths::NibPaths` (`src/paths.rs`), and
@@ -218,6 +260,14 @@ Each phase is independently reviewable and keeps `task verify` green.
   reports the new layout. Guide, tech docs, catalog, versions and memory are
   reconciled, and an independent review is complete (data integrity and
   credential handling).
+  Progress (phase 5): doctor prints "Checking nib layout" (user home,
+  `nib.db` and this folder's session count, runtime state, older files
+  left in `.nib`, moved or copied projects); the user guide covers the
+  layout, the session import, re-linking and rollback; the governed
+  `backend_rust.md` records the bundled `rusqlite` decision (scoped
+  approval). Open: the native macOS and Windows CI runs (only Linux was
+  built and tested locally), catalog, versions and memory reconciliation
+  (coordinator records), and the mandatory independent review.
 
 ## Validation Gates
 
@@ -444,6 +494,118 @@ because this touches data integrity, credentials and a public layout.
   `interactive_cli` and `sandbox_integration` passed, and no test run left a
   `~/.nib` behind. `docs_integrity` passes for this spec (it still fails for
   T087, outside this spec).
+
+### Phase 4: SQLite sessions and the session import (2026-10-24)
+
+- `rusqlite` 0.41 with only the `bundled` feature (decision 4); the scoped
+  amendment to `workspace/instructions/tech/backend_rust.md` records it.
+  `Cargo.lock` gains `rusqlite`, `libsqlite3-sys` and their small
+  dependencies (a necessary change inside the records boundary; the package
+  version is untouched).
+- `src/session/database.rs`: `~/.nib/nib.db` (`NibPaths::session_database`,
+  created `0600` without following links), WAL, `synchronous=FULL`, a 30 s
+  busy timeout, foreign keys, and `schema_version` migrations in a
+  transaction; a newer schema is refused. Tables: `sessions` (scope = the
+  session directory relative to the user home, id, `project_key`,
+  `profile_id`, `revision`, `generation`, the session document without
+  messages and events, stored size, change time), `session_messages` and
+  `session_events` (one row per entry, keyed by session, indexed by
+  project, cascading), and `session_imports` (the import ledger).
+  Connections are pooled per database path.
+- `SessionStore` keeps its API. A store whose directory is the default
+  session directory of a user-home state
+  (`<user home>/projects/<key>/profiles/<id>/sessions`,
+  `NibPaths::database_session_scope`) reads and writes the database; any
+  other directory (a configured `state_dir`, a managed worktree, a project
+  whose state has not moved yet, test folders) keeps JSON files. The
+  directory still exists for the locks, run leases and identity marker, and
+  its siblings hold checkpoints, read ledgers and presence.
+- Writes: one `IMMEDIATE` transaction guarded by the row the caller read
+  (`UPDATE ... WHERE generation = ? AND revision = ?`, or an insert that
+  fails on an existing row); message and event rows are appended, and an
+  earlier row is rewritten only when the session changed it (event
+  reconciliation of older audit evidence). The commit check runs inside the
+  transaction and can abort it. The transaction replaces the file store's
+  read-back verification. Deletes, subagent audit preparation (the row's
+  `generation` is the receipt, `SessionPreparationReceipt::session_generation`)
+  and its cleanup (also after a restart, `remove_prepared`) use rows the
+  same way; a namespace another spawn adopted is recognized by its other
+  rows.
+- Deviation from Rule 3: the striped lock files and the file-lock run
+  lease stay. The locks serialize the store's closure-based
+  read-modify-write calls across processes without holding a database-wide
+  write transaction while caller code runs (the revision guard is the
+  optimistic check at commit), and a kernel file lock is released when its
+  process dies, which a PID/heartbeat row would only approximate.
+- The session size limit (64 MiB) applies to the stored compact JSON.
+- Deviation from Rule 4: sessions are scoped per project and profile (each
+  store lists only its scope; `session_counts` groups by project); a listing
+  across all projects is left for a follow-up.
+- Import (`src/state_migration_sessions.rs`, part of the state migration):
+  every legacy `.nib/profiles/<id>/sessions/*.json` is read (bounded,
+  `O_NOFOLLOW`), parsed, validated and compared with the database before
+  anything changes (`import_status`: the ledger's SHA-256 or an identical
+  row means imported; a different row is a conflict). A conflict stops the
+  first migration with a diagnostic; once the state moved it leaves that
+  folder in place and reports it. Each session is imported in its own
+  transaction with its ledger entry and the file's change time; then the
+  whole folder (session files, files nib could not read, locks and identity
+  marker) and its lock anchors are renamed into
+  `.nib/legacy-<time>/sessions/profiles/<id>/`. A held run lease of any
+  session (probed with a non-creating `try_lock`) postpones the migration.
+  `checkpoints`, `file_reads` and `presence` now move with the rest of the
+  profile state, and `.nib/profiles/<id>/sessions` and pre-profile
+  `.nib/sessions` count as legacy state. Pre-profile sessions reach the
+  database through the profile migration, which imports instead of copying
+  when the profile's sessions are in the database.
+- Session directories recorded before the import (durable tasks) resolve
+  to the imported location (`state_migration::moved_sessions_dir`, used by
+  `SessionStore::at_dir`, the durable task profile resolution and the
+  worker check), so no second store starts in the project. Sessions in the
+  user home resolve back to their project through `project.toml`
+  (`NibPaths::state_owner`).
+- `ProfileRegistry::load` re-resolves the profiles whenever the migration
+  changed where the state resolves (also when it only recorded it), and a
+  "state moved" marker a copied project carries along is not legacy state.
+- `SessionStore::database_path` and `SessionStore::session_exists_at`
+  (read-only) are new public helpers; `delete_if` and
+  `load_result_with_metadata` pass a `SessionRecordMetadata` (modification
+  time and size of the file or row) instead of `fs::Metadata`.
+
+### Phase 5: doctor, re-linking and documentation (2026-10-24)
+
+- `nib doctor` prints "Checking nib layout": the user home, `nib.db` with
+  this folder's session count, the runtime state directory (and whether its
+  move is pending or was interrupted), what older versions left in `.nib`
+  (runtime state not moved yet, `legacy-<time>` folders, older worktrees),
+  and other states this folder may belong to. These lines warn and never
+  fail the doctor. The sessions line names the database.
+- `src/state_relink.rs` (`nib::state_migration::relink`): candidates are
+  state directories whose recorded root no longer exists (`Moved` with the
+  same folder name, else `Orphaned`), still exists with the same name and
+  Git root commit (`Copied`, reported only), or a re-link to this folder
+  that was interrupted.
+- `nib doctor --fix --relink <old folder or key>`: naming the old folder is
+  the confirmation (no prompt, scriptable). Under a lock in
+  `~/.nib/projects`, it refuses when the old folder still exists (a copy)
+  or the old or new state is in use, writes a journal (`relink.toml`)
+  before the first change and after each step, keeps a state the new
+  folder already has (with its sessions, moved to the aside key) in
+  `projects/.relinked-<key>-<time>`, keeps worktree receipts naming the
+  old folder in `relinked-<time>/`, points `project.toml` and `state.toml`
+  at the new folder, renames the state directory, moves the sessions to the
+  new key (`SessionDatabase::relink_project`, refused on an id present
+  under both keys), and runs `git worktree repair` for the managed
+  worktrees. An interrupted re-link finishes on the next profile load or
+  `--relink`. Nothing is deleted.
+- User guide: the layout (database, session directory), the session import
+  and legacy copies, moving and copying projects, rollback. The `/land`
+  messages name the worktree folder in nib's state instead of
+  `.nib/worktrees/sessions/` only.
+- Validation (2026-10-24): `cargo fmt`; `task check` passed; `cargo test
+  --lib -- --test-threads=2` VALIDATION_LIB; `cargo test --bin nib`
+  VALIDATION_BIN; integration targets VALIDATION_INTEGRATION. No test run
+  left a `~/.nib` behind.
 
 ## Version Impact
 

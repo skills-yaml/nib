@@ -1344,7 +1344,9 @@ pub(crate) fn load_worker_profile(
         .sessions_dir()
         .canonicalize()
         .map_err(|error| format!("failed to resolve profile sessions: {error}"))?;
-    let actual_sessions = sessions_dir
+    let actual_sessions = crate::state_migration::moved_sessions_dir(sessions_dir)
+        .as_deref()
+        .unwrap_or(sessions_dir)
         .canonicalize()
         .map_err(|error| format!("failed to resolve task sessions: {error}"))?;
     if actual_sessions != expected_sessions {

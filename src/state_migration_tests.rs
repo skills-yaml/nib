@@ -781,3 +781,33 @@ fn pre_profile_sessions_reach_the_session_database() {
     // The profile migration never removes its sources.
     assert!(legacy.join("sessions/old-1.json").is_file());
 }
+
+#[test]
+fn a_recorded_legacy_session_directory_reaches_the_imported_sessions() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    let legacy_sessions = project.legacy().join("profiles/default/sessions");
+    project.migrate().expect("migration");
+
+    // A scheduled task recorded the session directory before the import.
+    let store = crate::session::SessionStore::at_dir(legacy_sessions.clone());
+
+    assert!(store.database_path().is_some());
+    assert_eq!(store.load("s-1").expect("s-1").messages[0].content, "first");
+    store
+        .record_event(
+            "s-1",
+            "scheduled_agent_run_completed",
+            serde_json::json!({}),
+        )
+        .expect("event");
+    assert!(
+        !legacy_sessions.exists(),
+        "no second session store starts in the project"
+    );
+    // A configured or never-imported directory is not redirected.
+    assert_eq!(
+        moved_sessions_dir(&project.legacy().join("profiles/other/sessions")),
+        None
+    );
+}

@@ -305,8 +305,36 @@ fn migrate_locked(
     record.completed_at = None;
     write_record(&record_path, &record)?;
     let backup = legacy_backup_dir(&legacy);
+    let mut moved = move_entries(&moves, &duplicates, &backup, &mut record)?;
+    if !imports.is_empty() {
+        let database = open_database()?;
+        for import in &imports {
+            moved.push(import_directory(import, &database, &backup, &mut record)?);
+        }
+    }
+    for profile in profiles {
+        write_moved_marker(&legacy, state, profile)?;
+    }
+    record.status = "done".to_string();
+    record.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    write_record(&record_path, &record)?;
+    if !left.is_empty() {
+        tracing::warn!("{}", left_reason(&legacy, &left));
+    }
+    Ok(StateMigration::Moved(moved))
+}
+
+/// Renames each entry to the user home, or, for an identical duplicate the
+/// user home already holds, into `<backup>/state/`. Returns the moved
+/// entries.
+fn move_entries(
+    moves: &[Move],
+    duplicates: &[PathBuf],
+    backup: &Path,
+    record: &mut StateRecord,
+) -> Result<Vec<String>, String> {
     let mut moved = Vec::new();
-    for entry in &moves {
+    for entry in moves {
         let relative = entry.relative.display().to_string();
         if duplicates.contains(&entry.relative) {
             let kept_root = backup.join("state");
@@ -329,22 +357,7 @@ fn migrate_locked(
         }
         moved.push(relative);
     }
-    if !imports.is_empty() {
-        let database = open_database()?;
-        for import in &imports {
-            moved.push(import_directory(import, &database, &backup, &mut record)?);
-        }
-    }
-    for profile in profiles {
-        write_moved_marker(&legacy, state, profile)?;
-    }
-    record.status = "done".to_string();
-    record.completed_at = Some(chrono::Utc::now().to_rfc3339());
-    write_record(&record_path, &record)?;
-    if !left.is_empty() {
-        tracing::warn!("{}", left_reason(&legacy, &left));
-    }
-    Ok(StateMigration::Moved(moved))
+    Ok(moved)
 }
 
 /// Imports the sessions of one legacy session directory, then keeps the
@@ -399,6 +412,37 @@ fn import_directory(
         "{relative} ({} sessions imported)",
         import.sessions()
     ))
+}
+
+/// Where the sessions of a legacy profile session directory
+/// (`<project>/.nib/profiles/<id>/sessions`) went, once the migration imported
+/// them and kept the folder as a legacy copy: the profile's session directory
+/// in the user home. Records written before the import (a scheduled task's
+/// session directory, for one) then reach the session database instead of
+/// starting a second, empty store in the project.
+pub(crate) fn moved_sessions_dir(sessions_dir: &Path) -> Option<PathBuf> {
+    if fs::symlink_metadata(sessions_dir).is_ok()
+        || sessions_dir.file_name()? != LEGACY_PROFILE_SESSIONS
+    {
+        return None;
+    }
+    let profile = sessions_dir.parent()?;
+    let profiles = profile.parent()?;
+    let legacy = profiles.parent()?;
+    if profiles.file_name()? != "profiles" || !NibPaths::is_project_dir_name(legacy.file_name()?) {
+        return None;
+    }
+    let state = NibPaths::user_state_dir(legacy.parent()?)?;
+    let record = read_record(&state.join(STATE_RECORD_FILE)).ok()??;
+    let relative = Path::new("profiles")
+        .join(profile.file_name()?)
+        .join(LEGACY_PROFILE_SESSIONS);
+    let prefix = format!("{}:", relative.display());
+    record
+        .imported
+        .iter()
+        .any(|entry| entry.starts_with(&prefix))
+        .then(|| state.join(relative))
 }
 
 /// The profile folders of a legacy `.nib`, sorted.

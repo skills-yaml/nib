@@ -308,6 +308,15 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
     assert!(!intent.exists(), "planned intent reconciled last");
 }
 
+/// The tree of the profile directory a file-session profile configures
+/// (`.nib/profiles/default`), if it exists.
+fn configured_profile_tree(root: &Path) -> Option<Vec<(PathBuf, Vec<u8>)>> {
+    let profile_dir = root.join(".nib/profiles/default");
+    profile_dir
+        .exists()
+        .then(|| directory_tree_snapshot(&profile_dir))
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
@@ -337,10 +346,7 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
             }
             // The profile directory a configured profile already has; any
             // other profile/session tree is the transaction's own.
-            let profile_dir = root.path().join(".nib/profiles/default");
-            let profile_before = profile_dir
-                .exists()
-                .then(|| directory_tree_snapshot(&profile_dir));
+            let profile_before = configured_profile_tree(root.path());
             let ready = root.path().join(format!("{category}-{phase}.ready"));
             let resume = root.path().join(format!("{category}-{phase}.resume"));
             let mut child =
@@ -399,9 +405,7 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
                 "{category}/{phase} audit session remained"
             );
             assert_eq!(
-                profile_dir
-                    .exists()
-                    .then(|| directory_tree_snapshot(&profile_dir)),
+                configured_profile_tree(root.path()),
                 profile_before,
                 "{category}/{phase} left the transaction-owned profile/session directory tree"
             );
