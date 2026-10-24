@@ -232,26 +232,102 @@ provider caches. Provider retention/deletion guarantees remain provider contract
 
 ## Acceptance Criteria
 
-- [ ] Identical reusable inputs and admitted section allocations yield an identical
+AC4 below predates the 2026-10-22 decisions; per Decision 2, an omitted setting
+means `auto` (on), and `off` sends no optional fields.
+
+- [x] Identical reusable inputs and admitted section allocations yield an identical
   wire prefix; changing only the task/step preserves it when those allocations
   still fit. Required budget-driven changes remain explicit and safe.
-- [ ] Changing instructions, references, skills, tools, memory, profile, or endpoint
+  Evidence: `context::budget::tests::changing_only_the_task_or_step_preserves_the_reusable_wire_prefix`,
+  `planning_prompt_marks_stable_prefix_before_goal_dependent_sections`.
+- [x] Changing instructions, references, skills, tools, memory, profile, or endpoint
   refreshes/invalidate the relevant projection or key scope without stale reuse.
-- [ ] Applicable instruction order, roles, clarification, tool schemas, plan binding,
+  Evidence: the same budget test (edited guidelines, memory, and tool schema each
+  change the prefix or tool payload); prefixes are recomputed per request and never
+  cached locally; no cache key is used, so there is no key scope to go stale; a custom
+  endpoint drops controls (`llm::factory::tests::prompt_cache_sends_no_guessed_controls_to_gateways_or_unreviewed_providers`).
+- [x] Applicable instruction order, roles, clarification, tool schemas, plan binding,
   and fresh delegation context remain correct under the new projection.
-- [ ] Omitted/off settings send no optional fields; auto uses qualified mappings;
+  Evidence: `task test:agent-context` (context, agent loop, planner, delegation
+  context) passes with the reordered projection; the reusable boundary is metadata
+  on the existing system message and never changes sent content or roles.
+- [x] Omitted/off settings send no optional fields; auto uses qualified mappings;
   unsupported explicit settings fail locally and gateways receive no guessed fields.
-- [ ] Complete and streaming fixtures preserve distinct read/write categories,
+  Evidence: `disabled_cache_retention_sends_no_cache_fields`,
+  `prompt_cache_defaults_on_for_official_anthropic_and_off_disables_controls`,
+  `prompt_cache_sends_no_guessed_controls_to_gateways_or_unreviewed_providers`,
+  `config::tests::prompt_cache_policy_parses_defaults_to_auto_and_rejects_unreviewed_extended`.
+- [x] Complete and streaming fixtures preserve distinct read/write categories,
   unknowns, normalized input totals, and exactly-once accounting.
-- [ ] Context occupancy includes cached input; compaction and undersized-budget
+  Evidence: `llm::anthropic::tests::complete_posts_anthropic_payload_and_parses_mixed_content`,
+  `stream_consumes_named_sse_events_and_partial_tool_json`,
+  `anthropic_usage_keeps_cache_writes_distinct_and_unknown_when_omitted`,
+  `llm::types::tests::cache_write_usage_is_a_disjoint_input_subset_with_unknown_preserved`,
+  `context::snapshot::tests::cache_read_and_write_usage_persist_accumulate_and_render`
+  (duplicate events counted once).
+- [x] Context occupancy includes cached input; compaction and undersized-budget
   rejection remain enforced, including provider continuation requests.
-- [ ] Existing configs/sessions load; restart, retries, and cancellation preserve
+  Evidence: occupancy and admission code is unchanged and never subtracts cache
+  reads; budget rejection tests in `context::budget::tests` and continuation
+  admission tests in `task test:agent-context` pass;
+  `cache_breakpoints_never_accumulate_in_continuation_history` keeps continuation
+  requests within Anthropic's breakpoint limit.
+- [x] Existing configs/sessions load; restart, retries, and cancellation preserve
   truthful partial usage and do not silently replay warm-up calls.
-- [ ] Plain/TUI context inspection agrees with persisted evidence, including missing
+  Evidence: legacy provider TOML and legacy usage events without
+  `cache_write_input_tokens` load (config and snapshot tests); no warm-up or
+  refresh request was added; usage reconciliation still dedupes by run and request
+  sequence.
+- [x] Plain/TUI context inspection agrees with persisted evidence, including missing
   counts, zero-input ratios, partial totals, and bounded history coverage.
+  Evidence: both surfaces use `context::snapshot::inspect_text`;
+  `usage_display_handles_zero_input_unknown_requests_and_bounded_coverage` and
+  `cache_read_and_write_usage_persist_accumulate_and_render`.
 - [ ] A bounded, authorized exact-model comparison reports reads, writes, latency,
   total priced cost where known, and verified task outcomes. It meets predeclared
   targets before savings or default-enable claims are made.
+  Open: live measurement needs paid calls, which are not authorized (Decision 3).
+
+## Implementation Notes (2026-10-24)
+
+- Usage contract: `LlmUsage.cache_write_input_tokens` (optional, additive,
+  omitted from serialization when unknown) joins `cached_input_tokens` (reads).
+  Reads plus writes must not exceed effective input. Anthropic
+  `cache_creation_input_tokens` is now retained as writes on complete and stream
+  paths; OpenAI-compatible and Gemini keep reporting reads only, and writes stay
+  unknown. Session `context_usage` events carry `cache_write_input_tokens`;
+  `UsageTotals` gains `cache_write_input_tokens`, `request_count`, and
+  `history_truncated` (all serde-defaulted for older snapshots).
+- Configuration: `llm.providers.<name>.prompt_cache = "auto" | "extended" | "off"`
+  (`PromptCachePolicy`). `extended` is accepted only for `anthropic` and only on the
+  official `https://api.anthropic.com` endpoint; other combinations fail validation
+  or provider resolution before I/O. A custom Anthropic `base_url` under `auto`
+  gets no cache fields. Diagnostics add a `Prompt cache:` line.
+- Anthropic request shape: when enabled, `cache_control` goes on the last tool,
+  on the stable system block (the system prompt is split into stable and dynamic
+  text blocks at the reusable boundary), and on the last user message block.
+  That is at most 3 of 4 allowed breakpoints. Short retention is
+  `{"type":"ephemeral"}`; extended adds `"ttl":"1h"`. Breakpoints are applied after
+  continuation history is captured, so they never pile up across turns.
+- Stable prefix: `render_runtime_context_parts` now renders guidelines, project
+  docs, catalog skills, and memory before task, attachments, plan step, workload,
+  summary, and required skills. Group allocations depend only on which groups are
+  present and their weights. `BoundedLlmInput.reusable_system_prefix_bytes` and
+  `LlmMessage::with_reusable_prefix` carry the boundary to adapters;
+  `RuntimeContextSections::render` uses the same order.
+- No OpenAI `prompt_cache_key` or `prompt_cache_retention` is sent: Decision 1
+  relies on automatic caching, and extended OpenAI retention has no reviewed
+  mapping yet.
+- Focused gate: `task test:prompt-caching`.
+
+## Validation Notes (2026-10-24)
+
+Offline only; no provider calls. Passing: `task check`, `task test:prompt-caching`,
+`task test:llm-conformance`, `task test:agent-context`, `cargo test --lib --
+doctor:: config:: interactive::`, `cargo test --bin nib config_cmd`, and
+`cargo test --test doctor_cli --test config_migration`. The coordinator runs
+`task verify` at integration. Offline fixtures prove request shape and accounting,
+not live cache hits or savings.
 
 ## Validation Gates
 
