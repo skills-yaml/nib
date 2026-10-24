@@ -1146,7 +1146,9 @@ pub(crate) async fn run_agent_loop_inner(
                     .await?
                 } else {
                     if let Some(escalation) = escalation.as_mut() {
-                        takeover_turn = dispatch_pending_escalation(
+                        // A reserved takeover waits for the next provider turn, even
+                        // when steering sends the run back through this boundary.
+                        if let Some(reserved) = dispatch_pending_escalation(
                             escalation,
                             &store,
                             session_id,
@@ -1159,7 +1161,10 @@ pub(crate) async fn run_agent_loop_inner(
                             &cfg.stream_tx,
                             &mut provider_continuation,
                         )
-                        .await?;
+                        .await?
+                        {
+                            takeover_turn = Some(reserved);
+                        }
                     }
                     let skip_rebuild = if let Some(continuation) = provider_continuation.as_ref() {
                         let estimated =
