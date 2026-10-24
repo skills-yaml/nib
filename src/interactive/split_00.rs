@@ -228,6 +228,16 @@ pub const INTERACTIVE_COMMANDS: &[InteractiveCommandSpec] = &[
         },
     ),
     spec(
+        "escalate",
+        &[],
+        "/escalate [question]",
+        "Ask the configured escalation model for advice at the next safe point",
+        InteractiveArgumentSchema::OptionalText,
+        InteractiveMutability::Session,
+        InteractiveWorkerPolicy::Allowed,
+        NO_COMPLETION,
+    ),
+    spec(
         "compact",
         &[],
         "/compact",
@@ -785,6 +795,7 @@ pub enum InteractiveCommand {
     Worktree,
     Land { action: LandAction },
     Compact,
+    Escalate { note: Option<String> },
     Session,
     Resume,
     New,
@@ -818,6 +829,7 @@ impl InteractiveCommand {
             Self::Worktree => "worktree",
             Self::Land { .. } => "land",
             Self::Compact => "compact",
+            Self::Escalate { .. } => "escalate",
             Self::Session => "session",
             Self::Resume => "resume",
             Self::New => "new",
@@ -849,6 +861,9 @@ pub fn command_effect_class(command: &InteractiveCommand) -> CommandEffectClass 
         // The session mode is a locked session-record update that applies to
         // the next run, so it is safe while a run is active.
         InteractiveCommand::Mode { .. } => CommandEffectClass::Always,
+        // An escalation request is a session event the active run picks up at
+        // its next safe boundary, or the next run at its first worker turn.
+        InteractiveCommand::Escalate { .. } => CommandEffectClass::Always,
         _ => CommandEffectClass::RequiresIdle,
     }
 }

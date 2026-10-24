@@ -24,6 +24,97 @@ match state {
                     .await?;
                     continue;
                 }
+                if let Some(escalation_runtime) = escalation
+                    .as_mut()
+                    .filter(|_| tool_calls.iter().any(|call| call.name == ASK_ADVICE_TOOL))
+                {
+                    // The bounded advice step runs outside the tool executor: it has
+                    // no local side effects and the advisor is offered no tools.
+                    let observations = run_ask_advice_batch(
+                        escalation_runtime,
+                        &store,
+                        session_id,
+                        &run_id,
+                        goal,
+                        &context_sections.agents,
+                        active_plan_id.as_deref(),
+                        &tool_calls,
+                        &request_scope,
+                        &public_output_sensitive_values,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    for (request, observation) in tool_calls.iter().zip(&observations) {
+                        emit(
+                            &cfg.stream_tx,
+                            StreamEvent::ToolCompleted {
+                                invocation_id: request.invocation_id,
+                                tool_name: request.name.clone(),
+                                success: observation["success"] == true,
+                                output: Some(observation["output"].clone())
+                                    .filter(|output| !output.is_null()),
+                                error: observation["error"].as_str().map(str::to_string),
+                            },
+                        )
+                        .await;
+                    }
+                    let classifications = observations
+                        .iter()
+                        .map(|observation| ToolResultClass::from_success(observation["success"] == true))
+                        .collect::<Vec<_>>();
+                    let continuation_failure = record_provider_tool_outputs(
+                        &mut provider_continuation,
+                        &tool_calls,
+                        &observations,
+                        &classifications,
+                    )
+                    .err();
+                    store
+                        .try_append_message_with_origin(
+                            session_id,
+                            "tool",
+                            &json!({"observations": observations}).to_string(),
+                            MessageOrigin::ToolOutput,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    tool_calls.clear();
+                    response_content = None;
+                    let continuation_failed = continuation_failure.is_some();
+                    if let Some(error) = continuation_failure {
+                        reconciliation_failure = Some(redact_provider_failure(
+                            &nib_cfg,
+                            LlmError::local(
+                                LlmErrorClass::Protocol,
+                                LlmErrorPhase::Continuation,
+                                error,
+                            ),
+                        ));
+                        reconciliation_reason = Some("provider_continuation_failed".to_string());
+                    } else if llm_turns < max_turns {
+                        open_steering_admission(
+                            steering_enabled,
+                            &store,
+                            session_id,
+                            &run_id,
+                            "advice_build_context",
+                        )?;
+                    }
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        if continuation_failed {
+                            AgentState::Reconciliation
+                        } else {
+                            AgentState::BuildContext
+                        },
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
+                    continue;
+                }
                 let question_count = tool_calls
                     .iter()
                     .filter(|request| request.name == "ask_question")
@@ -936,6 +1027,28 @@ match state {
                     } else {
                         None
                     };
+                    // Denials and local preflight failures are human control or
+                    // environment problems, not evidence for a stronger model.
+                    let escalation_scheduled = if plan_updated
+                        && preflight_outcome.is_none()
+                        && !batch_denied
+                    {
+                        observe_escalation_outcome(
+                            &mut escalation,
+                            batch_success,
+                            &store,
+                            session_id,
+                            &run_id,
+                            &cfg.stream_tx,
+                        )
+                        .await?
+                    } else {
+                        false
+                    };
+                    if stalled && escalation_scheduled {
+                        failed_tool_batches.reset();
+                    }
+                    let stalled = stalled && !escalation_scheduled;
                     tool_calls.clear();
                     response_content = None;
                     if !plan_updated {

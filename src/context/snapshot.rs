@@ -331,7 +331,13 @@ pub fn accumulate_session_usage(session: &Session) -> UsageTotals {
             .get("request_sequence")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if !seen.insert((run_id.to_string(), sequence)) {
+        // FT-021 escalation calls share the run but not the worker's sequence.
+        let model_role = event
+            .details
+            .get("model_role")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !seen.insert((run_id.to_string(), sequence, model_role.to_string())) {
             continue;
         }
         if event

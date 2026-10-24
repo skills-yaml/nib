@@ -1209,6 +1209,14 @@ pub enum StreamEvent {
     Reconciled {
         outcome: String,
     },
+    /// FT-021: an escalation-model invocation started, finished, or was skipped.
+    Escalation {
+        kind: String,
+        trigger: String,
+        model: String,
+        status: String,
+        reason: Option<String>,
+    },
     Failure {
         failure: crate::llm::LlmError,
         session_id: Option<String>,

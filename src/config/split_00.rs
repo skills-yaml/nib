@@ -325,6 +325,9 @@ pub struct AgentConfig {
     /// interactive request. Projects may explicitly disable this route.
     #[serde(default = "default_true")]
     pub answer_only: bool,
+    /// Cost-controlled model escalation (FT-021). Off unless a model is set.
+    #[serde(default, skip_serializing_if = "EscalationConfig::is_default")]
+    pub escalation: EscalationConfig,
 }
 
 impl Default for AgentConfig {
@@ -333,9 +336,53 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             tool_use_enforcement: true,
             answer_only: true,
+            escalation: EscalationConfig::default(),
         }
     }
 }
+
+/// The run's provider/model is the worker. A configured escalation model from
+/// the same provider catalog gives bounded advice or a one-turn takeover.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationConfig {
+    /// Exact escalation model ID. Escalation is off while this is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Configured provider for the escalation model; defaults to the run's provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Escalations (advice or takeover) allowed in one run.
+    #[serde(default = "default_max_escalations_per_run")]
+    pub max_per_run: u32,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            provider: None,
+            max_per_run: default_max_escalations_per_run(),
+        }
+    }
+}
+
+impl EscalationConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// True when a model is configured and at least one escalation is allowed.
+    pub fn enabled(&self) -> bool {
+        self.model.is_some() && self.max_per_run > 0
+    }
+}
+
+pub(crate) fn default_max_escalations_per_run() -> u32 {
+    2
+}
+
+pub(crate) const MAX_ESCALATIONS_PER_RUN: u32 = 16;
 
 pub(crate) fn default_max_turns() -> u32 {
     90
@@ -956,6 +1003,31 @@ impl NibConfig {
             issues.push("agent.max_turns must be greater than zero".to_string());
         } else if self.agent.max_turns > MAX_AGENT_TURNS {
             issues.push(format!("agent.max_turns must be at most {MAX_AGENT_TURNS}"));
+        }
+        if let Some(model) = &self.agent.escalation.model {
+            if model.trim().is_empty() {
+                issues.push("agent.escalation.model must not be empty when configured".to_string());
+            } else if model.len() > MAX_MODEL_BYTES || model.contains('\0') {
+                issues.push(format!(
+                    "agent.escalation.model must be at most {MAX_MODEL_BYTES} bytes and contain no NUL"
+                ));
+            }
+        }
+        if let Some(provider) = &self.agent.escalation.provider {
+            if !is_safe_identifier(provider) {
+                issues.push(format!(
+                    "agent.escalation.provider must be at most {MAX_IDENTIFIER_BYTES} bytes and contain only supported identifier characters"
+                ));
+            } else if !self.llm.providers.contains_key(provider) {
+                issues.push(format!(
+                    "agent.escalation.provider '{provider}' must name a configured llm.providers entry"
+                ));
+            }
+        }
+        if self.agent.escalation.max_per_run > MAX_ESCALATIONS_PER_RUN {
+            issues.push(format!(
+                "agent.escalation.max_per_run must be at most {MAX_ESCALATIONS_PER_RUN}"
+            ));
         }
         if !matches!(
             self.execution.provider.as_str(),
