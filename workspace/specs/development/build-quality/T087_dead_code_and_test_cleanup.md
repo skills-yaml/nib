@@ -59,7 +59,7 @@ Task contract test if it checks filters.
 Focused Task commands while iterating; `task check`, `task test:task-contract`
 and frozen `task verify` before handoff.
 
-## Risks and Rollback
+## Risks, Rollback and Rollout Plan
 
 Removing an item a downstream library user relies on: keep documented public
 API, and remove only items with no consumer and no documentation. Each removal
