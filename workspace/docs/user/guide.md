@@ -70,9 +70,19 @@ but is explicitly ineligible as proof of a published exact-revision artifact.
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
 Running from a nested directory can select a different config root. Default runtime
-state is project-local:
+state is project-local, except for configuration that only you may set:
 
-- `.nib/config.toml`: provider and runtime configuration.
+- `~/.nib/config.toml`: your user configuration for every project: provider
+  credentials, endpoints and transports, default provider and model, and your
+  permission rules. `nib auth` writes it. Set `NIB_HOME` to use a folder other than
+  `~/.nib`.
+- `~/.nib/projects/<project-key>/config.toml`: your settings for one project:
+  approvals preset, sandbox level, the startup directory grant, and any
+  credentials or endpoints moved there from the project's old configuration. The
+  key is the project folder's name plus a hash of its full path; session and
+  subagent worktrees use their project's key.
+- `.nib/config.toml`: the project's preferences: provider and model selection,
+  skills, and agent and runtime behavior. It cannot hold secrets or safety settings.
 - `.nib/profiles/default/sessions/*.json`: messages, plans, approvals, tool calls,
   and audit records.
 - `.nib/profiles/default/memory.json`: durable environment and user memory.
@@ -94,8 +104,12 @@ cd /path/to/project
 nib auth
 ```
 
-The wizard writes the selected provider, model, and API key to `.nib/config.toml`.
-Config writes use owner-only permissions on Unix, but credentials remain plaintext.
+The wizard writes the selected provider, model, and API key to your user
+configuration, `~/.nib/config.toml`, so every project can use them and no project
+folder holds them. The user home is created owner-only (`0700`) and its files are
+written owner-only (`0600`) on Unix, but credentials remain plaintext. A project
+whose preferences still select the placeholder `mock` provider switches to the
+provider you just configured; any other project selection is kept.
 The configured adapters are OpenAI, Anthropic, Google Gemini, xAI Grok, OpenRouter,
 Meta, and the deterministic Mock provider used for tests. Meta has no verified public
 default inference endpoint in this adapter and therefore requires an explicit
@@ -103,6 +117,39 @@ OpenAI-compatible `base_url`; readiness fails before network I/O when it is abse
 Credentials can instead
 come from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`,
 `OPENROUTER_API_KEY`, or `META_API_KEY`.
+
+### Configuration layers
+
+nib builds a project's configuration from, in rising precedence:
+
+1. your user configuration, `~/.nib/config.toml`;
+2. the project's preferences, `<project>/.nib/config.toml`, so a project can choose
+   its own provider, model, skills and agent settings over your defaults;
+3. your settings for this project, `~/.nib/projects/<project-key>/config.toml`.
+
+Credentials in the environment keep their precedence where providers read them.
+The project's preferences cannot set `api_key`, `api_keys`, `base_url` or `api`
+for a provider, `[approvals]`, `execution.sandbox` or `[workspace]`: otherwise a
+cloned repository could send your credentials to its own endpoint or relax safety.
+A project file that sets them is rejected with a diagnostic that names the keys;
+remove them, then set credentials with `nib auth` and approvals or trust with
+`/permissions` and the startup grant.
+
+Configuration written by older versions kept these values in the project. The first
+time this version loads such a file, and Git does not track it, nib migrates it:
+
+- the original is kept byte for byte in `<project>/.nib/legacy-<time>/config.toml`;
+- its credentials, endpoints, transports, approvals preset, sandbox level and
+  directory grant move to your settings for the project; an existing different
+  setting is never replaced (the migration then stops with a diagnostic and changes
+  nothing);
+- the project file is rewritten as preferences only, without values that equal the
+  defaults.
+
+The migration is idempotent and safe to interrupt: the next load reuses the kept
+original and finishes. A file that the repository ships (tracked by Git) is never
+migrated: user-only values in it are refused, and default-valued ones are ignored.
+After the migration, user-only values added to the project file again are refused.
 
 ### Configuration
 
@@ -130,11 +177,11 @@ model = "gpt-6.1-sol"
 # Optional replacement for nib's bundled /model suggestions. Model selection is not
 # restricted to this list, and the selected model is always shown in the picker.
 models = ["gpt-6.1-sol", "gpt-6-astra", "my-gateway/model"]
-api_key = "replace-or-use-OPENAI_API_KEY"
-api_keys = []
-api = "responses"              # responses | chat_completions
+api_key = "replace-or-use-OPENAI_API_KEY"  # user configuration only
+api_keys = []                  # user configuration only
+api = "responses"              # responses | chat_completions; user configuration only
 reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|max
-# base_url = "https://api.openai.com/v1"
+# base_url = "https://api.openai.com/v1"   # user configuration only
 
 [agent]
 max_turns = 90
@@ -158,10 +205,10 @@ network = "restricted"    # restricted | enabled | disabled
 allow_write = []
 network = "disabled"
 
-[approvals]
+[approvals]               # user configuration or project settings only
 mode = "manual"           # manual | smart | policy | off
 
-[workspace]
+[workspace]               # user configuration or project settings only
 allowed = false           # set true after the startup directory grant
 
 [compression]
@@ -590,7 +637,7 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   of a push. Commits never include `.nib` (nib's state) and refuse untracked nested
   repositories. nib commits or pushes only when you ask it to.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
-  preset, then recomputes the effective provider/profile/network and platform sandbox
+  preset (kept in your settings for the project, not in its `.nib`), then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
   states are labeled in text rather than by color alone. `/permissions` also lists
@@ -839,7 +886,8 @@ the working directory under it; then `/new` to start a fresh session and worktre
 `/session` to switch sessions, and the most-used keys, plus the prompt. The first interactive start in a project asks permission to work in
 that directory before any goal runs. The composer shows the path and Allow/Decline
 choices sit under the input with Decline focused first. Select Allow and press Enter
-to persist `workspace.allowed`; Enter on the default, or Escape, quits. Later starts
+to persist `workspace.allowed` in your settings for the project (never in the
+project's own files); Enter on the default, or Escape, quits. Later starts
 skip the prompt. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
@@ -1154,7 +1202,9 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
   (macOS, Windows), only commands classified read-only run.
 - `full-access`: commands run directly on your machine with network. Choose it
   only when you trust the task; the footer shows `FULL ACCESS (no sandbox)`.
-  From a configuration file it applies only in a project you trusted with
+  Set it in `~/.nib/config.toml` or your settings for the project (a project's
+  own `.nib/config.toml` cannot set the sandbox level). From a configuration file
+  it applies only in a project you trusted with
   `/permissions trust`; `nib run --sandbox full-access` applies it for one run.
   Project instructions that restrict execution, `execution.provider = "bwrap"`
   and a disabled network keep the sandbox (`nib run` refuses the flag then).

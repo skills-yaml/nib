@@ -123,11 +123,22 @@ fn run_auth_wizard_with_input(
         }
     }
 
+    save_provider_updates(user_home, &project_root, updates)?;
+    println!("You can now run: nib");
+    Ok(())
+}
+
+/// Saves the configured providers to the user configuration (credentials
+/// belong to the user, never to a project; T082) and reports where.
+fn save_provider_updates(
+    user_home: &Path,
+    project_root: &Path,
+    updates: Vec<(String, String, Option<String>)>,
+) -> Result<(), String> {
     let providers: Vec<String> = updates
         .iter()
         .map(|(provider, _, _)| provider.clone())
         .collect();
-    // Credentials belong to the user, never to a project (T082).
     update_user_config_in(user_home, move |config| {
         for (provider, model, api_key) in updates {
             config.llm.add_or_update_provider(provider, model, api_key);
@@ -137,7 +148,7 @@ fn run_auth_wizard_with_input(
     .map_err(|error| format!("failed to save configuration: {error}"))?;
     // As before, a project still on the placeholder provider switches to the
     // one just configured; any other project choice is kept.
-    update_nib_config_conditionally(&project_root, |config| {
+    update_nib_config_conditionally(project_root, |config| {
         if config.llm.active_provider.as_deref() == Some("mock") && !providers.is_empty() {
             config.llm.active_provider = None;
             Ok(ConfigMutation::Changed(()))
@@ -150,7 +161,7 @@ fn run_auth_wizard_with_input(
         "\nProviders configured in {}",
         user_home.join("config.toml").display()
     );
-    if let Ok(settings) = load_project_settings(&project_root) {
+    if let Ok(settings) = load_project_settings(project_root) {
         for provider in providers
             .iter()
             .filter(|provider| settings.has_provider_credentials(provider))
@@ -160,14 +171,13 @@ fn run_auth_wizard_with_input(
             );
         }
     }
-    println!("You can now run: nib");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nib::config::{config_paths, load_nib_config_full, load_user_config_in, LlmApiMode};
+    use nib::config::{config_paths, load_user_config_in, LlmApiMode};
     use serial_test::serial;
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -276,7 +286,10 @@ mod tests {
         restore_env("NIB_AUTH_ONE", previous_one);
 
         let project_config = std::fs::read_to_string(&paths.toml).expect("project config");
-        assert!(!project_config.contains("active_provider"), "{project_config}");
+        assert!(
+            !project_config.contains("active_provider"),
+            "{project_config}"
+        );
         let user = load_user_config_in(home.path()).expect("user config");
         assert_eq!(user.llm.get_active_provider(), "openai");
     }
@@ -300,6 +313,5 @@ mod tests {
             "invalid = [toml"
         );
         assert!(!home.path().join("config.toml").exists());
-        let _ = load_nib_config_full;
     }
 }

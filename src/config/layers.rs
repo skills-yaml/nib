@@ -646,7 +646,9 @@ pub fn load_user_config_in(home: &Path) -> Result<NibConfig, ConfigError> {
             let config: NibConfig = user_layer(document)
                 .try_into()
                 .map_err(|error: toml::de::Error| in_file(&path, error.into()))?;
-            config.validate().map_err(|error| in_file(&path, error.into()))?;
+            config
+                .validate()
+                .map_err(|error| in_file(&path, error.into()))?;
             Ok(config)
         }
         None => Ok(NibConfig::default()),
@@ -771,8 +773,10 @@ fn tracked_by_git(project_root: &Path, file: &Path) -> bool {
     let Ok(relative) = file.strip_prefix(project_root) else {
         return false;
     };
+    // The repository is not trusted yet: its own configuration must not
+    // start a filesystem monitor or any other helper.
     std::process::Command::new("git")
-        .arg("-C")
+        .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(project_root)
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(relative)

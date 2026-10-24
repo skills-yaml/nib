@@ -160,7 +160,7 @@ cron, task), `src/tools/delegation/`, `src/tools/core.rs`,
 `src/agent/loop/verify.rs`, `Cargo.toml` (rusqlite), user guide, tech docs
 (with approval), catalog, releases and memory.
 
-## Phased Delivery
+## Phased Delivery (Implementation Plan)
 
 1. Add `NibPaths` and migrate all path sites with no layout change (pure
    refactor; the existing tests guard it).
@@ -179,9 +179,15 @@ Each phase is independently reviewable and keeps `task verify` green.
 
 - [ ] AC-1: A fresh project using the new version creates no runtime state or
   secrets under `<project>/.nib`. Only preference files may appear there.
-- [ ] AC-2: `nib auth` stores credentials only in `~/.nib/config.toml` with
+- [x] AC-2: `nib auth` stores credentials only in `~/.nib/config.toml` with
   mode 0600. Project config that sets credentials, endpoints, approvals,
-  sandbox or trust is rejected with a diagnostic.
+  sandbox or trust is rejected with a diagnostic. Evidence (phase 2):
+  `auth::tests::auth_wizard_accepts_numeric_provider_and_one_shot_mode`
+  (user config only, mode `0600`, no secret in the project),
+  `config::layers::tests::a_shipped_project_file_cannot_redirect_credentials_or_relax_safety`,
+  `project_preference_edits_cannot_set_user_only_values` and
+  `user_values_added_after_the_migration_are_rejected`. Existing untracked
+  legacy files are migrated instead of rejected (see phase 2 notes).
 - [ ] AC-3: Sessions are persisted in `~/.nib/nib.db`. Concurrent writers are
   rejected on revision conflict, and run leases are exclusive across
   processes. Existing session tests pass against the SQLite backend.
@@ -248,6 +254,70 @@ because this touches data integrity, credentials and a public layout.
   `tools::observed*` and `tools::core` passed (849 tests; three delegation
   fault-injection tests that need `--test-threads=1` passed when rerun
   serially); `cargo test --bin nib doctor:: auth::` passed.
+
+### Phase 2: user config layering and the project-preference boundary (2026-10-24)
+
+- `src/config/layers.rs` builds the effective configuration from, in rising
+  precedence, the user configuration `NibPaths::user_config_file()`
+  (`~/.nib/config.toml`, `NIB_HOME` overrides), the project's preferences
+  `<project>/.nib/config.toml`, and the user's settings for the project
+  `~/.nib/projects/<project-key>/config.toml` (`ProjectSettings`). Provider
+  environment variables keep their precedence where they are read.
+  Interpretation of Rule 2: the project's preferences sit above the user
+  configuration so a project can select its own provider and model over the
+  user's defaults ("model/provider selection among user-configured
+  providers"); since they can hold no user-only key, nothing they set can
+  override a credential, endpoint or safety value.
+- User-only keys (`USER_ONLY_PROVIDER_KEYS` = `api_key`, `api_keys`,
+  `base_url`, `api`, plus `[approvals]`, `execution.sandbox` and
+  `[workspace]`) are split out of every project document. Saves and edits
+  that would put them in the project (`update_nib_config`,
+  `edit_nib_config`, `preferences_document`) are rejected with a diagnostic
+  naming the keys; `save_config` and `save_nib_config_full` route them to
+  the project's user settings instead.
+- Decision 3: the approvals preset (`/permissions <mode>`), the sandbox
+  level and the startup directory grant (`grant_workspace_access`) are kept
+  per project in the user home. `NibPaths::project_key` is the folder name
+  plus a SHA-256 prefix of the canonical root; a linked session or subagent
+  worktree resolves to its main checkout (the check moved from
+  `permission_rules` to `NibPaths::project_identity_root`).
+  `projects/<key>/project.toml` records the canonical root for phase 5
+  re-linking. New user-home directories are `0700` and files `0600`.
+- `nib auth` writes only `~/.nib/config.toml` (`update_user_config_in`); a
+  project still on the placeholder `mock` provider drops that selection so
+  the configured provider applies. `nib doctor --fix` writes the OpenAI
+  transport repair to the user layer that holds the transport, and doctor
+  prints the user config and project settings paths.
+- Legacy migration of the project configuration (the config part of Rule 6,
+  needed so phase 2 does not break existing projects): on a locked load an
+  untracked project file holding user-only values is (1) copied byte for
+  byte to `<project>/.nib/legacy-<time>/config.toml` (an identical earlier
+  copy is reused), (2) merged into the user's project settings without
+  replacing a different existing value (a conflict stops with a diagnostic
+  and changes nothing), with a `migration` record, and (3) rewritten as
+  preferences only, under the expectation that it is still the file read.
+  Each step is resumable. A file tracked by Git is never migrated: real
+  user-only values are refused, default-valued keys ignored. After the
+  migration, user-only values planted again are refused. Read-only loads
+  accept unmigrated values only if they are already in the user settings.
+  Legacy `config.json` goes through the same path after its TOML conversion.
+- Test isolation: unit tests resolve the user home to a per-thread
+  `TestNibHome` or a process-wide temporary home; `.cargo/config.toml` sets
+  `NIB_HOME=target/test-nib-home` for every cargo-run process (matching
+  `task test`), so binary and integration tests never touch `~/.nib`.
+- The project-key Git probe runs `git -c core.fsmonitor=false` so an
+  untrusted repository's configuration cannot start a helper.
+- Validation: `cargo fmt`, `task check` passed; `cargo test --lib
+  -- --test-threads=2` passed 1588 of 1590 (including 17 new
+  `config::layers` tests), and the two delegation fault-injection tests
+  that need serial execution passed with `--test-threads=1`;
+  `cargo test --bin nib` (114 passed:
+  (auth wizard: user config only, `0600`, placeholder switch, corrupt
+  project config fails closed; doctor transport repair keeps the project
+  untouched and is idempotent) and the `config_integrity`,
+  `config_migration` and `doctor_cli` integration targets passed. The
+  `docs_integrity` spec-field check passes for this spec (the "Phased
+  Delivery" heading now names the implementation plan).
 
 ## Version Impact
 

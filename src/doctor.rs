@@ -1336,11 +1336,31 @@ mod tests {
         assert_eq!(entry.api_key.as_deref(), Some("doctor-fix-secret"));
         assert_eq!(entry.api_keys, ["rotating-doctor-fix-secret".to_string()]);
         assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Medium));
-        assert_eq!(repaired.revision, before_revision + 1);
+        // The transport lives in the user's settings for the project, so the
+        // project's preferences, and their revision, are untouched (T082).
+        assert_eq!(repaired.revision, before_revision);
+        let project_file =
+            std::fs::read_to_string(config_paths(dir.path()).toml).expect("project preferences");
+        assert!(
+            !project_file.contains("doctor-fix-secret"),
+            "{project_file}"
+        );
+        assert!(!project_file.contains("base_url"), "{project_file}");
+        let settings = load_project_settings(dir.path()).expect("project settings");
+        assert_eq!(
+            settings.llm.providers["openai"].api,
+            Some(LlmApiMode::Responses)
+        );
 
+        let settings_path = project_settings_path(dir.path()).expect("settings path");
+        let settings_before = std::fs::read(&settings_path).expect("settings file");
         assert!(!repair_openai_transport(dir.path()).expect("idempotent repair"));
         let unchanged = nib::config::load_nib_config_full(dir.path()).expect("unchanged config");
         assert_eq!(unchanged.revision, repaired.revision);
+        assert_eq!(
+            std::fs::read(&settings_path).expect("settings file"),
+            settings_before
+        );
     }
 
     #[test]
