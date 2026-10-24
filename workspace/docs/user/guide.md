@@ -76,7 +76,8 @@ the project's own `.nib` holds its preferences and, for now, its sessions:
 - `~/.nib/config.toml`: your user configuration for every project: provider
   credentials, endpoints and transports, default provider and model, and your
   permission rules. `nib auth` writes it. Set `NIB_HOME` to use a folder other than
-  `~/.nib`.
+  `~/.nib`; nib passes it on to the commands and MCP servers it starts, so a nib
+  they run uses the same folder.
 - `~/.nib/projects/<project-key>/config.toml`: your settings for one project:
   approvals preset, sandbox level, the startup directory grant, and any
   credentials or endpoints moved there from the project's old configuration. The

@@ -179,6 +179,10 @@ Each phase is independently reviewable and keeps `task verify` green.
 
 - [ ] AC-1: A fresh project using the new version creates no runtime state or
   secrets under `<project>/.nib`. Only preference files may appear there.
+  Progress (phase 3): runtime state other than sessions lives in
+  `~/.nib/projects/<key>/` (`state_migration::tests::a_fresh_project_records_its_state_in_the_user_home`);
+  `.nib/profiles/<id>/sessions` (with checkpoints, read records and
+  presence) remains until phase 4.
 - [x] AC-2: `nib auth` stores credentials only in `~/.nib/config.toml` with
   mode 0600. Project config that sets credentials, endpoints, approvals,
   sandbox or trust is rejected with a diagnostic. Evidence (phase 2):
@@ -194,7 +198,13 @@ Each phase is independently reviewable and keeps `task verify` green.
 - [ ] AC-4: The migration imports every existing JSON session (count and
   content parity checked), moves runtime state and credentials, keeps the
   originals in the legacy directory, and is idempotent and resumable after
-  interruption.
+  interruption. Progress (phases 2 and 3): credentials and safety values
+  move with the configuration migration; runtime state moves by rename
+  (`state_migration::tests::a_populated_legacy_layout_moves_to_the_user_home_without_loss`,
+  `a_second_run_changes_nothing`,
+  `an_interrupted_migration_resumes_and_keeps_identical_leftovers`). A
+  rename leaves no second original; identical leftovers are kept in the
+  legacy directory. The JSON session import is phase 4.
 - [ ] AC-5: Copying or moving the project directory does not break nib.
   `nib doctor` detects the mismatch and `--fix` re-links with confirmation.
 - [x] AC-6: No `.join(".nib")` remains outside `NibPaths`, and a test enforces
@@ -398,7 +408,42 @@ because this touches data integrity, credentials and a public layout.
   tests spawn from the test binary (`NIB_UNIT_TEST_PROCESS_HOME`), so they
   share the parent's state; tests that built legacy state paths by hand now
   resolve them through `NibPaths`.
-- Validation: `cargo fmt`, `task check`; focused tests below.
+- Sessions and durable tasks: code that derived a profile's daemon
+  directory from its sessions directory (`DurableTaskStore::from_sessions_dir`
+  and the timer audit in `tools/core.rs`) now resolves the owning profile
+  (`DurableTaskStore::profile_daemon_dir`), falling back to the sibling
+  directory for sessions outside a configured workspace. The owner lease
+  namespace lock is derived from the state directory itself.
+- `NIB_HOME` joins the environment allowlist for child processes
+  (`sandbox::INHERITED_ENVIRONMENT_ALLOWLIST`), so a nib started by a tool or
+  as an MCP server uses the same user home. Without it, integration tests
+  that start `nib mcp-server` through an MCP manager wrote their temporary
+  projects' state into the developer's `~/.nib` (found during this phase,
+  removed, and covered by `sandbox::tests::child_environment_keeps_nib_home`).
+- Worktree creation records the project identity
+  (`state_migration::ensure_state_identity`), so the sandbox can trace a
+  user-home worktree back to its project even before the first profile load.
+- Validation (2026-10-24): `cargo fmt`; `task check` passed; `cargo test
+  --lib -- --test-threads=2` passed 1602 of 1604, and the two delegation
+  fault-injection tests that share injection counters
+  (`expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup`,
+  `partial_cleanup_failures_retain_intent_until_restart_reconciles_last`)
+  passed with `--test-threads=1`, as in phase 2. New tests:
+  `state_migration::tests` (12: populated legacy layout moved without loss
+  and with preserved directory identity, idempotence, interrupted-run
+  resumption with identical leftovers kept, conflict before any change,
+  deferral while a session, owner lease or process scope is live,
+  configured state directories, symbolic links, the state-moved marker and
+  reappearing legacy state, fresh projects, managed worktrees, profile
+  loading), `sandbox::project_mounts_tests::user_home_worktrees_are_managed_and_the_user_home_stays_hidden`
+  (bwrap: Git works in a user-home worktree, the user home and the
+  project's `.nib` stay hidden) and `child_environment_keeps_nib_home`.
+  Integration targets `delegation`, `executor`, `durable_tasks`,
+  `doctor_cli`, `config_integrity`, `config_migration`, `test_runtime_e2e`,
+  `mcp_integration`, `managed_process_*`, `session_roundtrip`,
+  `interactive_cli` and `sandbox_integration` passed, and no test run left a
+  `~/.nib` behind. `docs_integrity` passes for this spec (it still fails for
+  T087, outside this spec).
 
 ## Version Impact
 
