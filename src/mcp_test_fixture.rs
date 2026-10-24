@@ -155,7 +155,7 @@ fn run_git_wrapper_if_requested() -> Option<io::Result<()>> {
     }
 
     let marker = match std::env::current_dir() {
-        Ok(directory) => nib::paths::NibPaths::project_state(&directory).join(GIT_WRAPPER_MARKER),
+        Ok(directory) => nib::paths::NibPaths::project_dir(&directory).join(GIT_WRAPPER_MARKER),
         Err(error) => return Some(Err(error)),
     };
     let encoded = match std::fs::read(&marker) {

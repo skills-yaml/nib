@@ -18,5 +18,6 @@ pub mod profile;
 pub mod sandbox;
 pub mod session;
 pub mod skill_cmd;
+pub mod state_migration;
 pub mod tools;
 pub mod tui;

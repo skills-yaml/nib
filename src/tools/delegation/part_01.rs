@@ -15,6 +15,8 @@ pub(crate) fn open_owner_lease_directories(
     let nib = crate::paths::NibPaths::project_state(project_root);
     let visible = owner_lease_directory(project_root);
     if create {
+        crate::state_migration::ensure_state_directory(&nib)
+            .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
         crate::fs_security::ensure_directory_without_symlinks(&visible)
             .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
     } else {
@@ -26,9 +28,8 @@ pub(crate) fn open_owner_lease_directories(
     let canonical = visible
         .canonicalize()
         .map_err(|error| format!("failed to resolve subagent owner lease directory: {error}"))?;
-    let within_project =
-        crate::fs_security::canonical_path_starts_with(&canonical, project_root)
-            .map_err(|error| format!("failed to resolve subagent project root: {error}"))?;
+    let within_project = crate::fs_security::canonical_path_starts_with(&canonical, &nib)
+        .map_err(|error| format!("failed to resolve subagent project state: {error}"))?;
     if crate::fs_security::metadata_is_link_or_reparse(&metadata)
         || !metadata.is_dir()
         || !within_project

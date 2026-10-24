@@ -547,7 +547,9 @@ pub(crate) fn open_or_create_records_directory_capability_with_setup_hook(
     });
     ensure_subagent_reconciliation_deadline(Some(setup_deadline))?;
     let nib = crate::paths::NibPaths::project_state(project_root);
-    let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
+    let state_parent = crate::state_migration::ensure_state_parent(&nib)
+        .map_err(|error| format!("subagent records path is unsafe: {error}"))?;
+    let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
     let mut setup_guard = || ensure_subagent_reconciliation_deadline(Some(setup_deadline));
     let nib_directory = project_directory.open_or_create_descendant_directory_with_guard(
         &nib,
@@ -694,9 +696,11 @@ pub(crate) fn validate_records_directory(
     let canonical = directory
         .canonicalize()
         .map_err(|error| format!("failed to resolve subagent records: {error}"))?;
-    let within_project =
-        crate::fs_security::canonical_path_starts_with(&canonical, project_root)
-            .map_err(|error| format!("failed to resolve subagent project root: {error}"))?;
+    let within_project = crate::fs_security::canonical_path_starts_with(
+        &canonical,
+        &crate::paths::NibPaths::project_state(project_root),
+    )
+    .map_err(|error| format!("failed to resolve subagent project state: {error}"))?;
     if crate::fs_security::metadata_is_link_or_reparse(metadata)
         || !metadata.is_dir()
         || !within_project
@@ -714,16 +718,10 @@ pub(crate) fn record_lock_path(project_root: &Path, id: &str) -> Result<PathBuf,
         return Err("invalid subagent id".to_string());
     }
     let directory = crate::paths::NibPaths::project_state(project_root);
-    crate::fs_security::ensure_directory_without_symlinks(&directory)
+    crate::state_migration::ensure_state_directory(&directory)
         .map_err(|error| error.to_string())?;
     let metadata = std::fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
-    let canonical = directory
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve subagent record locks: {error}"))?;
-    let within_project =
-        crate::fs_security::canonical_path_starts_with(&canonical, project_root)
-            .map_err(|error| format!("failed to resolve subagent project root: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() || !within_project {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(format!(
             "subagent record lock path must be a local project directory: {}",
             directory.display()

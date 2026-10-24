@@ -400,9 +400,12 @@ fn create_session_worktree(
     let parent = worktree_path
         .parent()
         .ok_or("session worktree has no parent directory")?;
+    let state = crate::paths::NibPaths::project_state(repo_root);
+    crate::state_migration::ensure_state_directory(&state)
+        .map_err(|error| format!("session worktree parent is unsafe: {error}"))?;
     let canonical_parent = crate::fs_security::ensure_directory_without_symlinks(parent)
         .map_err(|error| format!("session worktree parent is unsafe: {error}"))?;
-    if !canonical_parent.starts_with(repo_root) {
+    if !canonical_parent.starts_with(&state) {
         return Err(format!(
             "session worktree parent escapes the repository: {}",
             parent.display()

@@ -15,8 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Directories created by nib for managed worktrees, relative to the project.
-const MANAGED_WORKTREE_PARENT: [&str; 2] = [crate::paths::PROJECT_DIR_NAME, "worktrees"];
 /// Instruction files nib reads permission rules and execution directives
 /// from (`nib-policy:`, `nib-sandbox:`, `nib-boundary:`, `nib-workspace:`).
 /// Existing ones at the top of the writable area are bound read-only, so a
@@ -59,7 +57,7 @@ impl ProjectMounts {
     }
 
     fn state(&self) -> PathBuf {
-        crate::paths::NibPaths::project_state(&self.root)
+        crate::paths::NibPaths::project_dir(&self.root)
     }
 
     fn is_managed(&self) -> bool {
@@ -75,9 +73,9 @@ impl ProjectMounts {
         cwd: &Path,
         writable: bool,
     ) -> Result<(), String> {
-        let unmanaged_state = !self.is_managed() && cwd.starts_with(self.state());
-        if unmanaged_state || cwd.starts_with(crate::paths::NibPaths::project_state(&self.worktree))
-        {
+        let unmanaged_state =
+            !self.is_managed() && (cwd.starts_with(self.state()) || in_user_home(cwd));
+        if unmanaged_state || cwd.starts_with(crate::paths::NibPaths::project_dir(&self.worktree)) {
             return Err(format!(
                 "sandbox working directory is inside nib runtime state: {}",
                 cwd.display()
@@ -145,6 +143,12 @@ pub(super) fn append_fallback_protections(
     hidden_home: Option<&Path>,
     allowed: &[PathBuf],
 ) -> Result<(), String> {
+    if in_user_home(cwd) && !in_managed_worktree(cwd) {
+        return Err(format!(
+            "sandbox working directory is inside nib runtime state: {}",
+            cwd.display()
+        ));
+    }
     let plan = MaskPlan::new(cwd, cwd, mode(writable), &[], allowed, hidden_home);
     plan.append(args, Some(mode(writable)))?;
     protect_git_entry(args, &cwd.join(".git"))?;
@@ -206,7 +210,7 @@ impl<'a> MaskPlan<'a> {
         }
     }
 
-    /// Hides every reachable `.nib` directory and keeps existing nested Git
+    /// Hides nib's user home and every reachable `.nib` directory, and keeps existing nested Git
     /// metadata in writable areas read-only. Order:
     /// 1. masks that contain the workspace;
     /// 2. the workspace re-bind (`rebind`);
@@ -218,9 +222,12 @@ impl<'a> MaskPlan<'a> {
         let mut states: Vec<PathBuf> = self
             .cwd
             .ancestors()
-            .map(crate::paths::NibPaths::project_state)
+            .map(crate::paths::NibPaths::project_dir)
             .filter(|state| std::fs::symlink_metadata(state).is_ok())
             .collect();
+        // The user home holds credentials and the runtime state of every
+        // project; a managed worktree inside it is bound again below.
+        states.extend(user_home());
         let mut nested_git = Vec::new();
         for root in &self.scan_roots {
             scan_nested(root, &mut states, &mut nested_git);
@@ -334,8 +341,9 @@ fn mode(writable: bool) -> &'static str {
 }
 
 /// Whether `cwd` lies in a nib-managed worktree
-/// (`<project>/.nib/worktrees/<kind>/<name>`), as opposed to the user's own
-/// checkout or a linked worktree nib did not create.
+/// (`<state>/worktrees/<kind>/<name>`, in the user home or, for legacy
+/// worktrees, in `<project>/.nib`), as opposed to the user's own checkout or
+/// a linked worktree nib did not create.
 pub(crate) fn in_managed_worktree(cwd: &Path) -> bool {
     cwd.ancestors()
         .find(|candidate| is_git_entry(&candidate.join(".git")))
@@ -347,27 +355,25 @@ pub(crate) fn in_managed_worktree(cwd: &Path) -> bool {
 }
 
 fn managed_worktree_layout(worktree: &Path) -> bool {
-    let layout = || -> Option<bool> {
-        let worktrees = worktree.parent()?.parent()?;
-        let state = worktrees.parent()?;
-        let root = state.parent()?;
-        Some(
-            worktrees.file_name()? == MANAGED_WORKTREE_PARENT[1]
-                && state.file_name()? == MANAGED_WORKTREE_PARENT[0]
-                && is_git_entry(&root.join(".git")),
-        )
-    };
-    layout().unwrap_or(false)
+    crate::paths::NibPaths::managed_worktree_project(worktree)
+        .is_some_and(|root| is_git_entry(&root.join(".git")))
 }
 
 fn managed_worktree_project(worktree: &Path) -> Option<PathBuf> {
-    let kind = worktree.parent()?;
-    let worktrees = kind.parent()?;
-    let state = worktrees.parent()?;
-    let root = state.parent()?;
-    let layout_matches = worktrees.file_name()? == MANAGED_WORKTREE_PARENT[1]
-        && state.file_name()? == MANAGED_WORKTREE_PARENT[0];
-    (layout_matches && is_real_directory(&root.join(".git"))).then(|| root.to_path_buf())
+    crate::paths::NibPaths::managed_worktree_project(worktree)
+        .filter(|root| is_real_directory(&root.join(".git")))
+}
+
+/// nib's user home, canonical, when it exists.
+fn user_home() -> Option<PathBuf> {
+    crate::paths::NibPaths::user_home()?
+        .canonicalize()
+        .ok()
+        .filter(|home| home.is_dir())
+}
+
+fn in_user_home(cwd: &Path) -> bool {
+    user_home().is_some_and(|home| cwd.starts_with(home))
 }
 
 fn is_safe_root(path: &Path, home: Option<&Path>) -> bool {

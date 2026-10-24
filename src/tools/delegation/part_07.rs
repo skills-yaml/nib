@@ -763,14 +763,23 @@ pub(crate) fn validate_record_worktree(
         .worktree_path
         .canonicalize()
         .map_err(|error| format!("subagent worktree is unavailable: {error}"))?;
-    let allowed = crate::paths::NibPaths::subagent_worktrees(project_root)
-        .canonicalize()
-        .map_err(|error| format!("subagent worktree root is unavailable: {error}"))?;
-    if !worktree.starts_with(&allowed) {
+    // Worktrees created before T082 stay in `<project>/.nib/worktrees`.
+    let roots = crate::paths::NibPaths::subagent_worktree_roots(project_root);
+    let allowed: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    if allowed.is_empty() {
+        return Err(format!(
+            "subagent worktree root is unavailable: {}",
+            roots[0].display()
+        ));
+    }
+    if !allowed.iter().any(|root| worktree.starts_with(root)) {
         return Err(format!(
             "subagent worktree {} is outside {}",
             worktree.display(),
-            allowed.display()
+            roots[0].display()
         ));
     }
     Ok(())

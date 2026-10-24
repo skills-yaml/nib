@@ -282,7 +282,7 @@ impl From<&str> for ManagedWorktreeCaptureError {
 pub(crate) fn managed_worktree_ownership_directory(
     project_root: &Path,
 ) -> Result<crate::daemons::state::StableDirectory, String> {
-    let nib = crate::fs_security::ensure_directory_without_symlinks(
+    let nib = crate::state_migration::ensure_state_directory(
         &crate::paths::NibPaths::project_state(project_root),
     )
     .map_err(|error| format!("managed worktree state root is unsafe: {error}"))?;
@@ -459,8 +459,11 @@ pub(crate) fn validate_durable_ownership_record(
     if record.project_root != project_root {
         return Err("managed worktree ownership project root changed".to_string());
     }
-    let managed_root = crate::paths::NibPaths::managed_worktrees(&project_root);
-    if !record.worktree_path.is_absolute() || !record.worktree_path.starts_with(&managed_root) {
+    // Worktrees created before T082 stay in `<project>/.nib/worktrees`.
+    let managed = crate::paths::NibPaths::managed_worktree_roots(&project_root)
+        .iter()
+        .any(|root| record.worktree_path.starts_with(root));
+    if !record.worktree_path.is_absolute() || !managed {
         return Err("managed worktree ownership path escapes managed state".to_string());
     }
     let expected_worktree_staging =

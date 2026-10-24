@@ -186,6 +186,23 @@ pub fn other_sessions_in(sessions_dir: &Path, folder: &Path, session_id: &str) -
     Presence::new(sessions_dir, folder).others(session_id, SystemTime::now())
 }
 
+/// Whether any session keeps a live heartbeat in the presence directory
+/// `dir`, in any folder. The state migration waits for such sessions.
+pub(crate) fn any_live_in(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let now = unix_seconds(SystemTime::now());
+    entries.flatten().take(MAX_SCANNED).any(|entry| {
+        std::fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Heartbeat>(&bytes).ok())
+            .is_some_and(|heartbeat| {
+                now.saturating_sub(heartbeat.updated_at) < PRESENCE_TIMEOUT.as_secs()
+            })
+    })
+}
+
 impl Drop for Presence {
     fn drop(&mut self) {
         self.leave();

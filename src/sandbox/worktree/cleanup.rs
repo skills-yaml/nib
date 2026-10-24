@@ -863,14 +863,19 @@ pub(crate) fn prove_managed_worktree_namespace_absent_until(
     deadline: Instant,
     timeout: Duration,
 ) -> Result<(), String> {
-    let path = crate::paths::NibPaths::subagent_worktrees(project_root).join(safe_id);
-    if crate::fs_security::path_entry_exists(&path)
-        .map_err(|error| format!("failed to inspect reconciled worktree path: {error}"))?
-    {
-        return Err(format!(
-            "managed worktree path still exists without an active ownership receipt: {}",
-            path.display()
-        ));
+    let paths: Vec<PathBuf> = crate::paths::NibPaths::subagent_worktree_roots(project_root)
+        .into_iter()
+        .map(|root| root.join(safe_id))
+        .collect();
+    for path in &paths {
+        if crate::fs_security::path_entry_exists(path)
+            .map_err(|error| format!("failed to inspect reconciled worktree path: {error}"))?
+        {
+            return Err(format!(
+                "managed worktree path still exists without an active ownership receipt: {}",
+                path.display()
+            ));
+        }
     }
 
     let reference = format!("refs/heads/{}", branch_name(safe_id));
@@ -907,7 +912,7 @@ pub(crate) fn prove_managed_worktree_namespace_absent_until(
         return Ok(());
     }
     let registrations_directory = crate::daemons::state::StableDirectory::open(&registrations)?;
-    let expected_git_file = path.join(".git");
+    let expected_git_files: Vec<PathBuf> = paths.iter().map(|path| path.join(".git")).collect();
     let mut matching_registration = None;
     registrations_directory.for_each_entry_bounded(4096, 1024 * 1024, |name| {
         cleanup_time_remaining(deadline, timeout)?;
@@ -923,10 +928,11 @@ pub(crate) fn prove_managed_worktree_namespace_absent_until(
         let registration = registrations_directory.open_child(&registration_path)?;
         let gitdir_path = registration_path.join("gitdir");
         let gitdir = read_small_stable_file(&registration, &gitdir_path)?;
-        if crate::fs_security::canonical_paths_match(
-            &expected_git_file,
-            &parse_plain_path(&gitdir, "Git worktree registration backlink")?,
-        ) {
+        let backlink = parse_plain_path(&gitdir, "Git worktree registration backlink")?;
+        if expected_git_files
+            .iter()
+            .any(|expected| crate::fs_security::canonical_paths_match(expected, &backlink))
+        {
             matching_registration = Some(registration_path);
         }
         Ok(())
@@ -1342,7 +1348,8 @@ pub(crate) fn validate_created_path(
             path.display()
         ));
     }
-    if !canonical_parent.starts_with(project_root) {
+    let state = crate::paths::NibPaths::project_state(project_root);
+    if !canonical_parent.starts_with(&state) {
         return Err("created worktree parent escaped the repository".to_string());
     }
     crate::fs_security::verify_directory_without_symlinks(&path)

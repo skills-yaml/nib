@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 /// The settings file inside a project's user directory.
 const PROJECT_SETTINGS_FILE: &str = "config.toml";
 /// The identity file inside a project's user directory.
-const PROJECT_IDENTITY_FILE: &str = "project.toml";
+use crate::paths::PROJECT_IDENTITY_FILE;
 /// The user configuration table that holds permission rules (T080).
 const PERMISSIONS_TABLE: &str = "permissions";
 /// Prefix of the directories that keep a migrated project's originals.
@@ -755,16 +755,20 @@ fn record_project_identity(
     identity.insert("version".to_string(), 1.into());
     identity.insert("root".to_string(), root.display().to_string().into());
     let content = toml::to_string_pretty(&identity)?;
-    directory
-        .save_bytes_atomically_expected_with_hook(
-            &path,
-            content.as_bytes(),
-            IDENTITY_TEMPORARY_PREFIX,
-            true,
-            FileExpectation::Missing,
-            || Ok(()),
-        )
-        .map_err(config_state_error)
+    let saved = directory.save_bytes_atomically_expected_with_hook(
+        &path,
+        content.as_bytes(),
+        IDENTITY_TEMPORARY_PREFIX,
+        true,
+        FileExpectation::Missing,
+        || Ok(()),
+    );
+    match saved {
+        Ok(()) => Ok(()),
+        // The state migration records the same identity under its own lock.
+        Err(_) if regular_file_exists(directory, &path)? => Ok(()),
+        Err(error) => Err(config_state_error(error)),
+    }
 }
 
 /// Whether Git tracks `file` in the repository at `project_root`: a file

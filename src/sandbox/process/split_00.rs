@@ -364,7 +364,9 @@ impl ProcessScopeStore {
         let nib = crate::paths::NibPaths::project_state(&project_root);
         let directory = nib.join(SCOPE_DIRECTORY);
         let directory_capability = if lock_deadline.is_some() {
-            let project_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+            let state_parent = crate::state_migration::ensure_state_parent(&nib)
+                .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
+            let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
             let mut setup_guard = || {
                 before_setup_step()?;
                 ensure_process_scope_deadline(lock_deadline)
@@ -381,7 +383,7 @@ impl ProcessScopeStore {
                 )
                 .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?
         } else {
-            crate::fs_security::ensure_directory_without_symlinks(&nib)
+            crate::state_migration::ensure_state_directory(&nib)
                 .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
             crate::fs_security::ensure_directory_without_symlinks(&directory)
                 .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?;
@@ -566,9 +568,12 @@ impl ProcessScopeStore {
         if !project_root.is_absolute() {
             return Err("managed-process supervisor project root is not absolute".to_string());
         }
-        let project = crate::daemons::state::StableDirectory::open(project_root)?;
-        ensure_process_scope_deadline(Some(deadline))?;
         let nib_path = crate::paths::NibPaths::project_state(project_root);
+        let state_parent = nib_path
+            .parent()
+            .ok_or("managed-process state root has no parent")?;
+        let project = crate::daemons::state::StableDirectory::open(state_parent)?;
+        ensure_process_scope_deadline(Some(deadline))?;
         let nib = project.open_owned_child(&nib_path)?;
         ensure_process_scope_deadline(Some(deadline))?;
         let directory = nib_path.join(SCOPE_DIRECTORY);

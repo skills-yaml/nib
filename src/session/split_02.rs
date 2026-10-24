@@ -36,7 +36,8 @@ impl SessionStore {
     }
 
     pub fn new(project_root: &Path) -> Self {
-        let nib = crate::paths::NibPaths::project_state(project_root);
+        // Sessions stay in the project until T082 phase 4.
+        let nib = crate::paths::NibPaths::project_dir(project_root);
         let sessions_dir = nib.join("sessions");
         Self::at_dir(sessions_dir)
     }

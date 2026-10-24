@@ -637,6 +637,8 @@ async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
     }
 
     let nib_dir = crate::paths::NibPaths::project_state(cwd);
+    crate::state_migration::ensure_state_directory(&nib_dir)
+        .map_err(|e| format!("Failed to create plans dir: {e}"))?;
     let plans_dir = nib_dir.join("plans");
     tokio::fs::create_dir_all(&plans_dir)
         .await

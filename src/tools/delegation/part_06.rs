@@ -548,9 +548,11 @@ pub(crate) fn write_subagent_record_unlocked_with_receipt_and_guard(
     let canonical_parent = parent
         .canonicalize()
         .map_err(|error| format!("failed to resolve subagent records: {error}"))?;
-    let within_project =
-        crate::fs_security::canonical_path_starts_with(&canonical_parent, project_root)
-            .map_err(|error| format!("failed to resolve subagent project root: {error}"))?;
+    let within_project = crate::fs_security::canonical_path_starts_with(
+        &canonical_parent,
+        &crate::paths::NibPaths::project_state(project_root),
+    )
+    .map_err(|error| format!("failed to resolve subagent project state: {error}"))?;
     if crate::fs_security::metadata_is_link_or_reparse(&metadata)
         || !metadata.is_dir()
         || !within_project

@@ -38,6 +38,59 @@ pub struct Profile {
     sessions_dir: PathBuf,
     daemon_dir: PathBuf,
     managed_skills_dir: PathBuf,
+    /// The directory the state directory must stay inside: the profile root
+    /// for a configured `state_dir`, else the project's state directory.
+    state_scope: PathBuf,
+    /// The directory the session directory must stay inside.
+    sessions_scope: PathBuf,
+    /// Whether the configuration names the state directory.
+    configured_state: bool,
+}
+
+/// Where a profile keeps its state and sessions.
+struct ProfileDirs {
+    state_dir: PathBuf,
+    sessions_dir: PathBuf,
+    state_scope: PathBuf,
+    sessions_scope: PathBuf,
+}
+
+impl ProfileDirs {
+    /// A configured `state_dir` holds everything, inside the profile root.
+    /// The default keeps the state in the project's state directory and the
+    /// sessions in the project's `.nib/profiles/<id>/sessions` (they move to
+    /// SQLite in T082 phase 4).
+    fn resolve(root: &Path, id: &str, configured: Option<&Path>) -> Result<Self, ProfileError> {
+        if let Some(relative) = configured {
+            validate_relative_path(relative, "state_dir")?;
+            let state_dir = resolve_scoped_path(root, relative, "state_dir")?;
+            return Ok(Self {
+                sessions_dir: state_dir.join("sessions"),
+                sessions_scope: state_dir.clone(),
+                state_scope: root.to_path_buf(),
+                state_dir,
+            });
+        }
+        let legacy = resolve_scoped_path(
+            root,
+            &crate::paths::NibPaths::relative_profile_state(id),
+            "state_dir",
+        )?;
+        let state_dir = crate::paths::NibPaths::profile_state(root, id);
+        let state_scope = crate::paths::NibPaths::project_state(root);
+        let (state_dir, state_scope) =
+            if state_dir.starts_with(crate::paths::NibPaths::project_dir(root)) {
+                (legacy.clone(), root.to_path_buf())
+            } else {
+                (state_dir, state_scope)
+            };
+        Ok(Self {
+            sessions_dir: legacy.join("sessions"),
+            sessions_scope: root.to_path_buf(),
+            state_dir,
+            state_scope,
+        })
+    }
 }
 
 impl Profile {
@@ -64,12 +117,12 @@ impl Profile {
             )));
         }
 
-        let state_relative = config
-            .state_dir
-            .clone()
-            .unwrap_or_else(|| crate::paths::NibPaths::relative_profile_state(&config.id));
-        validate_relative_path(&state_relative, "state_dir")?;
-        let state_dir = resolve_scoped_path(&root_path, &state_relative, "state_dir")?;
+        let ProfileDirs {
+            state_dir,
+            sessions_dir,
+            state_scope,
+            sessions_scope,
+        } = ProfileDirs::resolve(&root_path, &config.id, config.state_dir.as_deref())?;
 
         let custom_env = match &config.env_file {
             Some(env_file) => {
@@ -104,10 +157,13 @@ impl Profile {
             skill_paths,
             memory_path: state_dir.join("memory.json"),
             context_path: state_dir.join("context.json"),
-            sessions_dir: state_dir.join("sessions"),
+            sessions_dir,
             daemon_dir: state_dir.join("daemons"),
             managed_skills_dir: state_dir.join("managed-skills"),
             state_dir,
+            state_scope,
+            sessions_scope,
+            configured_state: config.state_dir.is_some(),
         })
     }
 
@@ -160,26 +216,29 @@ impl Profile {
     }
 
     pub fn ensure_state_dirs(&self) -> Result<(), ProfileError> {
-        let canonical_state = crate::fs_security::ensure_directory_without_symlinks(
-            &self.state_dir,
-        )
-        .map_err(|error| {
+        let unsafe_state = |error: std::io::Error| {
             ProfileError::Invalid(format!(
                 "profile {} state directory is unsafe: {error}",
                 self.id
             ))
-        })?;
-        if !canonical_state.starts_with(&self.root_path) {
+        };
+        let state_scope = crate::state_migration::ensure_state_directory(&self.state_scope)
+            .map_err(unsafe_state)?;
+        let canonical_state =
+            crate::fs_security::ensure_directory_without_symlinks(&self.state_dir)
+                .map_err(unsafe_state)?;
+        if !canonical_state.starts_with(&state_scope) {
             return Err(ProfileError::Invalid(format!(
                 "profile {} state directory escapes its workspace: {}",
                 self.id,
                 canonical_state.display()
             )));
         }
-        for directory in [
-            &self.sessions_dir,
-            &self.daemon_dir,
-            &self.managed_skills_dir,
+        let sessions_scope = self.sessions_scope.canonicalize().map_err(unsafe_state)?;
+        for (directory, scope) in [
+            (&self.sessions_dir, &sessions_scope),
+            (&self.daemon_dir, &canonical_state),
+            (&self.managed_skills_dir, &canonical_state),
         ] {
             let canonical = crate::fs_security::ensure_directory_without_symlinks(directory)
                 .map_err(|error| {
@@ -189,7 +248,7 @@ impl Profile {
                         directory.display()
                     ))
                 })?;
-            if !canonical.starts_with(&canonical_state) {
+            if !canonical.starts_with(scope) {
                 return Err(ProfileError::Invalid(format!(
                     "profile {} state child escapes its state directory: {}",
                     self.id,
@@ -222,7 +281,59 @@ impl ProfileRegistry {
     pub fn load(base: &Path, config: &ProfilesConfig) -> Result<Self, ProfileError> {
         let registry = Self::resolve(base, config, None)?;
         migration::migrate_legacy_state(base, registry.default_profile())?;
+        if registry.migrate_project_state(base)? {
+            // The default state directories moved with the state.
+            return Self::resolve(base, config, None);
+        }
         Ok(registry)
+    }
+
+    /// Moves the legacy runtime state of the project and of every profile
+    /// root to the user home (T082 phase 3). Configured state directories
+    /// stay where they are. Returns whether anything moved.
+    fn migrate_project_state(&self, base: &Path) -> Result<bool, ProfileError> {
+        let keep: Vec<PathBuf> = self
+            .profiles
+            .values()
+            .filter(|profile| profile.configured_state)
+            .map(|profile| profile.state_dir.clone())
+            .collect();
+        let mut roots = vec![base.canonicalize()?];
+        for profile in self.profiles.values() {
+            if !roots.contains(&profile.root_path) {
+                roots.push(profile.root_path.clone());
+            }
+        }
+        let mut moved = false;
+        for root in roots {
+            let profiles: Vec<String> = self
+                .profiles
+                .values()
+                .filter(|profile| !profile.configured_state && profile.root_path == root)
+                .map(|profile| profile.id.clone())
+                .collect();
+            match crate::state_migration::migrate_project_state(&root, &keep, &profiles)
+                .map_err(ProfileError::Migration)?
+            {
+                crate::state_migration::StateMigration::Moved(entries) => {
+                    tracing::info!(
+                        "moved nib runtime state of {} to the user home: {}",
+                        root.display(),
+                        entries.join(", ")
+                    );
+                    moved = true;
+                }
+                crate::state_migration::StateMigration::Deferred(reason) => {
+                    tracing::warn!(
+                        "nib runtime state of {} was not moved: {reason}",
+                        root.display()
+                    );
+                }
+                crate::state_migration::StateMigration::NotApplicable
+                | crate::state_migration::StateMigration::Current => {}
+            }
+        }
+        Ok(moved)
     }
 
     pub(crate) fn resolve_sessions_dir_without_migration_until(
@@ -274,11 +385,11 @@ impl ProfileRegistry {
                     root.display()
                 )));
             }
-            let state_relative = entry
-                .state_dir
-                .clone()
-                .unwrap_or_else(|| crate::paths::NibPaths::relative_profile_state(&entry.id));
-            let state_dir = resolve_scoped_path(&root, &state_relative, "state_dir")?;
+            let ProfileDirs {
+                state_dir,
+                sessions_dir,
+                ..
+            } = ProfileDirs::resolve(&root, &entry.id, entry.state_dir.as_deref())?;
             if let Some(existing) = state_owners.insert(state_dir.clone(), entry.id.clone()) {
                 return Err(ProfileError::Invalid(format!(
                     "profiles {existing} and {} share state directory {}",
@@ -287,7 +398,7 @@ impl ProfileRegistry {
                 )));
             }
             if resolved
-                .insert(entry.id.clone(), (root, state_dir.join("sessions")))
+                .insert(entry.id.clone(), (root, sessions_dir))
                 .is_some()
             {
                 return Err(ProfileError::Invalid(format!(

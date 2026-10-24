@@ -434,7 +434,7 @@ fn load_remembered(project_root: &Path) -> Vec<TerminalInvocation> {
 
 fn write_remembered(project_root: &Path, rules: &[TerminalInvocation]) -> Result<(), String> {
     let nib = crate::paths::NibPaths::project_state(project_root);
-    crate::fs_security::ensure_directory_without_symlinks(&nib)
+    crate::state_migration::ensure_state_directory(&nib)
         .map_err(|error| format!("the command prefix was not saved: {error}"))?;
     let path = remembered_path(project_root);
     if let Ok(metadata) = std::fs::symlink_metadata(&path) {

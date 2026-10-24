@@ -630,23 +630,24 @@ fn check_owned_session_receipt(
             "worktree",
             "worktree_path",
             "worktree_identity",
-            nib::paths::NibPaths::session_worktrees(project),
+            // Legacy session worktrees stay in `<project>/.nib/worktrees`.
+            nib::paths::NibPaths::session_worktree_roots(project),
             true,
         ),
         (
             "Git registration",
             "registration_path",
             "registration_identity",
-            git_common.join("worktrees"),
+            vec![git_common.join("worktrees")],
             true,
         ),
     ];
-    for (label, path_key, identity_key, parent, directory) in paths {
+    for (label, path_key, identity_key, parents, directory) in paths {
         let path = receipt[path_key]
             .as_str()
             .ok_or_else(|| format!("session {session}: {label} path is missing"))?;
         let path = Path::new(path);
-        if !path.starts_with(&parent)
+        if !parents.iter().any(|parent| path.starts_with(parent))
             || path
                 .components()
                 .any(|part| matches!(part, std::path::Component::ParentDir))
