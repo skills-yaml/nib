@@ -239,14 +239,6 @@ impl ToolDefinition {
         &self.name
     }
 
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    pub fn parameters(&self) -> &Value {
-        &self.parameters
-    }
-
     pub fn from_openai_value(value: &Value) -> Result<Self, String> {
         let tool = value
             .as_object()

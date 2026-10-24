@@ -172,30 +172,6 @@ impl OpenAiCompatClient {
         }
     }
 
-    pub fn openai(model: String, api_keys: Vec<String>) -> Self {
-        Self::new(
-            model,
-            api_keys,
-            "https://api.openai.com/v1/chat/completions",
-        )
-    }
-
-    pub fn xai(model: String, api_keys: Vec<String>) -> Self {
-        Self::new(model, api_keys, "https://api.x.ai/v1/chat/completions")
-    }
-
-    pub fn openrouter(model: String, api_keys: Vec<String>) -> Self {
-        Self::new(
-            model,
-            api_keys,
-            "https://openrouter.ai/api/v1/chat/completions",
-        )
-    }
-
-    pub fn meta(model: String, api_keys: Vec<String>) -> Self {
-        Self::new(model, api_keys, "https://api.meta.com/v1/chat/completions")
-    }
-
     fn endpoint(&self) -> String {
         if self.base_url.ends_with("/chat/completions") {
             self.base_url.clone()

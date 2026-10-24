@@ -84,7 +84,6 @@ pub struct SkillReference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSelectionSource {
     Configured,
-    Automatic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

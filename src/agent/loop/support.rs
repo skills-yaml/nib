@@ -524,14 +524,6 @@ impl ExactRunSteeringHandle {
         Ok(sequence)
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
     pub(crate) fn fail_unaccounted(&self, reason: &str) -> Result<(), String> {
         let _submission_guard = self
             .submission_lock

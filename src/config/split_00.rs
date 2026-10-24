@@ -73,9 +73,6 @@ pub(crate) fn run_config_read_hook(path: &Path) -> Result<(), ConfigError> {
     hook.map_or(Ok(()), |hook| hook(path).map_err(config_state_error))
 }
 
-/// Legacy alias used by CLI modules during the Rust migration.
-pub type LLMConfigFile = LlmConfig;
-
 pub(crate) const MAX_MCP_CONFIGURED_SERVERS: usize = 32;
 pub(crate) const MAX_MCP_SERVER_NAME_BYTES: usize = 64;
 pub(crate) const MAX_MCP_REQUEST_TIMEOUT_SECS: u64 = 3_600;
