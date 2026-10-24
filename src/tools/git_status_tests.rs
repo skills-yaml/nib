@@ -308,6 +308,7 @@ async fn git_status_reports_managed_worktree_under_home() {
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "fixture"]);
     std::fs::write(project.join(".nib/config.toml"), "api_key = \"secret\"\n").unwrap();
+    crate::state_migration::ensure_state_identity(&project).expect("project state");
     let worktree = crate::paths::NibPaths::project_state(&project).join("worktrees/sessions/s1");
     git(
         &project,

@@ -1107,6 +1107,8 @@ impl Worktree {
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
         let state = crate::paths::NibPaths::project_state(&project_root);
+        crate::state_migration::ensure_state_identity(&project_root)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
         let state_parent = crate::state_migration::ensure_state_parent(&state)
             .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
         let root_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
@@ -1476,6 +1478,8 @@ impl Worktree {
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
         let state = crate::paths::NibPaths::project_state(&project_root);
+        crate::state_migration::ensure_state_identity(&project_root)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
         let state_parent = crate::state_migration::ensure_state_parent(&state)
             .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
         let root_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;

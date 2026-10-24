@@ -601,6 +601,27 @@ fn write_record(path: &Path, record: &StateRecord) -> Result<(), String> {
     write_private_file(path, text.as_bytes(), true)
 }
 
+/// Creates the user-home state directory of the folder at `project_root`
+/// and records which folder it belongs to, so the worktrees nib creates in
+/// it can be traced back to their project. Folders whose state stays in
+/// their own `.nib` need no record.
+pub(crate) fn ensure_state_identity(project_root: &Path) -> Result<(), String> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|error| format!("the project folder cannot be resolved: {error}"))?;
+    let state = NibPaths::project_state(&root);
+    if state.starts_with(NibPaths::project_dir(&root)) {
+        return Ok(());
+    }
+    let state = ensure_state_directory(&state).map_err(|error| {
+        format!(
+            "nib's state directory {} is unusable: {error}",
+            state.display()
+        )
+    })?;
+    record_identity(&state, &root)
+}
+
 /// Records which folder the state directory belongs to, as the settings
 /// directory of phase 2 does, unless the file exists.
 fn record_identity(state: &Path, root: &Path) -> Result<(), String> {
