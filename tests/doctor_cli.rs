@@ -277,12 +277,12 @@ fn doctor_cli_reports_a_moved_project_and_relinks_its_sessions() {
     // Doctor records its own audit session in the original folder.
     let before = doctor(&original, &[]);
     assert!(before.contains("Checking nib layout... OK"), "{before}");
-    assert!(before.contains("(1 sessions of this folder)"), "{before}");
 
     let moved = second.path().canonicalize().unwrap().join("moved-project");
     std::fs::rename(&original, &moved).expect("move project");
     let report = doctor(&moved, &[]);
     assert!(report.contains("Moved?"), "{report}");
+    assert!(report.contains(", 1 sessions)"), "{report}");
     assert!(
         report.contains(&format!("nib doctor --fix --relink {}", original.display())),
         "{report}"

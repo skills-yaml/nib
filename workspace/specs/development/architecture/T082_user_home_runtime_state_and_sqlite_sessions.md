@@ -209,9 +209,9 @@ Each phase is independently reviewable and keeps `task verify` green.
   floats, delete, corrupt rows, newer schema refused, re-link. Every store
   opened through a profile (`for_project`, the agent loop, gateway, MCP,
   TUI, delegation audits, durable tasks, curator) now uses the database, so
-  their existing tests run against it (`cargo test --lib`: 1617 of 1618
-  with two threads, the remaining delegation fault-injection test passes
-  serially as before). The session-directory tests that construct a store
+  their existing tests run against it (`cargo test --lib`: 1622 of 1623
+  with two threads; the remaining timing-sensitive presence test passes on
+  rerun, and the delegation fault-injection tests pass serially as before). The session-directory tests that construct a store
   in a temporary folder keep exercising the JSON file backend, which stays
   for configured `state_dir` profiles and managed worktrees.
 - [x] AC-4: The migration imports every existing JSON session (count and
@@ -603,8 +603,17 @@ because this touches data integrity, credentials and a public layout.
   messages name the worktree folder in nib's state instead of
   `.nib/worktrees/sessions/` only.
 - Validation (2026-10-24): `cargo fmt`; `task check` passed; `cargo test
-  --lib -- --test-threads=2` VALIDATION_LIB; `cargo test --bin nib`
-  VALIDATION_BIN; integration targets VALIDATION_INTEGRATION. No test run
+  --lib -- --test-threads=2` passed 1622 of 1623 (the timing-sensitive
+  `session::presence` heartbeat test failed once under load and passed on
+  rerun; with `--test-threads=1` the presence tests and the two delegation
+  fault-injection tests passed); `cargo test --bin nib`
+  passed 114; integration targets `session_roundtrip`, `doctor_cli` (7,
+  including the moved-project re-link), `config_integrity`,
+  `config_migration`, `durable_tasks`, `executor`, `delegation`,
+  `interactive_cli`, `compression_runtime`, `llm_failure_cli`,
+  `managed_process_*` (Linux), `sandbox_integration`, `mcp_integration`
+  and `test_runtime_e2e` passed. `docs_integrity` passes for this spec
+  (it fails for T087, FT-021 and FT-022, outside this spec). No test run
   left a `~/.nib` behind.
 
 ## Version Impact
