@@ -1441,7 +1441,13 @@ pub(crate) fn validate_scoped_worker_paths(
     let cwd = cwd
         .canonicalize()
         .map_err(|error| format!("invalid durable task working directory: {error}"))?;
-    if !cwd.starts_with(&project_root) || !cwd.is_dir() {
+    // A task may work in one of the project's managed worktrees, which live
+    // in nib's user home (or, for legacy worktrees, in the project).
+    let in_managed_worktree = crate::paths::NibPaths::managed_worktree_roots(&project_root)
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| cwd.starts_with(root));
+    if !(cwd.starts_with(&project_root) || in_managed_worktree) || !cwd.is_dir() {
         return Err(format!(
             "durable task working directory escapes its project: {}",
             cwd.display()

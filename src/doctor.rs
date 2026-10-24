@@ -1069,13 +1069,13 @@ mod tests {
     fn doctor_reports_missing_owned_session_worktree_without_repairing_it() {
         let dir = tempdir().expect("tempdir");
         initialize_git(dir.path());
-        let receipts = dir.path().join(".nib/worktree-ownership");
+        let receipts = nib::paths::NibPaths::project_state(dir.path()).join("worktree-ownership");
         std::fs::create_dir_all(&receipts).expect("receipt directory");
         let receipt = json!({
             "kind": "session",
             "phase": "owned",
             "logical_id": "stale-session",
-            "worktree_path": dir.path().join(".nib/worktrees/sessions/stale-session"),
+            "worktree_path": nib::paths::NibPaths::project_state(dir.path()).join("worktrees/sessions/stale-session"),
             "worktree_identity": {"device": 1, "inode": 1},
         });
         let path = receipts.join("stale.json");

@@ -1272,7 +1272,8 @@ async fn persistent_anchor_prevents_replaced_repository_lock_domains() {
     std::fs::remove_file(&lock_path).expect("remove replacement lock path");
     std::fs::rename(&displaced_lock, &lock_path).expect("restore anchored lock path");
 
-    let displaced_records = root.path().join(".nib/subagents.displaced");
+    let displaced_records =
+        crate::paths::NibPaths::project_state(&root.path()).join("subagents.displaced");
     #[cfg(unix)]
     {
         std::fs::rename(&records_path, &displaced_records)

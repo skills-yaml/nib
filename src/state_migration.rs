@@ -123,7 +123,7 @@ struct Move {
 /// private (`0700`), from the user home down; elsewhere the directory is
 /// created as before. Returns its canonical path.
 pub(crate) fn ensure_state_directory(directory: &Path) -> io::Result<PathBuf> {
-    if let Some(home) = NibPaths::user_home().filter(|home| directory.starts_with(home)) {
+    if let Some(home) = user_home_containing(directory) {
         let mut current = home.clone();
         ensure_private_directory(&current)?;
         if let Ok(relative) = directory.strip_prefix(&home) {
@@ -146,10 +146,20 @@ pub(crate) fn ensure_state_parent(state: &Path) -> io::Result<PathBuf> {
             format!("nib state directory has no parent: {}", state.display()),
         )
     })?;
-    if NibPaths::user_home().is_some_and(|home| parent.starts_with(home)) {
+    if user_home_containing(parent).is_some() {
         ensure_state_directory(parent)?;
     }
     Ok(parent.to_path_buf())
+}
+
+/// The user home, as `directory` spells it, when `directory` is inside it.
+pub(crate) fn user_home_containing(directory: &Path) -> Option<PathBuf> {
+    let home = NibPaths::user_home()?;
+    let canonical = home.canonicalize().ok();
+    [Some(home), canonical]
+        .into_iter()
+        .flatten()
+        .find(|home| directory.starts_with(home))
 }
 
 fn ensure_private_directory(path: &Path) -> io::Result<()> {
@@ -207,7 +217,13 @@ fn migrate_locked(
 ) -> Result<StateMigration, String> {
     record_identity(state, root)?;
     let legacy = NibPaths::project_dir(root);
-    let mut moves = legacy_moves(&legacy, state, keep)?;
+    // A `.nib` that is a symbolic link may point at another project's state;
+    // it is never moved (and never used, see `NibPaths::has_legacy_state`).
+    let mut moves = if NibPaths::has_legacy_state(root) {
+        legacy_moves(&legacy, state, keep)?
+    } else {
+        Vec::new()
+    };
     let record_path = state.join(STATE_RECORD_FILE);
     let existing = read_record(&record_path)?;
     if moves.is_empty() {

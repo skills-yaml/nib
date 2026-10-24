@@ -281,7 +281,9 @@ fn unfinished_creation_intent_is_compensated_from_durable_provenance() {
         .expect("canonical repository");
     let id = "restart-creation-intent";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let parent = crate::fs_security::ensure_directory_without_symlinks(
         path.parent().expect("worktree parent"),
     )
@@ -333,7 +335,9 @@ fn partial_add_restart_preserves_and_reports_unattributed_registration() {
         .expect("canonical repository");
     let id = "restart-partial-registration";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let parent = crate::fs_security::ensure_directory_without_symlinks(
         path.parent().expect("worktree parent"),
     )
@@ -412,7 +416,9 @@ fn reserved_branch_publisher_excludes_recovery_until_present_cas() {
         .expect("canonical repository");
     let id = "live-reserved-branch-publisher";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let mut reservation = reserve_managed_worktree_sync_controlled(
         &project_root,
         ManagedWorktreeKind::Subagent,
@@ -490,7 +496,9 @@ fn reserved_staging_names_recover_a_crash_before_identity_cas() {
         .expect("canonical repository");
     let id = "restart-before-staging-cas";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let parent = crate::fs_security::ensure_directory_without_symlinks(
         path.parent().expect("worktree parent"),
     )
@@ -552,7 +560,9 @@ fn identity_cas_before_final_publication_recovers_staged_artifacts() {
         .expect("canonical repository");
     let id = "restart-after-staging-cas";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let parent = crate::fs_security::ensure_directory_without_symlinks(
         path.parent().expect("worktree parent"),
     )
@@ -608,7 +618,9 @@ fn reservation_preserves_artifacts_whose_exact_identity_was_not_attached() {
         .expect("canonical repository");
     let id = "restart-unattached-reservation";
     let branch = branch_name(id);
-    let path = project_root.join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&project_root)
+        .join("worktrees/subagents")
+        .join(id);
     let parent = crate::fs_security::ensure_directory_without_symlinks(
         path.parent().expect("worktree parent"),
     )
@@ -652,7 +664,9 @@ fn reservation_preserves_artifacts_whose_exact_identity_was_not_attached() {
 fn remove_without_a_retained_tombstone_uses_bounded_absence_proof() {
     let repository = repository();
     let id = "absent-without-receipt";
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert!(!path.exists());
 
     Worktree::remove(repository.path(), id).expect("bounded absence proof");
@@ -671,7 +685,9 @@ fn failed_add_preserves_a_replacement_installed_after_owned_publication() {
     let error = Worktree::create(repository.path(), id)
         .expect_err("failed add must preserve the replacement destination");
 
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert_eq!(
         std::fs::read(path.join("sentinel")).expect("replacement sentinel"),
         b"replacement"
@@ -701,7 +717,9 @@ fn final_absence_proof_preserves_a_destination_that_appeared_before_publication(
     let error = Worktree::create(repository.path(), id)
         .expect_err("destination replacement must fail the final absence proof");
 
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert!(path.join("sentinel").is_file());
     assert!(
         error.contains("appeared") || error.contains("preserved"),
@@ -721,7 +739,9 @@ fn compensation_preserves_a_hostile_visible_path_replacement() {
     let error = Worktree::create(repository.path(), id)
         .expect_err("post-add path replacement must fail closed");
 
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert_eq!(
         std::fs::read(path.join("sentinel")).expect("replacement sentinel"),
         b"replacement"
@@ -764,9 +784,8 @@ fn compensation_preserves_a_hostile_registration_replacement() {
         "registration replacement was removed"
     );
     assert!(
-        repository
-            .path()
-            .join(".nib/worktrees/subagents")
+        crate::paths::NibPaths::project_state(&repository.path())
+            .join("worktrees/subagents")
             .join(id)
             .exists(),
         "owned path must remain until registration cleanup is exact"
@@ -804,7 +823,9 @@ fn compensation_preserves_a_branch_moved_after_creation() {
     assert!(error.contains("refusing publication"), "{error}");
     assert!(error.contains("changed from"), "{error}");
     assert!(error.contains("preserving it"), "{error}");
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert!(!path.exists(), "partial worktree path remains");
     let reference = format!("refs/heads/{}", branch_name(id));
     assert_eq!(
@@ -833,7 +854,9 @@ fn compensation_preserves_a_post_add_symref_and_its_referent() {
 
     assert!(error.contains("is symbolic to"), "{error}");
     assert!(error.contains("preserving"), "{error}");
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert!(!path.exists(), "partial worktree path remains");
     let reference = format!("refs/heads/{}", branch_name(id));
     assert_eq!(
@@ -858,7 +881,11 @@ fn create_rejects_symlinked_worktree_ancestor_without_outside_mutation() {
     let repository = repository();
     let outside = tempdir().expect("outside");
     std::fs::create_dir(repository.path().join(".nib")).expect("state");
-    symlink(outside.path(), repository.path().join(".nib/worktrees")).expect("worktrees symlink");
+    symlink(
+        outside.path(),
+        crate::paths::NibPaths::project_state(&repository.path()).join("worktrees"),
+    )
+    .expect("worktrees symlink");
 
     let error = Worktree::create(repository.path(), "hostile")
         .expect_err("symlinked worktree root must fail closed");
@@ -884,7 +911,9 @@ fn sync_create_compensates_a_failure_after_worktree_add() {
         !error.contains("partial worktree cleanup failed"),
         "post-add compensation did not finish: {error}"
     );
-    let path = repository.path().join(".nib/worktrees/subagents").join(id);
+    let path = crate::paths::NibPaths::project_state(&repository.path())
+        .join("worktrees/subagents")
+        .join(id);
     assert!(!path.exists(), "partial worktree path remains: {error}");
     let registered = Command::new("git")
         .current_dir(repository.path())

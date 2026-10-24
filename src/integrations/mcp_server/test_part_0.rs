@@ -1025,11 +1025,8 @@ async fn direct_executor_uses_selected_profile_store_and_environment() {
     assert!(!root.path().join(".nib/sessions").exists());
     // T080 phase 5c: MCP-server calls always run in a session worktree,
     // never in the folder, and record no workspace on their session.
-    let worktrees = root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join(".nib/worktrees/sessions");
+    let worktrees = crate::paths::NibPaths::project_state(&root.path().canonicalize().unwrap())
+        .join("worktrees/sessions");
     assert!(store.list().into_iter().any(|id| {
         store.load(&id).is_some_and(|session| {
             session.workspace.is_none()
@@ -1451,8 +1448,8 @@ async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_aud
     }));
     let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
         &std::fs::read(
-            root.path()
-                .join(".nib/subagents")
+            crate::paths::NibPaths::project_state(&root.path())
+                .join("subagents")
                 .join(format!("{id}.json")),
         )
         .expect("persisted cancelled record"),

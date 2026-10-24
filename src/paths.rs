@@ -157,7 +157,7 @@ impl NibPaths {
     /// approvals, the sandbox level and trust.
     pub fn user_project_dir(project_root: &Path) -> Option<PathBuf> {
         let key = Self::project_key(project_root)?;
-        Some(Self::user_home()?.join(USER_PROJECTS_DIR).join(key))
+        Some(Self::user_projects_dir()?.join(key))
     }
 
     /// The user-home directory of a folder's runtime state,
@@ -165,7 +165,14 @@ impl NibPaths {
     /// same directory as [`Self::user_project_dir`].
     pub fn user_state_dir(project_root: &Path) -> Option<PathBuf> {
         let key = Self::state_key(project_root)?;
-        Some(Self::user_home()?.join(USER_PROJECTS_DIR).join(key))
+        Some(Self::user_projects_dir()?.join(key))
+    }
+
+    /// `<user home>/projects`, through the canonical user home when it
+    /// exists, so the paths below it compare equal to canonical paths.
+    fn user_projects_dir() -> Option<PathBuf> {
+        let home = Self::user_home()?;
+        Some(home.canonicalize().unwrap_or(home).join(USER_PROJECTS_DIR))
     }
 
     /// The directory that holds a project's runtime state.
@@ -202,8 +209,13 @@ impl NibPaths {
 
     /// Whether the project's `.nib` holds runtime state of an older version
     /// that the state migration would move.
+    /// A `.nib` that is a symbolic link is never taken for the project's
+    /// state: it could point at another project's state.
     pub fn has_legacy_state(project_root: &Path) -> bool {
         let legacy = Self::project_dir(project_root);
+        if !std::fs::symlink_metadata(&legacy).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
         if LEGACY_STATE_ENTRIES
             .iter()
             .any(|entry| std::fs::symlink_metadata(legacy.join(entry)).is_ok())
@@ -320,8 +332,8 @@ impl NibPaths {
             return None;
         }
         let in_project = state.file_name()? == PROJECT_DIR_NAME;
-        let in_user_home = Self::user_home()
-            .is_some_and(|home| state.parent() == Some(home.join(USER_PROJECTS_DIR).as_path()));
+        let in_user_home =
+            Self::user_projects_dir().is_some_and(|projects| state.parent() == Some(&projects));
         (in_project || in_user_home).then(|| state.to_path_buf())
     }
 
@@ -475,15 +487,29 @@ mod test_home {
             .or_else(|| Some(process_home().to_path_buf()))
     }
 
+    /// Names the process home for child processes the tests spawn from the
+    /// test binary, so they share the parent's user home.
+    const PROCESS_HOME_ENV: &str = "NIB_UNIT_TEST_PROCESS_HOME";
+
     pub(crate) fn process_home() -> &'static std::path::Path {
-        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        static OWNED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         HOME.get_or_init(|| {
-            tempfile::Builder::new()
-                .prefix("nib-unit-test-home-")
-                .tempdir()
-                .expect("unit test nib home")
+            if let Some(inherited) =
+                std::env::var_os(PROCESS_HOME_ENV).filter(|value| !value.is_empty())
+            {
+                return PathBuf::from(inherited);
+            }
+            let directory = OWNED.get_or_init(|| {
+                tempfile::Builder::new()
+                    .prefix("nib-unit-test-home-")
+                    .tempdir()
+                    .expect("unit test nib home")
+            });
+            std::env::set_var(PROCESS_HOME_ENV, directory.path());
+            directory.path().to_path_buf()
         })
-        .path()
+        .as_path()
     }
 
     /// A temporary user home for the current test thread.

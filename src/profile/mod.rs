@@ -819,6 +819,8 @@ mod tests {
         )
         .expect("profile");
         std::fs::create_dir_all(profile.state_dir()).expect("profile state");
+        std::fs::create_dir_all(profile.sessions_dir().parent().expect("sessions parent"))
+            .expect("profile sessions parent");
         symlink(outside.path(), profile.sessions_dir()).expect("sessions symlink");
 
         let error = profile

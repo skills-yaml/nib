@@ -163,7 +163,11 @@ impl RepositoryMergeLock {
                 anchor_path.display()
             )
         })?;
-        let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
+        let state_parent = crate::state_migration::ensure_state_parent(
+            &crate::paths::NibPaths::project_state(project_root),
+        )
+        .map_err(|error| format!("repository merge lock directory is unsafe: {error}"))?;
+        let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let mut setup_guard = || {
             ensure_repository_merge_lock_not_cancelled(cancellation)?;
             if Instant::now() >= deadline {
@@ -446,6 +450,11 @@ pub(crate) fn with_delegation_lock_in_deadline_with_setup_hook<T>(
 }
 
 pub(crate) fn delegation_lock_project_root(lock_path: &Path) -> Result<PathBuf, String> {
+    // Project state in nib's user home is opened from the user home, which
+    // also holds the lock anchors of its project directories.
+    if let Some(home) = crate::state_migration::user_home_containing(lock_path) {
+        return Ok(home);
+    }
     let mut current = lock_path.parent();
     while let Some(directory) = current {
         if directory

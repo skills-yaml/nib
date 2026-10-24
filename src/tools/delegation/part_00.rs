@@ -1276,7 +1276,11 @@ impl SubagentOwnerLease {
         let timeout = deadline.saturating_duration_since(Instant::now());
         let visible = owner_lease_directory(project_root);
         let namespace_lock = owner_lease_namespace_lock_path(project_root);
-        let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
+        let state_parent = crate::state_migration::ensure_state_parent(
+            &crate::paths::NibPaths::project_state(project_root),
+        )
+        .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
+        let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let mut deadline_guard = || {
             before_namespace_step()?;
             ensure_delegation_lock_deadline(deadline, &namespace_lock, Some(timeout))

@@ -459,8 +459,10 @@ mod tests {
             fs::read(&legacy_session_path).expect("preserved session"),
             legacy_session
         );
+        // The legacy project memory moved with the runtime state (T082).
         assert_eq!(
-            fs::read(&legacy_memory_path).expect("preserved memory"),
+            fs::read(crate::paths::NibPaths::project_state(root.path()).join("memory.json"))
+                .expect("preserved memory"),
             legacy_memory
         );
         let marker_path = profile.state_dir().join(MARKER_FILE);

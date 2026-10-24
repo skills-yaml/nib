@@ -148,7 +148,9 @@ async fn a_default_session_edits_the_main_checkout_in_place() {
         .await;
     assert!(command.success, "{command:?}");
     assert_eq!(std::fs::read_to_string(root.join("made.txt")).unwrap(), "x");
-    assert!(!root.join(".nib/worktrees/sessions").exists());
+    assert!(!crate::paths::NibPaths::project_state(&root)
+        .join("worktrees/sessions")
+        .exists());
     let records = changed_paths(&store, &session.id);
     assert_eq!(
         records[records.len() - 2].clone(),
@@ -187,5 +189,7 @@ async fn a_required_worktree_overrides_an_in_place_session() {
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "one\n"
     );
-    assert!(root.join(".nib/worktrees/sessions").is_dir());
+    assert!(crate::paths::NibPaths::project_state(&root)
+        .join("worktrees/sessions")
+        .is_dir());
 }

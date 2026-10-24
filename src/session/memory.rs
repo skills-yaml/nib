@@ -789,7 +789,7 @@ mod tests {
         let root = tempdir().expect("project");
         let outside = tempdir().expect("outside");
         symlink(outside.path(), root.path().join(".nib")).expect("symlink .nib");
-        let store = MemoryStore::new(root.path());
+        let store = MemoryStore::at_path(root.path().join(".nib/memory.json"));
 
         assert!(store.set_user("blocked", "value").is_err());
         assert!(!outside.path().join("memory.json").exists());
@@ -813,7 +813,7 @@ mod tests {
             "mklink failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let store = MemoryStore::new(root.path());
+        let store = MemoryStore::at_path(root.path().join(".nib/memory.json"));
 
         assert!(store.set_user("blocked", "value").is_err());
         assert!(!outside.path().join("memory.json").exists());
@@ -827,7 +827,7 @@ mod tests {
 
         let root = tempdir().expect("project");
         let outside = tempdir().expect("outside");
-        let store = MemoryStore::new(root.path());
+        let store = MemoryStore::at_path(root.path().join(".nib/memory.json"));
         assert_eq!(store.load_result().unwrap(), MemoryStoreData::default());
         fs::remove_file(root.path().join(".nib/memory.json.lock")).expect("remove lock");
         fs::remove_dir(root.path().join(".nib")).expect("remove .nib");

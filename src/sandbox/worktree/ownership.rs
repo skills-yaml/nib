@@ -353,15 +353,24 @@ pub(crate) fn canonical_managed_worktree_reservation_paths(
             canonical_project_root.display()
         ));
     }
-    let relative_worktree_path = worktree_path
-        .strip_prefix(project_root)
-        .or_else(|_| worktree_path.strip_prefix(&canonical_project_root))
-        .map_err(|_| {
-            format!(
-                "managed worktree path is outside the project root: {}",
-                worktree_path.display()
-            )
-        })?;
+    // A managed worktree lives in the project's state directory: in nib's
+    // user home, or inside the project for legacy state.
+    let state = crate::paths::NibPaths::project_state(&canonical_project_root);
+    let canonical_state = state.canonicalize().unwrap_or_else(|_| state.clone());
+    let (base, relative_worktree_path) = [
+        (&canonical_project_root, project_root),
+        (&canonical_project_root, canonical_project_root.as_path()),
+        (&canonical_state, state.as_path()),
+        (&canonical_state, canonical_state.as_path()),
+    ]
+    .into_iter()
+    .find_map(|(base, prefix)| Some((base, worktree_path.strip_prefix(prefix).ok()?)))
+    .ok_or_else(|| {
+        format!(
+            "managed worktree path is outside the project root: {}",
+            worktree_path.display()
+        )
+    })?;
     if relative_worktree_path.as_os_str().is_empty()
         || relative_worktree_path
             .components()
@@ -369,7 +378,7 @@ pub(crate) fn canonical_managed_worktree_reservation_paths(
     {
         return Err("managed worktree path has an unsafe project-relative component".to_string());
     }
-    let canonical_worktree_path = canonical_project_root.join(relative_worktree_path);
+    let canonical_worktree_path = base.join(relative_worktree_path);
     Ok((canonical_project_root, canonical_worktree_path))
 }
 

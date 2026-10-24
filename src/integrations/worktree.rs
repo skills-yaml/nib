@@ -156,7 +156,7 @@ impl WorktreeManager {
         let Some(worktree) = self.worktrees.get(session_id) else {
             return Ok(None);
         };
-        if !worktree.path.starts_with(&self.repo_root) {
+        if !within_managed_worktrees(&self.repo_root, &worktree.path) {
             return Err(
                 "cached session worktree path escapes the project root; it was preserved"
                     .to_string(),
@@ -197,7 +197,7 @@ pub(crate) fn with_validated_session_worktree<T>(
     };
     let path = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
         .map_err(|error| format!("session worktree ownership is invalid: {error}"))?;
-    if !path.starts_with(&repo_root) {
+    if !within_managed_worktrees(&repo_root, &path) {
         return Err("session worktree ownership escapes the project root".to_string());
     }
 
@@ -210,6 +210,16 @@ pub(crate) fn with_validated_session_worktree<T>(
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(ownership_error)) => Err(format!("{error}; {ownership_error}")),
     }
+}
+
+/// Whether `path` lies in one of the project's managed worktree directories:
+/// in nib's user home, or `<project>/.nib/worktrees` for a legacy worktree.
+fn within_managed_worktrees(repo_root: &Path, path: &Path) -> bool {
+    crate::paths::NibPaths::managed_worktree_roots(repo_root)
+        .iter()
+        .any(|root| {
+            path.starts_with(root) || root.canonicalize().is_ok_and(|root| path.starts_with(root))
+        })
 }
 
 /// Time allowed to remove a landed or discarded session worktree, which may
@@ -300,7 +310,7 @@ pub(crate) fn session_worktree_branch(
     };
     let path = crate::sandbox::worktree::validate_managed_worktree_for_read(&ownership)
         .map_err(|error| format!("session worktree ownership is invalid: {error}"))?;
-    if !path.starts_with(&repo_root) {
+    if !within_managed_worktrees(&repo_root, &path) {
         return Err("session worktree ownership escapes the project root".to_string());
     }
     let reference = owned_branch_reference(&ownership)?;
@@ -947,7 +957,8 @@ mod tests {
             error.contains("injected session worktree post-add"),
             "{error}"
         );
-        let sessions = repository.path().join(".nib/worktrees/sessions");
+        let sessions =
+            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -989,7 +1000,8 @@ mod tests {
 
         assert!(error.contains("injected failure reported"), "{error}");
         assert!(error.contains("registrations were preserved"), "{error}");
-        let sessions = repository.path().join(".nib/worktrees/sessions");
+        let sessions =
+            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -1036,7 +1048,8 @@ mod tests {
         assert!(error.contains("refusing publication"), "{error}");
         assert!(error.contains("changed from"), "{error}");
         assert!(error.contains("preserving it"), "{error}");
-        let sessions = repository.path().join(".nib/worktrees/sessions");
+        let sessions =
+            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -1152,7 +1165,8 @@ mod tests {
         {
             return true;
         }
-        let sessions = repository.join(".nib/worktrees/sessions");
+        let sessions =
+            crate::paths::NibPaths::project_state(&repository).join("worktrees/sessions");
         sessions.is_dir()
             && std::fs::read_dir(sessions)
                 .expect("session worktree directory")
@@ -1298,8 +1312,11 @@ mod tests {
         let repository = repository();
         let outside = tempdir().expect("outside");
         std::fs::create_dir(repository.path().join(".nib")).expect("state");
-        symlink(outside.path(), repository.path().join(".nib/worktrees"))
-            .expect("worktrees symlink");
+        symlink(
+            outside.path(),
+            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees"),
+        )
+        .expect("worktrees symlink");
         let mut manager = WorktreeManager::new(repository.path().to_path_buf());
 
         let error = manager

@@ -250,7 +250,8 @@ fn live_owner_is_not_reconciled_through_replaced_lease_paths() {
     write_subagent_record(root.path(), &record).expect("running record");
 
     let visible_directory = owner_lease_directory(root.path());
-    let displaced_directory = root.path().join(".nib/subagent-owner-leases.displaced");
+    let displaced_directory =
+        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases.displaced");
     std::fs::rename(&visible_directory, &displaced_directory)
         .expect("displace live lease directory");
     std::fs::create_dir(&visible_directory).expect("replacement lease directory");
@@ -787,7 +788,8 @@ fn subagent_record_write_never_redirects_to_replaced_records_directory() {
     }
 
     let records = records_dir(root.path());
-    let displaced = root.path().join(".nib/subagents.displaced-write");
+    let displaced =
+        crate::paths::NibPaths::project_state(&root.path()).join("subagents.displaced-write");
     std::fs::rename(&records, &displaced).expect("detach records directory");
     std::fs::create_dir(&records).expect("replacement records directory");
     std::fs::write(records.join("replacement-record.json"), &initial)

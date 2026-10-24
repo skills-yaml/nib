@@ -405,7 +405,7 @@ fn a_fresh_project_records_its_state_in_the_user_home() {
     );
 
     let state = NibPaths::user_state_dir(&root).unwrap();
-    assert!(state.starts_with(home.directory.path()));
+    assert!(state.starts_with(home.directory.path().canonicalize().unwrap()));
     assert_eq!(NibPaths::project_state(&root), state);
     assert!(state.join(STATE_RECORD_FILE).is_file());
     assert!(state.join(PROJECT_IDENTITY_FILE).is_file());
@@ -413,7 +413,7 @@ fn a_fresh_project_records_its_state_in_the_user_home() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for directory in [home.directory.path().join("projects"), state.clone()] {
+        for directory in [state.parent().unwrap().to_path_buf(), state.clone()] {
             let mode = fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{}", directory.display());
         }
@@ -455,7 +455,8 @@ fn managed_worktrees_keep_their_state_inside_themselves() {
             Some(root.clone())
         );
     }
-    assert!(NibPaths::subagent_worktrees(&root).starts_with(home.directory.path()));
+    assert!(NibPaths::subagent_worktrees(&root)
+        .starts_with(home.directory.path().canonicalize().unwrap()));
     assert_eq!(
         NibPaths::subagent_worktree_roots(&root),
         vec![
@@ -474,4 +475,28 @@ fn managed_worktrees_keep_their_state_inside_themselves() {
     )
     .unwrap();
     assert_eq!(NibPaths::managed_worktree_project(&worktree), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_for_the_project_directory_is_neither_used_nor_moved() {
+    let _home = TestNibHome::isolated();
+    // Another project's state, which a planted `.nib` link points at.
+    let other = LegacyProject::new();
+    let directory = tempfile::tempdir().expect("project");
+    let root = directory.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(other.legacy(), NibPaths::project_dir(&root)).unwrap();
+    let before = files_below(&other.legacy());
+
+    assert!(!NibPaths::has_legacy_state(&root));
+    assert_eq!(
+        NibPaths::project_state(&root),
+        NibPaths::user_state_dir(&root).unwrap()
+    );
+    assert_eq!(
+        migrate_project_state(&root, &[], &["default".to_string()]),
+        Ok(StateMigration::Current)
+    );
+
+    assert_eq!(files_below(&other.legacy()), before);
 }

@@ -77,7 +77,12 @@ fn project_keys_are_stable_readable_and_distinct() {
     let directory = NibPaths::user_project_dir(&named).expect("project directory");
     assert_eq!(
         directory,
-        NibPaths::user_home().unwrap().join("projects").join(key)
+        NibPaths::user_home()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("projects")
+            .join(key)
     );
 }
 
