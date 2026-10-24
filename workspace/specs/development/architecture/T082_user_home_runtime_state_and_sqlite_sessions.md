@@ -742,6 +742,10 @@ blocking or major findings. Resolutions:
   daemons) gets a fail-closed "state directory changed" error on its next write
   once another process migrates. It is safe, but the process should re-resolve
   its store on that error, or publish presence.
+- PR CI then failed `smoke:managed-process` (release binary, CI only): the
+  script waited for subagent records under the project's `.nib/subagents`.
+  It now sets `NIB_HOME` inside its fixture and finds the records under
+  `projects/<key>/subagents`; it passed locally on the debug binary.
 - No change needed: exported smoke session files are never pruned, which can
   only cause false failures, not vacuous passes.
 

@@ -52,7 +52,7 @@ printf '%s\n' \
 
 (
   cd "$fixture"
-  exec env HOME="$fixture/home" NIB_ENABLE_MANAGED_PROCESS_SMOKE=1 \
+  exec env HOME="$fixture/home" NIB_HOME="$fixture/nib-home" NIB_ENABLE_MANAGED_PROCESS_SMOKE=1 \
     setsid "$binary" run \
     "managed supervisor release smoke parent ${token}" \
     --provider mock --model mock-model --max-steps 10 --yes \
@@ -79,6 +79,8 @@ kill -KILL -- "-$owner_pid"
 wait "$owner_pid" 2>/dev/null || true
 owner_pid=""
 
+# Runtime state, including subagent records and process scopes, lives in the
+# user home under projects/<key>/ (T082); NIB_HOME keeps it inside the fixture.
 record=""
 deadline=$((SECONDS + 20))
 while [ -z "$record" ]; do
@@ -88,12 +90,12 @@ while [ -z "$record" ]; do
       record="$candidate"
       break
     fi
-  done < <(find "$fixture" -path '*/.nib/subagents/sub-*.json' -type f -print)
+  done < <(find "$fixture/nib-home" -path '*/projects/*/subagents/sub-*.json' -type f -print)
   if [ -n "$record" ]; then
     break
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
-    find "$fixture" -path '*/.nib/subagents/sub-*.json' -type f -print -exec cat {} \; >&2
+    find "$fixture/nib-home" -path '*/projects/*/subagents/sub-*.json' -type f -print -exec cat {} \; >&2
     printf '%s\n' 'timed out waiting for verified subagent reconciliation' >&2
     exit 1
   fi
