@@ -428,6 +428,33 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(windows_script.contains(
         "foreach ($fullScreenSequence in @(\n        \"$([char]27)[?1049\",\n        \"$([char]27)[?2004\"\n    )) {\n        if ($plainResult.Output.Contains($fullScreenSequence)) {"
     ));
+    // T082: the Windows smoke keeps nib's user home inside its fixture too,
+    // finds the user's project settings by the root project.toml records,
+    // and reads sessions through a read-only export of the session database.
+    for contract in [
+        "$nibHome = Join-Path $fixture \"nib-home\"",
+        "$env:NIB_HOME = $nibHome",
+        "\"NIB_HOME\",",
+        "Find-NibSmokePython",
+        "-I $script:sessionExportPath",
+        "?mode=ro",
+        "WHERE profile_id = 'default'",
+        "Export-NibSmokeSessions",
+        "Start-NibSmokeSessionExporter",
+        "Stop-NibSmokeSessionExporter",
+        "Join-Path $_.FullName \"project.toml\"",
+        "Get-Content -LiteralPath (Get-NibSmokeProjectSettingsFile) -Raw",
+        "if ($projectConfig.Contains(\"allowed\")) {",
+        "Get-ChildItem -LiteralPath $nibHome -Filter \"nib.db*\" -File",
+        "Test-NibSmokeFileContainsSentinel",
+    ] {
+        assert!(
+            windows_script.contains(contract),
+            "missing Windows interactive smoke contract: {contract}"
+        );
+    }
+    assert!(!windows_script.contains(".nib\\profiles\\default\\sessions"));
+    assert!(!windows_script.contains("$persistedConfig"));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
     assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));

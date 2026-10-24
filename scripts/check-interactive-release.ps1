@@ -12,6 +12,178 @@ function Quote-NibPowerShellLiteral {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+# T082: sessions are rows of the session database, $nibHome\nib.db. The smoke
+# exports the default profile's sessions, read-only, as the pretty JSON
+# documents nib wrote before (one <id>.json each), so every check below reads
+# the persisted session itself. With a stop file it keeps exporting until that
+# file appears, so a durable wait inside the pseudoterminal host observes the
+# session while nib is still running.
+$nibSessionExportScript = @'
+import json, os, pathlib, sqlite3, sys, time
+database, target = sys.argv[1], sys.argv[2]
+stop = sys.argv[3] if len(sys.argv) > 3 else None
+
+def export():
+    if not os.path.isfile(database):
+        return
+    # A file URI: a Windows path is not a valid URI as it stands.
+    uri = pathlib.Path(database).resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        with connection:
+            sessions = connection.execute(
+                "SELECT scope, id, document FROM sessions WHERE profile_id = 'default'"
+            ).fetchall()
+            for scope, session_id, document in sessions:
+                session = json.loads(document)
+                for key, table in (("messages", "session_messages"), ("events", "session_events")):
+                    session[key] = [
+                        json.loads(body)
+                        for (body,) in connection.execute(
+                            f"SELECT body FROM {table} WHERE scope = ? AND session_id = ? ORDER BY idx",
+                            (scope, session_id),
+                        )
+                    ]
+                path = os.path.join(target, f"{session_id}.json")
+                temporary = f"{path}.export"
+                with open(temporary, "w", encoding="utf-8") as file:
+                    json.dump(session, file, indent=2, ensure_ascii=False)
+                os.replace(temporary, path)
+    finally:
+        connection.close()
+
+if stop is None:
+    export()
+    sys.exit(0)
+deadline = time.monotonic() + 300
+while not os.path.exists(stop) and time.monotonic() < deadline:
+    try:
+        export()
+    except (OSError, sqlite3.Error, ValueError):
+        # nib may hold a write lock, or an observer may hold an exported file
+        # open; the next round retries under the observer's own deadline.
+        pass
+    time.sleep(0.1)
+'@
+
+function Find-NibSmokePython {
+    # The release workflow does not install Python; GitHub's Windows images
+    # provide it. Fail clearly when it (or its sqlite3 module) is unavailable.
+    foreach ($candidate in @("python", "python3")) {
+        $command = Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -eq $command) { continue }
+        try {
+            & $command.Source -I -c "import sqlite3, sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { return $command.Source }
+        } catch {
+            # An unusable candidate (such as an app-installer alias) is skipped.
+        }
+    }
+    throw "required command is unavailable: python (3.8 or later, with sqlite3) to read the session database"
+}
+
+function Export-NibSmokeSessions {
+    & $script:pythonPath -I $script:sessionExportPath (Join-Path $script:nibHome "nib.db") $script:sessionDirectory
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to export the Windows interactive smoke sessions from the session database"
+    }
+}
+
+function Start-NibSmokeSessionExporter {
+    $script:sessionExportStop = Join-Path $script:isolatedHome ("session-export-stop-" + [guid]::NewGuid().ToString("N"))
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $script:pythonPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in @(
+        "-I",
+        $script:sessionExportPath,
+        (Join-Path $script:nibHome "nib.db"),
+        $script:sessionDirectory,
+        $script:sessionExportStop
+    )) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $script:sessionExporter = [Diagnostics.Process]::Start($startInfo)
+}
+
+function Stop-NibSmokeSessionExporter {
+    if ($null -eq $script:sessionExporter) { return }
+    try {
+        [IO.File]::WriteAllText($script:sessionExportStop, "", [Text.UTF8Encoding]::new($false))
+        if (-not $script:sessionExporter.WaitForExit(5000)) {
+            $script:sessionExporter.Kill($true)
+            $script:sessionExporter.WaitForExit(5000) | Out-Null
+        }
+    } finally {
+        $script:sessionExporter.Dispose()
+        $script:sessionExporter = $null
+    }
+}
+
+function Test-NibSmokeFileContainsSentinel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Sentinel
+    )
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    )
+    try {
+        $memory = [IO.MemoryStream]::new()
+        $stream.CopyTo($memory)
+        # Latin-1 maps every byte to one character, so an ASCII sentinel is
+        # found wherever its bytes are, like `grep -a`.
+        return [Text.Encoding]::Latin1.GetString($memory.ToArray()).Contains($Sentinel)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+# The user's settings for the fixture project, where nib records its approvals
+# and the workspace consent (T082 decision 3): <NIB_HOME>\projects\<key>\config.toml.
+# The key hashes nib's canonical form of the fixture path, so instead of
+# recomputing it the smoke finds the directory whose project.toml records the
+# fixture as its root. The canonical form may carry a verbatim prefix or expand
+# 8.3 short names, so the fixture's unique folder name decides a mismatch.
+function Get-NibSmokeProjectSettingsFile {
+    $projects = Join-Path $script:nibHome "projects"
+    $settingsFiles = @()
+    if (Test-Path -LiteralPath $projects -PathType Container) {
+        foreach ($identity in Get-ChildItem -LiteralPath $projects -Directory |
+                ForEach-Object { Join-Path $_.FullName "project.toml" } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
+            $rootLine = Get-Content -LiteralPath $identity |
+                Where-Object { $_ -match '^\s*root\s*=' } |
+                Select-Object -First 1
+            if ($null -eq $rootLine) { continue }
+            $root = ($rootLine -replace '^\s*root\s*=\s*', '').Trim()
+            if ($root.StartsWith("'") -and $root.EndsWith("'")) {
+                $root = $root.Substring(1, $root.Length - 2)
+            } elseif ($root.StartsWith('"') -and $root.EndsWith('"')) {
+                $root = $root.Substring(1, $root.Length - 2).Replace('\\', '\')
+            }
+            $root = $root -replace '^\\\\\?\\UNC\\', '\\' -replace '^\\\\\?\\', ''
+            $root = $root.TrimEnd('\')
+            if ($root.Equals($script:fixture.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetFileName($root).Equals(
+                    [IO.Path]::GetFileName($script:fixture.TrimEnd('\')),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $settingsFiles += (Join-Path (Split-Path -Parent $identity) "config.toml")
+            }
+        }
+    }
+    if ($settingsFiles.Count -ne 1) {
+        throw "Windows interactive smoke found $($settingsFiles.Count) user project directories for its fixture"
+    }
+    return $settingsFiles[0]
+}
+
 function Invoke-NibRedirectedPlain {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
@@ -88,6 +260,16 @@ $temporaryBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 $fixture = Join-Path $temporaryBase ("nib-interactive-smoke-" + [guid]::NewGuid().ToString("N"))
 $isolatedHome = Join-Path $fixture "home"
 $isolatedConfig = Join-Path $fixture "xdg-config"
+# T082: nib keeps its user home (user settings, per-project approvals and
+# trust, runtime state and the session database) in NIB_HOME. The smoke sets
+# it inside the fixture, so it never reads or writes the real user home, nor
+# an outer NIB_HOME it may inherit.
+$nibHome = Join-Path $fixture "nib-home"
+$sessionDirectory = Join-Path $fixture "sessions"
+$sessionExportPath = Join-Path $isolatedHome "nib-session-export.py"
+$sessionExporter = $null
+$sessionExportStop = $null
+$pythonPath = Find-NibSmokePython
 $privateSentinel = "interactive-private-sentinel-windows-q7v9k2"
 $environmentNames = @(
     "OPENAI_API_KEY",
@@ -101,6 +283,7 @@ $environmentNames = @(
     "HOME",
     "USERPROFILE",
     "XDG_CONFIG_HOME",
+    "NIB_HOME",
     "NIB_NO_UPDATE_CHECK",
     "NIB_ENABLE_INTERACTIVE_SMOKE",
     "TERM",
@@ -127,7 +310,10 @@ try {
         $fixture, `
         $isolatedHome, `
         $isolatedConfig, `
+        $nibHome, `
+        $sessionDirectory, `
         (Join-Path $fixture ".nib") | Out-Null
+    [IO.File]::WriteAllText($sessionExportPath, $nibSessionExportScript, [Text.UTF8Encoding]::new($false))
     & git -C $fixture init --quiet
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to initialize the isolated Windows interactive smoke repository"
@@ -141,7 +327,7 @@ try {
     )
     [IO.File]::WriteAllText(
         (Join-Path $fixture ".gitignore"),
-        ".nib/`nhome/`nxdg-config/`n*.txt`n",
+        ".nib/`nhome/`nxdg-config/`nnib-home/`nsessions/`n*.txt`n",
         [Text.UTF8Encoding]::new($false)
     )
     & git -C $fixture add .gitignore README.md
@@ -194,6 +380,7 @@ curator_enabled = false
     $env:HOME = $isolatedHome
     $env:USERPROFILE = $isolatedHome
     $env:XDG_CONFIG_HOME = $isolatedConfig
+    $env:NIB_HOME = $nibHome
     $env:NIB_NO_UPDATE_CHECK = "1"
     $env:NIB_ENABLE_INTERACTIVE_SMOKE = "1"
 
@@ -225,9 +412,15 @@ curator_enabled = false
         -not $tuiResult.Output.Contains("$([char]27)[?2004l")) {
         throw "Windows interactive smoke did not restore the capable TUI terminal"
     }
-    $persistedConfig = Get-Content -LiteralPath (Join-Path $fixture ".nib\config.toml") -Raw
-    if (-not $persistedConfig.Contains("allowed = true")) {
+    # The consent is the user's: it is in the user's settings for the project,
+    # never in the project's own configuration.
+    $projectSettings = Get-Content -LiteralPath (Get-NibSmokeProjectSettingsFile) -Raw
+    if (-not $projectSettings.Contains("allowed = true")) {
         throw "Windows interactive smoke did not persist explicit workspace consent"
+    }
+    $projectConfig = Get-Content -LiteralPath (Join-Path $fixture ".nib\config.toml") -Raw
+    if ($projectConfig.Contains("allowed")) {
+        throw "Windows interactive smoke wrote workspace consent to the project configuration"
     }
 
     $tuiQuestionCommand = "Set-Location -LiteralPath $quotedFixture; & $quotedBinary --tui --run 'ask a question before continuing in TUI smoke'; exit `$LASTEXITCODE"
@@ -257,8 +450,9 @@ curator_enabled = false
         -not $tuiQuestionResult.Output.Contains("Verification:")) {
         throw "Windows TUI F2 smoke did not preserve the pending question and command overlay"
     }
+    Export-NibSmokeSessions
     $tuiQuestionSessions = @(
-        Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+        Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File |
             Where-Object {
                 $text = Get-Content -LiteralPath $_.FullName -Raw
                 $text.Contains("ask a question before continuing in TUI smoke") -and
@@ -291,8 +485,9 @@ curator_enabled = false
         -not $plainQuestionResult.Output.Contains('"answer":"full"')) {
         throw "Windows plain :command smoke did not preserve and answer the pending question"
     }
+    Export-NibSmokeSessions
     $plainQuestionSessions = @(
-        Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+        Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File |
             Where-Object {
                 $text = Get-Content -LiteralPath $_.FullName -Raw
                 # Match the exact goal field: the earlier TUI fixture deliberately
@@ -376,7 +571,6 @@ curator_enabled = false
 
     $env:TERM = "xterm-256color"
     $oneShotOutputs = [ordered]@{}
-    $sessionDirectory = Join-Path $fixture ".nib\profiles\default\sessions"
     foreach ($interruptCase in @(
         [pscustomobject]@{
             Label = "question"
@@ -404,8 +598,9 @@ curator_enabled = false
         $interruptSessionPath = Join-Path $sessionDirectory "$interruptSessionId.json"
         $lastInterruptSessionText = $null
         $lastInterruptResult = $null
+        Export-NibSmokeSessions
         $sessionsBeforeInterrupt = @(
-            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+            Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File |
                 ForEach-Object { $_.FullName }
         )
         $oneShotArguments = @(
@@ -415,32 +610,39 @@ curator_enabled = false
         )
         if ($interruptCase.Yes) { $oneShotArguments += "--yes" }
         $activeStage = "one-shot-interrupt-$($interruptCase.Label)"
-        $oneShotResult = Invoke-WindowsPseudoTerminal `
-            -Executable $binaryPath `
-            -Arguments $oneShotArguments `
-            -WorkingDirectory $fixture `
-            -InputChunks @(
-                # Attach to the ConPTY-backed console and generate the native Windows
-                # Ctrl+C control event; raw ETX input is not accepted as evidence.
-                [pscustomobject]@{
-                    Text = ""
-                    NativeCtrlC = $true
-                    WaitForDirectory = $sessionDirectory
-                    WaitForFileName = "$interruptSessionId.json"
-                    WaitForFileContents = @(
-                        ('"id": "' + $interruptSessionId + '"')
-                        ('"goal": "' + $interruptCase.Goal + '"')
-                        ('"kind": "' + $interruptCase.ExpectedEvent + '"')
-                    )
-                    DelayMilliseconds = 100
-                }
-            ) `
-            -TimeoutMilliseconds 30000 `
-            -AllowInterruptedChildWithoutExitMarker
+        # The durable wait below reads the exported session while nib runs.
+        Start-NibSmokeSessionExporter
+        try {
+            $oneShotResult = Invoke-WindowsPseudoTerminal `
+                -Executable $binaryPath `
+                -Arguments $oneShotArguments `
+                -WorkingDirectory $fixture `
+                -InputChunks @(
+                    # Attach to the ConPTY-backed console and generate the native Windows
+                    # Ctrl+C control event; raw ETX input is not accepted as evidence.
+                    [pscustomobject]@{
+                        Text = ""
+                        NativeCtrlC = $true
+                        WaitForDirectory = $sessionDirectory
+                        WaitForFileName = "$interruptSessionId.json"
+                        WaitForFileContents = @(
+                            ('"id": "' + $interruptSessionId + '"')
+                            ('"goal": "' + $interruptCase.Goal + '"')
+                            ('"kind": "' + $interruptCase.ExpectedEvent + '"')
+                        )
+                        DelayMilliseconds = 100
+                    }
+                ) `
+                -TimeoutMilliseconds 30000 `
+                -AllowInterruptedChildWithoutExitMarker
+        } finally {
+            Stop-NibSmokeSessionExporter
+        }
+        Export-NibSmokeSessions
         $lastInterruptResult = $oneShotResult
         $oneShotOutputs[$interruptCase.Label] = $oneShotResult.Output
         $newInterruptSessions = @(
-            Get-ChildItem -LiteralPath (Join-Path $fixture ".nib\profiles\default\sessions") -Filter "*.json" -File |
+            Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File |
                 Where-Object { $sessionsBeforeInterrupt -notcontains $_.FullName }
         )
         if (Test-Path -LiteralPath $interruptSessionPath -PathType Leaf) {
@@ -479,6 +681,7 @@ curator_enabled = false
         }
     }
     $cancelledSessionCount = 0
+    Export-NibSmokeSessions
     if (Test-Path -LiteralPath $sessionDirectory -PathType Container) {
         foreach ($sessionFile in Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File) {
             $sessionText = Get-Content -LiteralPath $sessionFile.FullName -Raw
@@ -515,13 +718,18 @@ curator_enabled = false
             throw "Windows interactive smoke exposed private configuration or raw arguments"
         }
     }
-    $sessionDirectory = Join-Path $fixture ".nib\profiles\default\sessions"
+    Export-NibSmokeSessions
     if (Test-Path -LiteralPath $sessionDirectory -PathType Container) {
         foreach ($sessionFile in Get-ChildItem -LiteralPath $sessionDirectory -Filter "*.json" -File) {
             $sessionText = Get-Content -LiteralPath $sessionFile.FullName -Raw
             if ($sessionText.Contains($privateSentinel)) {
                 throw "Windows interactive smoke persisted the inactive-provider sentinel"
             }
+        }
+    }
+    foreach ($sessionDatabase in Get-ChildItem -LiteralPath $nibHome -Filter "nib.db*" -File) {
+        if (Test-NibSmokeFileContainsSentinel -Path $sessionDatabase.FullName -Sentinel $privateSentinel) {
+            throw "Windows interactive smoke persisted the inactive-provider sentinel through $($sessionDatabase.Name)"
         }
     }
 
@@ -583,6 +791,7 @@ curator_enabled = false
     Write-Output "Interactive release smoke passed (offline Windows ConPTY and TERM=dumb modes)."
 } catch {
     if (-not [string]::IsNullOrWhiteSpace($env:NIB_INTERACTIVE_EVIDENCE_DIR)) {
+        try { Export-NibSmokeSessions } catch { }
         if (-not [string]::IsNullOrWhiteSpace($interruptSessionPath) -and
             (Test-Path -LiteralPath $interruptSessionPath -PathType Leaf)) {
             $lastInterruptSessionText = Get-Content -LiteralPath $interruptSessionPath -Raw
@@ -632,6 +841,7 @@ curator_enabled = false
     }
     throw
 } finally {
+    try { Stop-NibSmokeSessionExporter } catch { }
     if ($restoreClipboard) {
         try {
             Set-Clipboard -Value $originalClipboard -ErrorAction Stop

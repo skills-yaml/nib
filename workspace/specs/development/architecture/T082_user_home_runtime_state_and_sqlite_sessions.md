@@ -707,9 +707,23 @@ fixed; one part of a minor finding is recorded as a deviation.
   read-only `python3` export of `nib.db` (one pretty JSON document per
   session) instead of `.nib/profiles/default/sessions/*.json`, and also
   scans `nib.db*` for the private sentinel. `tests/installers.rs` pins
-  these contracts. The Windows smoke (`check-interactive-release.ps1`)
-  still reads the old session and consent paths; it is not run by CI on
-  this branch and needs the same change.
+  these contracts.
+- `scripts/check-interactive-release.ps1`: the Windows smoke now makes the
+  same change. It sets `NIB_HOME` inside its fixture for every child (and
+  restores it afterwards), finds the user's project settings through the
+  `projects\*\project.toml` whose `root` names the fixture (accepting
+  the `\\?\` canonical prefix, with the fixture's unique folder name
+  deciding an 8.3 or prefix mismatch), checks the consent there and its
+  absence from the project's `.nib\config.toml`, reads sessions through a
+  read-only `python -I` export of `nib.db` (a continuous export runs
+  during each native Ctrl+C case, so the pseudoterminal host's durable
+  wait still observes the session file while nib runs), and scans
+  `nib.db*` for the private sentinel. nib has no session listing or export
+  command, so the smoke requires Python 3.8+ with `sqlite3` and fails with
+  a clear precondition error without it. `tests/installers.rs` pins these
+  contracts. The script was neither parsed nor executed on the Linux
+  development host (no `pwsh`); its embedded exporter was run there
+  against a real `nib.db`. Its first execution is the Windows CI smoke.
 
 ## Version Impact
 
