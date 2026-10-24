@@ -1545,6 +1545,65 @@ mod tests {
     }
 
     #[test]
+    fn cache_write_usage_is_a_disjoint_input_subset_with_unknown_preserved() {
+        let usage = LlmUsage::new(100, 10, 110, Some(60), None)
+            .unwrap()
+            .with_cache_write_input_tokens(Some(30))
+            .unwrap();
+        assert_eq!(usage.cache_write_input_tokens, Some(30));
+        let encoded = serde_json::to_value(usage).unwrap();
+        assert_eq!(encoded["cache_write_input_tokens"], 30);
+        assert_eq!(serde_json::from_value::<LlmUsage>(encoded).unwrap(), usage);
+
+        // Older evidence without the field still loads, and the category stays unknown.
+        let legacy: LlmUsage = serde_json::from_value(
+            json!({"input_tokens": 5, "output_tokens": 1, "total_tokens": 6, "cached_input_tokens": 2}),
+        )
+        .unwrap();
+        assert_eq!(legacy.cache_write_input_tokens, None);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("cache_write_input_tokens")
+            .is_none());
+
+        // Reads plus writes cannot exceed effective input.
+        assert!(LlmUsage::new(100, 0, 100, Some(60), None)
+            .unwrap()
+            .with_cache_write_input_tokens(Some(41))
+            .is_err());
+        assert!(serde_json::from_value::<LlmUsage>(json!({
+            "input_tokens": 10, "output_tokens": 0, "total_tokens": 10,
+            "cached_input_tokens": 6, "cache_write_input_tokens": 5
+        }))
+        .is_err());
+
+        let known = usage.checked_add(usage).unwrap();
+        assert_eq!(known.cache_write_input_tokens, Some(60));
+        assert_eq!(known.cached_input_tokens, Some(120));
+        let partial = usage
+            .checked_add(LlmUsage::new(1, 1, 2, Some(0), None).unwrap())
+            .unwrap();
+        assert_eq!(partial.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn reusable_prefix_splits_only_at_valid_interior_boundaries() {
+        let message = LlmMessage::system("stable·rest").with_reusable_prefix(6);
+        assert_eq!(message.split_reusable_prefix(), Some(("stable", "·rest")));
+        assert_eq!(message.content, "stable·rest");
+        for invalid in [0, 7, 12, 99] {
+            assert_eq!(
+                LlmMessage::system("stable·rest")
+                    .with_reusable_prefix(invalid)
+                    .split_reusable_prefix(),
+                None,
+                "boundary {invalid}"
+            );
+        }
+        assert_eq!(LlmMessage::system("plain").split_reusable_prefix(), None);
+    }
+
+    #[test]
     fn typed_messages_and_tools_reject_wire_protocol_shapes() {
         let message = LlmMessage::from_openai_value(&json!({
             "role": "user",

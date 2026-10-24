@@ -1046,6 +1046,94 @@ mod tests {
         }
     }
 
+    fn runtime_prefix(
+        context: &RuntimeContextSections,
+        step: Option<&str>,
+        tools: &[Value],
+    ) -> (String, String, Option<Vec<Value>>) {
+        let session = hostile_session();
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context,
+            session: &session,
+            current_step: step,
+            tools: Some(tools),
+            mode: "execute",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: true,
+            context_length: 2_400,
+        })
+        .expect("bounded input");
+        let typed = bounded.typed_messages().expect("typed messages");
+        let (stable, rest) = typed[0]
+            .split_reusable_prefix()
+            .expect("runtime prompt marks a reusable prefix");
+        (stable.to_string(), rest.to_string(), bounded.tools)
+    }
+
+    #[test]
+    fn changing_only_the_task_or_step_preserves_the_reusable_wire_prefix() {
+        let tools = hostile_tools();
+        let context = hostile_context();
+        let (stable, rest, wire_tools) = runtime_prefix(&context, Some("STEP_ONE"), &tools);
+        assert!(stable.contains("## Project Agent Guidelines"));
+        assert!(stable.contains("AGENTS_HEAD"));
+        assert!(stable.contains("PROJECT_DOC_00_HEAD"));
+        assert!(stable.contains("memory-00"));
+        assert!(!stable.contains("TASK_HEAD"));
+        assert!(!stable.contains("STEP_ONE"));
+        assert!(rest.starts_with("\n\n## Current Task"));
+        assert!(rest.contains("STEP_ONE"));
+
+        let mut changed_task = context.clone();
+        changed_task.task = format!("OTHER_TASK {} END", "different work ".repeat(300));
+        let (same_stable, changed_rest, same_tools) =
+            runtime_prefix(&changed_task, Some("STEP_TWO"), &tools);
+        assert_eq!(same_stable, stable);
+        assert_eq!(same_tools, wire_tools);
+        assert!(changed_rest.contains("OTHER_TASK"));
+        assert!(changed_rest.contains("STEP_TWO"));
+
+        let mut changed_agents = context.clone();
+        changed_agents.agents = context.agents.replace("AGENTS_HEAD", "AGENTS_EDITED");
+        let (refreshed, _, _) = runtime_prefix(&changed_agents, Some("STEP_ONE"), &tools);
+        assert_ne!(refreshed, stable);
+        assert!(refreshed.contains("AGENTS_EDITED"));
+
+        let mut changed_memory = context.clone();
+        changed_memory.memory[0].label = "memory-fresh".to_string();
+        let (refreshed, _, _) = runtime_prefix(&changed_memory, Some("STEP_ONE"), &tools);
+        assert_ne!(refreshed, stable);
+        assert!(refreshed.contains("memory-fresh"));
+
+        let mut changed_tools = tools.clone();
+        changed_tools[0]["function"]["description"] = json!("edited core tool");
+        let (_, _, refreshed_tools) = runtime_prefix(&context, Some("STEP_ONE"), &changed_tools);
+        assert_ne!(refreshed_tools, wire_tools);
+    }
+
+    #[test]
+    fn planning_prompt_marks_stable_prefix_before_goal_dependent_sections() {
+        let tools = hostile_tools();
+        let plan = |context: &RuntimeContextSections| {
+            let bounded = build_bounded_planning_input(PlanningPromptRequest {
+                context,
+                session: None,
+                goal: "plan the work",
+                tools: &tools,
+                context_length: 4_000,
+            })
+            .expect("planning input");
+            let typed = bounded.typed_messages().expect("typed");
+            let (stable, _) = typed[0].split_reusable_prefix().expect("prefix");
+            stable.to_string()
+        };
+        let context = hostile_context();
+        let mut other = context.clone();
+        other.task = "a different planning goal".to_string();
+        assert_eq!(plan(&context), plan(&other));
+        assert!(!plan(&context).contains("TASK_HEAD"));
+    }
+
     #[test]
     fn answer_only_prompt_exposes_only_the_routing_control_and_forbids_claimed_actions() {
         let context = hostile_context();

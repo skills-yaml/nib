@@ -1544,6 +1544,193 @@ mod tests {
         ));
     }
 
+    fn count_cache_controls(value: &Value) -> usize {
+        match value {
+            Value::Object(map) => {
+                usize::from(map.contains_key("cache_control"))
+                    + map.values().map(count_cache_controls).sum::<usize>()
+            }
+            Value::Array(items) => items.iter().map(count_cache_controls).sum(),
+            _ => 0,
+        }
+    }
+
+    fn cache_test_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new("grep", "search", json!({"type": "object"})).unwrap(),
+            ToolDefinition::new("read_file", "read", json!({"type": "object"})).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn cache_retention_places_breakpoints_on_tools_stable_system_and_last_turn() {
+        let client = test_client("https://api.anthropic.com".to_string())
+            .with_cache_retention(Some(AnthropicCacheRetention::Short));
+        let messages = [
+            LlmMessage::system("STABLE RULES\n\n## Current Task\nfix it").with_reusable_prefix(12),
+            LlmMessage::user("first"),
+            LlmMessage::assistant("ack"),
+            LlmMessage::user("second"),
+        ];
+        let tools = cache_test_tools();
+        let body = client
+            .request_body(LlmRequest::new(&messages, Some(&tools)), false)
+            .unwrap();
+
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            body["system"],
+            json!([
+                {"type": "text", "text": "STABLE RULES", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "\n\n## Current Task\nfix it"},
+            ])
+        );
+        assert_eq!(body["messages"][0]["content"], "first");
+        assert_eq!(
+            body["messages"][2]["content"],
+            json!([{"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}}])
+        );
+        assert_eq!(count_cache_controls(&body), 3);
+
+        let extended = test_client("https://api.anthropic.com".to_string())
+            .with_cache_retention(Some(AnthropicCacheRetention::Extended))
+            .request_body(LlmRequest::new(&messages, Some(&tools)), false)
+            .unwrap();
+        assert_eq!(
+            extended["tools"][1]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            extended["system"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+
+        // Without a reusable boundary the whole system prompt is one cached block.
+        let unmarked = [LlmMessage::system("rules"), LlmMessage::user("go")];
+        let body = client
+            .request_body(LlmRequest::new(&unmarked, None), false)
+            .unwrap();
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}])
+        );
+        assert_eq!(count_cache_controls(&body), 2);
+    }
+
+    #[test]
+    fn disabled_cache_retention_sends_no_cache_fields() {
+        let messages = [
+            LlmMessage::system("STABLE\nrest").with_reusable_prefix(6),
+            LlmMessage::user("go"),
+        ];
+        let tools = cache_test_tools();
+        let body = test_client("https://api.anthropic.com".to_string())
+            .request_body(LlmRequest::new(&messages, Some(&tools)), false)
+            .unwrap();
+        assert_eq!(count_cache_controls(&body), 0);
+        assert_eq!(body["system"], "STABLE\nrest");
+        assert_eq!(body["messages"][0]["content"], "go");
+    }
+
+    #[test]
+    fn cache_breakpoints_never_accumulate_in_continuation_history() {
+        let client = test_client("https://api.anthropic.com".to_string())
+            .with_cache_retention(Some(AnthropicCacheRetention::Short));
+        let scope = LlmRequestScope::new("test-session", "test-run").unwrap();
+        let messages = [
+            LlmMessage::system("STABLE\nrest").with_reusable_prefix(6),
+            LlmMessage::user("inspect"),
+        ];
+        let tools = cache_test_tools();
+        let (first, context) = client
+            .prepare_request(
+                LlmRequest::new(&messages, Some(&tools)).with_scope(scope.clone()),
+                false,
+            )
+            .unwrap();
+        assert_eq!(count_cache_controls(&first), 3);
+        assert_eq!(count_cache_controls(&json!(context.messages)), 0);
+
+        let call = ToolCallRequest::with_provider_call(
+            ProviderCallId::new("toolu_cache").unwrap(),
+            "grep",
+            json!({}),
+        );
+        let mut continuation = anthropic_continuation(
+            "claude-test",
+            context,
+            vec![json!({"type": "tool_use", "id": "toolu_cache", "name": "grep", "input": {}})],
+            std::slice::from_ref(&call),
+        )
+        .unwrap();
+        continuation
+            .record_tool_result(
+                ToolResult::success(call.invocation_id, json!({"ok": true})).unwrap(),
+            )
+            .unwrap();
+        let second = client
+            .request_body(
+                LlmRequest::new(&messages, Some(&tools))
+                    .with_scope(scope)
+                    .with_continuation(Some(continuation)),
+                false,
+            )
+            .unwrap();
+        // Tools, stable system, and only the newest tool result carry breakpoints.
+        assert_eq!(count_cache_controls(&second), 3);
+        let history = second["messages"].as_array().unwrap();
+        assert_eq!(history[0]["content"], "inspect");
+        assert!(history[1].get("cache_control").is_none());
+        assert_eq!(
+            history[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(history[2]["content"][0]["type"], "tool_result");
+    }
+
+    #[test]
+    fn anthropic_usage_keeps_cache_writes_distinct_and_unknown_when_omitted() {
+        let usage = normalized_anthropic_usage(
+            json!({"input_tokens": 4, "output_tokens": 2, "cache_creation_input_tokens": 90, "cache_read_input_tokens": 6})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cached_input_tokens, Some(6));
+        assert_eq!(usage.cache_write_input_tokens, Some(90));
+
+        let omitted = normalized_anthropic_usage(
+            json!({"input_tokens": 4, "output_tokens": 2})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(omitted.input_tokens, 4);
+        assert_eq!(omitted.cached_input_tokens, None);
+        assert_eq!(omitted.cache_write_input_tokens, None);
+
+        let mut stream = AnthropicUsageAccumulator::default();
+        stream
+            .observe(
+                "message_start",
+                &json!({"message": {"usage": {"input_tokens": 1, "output_tokens": 0, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 0}}}),
+            )
+            .unwrap();
+        stream
+            .observe("message_delta", &json!({"usage": {"output_tokens": 4}}))
+            .unwrap();
+        let streamed = stream.finish().unwrap().unwrap();
+        assert_eq!(streamed.input_tokens, 51);
+        assert_eq!(streamed.cached_input_tokens, Some(0));
+        assert_eq!(streamed.cache_write_input_tokens, Some(50));
+        assert_eq!(streamed.total_tokens, 55);
+    }
+
     #[test]
     fn normalizes_and_validates_custom_anthropic_endpoints() {
         let root = AnthropicClient::with_base_url(
@@ -1794,7 +1981,12 @@ mod tests {
         assert_eq!(response.finish_reason, LlmFinishReason::ToolCalls);
         assert_eq!(
             response.usage,
-            Some(LlmUsage::new(15, 7, 22, Some(2), Some(3)).unwrap())
+            Some(
+                LlmUsage::new(15, 7, 22, Some(2), Some(3))
+                    .unwrap()
+                    .with_cache_write_input_tokens(Some(3))
+                    .unwrap()
+            )
         );
         let call = &response.tool_calls.expect("tool use")[0];
         assert_eq!(call.name, "grep");
@@ -1872,7 +2064,12 @@ mod tests {
         assert_eq!(completion.finish_reason, LlmFinishReason::ToolCalls);
         assert_eq!(
             completion.usage,
-            Some(LlmUsage::new(15, 7, 22, Some(2), Some(3)).unwrap())
+            Some(
+                LlmUsage::new(15, 7, 22, Some(2), Some(3))
+                    .unwrap()
+                    .with_cache_write_input_tokens(Some(3))
+                    .unwrap()
+            )
         );
         let private_calls = completion.tool_calls.expect("private tool authority");
         assert_eq!(private_calls[0].name, "read_file");

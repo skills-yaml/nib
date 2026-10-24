@@ -1094,6 +1094,104 @@ mod tests {
         assert!(error.contains("does not consume api or reasoning_effort"));
     }
 
+    fn prompt_cache_config(
+        provider: &str,
+        base_url: Option<&str>,
+        prompt_cache: Option<PromptCachePolicy>,
+    ) -> LlmConfig {
+        LlmConfig {
+            active_provider: Some(provider.to_string()),
+            providers: HashMap::from([(
+                provider.to_string(),
+                ProviderEntry {
+                    model: "fixture-model".to_string(),
+                    api_key: Some("fixture-key".to_string()),
+                    base_url: base_url.map(str::to_string),
+                    prompt_cache,
+                    ..ProviderEntry::default()
+                },
+            )]),
+            ..LlmConfig::default()
+        }
+    }
+
+    fn anthropic_retention(config: &LlmConfig) -> Option<AnthropicCacheRetention> {
+        match resolve_provider(config, None).expect("resolved").adapter {
+            ResolvedAdapter::Anthropic {
+                cache_retention, ..
+            } => cache_retention,
+            other => panic!("unexpected adapter {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_cache_defaults_on_for_official_anthropic_and_off_disables_controls() {
+        let omitted = prompt_cache_config("anthropic", None, None);
+        assert_eq!(
+            anthropic_retention(&omitted),
+            Some(AnthropicCacheRetention::Short)
+        );
+        assert_eq!(
+            provider_diagnostics(&omitted, None).unwrap().prompt_cache,
+            "auto (cache_control breakpoints, 5m retention)"
+        );
+        let extended = prompt_cache_config("anthropic", None, Some(PromptCachePolicy::Extended));
+        assert_eq!(
+            anthropic_retention(&extended),
+            Some(AnthropicCacheRetention::Extended)
+        );
+        assert!(provider_diagnostics(&extended, None)
+            .unwrap()
+            .lines()
+            .contains(
+                &"Prompt cache: extended (cache_control breakpoints, 1h retention)".to_string()
+            ));
+        let off = prompt_cache_config("anthropic", None, Some(PromptCachePolicy::Off));
+        assert_eq!(anthropic_retention(&off), None);
+        assert_eq!(
+            provider_diagnostics(&off, None).unwrap().prompt_cache,
+            "off (no cache controls sent)"
+        );
+        assert!(create_client(&omitted, None).is_ok());
+    }
+
+    #[test]
+    fn prompt_cache_sends_no_guessed_controls_to_gateways_or_unreviewed_providers() {
+        let gateway = prompt_cache_config("anthropic", Some("https://gateway.example/proxy"), None);
+        assert_eq!(anthropic_retention(&gateway), None);
+        assert_eq!(
+            provider_diagnostics(&gateway, None).unwrap().prompt_cache,
+            "auto (controls unavailable for a custom endpoint)"
+        );
+        let gateway_extended = prompt_cache_config(
+            "anthropic",
+            Some("https://gateway.example/proxy"),
+            Some(PromptCachePolicy::Extended),
+        );
+        assert!(provider_diagnostics(&gateway_extended, None)
+            .unwrap_err()
+            .contains("requires the official Anthropic endpoint"));
+
+        for provider in ["openai", "grok", "openrouter", "google", "mock"] {
+            let mut config = prompt_cache_config(provider, None, None);
+            if provider == "mock" {
+                config.providers.get_mut("mock").unwrap().api_key = None;
+            }
+            let label = provider_diagnostics(&config, None).unwrap().prompt_cache;
+            assert!(label.starts_with("auto ("), "{provider}: {label}");
+            assert!(!label.contains("breakpoints"), "{provider}: {label}");
+            let mut extended = config.clone();
+            extended.providers.get_mut(provider).unwrap().prompt_cache =
+                Some(PromptCachePolicy::Extended);
+            let error = provider_diagnostics(&extended, None).unwrap_err();
+            assert!(
+                error.contains("no reviewed extended prompt-cache retention"),
+                "{error}"
+            );
+            assert!(create_client(&extended, None).is_err());
+        }
+    }
+
     #[test]
     fn legacy_and_typed_modes_resolve_one_exact_endpoint() {
         let legacy = compatible_config("openai", None, None, None);

@@ -1190,6 +1190,9 @@ mod tests {
         assert!(lines.contains("API mode: responses"));
         assert!(lines.contains("Endpoint path: /v1/responses"));
         assert!(lines.contains("Reasoning effort: medium"));
+        assert!(
+            lines.contains("Prompt cache: auto (stable prefix; implicit provider caching only)")
+        );
         assert!(!lines.contains("api_key"));
     }
 
