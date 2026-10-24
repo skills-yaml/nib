@@ -319,6 +319,76 @@ because this touches data integrity, credentials and a public layout.
   `docs_integrity` spec-field check passes for this spec (the "Phased
   Delivery" heading now names the implementation plan).
 
+### Phase 3: runtime state in the user home (2026-10-24)
+
+- `NibPaths::project_state` resolves to `~/.nib/projects/<state key>`
+  (`NibPaths::user_state_dir`). The state key is the folder name plus a
+  SHA-256 prefix of the folder's own canonical root (`NibPaths::state_key`);
+  for a main checkout it equals the phase 2 project key, so settings and
+  state share `projects/<key>/`. Exceptions, all documented on the function:
+  - a worktree nib manages (`<state>/worktrees/{sessions,subagents}/<name>`,
+    in the user home or a legacy `.nib`) keeps its state inside itself, as
+    before, so it goes away with the worktree. Subagents therefore keep the
+    explicit in-worktree `state_dir` of `delegation/part_06.rs` (a deviation
+    from the Exclusions bullet, which would have mixed every subagent's
+    memory and daemons into the parent's);
+  - a Git worktree the user created keeps state of its own (its folder is a
+    separate working tree with its own subagents and processes); its
+    settings stay its main project's (phase 2);
+  - a project whose `.nib` still holds legacy runtime state and has no state
+    record keeps using `.nib` until the migration moves it, so state is
+    never split between two places;
+  - with no user home or no resolvable folder the in-project `.nib` is used.
+- Default profile state (`memory.json`, `context.json`, `daemons/`,
+  `managed-skills/`, the T044 marker) moved to `<state>/profiles/<id>`.
+  Sessions and what is derived from their directory (checkpoints, read
+  ledgers, presence) stay in `<project>/.nib/profiles/<id>/` until phase 4.
+  A configured `state_dir` is unchanged. `Profile` keeps the scopes each
+  directory must stay inside.
+- New session and subagent worktrees are created under
+  `<state>/worktrees/`. Legacy worktrees under `<project>/.nib/worktrees`
+  (decision 1) stay manageable: `NibPaths::managed_worktree_roots` (and the
+  session/subagent variants) are accepted by the ownership receipt check,
+  `validate_record_worktree`, the reconciled-namespace proof and doctor.
+  Creation checks are rebased from "inside the repository" to "inside the
+  project state", and the delegation record, owner-lease and lock checks
+  likewise.
+- The sandbox mount plan recognizes both layouts. For a worktree in the user
+  home the project is the root recorded in `<state>/project.toml`, accepted
+  only when that root's state key names the directory (never the
+  worktree's writable `.git` file). nib's user home (wherever `NIB_HOME`
+  points) is masked for every sandboxed command and the managed worktree is
+  bound again inside it; commands cannot start inside the user home.
+- `src/state_migration.rs` moves the legacy entries
+  (`NibPaths::LEGACY_STATE_ENTRIES`: `command-prefixes.json`, `daemons`,
+  `memory.json`, `plans`, `process-scopes`, `subagent-owner-leases`,
+  `subagents`, `worktree-ownership`, and per profile
+  `LEGACY_PROFILE_STATE_ENTRIES`) when `ProfileRegistry::load` runs, under a
+  file lock in the state directory, then re-resolves the profiles:
+  - entries are renamed, never copied: content and the file identities
+    that subagent receipts (`records_identity`) and locks are bound to
+    survive. A probe rename first; a user home on another file system defers
+    the migration with a message instead of stopping halfway. Rename uses
+    `renameat2(RENAME_NOREPLACE)` on Linux;
+  - before anything moves, a differing destination stops the migration
+    with a diagnostic naming both paths; an identical file (an interrupted
+    move) has its legacy copy kept in `<project>/.nib/legacy-<time>/state/`;
+  - a live session heartbeat, an owner lease or a recorded process scope
+    defers the migration, and the project keeps resolving to `.nib`;
+  - `state.toml` (status `moving`, then `done`, with the moved entries and
+    kept copies) is written before the first rename, so the project resolves
+    to the user home from then on and an interrupted run resumes;
+  - "state moved" marker: the T044 marker path of each default-state
+    profile receives a version 2 marker naming the new location. Older
+    versions parse it, reject the version and stop at profile loading,
+    before they touch any state; this version ignores it. Legacy entries an
+    older version writes anyway are left in place and reported, never
+    merged over the moved state.
+  - a symbolic link among the legacy entries stops the migration.
+- New user-home directories are `0700` and records `0600`
+  (`ensure_state_directory`, `ensure_state_parent`).
+- Validation: `cargo fmt`, `task check`; focused tests below.
+
 ## Version Impact
 
 | Component | Impact | Release | Rationale |

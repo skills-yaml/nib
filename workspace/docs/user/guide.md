@@ -69,8 +69,9 @@ but is explicitly ineligible as proof of a published exact-revision artifact.
 ## Project Setup
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
-Running from a nested directory can select a different config root. Default runtime
-state is project-local, except for configuration that only you may set:
+Running from a nested directory can select a different config root. nib keeps
+configuration only you may set, and a project's runtime state, in its user home;
+the project's own `.nib` holds its preferences and, for now, its sessions:
 
 - `~/.nib/config.toml`: your user configuration for every project: provider
   credentials, endpoints and transports, default provider and model, and your
@@ -81,18 +82,55 @@ state is project-local, except for configuration that only you may set:
   credentials or endpoints moved there from the project's old configuration. The
   key is the project folder's name plus a hash of its full path; session and
   subagent worktrees use their project's key.
+- `~/.nib/projects/<project-key>/`: the project's runtime state:
+  - `profiles/default/memory.json`: durable environment and user memory;
+  - `profiles/default/daemons/`: cron state, pins, and maintenance audit;
+  - `profiles/default/managed-skills/` and `context.json`: curated skills and
+    context;
+  - `subagents/`, `subagent-owner-leases/` and `process-scopes/`: delegation
+    records and the processes nib supervises;
+  - `worktree-ownership/`: receipts of the worktrees nib manages;
+  - `plans/` and `command-prefixes.json`: written plans and remembered command
+    prefixes;
+  - `worktrees/sessions/` and `worktrees/subagents/`: Git worktrees for sessions that
+    use one, and for subagents. A worktree keeps its own state inside itself.
+
+  A Git worktree you create yourself (`git worktree add`) is its own working folder
+  and gets its own state directory; its settings are its main project's.
 - `.nib/config.toml`: the project's preferences: provider and model selection,
   skills, and agent and runtime behavior. It cannot hold secrets or safety settings.
-- `.nib/profiles/default/sessions/*.json`: messages, plans, approvals, tool calls,
-  and audit records.
-- `.nib/profiles/default/memory.json`: durable environment and user memory.
-- `.nib/profiles/default/daemons/`: cron state, pins, and maintenance audit.
 - `.nib/skills/`: project-local skills.
-- `.nib/worktrees/sessions/` and `.nib/worktrees/subagents/`: Git worktrees for
-  sessions that use one, and for subagents.
-- `.nib/subagents/`: linked delegation records.
+- `.nib/profiles/default/sessions/*.json`: messages, plans, approvals, tool calls,
+  and audit records, with each session's checkpoints, read records and presence
+  beside them. Sessions move to the user home in a later version.
 
-Configured profiles replace `default` with their profile ID or custom `state_dir`.
+Configured profiles replace `default` with their profile ID. A profile with a custom
+`state_dir` keeps all its state, sessions included, in that folder.
+
+#### Runtime state from older versions
+
+Older versions kept the runtime state in the project's `.nib`. When this version
+loads a project that still has it, nib moves it to `~/.nib/projects/<project-key>/`:
+
+- each file and folder is renamed, never copied, so nothing is rewritten and
+  nothing is lost; where both places already hold the same file, the project's
+  copy is kept in `<project>/.nib/legacy-<time>/state/`;
+- if your user home already holds a different version of an entry, nothing is
+  moved and nib stops with a message naming both paths;
+- while the old state is in use (a running nib session, running subagents or
+  supervised processes), it stays in the project and nib keeps using it there;
+  the next start after they finish moves it;
+- if your user home is on another file system than the project, the state stays in
+  the project and nib says so;
+- the move is recorded in `~/.nib/projects/<project-key>/state.toml`, and an
+  interrupted move finishes on the next start;
+- worktrees older versions created under `.nib/worktrees/` stay where they are and
+  remain manageable (`/land`, subagent cleanup, `nib doctor`); new ones go to the
+  user home;
+- nib leaves a marker in `.nib/profiles/<id>/` that older versions refuse to start
+  with, so they cannot begin a second copy of the state in the project. State an
+  older version writes there anyway is left in place and reported, never merged
+  over the moved state.
 
 The repository `.gitignore` should exclude `.nib/`; API keys and session data must not
 be committed.
@@ -1195,8 +1233,10 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
 `execution.sandbox` (or `nib run --sandbox`) sets how much commands may touch:
 
 - `workspace-write` (default): commands run in the Linux `bwrap` sandbox and can
-  write the workspace; Git metadata stays read-only, and `.nib` and your home
-  folder are hidden.
+  write the workspace; Git metadata stays read-only, and `.nib`, nib's user home
+  (`~/.nib` or `NIB_HOME`, wherever it is) and your home folder are hidden. A
+  worktree nib created in its user home stays visible to the commands working in
+  it.
 - `read-only`: commands can read the project but write only a private `/tmp`,
   without network. File edits, commits and pushes are refused. Without `bwrap`
   (macOS, Windows), only commands classified read-only run.
@@ -1292,7 +1332,7 @@ Windows, `full-access`, or `hybrid` without usable `bwrap`) commands are not
 confined this way.
 
 A session works in its own Git worktree, on a `nib/session/...` branch under
-`.nib/worktrees/sessions/`, when:
+`~/.nib/projects/<project-key>/worktrees/sessions/`, when:
 
 - you run `/worktree` (from the session's next request) or start nib with
   `nib --worktree` or `nib run --worktree`;
@@ -1334,7 +1374,8 @@ partway (for example on files nib may not delete), or nib cannot load the worktr
 `/land` says why. When nib can still load what remains, `/land discard` finishes
 the removal. Otherwise it stops the session from using the worktree without
 deleting anything: switch a worktree that is off its branch back to it, or remove
-what remains under `.nib/worktrees/sessions/` by hand.
+what remains under `~/.nib/projects/<project-key>/worktrees/sessions/` (or, for a
+worktree an older version created, `.nib/worktrees/sessions/`) by hand.
 
 Subagents, scheduled tasks and calls through `nib mcp-server` always use their own
 worktrees. When nib merges a subagent's work into the folder, the folder must have
@@ -1531,8 +1572,10 @@ rm ~/.local/bin/nib
 Remove-Item "$env:USERPROFILE\.local\bin\nib.exe" -Force
 ```
 
-Project `.nib/` directories contain configuration, credentials, sessions, worktrees,
-branches, and memory. Do not delete them while Git still registers nib worktrees.
+Project `.nib/` directories contain preferences, sessions and, from older versions,
+worktrees and runtime state. `~/.nib` contains your configuration, credentials,
+each project's runtime state and the worktrees nib created. Do not delete either
+while Git still registers nib worktrees.
 Failed creation or cleanup may intentionally preserve an unproven registration, path,
 or ref. Inspect the porcelain listing and remove only entries you have verified, then
 review the associated branches:
@@ -1543,6 +1586,7 @@ git worktree remove /path/from/the/list
 git branch --list 'nib/session/*' 'nib/subagent/*'
 git worktree prune
 rm -rf /path/to/project/.nib
+rm -rf ~/.nib  # every project's state, and your credentials
 ```
 
 Delete branches only after reviewing or merging their changes. Global skills are
