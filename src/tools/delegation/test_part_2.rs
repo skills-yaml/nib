@@ -251,7 +251,7 @@ fn live_owner_is_not_reconciled_through_replaced_lease_paths() {
 
     let visible_directory = owner_lease_directory(root.path());
     let displaced_directory =
-        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases.displaced");
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases.displaced");
     std::fs::rename(&visible_directory, &displaced_directory)
         .expect("displace live lease directory");
     std::fs::create_dir(&visible_directory).expect("replacement lease directory");
@@ -789,7 +789,7 @@ fn subagent_record_write_never_redirects_to_replaced_records_directory() {
 
     let records = records_dir(root.path());
     let displaced =
-        crate::paths::NibPaths::project_state(&root.path()).join("subagents.displaced-write");
+        crate::paths::NibPaths::project_state(root.path()).join("subagents.displaced-write");
     std::fs::rename(&records, &displaced).expect("detach records directory");
     std::fs::create_dir(&records).expect("replacement records directory");
     std::fs::write(records.join("replacement-record.json"), &initial)
@@ -1345,7 +1345,6 @@ fn stale_record_revision_cannot_overwrite_a_newer_generation() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
     let existing = tempfile::tempdir().expect("existing root");
     let existing_records = records_dir(existing.path());

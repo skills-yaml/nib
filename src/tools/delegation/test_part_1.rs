@@ -477,7 +477,7 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                 .to_path_buf();
             let records = records_dir(root.path());
             let ownership =
-                crate::paths::NibPaths::project_state(&root.path()).join("worktree-ownership");
+                crate::paths::NibPaths::project_state(root.path()).join("worktree-ownership");
             let ownership_before = std::fs::read_dir(&ownership)
                 .expect("read primed worktree ownership")
                 .map(|entry| entry.expect("worktree ownership entry").file_name())
@@ -670,9 +670,9 @@ async fn direct_spawn_rejects_selected_state_replacement_after_audit_preflight_w
         vec![(PathBuf::from("sentinel"), b"replacement".to_vec())]
     );
     for path in [
-        crate::paths::NibPaths::project_state(&root.path()).join("subagents"),
-        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases"),
-        crate::paths::NibPaths::project_state(&root.path()).join("worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -744,9 +744,9 @@ async fn cancellable_spawn_rejects_sessions_replacement_after_audit_preflight_wi
         vec![(PathBuf::from("sentinel"), b"replacement".to_vec())]
     );
     for path in [
-        crate::paths::NibPaths::project_state(&root.path()).join("subagents"),
-        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases"),
-        crate::paths::NibPaths::project_state(&root.path()).join("worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -803,9 +803,9 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
         "failed preflight must not add profile descendants"
     );
     for path in [
-        crate::paths::NibPaths::project_state(&root.path()).join("subagents"),
-        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases"),
-        crate::paths::NibPaths::project_state(&root.path()).join("worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -923,14 +923,14 @@ fn terminal_scope_retirement_requires_a_locked_full_record_and_exact_authority()
     )
     .expect("write partial record");
     assert!(retire_terminal_process_scope(root.path(), &record).is_err());
-    assert!(crate::paths::NibPaths::project_state(&root.path())
+    assert!(crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
     std::fs::remove_file(&path).expect("remove partial record");
     write_subagent_record(root.path(), &record).expect("full terminal record");
     assert!(retire_terminal_process_scope(root.path(), &record).expect("retire exact scope"));
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
@@ -1057,7 +1057,7 @@ fn terminal_scope_retirement_rejects_mismatched_ownership_and_stale_snapshots() 
     })
     .expect("replacement record");
     assert!(retire_terminal_process_scope(root.path(), &stale).is_err());
-    assert!(crate::paths::NibPaths::project_state(&root.path())
+    assert!(crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
@@ -1103,7 +1103,7 @@ fn terminal_scope_retirement_retries_after_merge_status_advances() {
         get_subagent_record_unreconciled(root.path(), id).expect("advanced terminal record");
     assert!(retire_terminal_process_scope(root.path(), &advanced)
         .expect("retry retirement from merge-pending authority"));
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
@@ -1211,7 +1211,7 @@ fn terminal_scope_retirement_accepts_exact_launch_abort_authority() {
 
     write_subagent_record(root.path(), &base).expect("terminal launch-abort record");
     assert!(retire_terminal_process_scope(root.path(), &base).expect("retire launch-aborted scope"));
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
@@ -1307,7 +1307,7 @@ fn terminal_scope_retirement_rejects_forged_launch_abort_authority() {
         );
     }
 
-    assert!(crate::paths::NibPaths::project_state(&root.path())
+    assert!(crate::paths::NibPaths::project_state(root.path())
         .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());

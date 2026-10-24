@@ -664,7 +664,7 @@ fn reservation_preserves_artifacts_whose_exact_identity_was_not_attached() {
 fn remove_without_a_retained_tombstone_uses_bounded_absence_proof() {
     let repository = repository();
     let id = "absent-without-receipt";
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(!path.exists());
@@ -685,7 +685,7 @@ fn failed_add_preserves_a_replacement_installed_after_owned_publication() {
     let error = Worktree::create(repository.path(), id)
         .expect_err("failed add must preserve the replacement destination");
 
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert_eq!(
@@ -717,7 +717,7 @@ fn final_absence_proof_preserves_a_destination_that_appeared_before_publication(
     let error = Worktree::create(repository.path(), id)
         .expect_err("destination replacement must fail the final absence proof");
 
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(path.join("sentinel").is_file());
@@ -739,7 +739,7 @@ fn compensation_preserves_a_hostile_visible_path_replacement() {
     let error = Worktree::create(repository.path(), id)
         .expect_err("post-add path replacement must fail closed");
 
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert_eq!(
@@ -784,7 +784,7 @@ fn compensation_preserves_a_hostile_registration_replacement() {
         "registration replacement was removed"
     );
     assert!(
-        crate::paths::NibPaths::project_state(&repository.path())
+        crate::paths::NibPaths::project_state(repository.path())
             .join("worktrees/subagents")
             .join(id)
             .exists(),
@@ -823,7 +823,7 @@ fn compensation_preserves_a_branch_moved_after_creation() {
     assert!(error.contains("refusing publication"), "{error}");
     assert!(error.contains("changed from"), "{error}");
     assert!(error.contains("preserving it"), "{error}");
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(!path.exists(), "partial worktree path remains");
@@ -854,7 +854,7 @@ fn compensation_preserves_a_post_add_symref_and_its_referent() {
 
     assert!(error.contains("is symbolic to"), "{error}");
     assert!(error.contains("preserving"), "{error}");
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(!path.exists(), "partial worktree path remains");
@@ -908,7 +908,7 @@ fn sync_create_compensates_a_failure_after_worktree_add() {
         !error.contains("partial worktree cleanup failed"),
         "post-add compensation did not finish: {error}"
     );
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(!path.exists(), "partial worktree path remains: {error}");

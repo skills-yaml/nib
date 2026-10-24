@@ -544,7 +544,7 @@ pub(crate) fn assert_create_rejects_packed_ref_namespace_conflict(
         !git_directory.join(format!("{requested}.lock")).exists(),
         "managed branch lock was not released"
     );
-    assert!(!crate::paths::NibPaths::project_state(&repository)
+    assert!(!crate::paths::NibPaths::project_state(repository)
         .join("worktrees/subagents")
         .join(id)
         .exists());
@@ -553,7 +553,7 @@ pub(crate) fn assert_create_rejects_packed_ref_namespace_conflict(
 pub(crate) fn assert_ownership_cas_crash_recovers(mode: &str, test_name: &str, id: &str) {
     let repository = repository();
     let branch = branch_name(id);
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     crate::fs_security::ensure_directory_without_symlinks(path.parent().expect("worktree parent"))

@@ -24,7 +24,7 @@ async fn git_status_reads_repository_without_creating_a_session_worktree() {
             .expect_err("strict isolation is required")
             .contains("strict Linux bwrap isolation"));
     }
-    assert!(!crate::paths::NibPaths::project_state(&directory.path())
+    assert!(!crate::paths::NibPaths::project_state(directory.path())
         .join("worktrees")
         .exists());
 }

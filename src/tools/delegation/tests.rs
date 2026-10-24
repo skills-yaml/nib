@@ -520,7 +520,7 @@ pub(crate) fn install_completed_process_scope_with_outcome(
     scope.cleanup_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        crate::paths::NibPaths::project_state(&root)
+        crate::paths::NibPaths::project_state(root)
             .join("process-scopes")
             .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode complete scope"),
@@ -568,7 +568,7 @@ pub(crate) fn install_completed_launch_abort_scope(
     scope.launch_abort_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        crate::paths::NibPaths::project_state(&root)
+        crate::paths::NibPaths::project_state(root)
             .join("process-scopes")
             .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode launch-abort scope"),
@@ -616,7 +616,7 @@ pub(crate) fn install_completed_process_scope_with_live_lease(
     scope.cleanup_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        crate::paths::NibPaths::project_state(&root)
+        crate::paths::NibPaths::project_state(root)
             .join("process-scopes")
             .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode complete scope"),

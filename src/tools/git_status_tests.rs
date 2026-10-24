@@ -72,7 +72,7 @@ async fn git_status_requires_strict_isolation_when_unavailable() {
         assert!(error.contains("strict Linux bwrap isolation"));
         assert!(error.contains("approved isolated terminal"));
     }
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("worktrees")
         .exists());
 }
@@ -195,7 +195,7 @@ async fn git_status_bounds_output_without_mutating_repository() {
         .await
         .expect_err("bounded output")
         .contains("65536-byte limit"));
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("worktrees")
         .exists());
     assert!(!root.path().join(".git/index").exists());

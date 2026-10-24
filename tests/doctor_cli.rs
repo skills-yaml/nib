@@ -70,12 +70,12 @@ fn doctor_cli_requires_explicit_offline_attestation_to_migrate_legacy_subagent_l
     let mut config = NibConfig::default();
     config.skills.enabled = false;
     save_nib_config_full(project.path(), &mut config).expect("save config");
-    let records = nib::paths::NibPaths::project_state(&project.path()).join("subagents");
+    let records = nib::paths::NibPaths::project_state(project.path()).join("subagents");
     let locks = records.join(".locks");
     std::fs::create_dir_all(&locks).expect("legacy lock directory");
     let visible = locks.join("doctor-offline.lock");
     std::fs::write(&visible, b"legacy").expect("legacy lock");
-    let anchor = nib::paths::NibPaths::project_state(&project.path())
+    let anchor = nib::paths::NibPaths::project_state(project.path())
         .join("subagents/.nib-lock-6-.locks-doctor-offline.lock.anchor");
     std::fs::hard_link(&visible, &anchor).expect("legacy anchor");
 

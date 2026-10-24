@@ -1452,7 +1452,7 @@ async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_aud
     }));
     let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
         &std::fs::read(
-            crate::paths::NibPaths::project_state(&root.path())
+            crate::paths::NibPaths::project_state(root.path())
                 .join("subagents")
                 .join(format!("{id}.json")),
         )

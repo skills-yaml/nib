@@ -340,7 +340,7 @@ fn an_interrupted_removal_is_left_for_the_user_and_the_session_moves_on() {
         Some(SessionWorkspace::in_place(workspace::DISCARDED_REASON))
     );
     // What could not be removed is still there for the user to inspect.
-    assert!(crate::paths::NibPaths::project_state(&fixture.root())
+    assert!(crate::paths::NibPaths::project_state(fixture.root())
         .join("worktrees/sessions")
         .read_dir()
         .unwrap()

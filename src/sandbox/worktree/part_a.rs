@@ -243,7 +243,7 @@ fn managed_git_rejects_executable_repository_helpers_without_running_them() {
     assert!(error.contains("include.path"), "{error}");
     assert!(error.contains("includeif.gitdir:/tmp/.path"), "{error}");
     assert!(!marker.exists(), "repository helper executed");
-    assert!(!crate::paths::NibPaths::project_state(&repository.path())
+    assert!(!crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents/hostile-config")
         .exists());
     let reference = "refs/heads/nib/subagent/hostile-config";
@@ -307,7 +307,7 @@ fn managed_git_rejects_executable_worktree_configuration_without_running_it() {
     );
     assert!(error.contains("filter.worktree-hostile.smudge"), "{error}");
     assert!(!marker.exists(), "worktree-scoped filter executed");
-    assert!(!crate::paths::NibPaths::project_state(&repository.path())
+    assert!(!crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents/hostile-worktree-config")
         .exists());
 }
@@ -330,7 +330,7 @@ fn create_preserves_a_preexisting_branch_ref() {
         ),
         original
     );
-    assert!(!crate::paths::NibPaths::project_state(&repository.path())
+    assert!(!crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents/preexisting")
         .exists());
 }
@@ -396,7 +396,7 @@ fn create_rejects_a_preexisting_symref_without_creating_its_referent() {
 fn create_preserves_a_preexisting_reciprocal_worktree_registration() {
     let repository = repository();
     let id = "preexisting-registration";
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     let registration = leave_stale_registration_for_path(repository.path(), &path);
@@ -433,7 +433,7 @@ fn create_preserves_a_preexisting_reciprocal_worktree_registration() {
 async fn cancellable_create_preserves_a_preexisting_reciprocal_registration() {
     let repository = repository();
     let id = "async-preexisting-registration";
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     let registration = leave_stale_registration_for_path(repository.path(), &path);
@@ -467,7 +467,7 @@ fn failed_add_preserves_a_registration_forged_after_the_snapshot() {
         .expect_err("forged post-snapshot registration must fail closed");
 
     assert!(error.contains("registrations were preserved"), "{error}");
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     assert!(
@@ -700,7 +700,7 @@ fn restart_recovers_receipt_lock_quarantine_and_pre_stage_scratch_after_holder_e
     let repository = repository();
     let id = "restart-pre-stage-lock";
     let branch = branch_name(id);
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     crate::fs_security::ensure_directory_without_symlinks(path.parent().expect("worktree parent"))
@@ -774,7 +774,7 @@ fn restart_recovers_dead_packed_and_target_ref_locks_after_holder_exit() {
     let repository = repository();
     let id = "restart-target-lock";
     let branch = branch_name(id);
-    let path = crate::paths::NibPaths::project_state(&repository.path())
+    let path = crate::paths::NibPaths::project_state(repository.path())
         .join("worktrees/subagents")
         .join(id);
     crate::fs_security::ensure_directory_without_symlinks(path.parent().expect("worktree parent"))
@@ -854,7 +854,7 @@ fn restart_finalizes_committed_ownership_with_previous_scratch() {
 fn foreign_packed_lock_owner_is_deferred_until_its_receipt_is_recovered() {
     let repository = repository();
     let reserve = |id: &str| {
-        let path = crate::paths::NibPaths::project_state(&repository.path())
+        let path = crate::paths::NibPaths::project_state(repository.path())
             .join("worktrees/subagents")
             .join(id);
         crate::fs_security::ensure_directory_without_symlinks(

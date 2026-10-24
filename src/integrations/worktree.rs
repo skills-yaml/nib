@@ -958,7 +958,7 @@ mod tests {
             "{error}"
         );
         let sessions =
-            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
+            crate::paths::NibPaths::project_state(repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -1001,7 +1001,7 @@ mod tests {
         assert!(error.contains("injected failure reported"), "{error}");
         assert!(error.contains("registrations were preserved"), "{error}");
         let sessions =
-            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
+            crate::paths::NibPaths::project_state(repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -1049,7 +1049,7 @@ mod tests {
         assert!(error.contains("changed from"), "{error}");
         assert!(error.contains("preserving it"), "{error}");
         let sessions =
-            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees/sessions");
+            crate::paths::NibPaths::project_state(repository.path()).join("worktrees/sessions");
         assert!(
             !sessions.exists()
                 || std::fs::read_dir(&sessions)
@@ -1165,8 +1165,7 @@ mod tests {
         {
             return true;
         }
-        let sessions =
-            crate::paths::NibPaths::project_state(&repository).join("worktrees/sessions");
+        let sessions = crate::paths::NibPaths::project_state(repository).join("worktrees/sessions");
         sessions.is_dir()
             && std::fs::read_dir(sessions)
                 .expect("session worktree directory")

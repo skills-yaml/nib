@@ -232,7 +232,7 @@ fn killed_fallback_preparation_is_reconciled_without_orphans() {
     assert!(!owner_lease_directory(root.path())
         .read_dir()
         .is_ok_and(|mut entries| entries.next().is_some()));
-    assert!(!crate::paths::NibPaths::project_state(&root.path())
+    assert!(!crate::paths::NibPaths::project_state(root.path())
         .join("worktrees/subagents")
         .join(&subagent_id)
         .exists());
@@ -285,7 +285,7 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
     let intent = spawn_preparation_directory_path(root.path()).join(format!("{id}.json"));
     assert!(intent.is_file(), "planned intent is durable");
     assert!(
-        !crate::paths::NibPaths::project_state(&root.path())
+        !crate::paths::NibPaths::project_state(root.path())
             .join("worktrees/subagents")
             .join(&id)
             .exists(),
@@ -381,7 +381,7 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
                 "{category}/{phase} preparation remained"
             );
             assert!(
-                !crate::paths::NibPaths::project_state(&root.path())
+                !crate::paths::NibPaths::project_state(root.path())
                     .join("worktrees/subagents")
                     .join(&id)
                     .exists(),
@@ -485,7 +485,7 @@ fn killed_fallback_namespace_phases_reconcile_exact_planned_artifacts() {
             !root.path().join(".nib/profiles").exists(),
             "{phase}: exact planned audit hierarchy is removed"
         );
-        assert!(!crate::paths::NibPaths::project_state(&root.path())
+        assert!(!crate::paths::NibPaths::project_state(root.path())
             .join("worktrees/subagents")
             .join(&subagent_id)
             .exists());
@@ -541,9 +541,9 @@ async fn direct_spawn_variants_reject_non_utf8_audit_target_before_any_partial_s
         non_utf8_state.join("sessions"),
         non_utf8_state.join("daemons"),
         non_utf8_state.join("managed-skills"),
-        crate::paths::NibPaths::project_state(&root.path()).join("subagents"),
-        crate::paths::NibPaths::project_state(&root.path()).join("subagent-owner-leases"),
-        crate::paths::NibPaths::project_state(&root.path()).join("worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),

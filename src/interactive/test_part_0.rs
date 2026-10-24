@@ -1658,7 +1658,7 @@ fn review_rejects_an_ownership_record_that_escapes_managed_state() {
         .create_for_session(&session.id)
         .expect("owned session worktree");
     let ownership_directory =
-        crate::paths::NibPaths::project_state(&repository.path()).join("worktree-ownership");
+        crate::paths::NibPaths::project_state(repository.path()).join("worktree-ownership");
     let ownership_path = std::fs::read_dir(&ownership_directory)
         .expect("ownership directory")
         .filter_map(Result::ok)
