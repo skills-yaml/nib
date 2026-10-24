@@ -327,6 +327,54 @@ memory, or tools change the prefix immediately. Cached input still counts toward
 Provider diagnostics in `nib doctor` show the effective `Prompt cache:` mapping.
 Reported cache reads and writes are usage evidence, not proof of savings.
 
+#### Model escalation
+
+nib can run most work on a cheaper model (the worker: the run's selected
+provider and model) and call a costlier model only when the work is stuck.
+Escalation is off unless you name an escalation model from your configured
+providers:
+
+```toml
+[agent.escalation]
+model = "gpt-5"          # exact model ID; omit to keep escalation off
+# provider = "openai"    # a configured llm.providers entry; defaults to the run's provider
+# max_per_run = 2        # escalations per run (0-16); 0 turns escalation off
+```
+
+An escalation starts in one of three ways:
+
+- the worker calls its bounded `ask_advice` step with one specific question;
+- three consecutive failed tool batches or rejected completions (open required
+  verification) in a run. Approval denials and local preflight failures (such as
+  worktree setup) do not count;
+- you run `/escalate [question]`, which also works while a run is active. The
+  request applies at the run's next safe point, or at the first worker turn of
+  your next request.
+
+The first escalation in a run is advice: the escalation model receives a bounded
+request (the goal, applicable instructions, the current plan step and its open
+verification obligations, recent observations, and the question), no tools, and
+at most 1,024 output tokens. The worker continues with that advice. Advice is not
+verification evidence and authorizes nothing. If failures or `/escalate` continue
+after advice, the next escalation is a takeover: the escalation model handles
+exactly one turn, through the same plan, tool approvals, sandbox, and
+verification gates, and then the worker continues. Each model change starts a
+fresh provider request rather than reusing the other model's continuation.
+
+Limits apply per run: at most `max_per_run` escalations (2 by default), and no
+further escalation once the escalation model has used 25% or more of the run's
+provider-reported model tokens (cache reads and writes included). A call without
+reported usage is counted as a call and makes the token share unknown rather than
+zero; the count limit still applies. Each escalation is reserved in the session
+before the call, so cancelling or resuming a run does not restore its allowance.
+Delegated subagents and runs with an explicit `--model` never escalate.
+
+The session records `escalation_dispatched`, `escalation_completed` (outcome,
+reported usage, and budget), and `escalation_skipped` (reason) events. Plain and
+full-screen output show the same `[escalation]` lines, `/status` shows the
+configuration and this session's escalations, and `nib doctor` shows whether
+escalation is on. nib does not choose models for you or estimate savings.
+
 #### OpenAI API mode
 
 New official OpenAI entries created by `nib auth` select `api = "responses"`.
@@ -657,6 +705,9 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   provider. It may bypass the automatic usage threshold, but still respects the
   compression enabled switch, preserves every raw message, and reports the resulting
   budget or a truthful no-op/failure outcome.
+- `/escalate [question]` asks the configured escalation model for advice at the
+  next safe point (see [Model escalation](#model-escalation)); without an
+  escalation model it explains how to enable one and records nothing.
 - `/ps` lists a bounded projection of durable background work owned by the active
   session. `/stop` lists stoppable work and exact-ID guidance; `/stop <task-id>` requests
   cancellation of exactly one task only when that durable record belongs to the active
@@ -731,6 +782,7 @@ Parity matrix (same command/session effect in both renderers):
 | Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
 | Path attachment | `@` completion, structured context | same `@path` mentions |
 | Compact context | `/compact`, streamed compression/reconciliation | same command and outcomes |
+| Model escalation | `/escalate [question]`, escalation activity rows | same command, `[escalation]` lines |
 | Background work | `/ps`; `/stop [task-id]` | same bounded list and exact-ID cancellation |
 
 Interaction state is shared by both renderers and is derived from the authoritative
