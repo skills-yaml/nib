@@ -264,10 +264,6 @@ impl Curator {
         Ok(report)
     }
 
-    pub fn cleanup_old_sessions(&self) -> Result<usize, String> {
-        Ok(self.cleanup_old_sessions_at(Utc::now())?.sessions_deleted)
-    }
-
     #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub fn cleanup_old_sessions_at(&self, now: DateTime<Utc>) -> Result<CuratorReport, String> {
         let cutoff = self.retention_cutoff(now)?;

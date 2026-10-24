@@ -484,11 +484,6 @@ impl<'a> LlmRequest<'a> {
         }
     }
 
-    pub fn with_options(mut self, options: GenerationOptions) -> Self {
-        self.options = options;
-        self
-    }
-
     pub fn with_temperature(mut self, value: f64) -> Result<Self, String> {
         self.options.set_temperature(value)?;
         Ok(self)
@@ -1048,11 +1043,6 @@ impl LlmResponse {
 
     pub fn with_retry_attempts(mut self, attempts: crate::llm::RetryAttemptMetadata) -> Self {
         self.attempts = attempts;
-        self
-    }
-
-    pub fn with_usage(mut self, usage: Option<LlmUsage>) -> Self {
-        self.usage = usage;
         self
     }
 }

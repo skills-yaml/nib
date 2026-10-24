@@ -95,43 +95,6 @@ pub(crate) fn validate_planning_instruction_context(
 // their callers. Boxing only these adapters would create a parallel error contract without
 // reducing the authoritative error type.
 #[allow(clippy::result_large_err)]
-pub async fn generate_plan(
-    llm: &Arc<dyn LlmClient>,
-    goal: &str,
-) -> Result<Plan, crate::llm::LlmError> {
-    generate_plan_with_events(llm, goal, None).await
-}
-
-#[allow(clippy::result_large_err)]
-pub async fn generate_plan_with_events(
-    llm: &Arc<dyn LlmClient>,
-    goal: &str,
-    event_tx: Option<&Sender<StreamEvent>>,
-) -> Result<Plan, crate::llm::LlmError> {
-    generate_plan_with_events_bounded(llm, goal, event_tx, 128_000).await
-}
-
-#[allow(clippy::result_large_err)]
-pub async fn generate_plan_with_events_bounded(
-    llm: &Arc<dyn LlmClient>,
-    goal: &str,
-    event_tx: Option<&Sender<StreamEvent>>,
-    context_length: usize,
-) -> Result<Plan, crate::llm::LlmError> {
-    let context = RuntimeContextSections {
-        agents: String::new(),
-        task: goal.to_string(),
-        project_docs: Vec::new(),
-        skills: Vec::new(),
-        memory: Vec::new(),
-        workload: Vec::new(),
-        attachments: Vec::new(),
-    };
-    generate_plan_with_context_events_bounded(llm, goal, &context, None, event_tx, context_length)
-        .await
-}
-
-#[allow(clippy::result_large_err)]
 pub async fn generate_plan_with_context_events_bounded(
     llm: &Arc<dyn LlmClient>,
     goal: &str,

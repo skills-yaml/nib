@@ -1427,13 +1427,6 @@ pub enum QuestionOutcome {
 }
 
 impl QuestionOutcome {
-    pub fn answered_text(&self) -> Option<&str> {
-        match self {
-            Self::Answered(answer) | Self::ApprovedProposal(answer) => Some(answer.as_str()),
-            _ => None,
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn clarification_status(&self) -> ClarificationStatus {
         match self {
