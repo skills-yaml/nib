@@ -10,7 +10,7 @@ case "$platform" in
     ;;
 esac
 
-for command in basename dirname env find git grep head mktemp pgrep script sed sleep sort stty tail tr uname wc; do
+for command in basename dirname env find git grep head mktemp pgrep python3 script sed sleep sort stty tail tr uname wc; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'required command is unavailable: %s\n' "$command" >&2
     exit 1
@@ -73,7 +73,8 @@ report_smoke_context() {
     printf '%s\n' 'Last terminal bytes from isolated Mock fixture (escaped, at most 16 KiB before escaping):' >&2
     tail -c 16384 "$capture" | LC_ALL=C sed -n -e "$redaction" -e l >&2 || true
   fi
-  for diagnostic_session in "$fixture"/.nib/profiles/default/sessions/*.json; do
+  export_sessions 2>/dev/null || true
+  for diagnostic_session in "${session_directory:-$fixture/sessions}"/*.json; do
     if [ -f "$diagnostic_session" ] &&
       grep -Fq 'edit line' "$diagnostic_session" 2>/dev/null; then
       printf '%s\n' 'Composer session messages and lifecycle fields (escaped, at most 8 KiB before escaping):' >&2
@@ -124,11 +125,16 @@ trap 'exit 143' TERM
 
 isolated_home="$fixture/home"
 isolated_config="$fixture/xdg-config"
-mkdir -p "$fixture/.nib" "$isolated_home" "$isolated_config"
+# T082: nib keeps its user home (user settings, per-project approvals and
+# trust, runtime state and the session database) in NIB_HOME. The smoke sets
+# it inside the fixture, so it never reads or writes the real user home, nor
+# an outer NIB_HOME it may inherit.
+nib_home="$fixture/nib-home"
+mkdir -p "$fixture/.nib" "$isolated_home" "$isolated_config" "$nib_home"
 git -C "$fixture" init --quiet
 git -C "$fixture" config user.email nib-smoke@example.invalid
 git -C "$fixture" config user.name 'nib interactive smoke'
-printf '.nib/\nhome/\nxdg-config/\n*.txt\n' >"$fixture/.gitignore"
+printf '.nib/\nhome/\nxdg-config/\nnib-home/\nsessions/\n*.txt\n' >"$fixture/.gitignore"
 printf 'interactive smoke fixture\n' >"$fixture/README.md"
 git -C "$fixture" add .gitignore README.md
 git -C "$fixture" commit --quiet -m initial
@@ -170,17 +176,98 @@ offline_environment=(
   -u NIB_SKILLS_DIR
   "HOME=$isolated_home"
   "XDG_CONFIG_HOME=$isolated_config"
+  "NIB_HOME=$nib_home"
   NIB_NO_UPDATE_CHECK=1
   NIB_ENABLE_INTERACTIVE_SMOKE=1
 )
 
-session_directory="$fixture/.nib/profiles/default/sessions"
+# T082: sessions are rows of the session database, $nib_home/nib.db. The smoke
+# exports the default profile's sessions, read-only, as the pretty JSON
+# documents nib wrote before (one <id>.json each), so every check below reads
+# the persisted session itself. Call export_sessions before reading them.
+session_directory="$fixture/sessions"
+mkdir -p "$session_directory"
+export_sessions() {
+  python3 -I - "$nib_home/nib.db" "$session_directory" <<'EXPORT'
+import json, os, sqlite3, sys
+database, target = sys.argv[1], sys.argv[2]
+if not os.path.isfile(database):
+    sys.exit(0)
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
+try:
+    with connection:
+        sessions = connection.execute(
+            "SELECT scope, id, document FROM sessions WHERE profile_id = 'default'"
+        ).fetchall()
+        for scope, session_id, document in sessions:
+            session = json.loads(document)
+            for key, table in (("messages", "session_messages"), ("events", "session_events")):
+                session[key] = [
+                    json.loads(body)
+                    for (body,) in connection.execute(
+                        f"SELECT body FROM {table} WHERE scope = ? AND session_id = ? ORDER BY idx",
+                        (scope, session_id),
+                    )
+                ]
+            path = os.path.join(target, f"{session_id}.json")
+            temporary = f"{path}.export"
+            with open(temporary, "w", encoding="utf-8") as file:
+                json.dump(session, file, indent=2, ensure_ascii=False)
+            os.replace(temporary, path)
+finally:
+    connection.close()
+EXPORT
+}
+
 session_count() {
-  if [ ! -d "$session_directory" ]; then
-    printf '0\n'
-    return
-  fi
+  export_sessions
   find "$session_directory" -type f -name '*.json' -print | wc -l | tr -d ' '
+}
+
+# The user's settings for the fixture project, where nib records its approvals
+# and the workspace consent (T082 decision 3). The project key is derived from
+# the canonical fixture path, so the file is found by its one match.
+project_settings_file() {
+  local candidate
+  for candidate in "$nib_home"/projects/*/config.toml; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_for_project_setting() {
+  local expected=$1
+  local attempts=0
+  local settings
+  while [ "$attempts" -lt 100 ]; do
+    if settings="$(project_settings_file)" && grep -Fq "$expected" "$settings" 2>/dev/null; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'user project settings did not record: %s\n' "$expected" >&2
+  return 1
+}
+
+# Waits until an exported session file holds the expected text.
+wait_for_session_output() {
+  local session_file=$1
+  local expected=$2
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    export_sessions
+    if [ -f "$session_file" ] && grep -Fq "$expected" "$session_file" 2>/dev/null; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'session did not persist the expected text: %s\n' "$expected" >&2
+  return 1
 }
 
 terminate_process_tree() {
@@ -291,7 +378,8 @@ quoted_fixture="$(quote_for_sh "$fixture")"
 quoted_binary="$(quote_for_sh "$binary")"
 quoted_home="$(quote_for_sh "$isolated_home")"
 quoted_config="$(quote_for_sh "$isolated_config")"
-offline_prefix="env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GOOGLE_API_KEY -u XAI_API_KEY -u META_API_KEY -u OPENROUTER_API_KEY -u NIB_MANAGED_PROCESS_SCOPE -u NIB_SKILLS_DIR HOME=$quoted_home XDG_CONFIG_HOME=$quoted_config NIB_NO_UPDATE_CHECK=1 NIB_ENABLE_INTERACTIVE_SMOKE=1"
+quoted_nib_home="$(quote_for_sh "$nib_home")"
+offline_prefix="env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GOOGLE_API_KEY -u XAI_API_KEY -u META_API_KEY -u OPENROUTER_API_KEY -u NIB_MANAGED_PROCESS_SCOPE -u NIB_SKILLS_DIR HOME=$quoted_home XDG_CONFIG_HOME=$quoted_config NIB_HOME=$quoted_nib_home NIB_NO_UPDATE_CHECK=1 NIB_ENABLE_INTERACTIVE_SMOKE=1"
 alternate_screen_exit="$(printf '\033[?1049l')"
 bracketed_paste_enable="$(printf '\033[?2004h')"
 bracketed_paste_disable="$(printf '\033[?2004l')"
@@ -308,7 +396,7 @@ quit_tui_input() {
 consent_tui_input() {
   wait_for_pty_output "$fixture/$current_case.txt" 'Work in this directory'
   printf 'y'
-  wait_for_pty_output "$fixture/.nib/config.toml" 'allowed = true'
+  wait_for_project_setting 'allowed = true'
   printf '\021\021'
 }
 
@@ -362,6 +450,7 @@ wait_for_goal_session() {
   local attempts=0
   local candidate
   while [ "$attempts" -lt 100 ]; do
+    export_sessions
     for candidate in "$session_directory"/*.json; do
       if [ -f "$candidate" ] && grep -Fq "\"content\": \"$goal\"" "$candidate" 2>/dev/null; then
         printf '%s\n' "$candidate"
@@ -431,7 +520,13 @@ run_tui_case() {
 
 run_tui_case automatic consent_tui_input ''
 grep -Fq 'Work in this directory' "$fixture/automatic.txt"
-grep -Fq 'allowed = true' "$fixture/.nib/config.toml"
+# The consent is the user's: it is in the user's settings for the project,
+# never in the project's own configuration.
+grep -Fq 'allowed = true' "$(project_settings_file)"
+if grep -Fq 'allowed' "$fixture/.nib/config.toml"; then
+  printf '%s\n' 'workspace consent was written to the project configuration' >&2
+  exit 1
+fi
 run_tui_case compatibility quit_tui_input 'tui'
 grep -Fq 'compatibility alias' "$fixture/compatibility.txt"
 
@@ -478,6 +573,7 @@ interrupt_terminal_input() {
   local attempts=0
   session_file="$(wait_for_goal_session 'one-shot interrupt terminal')"
   while [ "$attempts" -lt 100 ]; do
+    export_sessions
     if grep -Fq '"kind": "tool_started"' "$session_file" 2>/dev/null; then
       printf '\003'
       wait_for_pty_output "$fixture/$current_case.txt" "$child_status_marker:130" || return 1
@@ -510,6 +606,7 @@ if [ -e "$fixture/one-shot-approval-ran.txt" ] ||
   printf '%s\n' 'one-shot interruption allowed a cancelled action to complete' >&2
   exit 1
 fi
+export_sessions
 if [ "$(grep -F -l '"outcome": "cancelled_by_user"' "$session_directory"/*.json | wc -l | tr -d ' ')" -lt 3 ]; then
   printf '%s\n' 'one-shot interruption did not persist three cancellation outcomes' >&2
   exit 1
@@ -605,6 +702,7 @@ grep -Fq 'Final answer: task complete. (mock LLM response)' "$fixture/plain-prov
 grep -Fq 'Approval required' "$fixture/plain-provider-failure-recovery.txt"
 grep -Fq 'Action: list_directory' "$fixture/plain-provider-failure-recovery.txt"
 failure_recovery_session_list="$fixture/failure-recovery-sessions.txt"
+export_sessions
 grep -F -l 'interactive provider failure smoke' "$session_directory"/*.json \
   >"$failure_recovery_session_list"
 if [ "$(wc -l <"$failure_recovery_session_list" | tr -d ' ')" -ne 1 ]; then
@@ -630,8 +728,8 @@ tui_approval_input() {
   printf 'y\r'
   local session
   session="$(wait_for_goal_session 'list workspace for approval smoke')"
-  wait_for_pty_output "$session" '"source": "user"'
-  wait_for_pty_output "$session" '"outcome": "completed"'
+  wait_for_session_output "$session" '"source": "user"'
+  wait_for_session_output "$session" '"outcome": "completed"'
   printf '\021\021'
 }
 
@@ -661,8 +759,8 @@ tui_question_input() {
   printf '2\r'
   local session
   session="$(wait_for_goal_session 'ask a question before continuing in TUI smoke')" || return 1
-  wait_for_pty_output "$session" '"answer": "full"' || return 1
-  wait_for_pty_output "$session" '"outcome": "completed"' || return 1
+  wait_for_session_output "$session" '"answer": "full"' || return 1
+  wait_for_session_output "$session" '"outcome": "completed"' || return 1
   printf '\021\021'
 }
 
@@ -750,6 +848,7 @@ wait_for_composer_session() {
   local attempts=0
   local candidate
   while [ "$attempts" -lt 100 ]; do
+    export_sessions
     for candidate in "$session_directory"/*.json; do
       if [ -f "$candidate" ] &&
         grep -Fq '"content": "edit line\nunicode 🙂X"' "$candidate" 2>/dev/null; then
@@ -770,6 +869,7 @@ wait_for_composer_terminal() {
   local attempts=0
   local count
   while [ "$attempts" -lt 100 ]; do
+    export_sessions
     # Session replacement can briefly remove the published path. Treat that as
     # pending evidence, subject to the same deadline, rather than an empty integer.
     count="$(grep -F -c '"kind": "run_terminal"' "$session_file" 2>/dev/null || true)"
@@ -811,7 +911,7 @@ tui_composer_input() {
   printf '\003'
   wait_for_composer_terminal "$composer_session" 1
   printf '\033[200~inspect @REA\033[201~\t\r'
-  wait_for_pty_output "$composer_session" '"content": "inspect @README.md"'
+  wait_for_session_output "$composer_session" '"content": "inspect @README.md"'
   printf '\003'
   wait_for_composer_terminal "$composer_session" 2
   printf '\022unicode'
@@ -821,7 +921,7 @@ tui_composer_input() {
   # A successful search must restore the exact earlier multiline draft. Edit and
   # submit it so the ledger proves restoration independently of VT redraw chunks.
   printf '\033[200~\nrestored history smoke\033[201~\r'
-  wait_for_pty_output "$composer_session" \
+  wait_for_session_output "$composer_session" \
     '"content": "edit line\nunicode 🙂X\nrestored history smoke"'
   printf '\003'
   wait_for_composer_terminal "$composer_session" 3
@@ -842,6 +942,7 @@ grep -Fq 'Tab insert' "$composer_words"
 grep -Fq 'Enter run' "$composer_words"
 grep -Fq 'Ctrl+End follow' "$composer_words"
 grep -Fq 'README.md' "$fixture/tui-composer-scroll-history.txt"
+export_sessions
 grep -R -Fq 'edit line\nunicode 🙂X' "$session_directory"
 grep -R -Fq '"content": "edit line\nunicode 🙂X\nrestored history smoke"' "$session_directory"
 grep -R -Fq '"path": "README.md"' "$session_directory"
@@ -861,6 +962,7 @@ tui_queue_input() {
   local planning_attempts=0
   local queue_candidate
   while [ "$planning_attempts" -lt 100 ]; do
+    export_sessions
     for queue_candidate in "$session_directory"/*.json; do
       if [ -f "$queue_candidate" ] &&
         grep -Fq '"content": "interactive queue smoke"' "$queue_candidate" 2>/dev/null &&
@@ -896,6 +998,7 @@ grep -Fq 'persisted' "$fixture/tui-queue-steer-cancel.txt"
 grep -Fq 'exact' "$fixture/tui-queue-steer-cancel.txt"
 grep -Fq 'active' "$fixture/tui-queue-steer-cancel.txt"
 queue_session_list="$fixture/queue-sessions.txt"
+export_sessions
 grep -F -l 'interactive queue smoke' "$session_directory"/*.json >"$queue_session_list"
 if [ "$(wc -l <"$queue_session_list" | tr -d ' ')" -ne 1 ]; then
   printf '%s\n' 'queue smoke goal did not bind to exactly one session' >&2
@@ -957,6 +1060,7 @@ run_pty_case \
   'TERM=xterm-256color NO_COLOR=1' \
   "--plain --session $quoted_source_session"
 grep -Fq "Resumed session $target_session from persisted state." "$fixture/plain-resume.txt"
+export_sessions
 grep -E -q '"forked_from": "[^\"]+' "$session_directory"/*.json
 
 # Lifecycle records retain exact private run IDs in persistence, but terminal
@@ -973,6 +1077,12 @@ fi
 for session_file in "$session_directory"/*.json; do
   if grep -Fq "$private_sentinel" "$session_file"; then
     printf 'inactive-provider sentinel persisted through %s\n' "$session_file" >&2
+    exit 1
+  fi
+done
+for session_database in "$nib_home"/nib.db*; do
+  if [ -f "$session_database" ] && grep -aFq "$private_sentinel" "$session_database"; then
+    printf 'inactive-provider sentinel persisted through %s\n' "$session_database" >&2
     exit 1
   fi
 done

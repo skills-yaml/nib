@@ -327,6 +327,17 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("Resumed session $target_session from persisted state."));
     assert!(script.contains("for session_file in \"$session_directory\"/*.json; do"));
     assert!(script.contains("grep -Fq \"$private_sentinel\" \"$session_file\""));
+    // T082: the smoke keeps nib's user home inside its fixture and reads the
+    // persisted sessions and the user's project settings where nib now keeps
+    // them, never the project's legacy `.nib` layout.
+    assert!(script.contains("nib_home=\"$fixture/nib-home\""));
+    assert!(script.contains("\"NIB_HOME=$nib_home\""));
+    assert!(script.contains("NIB_HOME=$quoted_nib_home"));
+    assert!(script.contains("export_sessions"));
+    assert!(script.contains("grep -Fq 'allowed = true' \"$(project_settings_file)\""));
+    assert!(script.contains("if grep -Fq 'allowed' \"$fixture/.nib/config.toml\"; then"));
+    assert!(!script.contains(".nib/profiles/default/sessions"));
+    assert!(!script.contains("grep -Fq 'allowed = true' \"$fixture/.nib/config.toml\""));
     assert!(!script.contains("mapfile"));
     assert!(!script.contains("-maxdepth"));
     assert!(!script.contains("realpath"));

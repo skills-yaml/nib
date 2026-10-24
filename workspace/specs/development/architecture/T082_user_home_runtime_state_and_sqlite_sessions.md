@@ -685,6 +685,32 @@ fixed; one part of a minor finding is recorded as a deviation.
   (it fails for T087, FT-021 and FT-022, outside this spec). No test run
   left a `~/.nib` behind.
 
+### Gate fixes (2026-10-24)
+
+- `test_runtime_e2e::mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio`
+  failed with `audit recording failed: ... state directory changed`. The
+  test audited into `SessionStore::new(root)`, the pre-profile
+  `<project>/.nib/sessions` layout. The `nib mcp-server` child it spawns
+  runs the state migration on its first stateful tool call
+  (`nib_get_status`), which imported that directory into `nib.db` and
+  moved it to `.nib/legacy-<time>/` while the parent still held it open;
+  the parent's next audit write then failed closed. Runtime code never
+  opens that layout (it opens `SessionStore::for_project`, which migrates
+  first), so the test, not the product, encoded the old layout: it now
+  audits into `SessionStore::for_project` (the database) and asserts that
+  no `.nib/sessions` or `legacy-*` copy appears.
+- `scripts/check-interactive-release.sh`: the smoke now sets `NIB_HOME`
+  inside its fixture (it isolated `HOME` only, so an inherited `NIB_HOME`
+  leaked through), checks the workspace consent in the user's project
+  settings (`$NIB_HOME/projects/<key>/config.toml`) and that the
+  project's `.nib/config.toml` has none, reads sessions through a
+  read-only `python3` export of `nib.db` (one pretty JSON document per
+  session) instead of `.nib/profiles/default/sessions/*.json`, and also
+  scans `nib.db*` for the private sentinel. `tests/installers.rs` pins
+  these contracts. The Windows smoke (`check-interactive-release.ps1`)
+  still reads the old session and consent paths; it is not run by CI on
+  this branch and needs the same change.
+
 ## Version Impact
 
 | Component | Impact | Release | Rationale |
