@@ -485,6 +485,19 @@ mod tests {
     use crate::profile::ProfileRegistry;
     use tempfile::tempdir;
 
+    /// Where the state migration kept a pre-profile session file of the
+    /// project at `root`: `.nib/legacy-<time>/sessions/sessions/<name>`.
+    fn kept_pre_profile_session(root: &Path, name: &str) -> PathBuf {
+        let copies: Vec<PathBuf> = fs::read_dir(root.join(".nib"))
+            .expect("project .nib")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("legacy-"))
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        copies[0].join("sessions/sessions").join(name)
+    }
+
     #[test]
     fn migrates_legacy_state_once_without_removing_sources() {
         let root = tempdir().expect("root");
@@ -512,6 +525,9 @@ mod tests {
             fs::read(profile.memory_path()).expect("migrated memory"),
             legacy_memory
         );
+        // The source is kept in the legacy copy once imported (T082).
+        assert!(!legacy_session_path.exists());
+        let legacy_session_path = kept_pre_profile_session(root.path(), "legacy.json");
         assert_eq!(
             fs::read(&legacy_session_path).expect("preserved session"),
             legacy_session
@@ -630,7 +646,12 @@ mod tests {
         migrated.validate().expect("strict current invariants");
         assert_eq!(migrated.messages[0].index, 0);
         assert_eq!(migrated.messages[1].index, 1);
-        assert_eq!(fs::read(source_path).expect("preserved source"), source);
+        assert!(!source_path.exists());
+        assert_eq!(
+            fs::read(kept_pre_profile_session(root.path(), "pre-index.json"))
+                .expect("preserved source"),
+            source
+        );
     }
 
     #[test]

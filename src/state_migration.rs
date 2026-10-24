@@ -243,22 +243,8 @@ fn migrate_locked(
     } else {
         Vec::new()
     };
-    let state_key = state
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("nib's state directory {} has no key", state.display()))?;
-    let open_database = || {
-        crate::session::database::SessionDatabase::for_user_home()
-            .map_err(|error| error.to_string())
-    };
     let mut imports = if has_legacy {
-        sessions::plan(
-            &legacy,
-            state_key,
-            keep,
-            &legacy_profile_ids(&legacy)?,
-            &open_database,
-        )?
+        plan_imports(&legacy, state, keep)?
     } else {
         Vec::new()
     };
@@ -270,20 +256,7 @@ fn migrate_locked(
         None
     };
     if moves.is_empty() && imports.is_empty() && pre_profile.is_none() {
-        match existing {
-            None => write_record(&record_path, &new_record(root, "done"))?,
-            // A run stopped after its last step: only the markers and the
-            // record's status are left to write.
-            Some(mut record) if record.status != "done" => {
-                if fs::symlink_metadata(&legacy).is_ok_and(|metadata| metadata.is_dir()) {
-                    for profile in profiles {
-                        write_moved_marker(&legacy, state, profile)?;
-                    }
-                }
-                finish_record(&record_path, &mut record)?;
-            }
-            Some(_) => {}
-        }
+        finish_current(root, state, profiles, existing)?;
         return Ok(StateMigration::Current);
     }
     if let Some(reason) = live_activity(&legacy) {
@@ -330,7 +303,7 @@ fn migrate_locked(
     let backup = legacy_backup_dir(&legacy);
     let mut moved = move_entries(&moves, &duplicates, &backup, &mut record, &record_path)?;
     if !imports.is_empty() {
-        let database = open_database()?;
+        let database = open_session_database()?;
         for import in &imports {
             moved.push(import_directory(
                 import,
@@ -357,6 +330,56 @@ fn migrate_locked(
         tracing::warn!("{}", left_reason(&legacy, &left));
     }
     Ok(StateMigration::Moved(moved))
+}
+
+fn open_session_database(
+) -> Result<std::sync::Arc<crate::session::database::SessionDatabase>, String> {
+    crate::session::database::SessionDatabase::for_user_home().map_err(|error| error.to_string())
+}
+
+/// The legacy session directories of `legacy` and their sessions, compared
+/// with the session database.
+fn plan_imports(
+    legacy: &Path,
+    state: &Path,
+    keep: &[PathBuf],
+) -> Result<Vec<sessions::SessionDirImport>, String> {
+    let state_key = state
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("nib's state directory {} has no key", state.display()))?;
+    sessions::plan(
+        legacy,
+        state_key,
+        keep,
+        &legacy_profile_ids(legacy)?,
+        &open_session_database,
+    )
+}
+
+/// Records a folder with nothing left to move: a new record, or the end of
+/// a run that stopped after its last step, whose markers and status are
+/// left to write.
+fn finish_current(
+    root: &Path,
+    state: &Path,
+    profiles: &[String],
+    existing: Option<StateRecord>,
+) -> Result<(), String> {
+    let record_path = state.join(STATE_RECORD_FILE);
+    match existing {
+        None => write_record(&record_path, &new_record(root, "done")),
+        Some(mut record) if record.status != "done" => {
+            let legacy = NibPaths::project_dir(root);
+            if fs::symlink_metadata(&legacy).is_ok_and(|metadata| metadata.is_dir()) {
+                for profile in profiles {
+                    write_moved_marker(&legacy, state, profile)?;
+                }
+            }
+            finish_record(&record_path, &mut record)
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 fn finish_record(path: &Path, record: &mut StateRecord) -> Result<(), String> {

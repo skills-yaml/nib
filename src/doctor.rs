@@ -609,29 +609,7 @@ fn print_layout(project: &Path) {
     for line in &report.legacy {
         println!("  Legacy: {line}");
     }
-    const MAX_NOT_IMPORTED_LINES: usize = 5;
-    for path in report.not_imported.iter().take(MAX_NOT_IMPORTED_LINES) {
-        println!(
-            "  Not imported: {} is not in the session database; it is kept only in this legacy copy",
-            path.display()
-        );
-    }
-    if report.not_imported.len() > MAX_NOT_IMPORTED_LINES {
-        println!(
-            "  ... and {} more session files that were not imported",
-            report.not_imported.len() - MAX_NOT_IMPORTED_LINES
-        );
-    }
-    for aside in &report.asides {
-        let key = aside
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        println!(
-            "  Kept aside: {} holds the state this folder had before a re-link replaced it. To bring it back, run `nib doctor --fix --relink {key}`.",
-            aside.display()
-        );
-    }
+    print_kept_files(&report);
     // States of deleted folders accumulate; name a few of them.
     const MAX_ORPHANED_LINES: usize = 3;
     let orphaned = report
@@ -674,6 +652,34 @@ fn print_layout(project: &Path) {
         println!(
             "  ... and {} more states of folders that no longer exist",
             orphaned - MAX_ORPHANED_LINES
+        );
+    }
+}
+
+/// The session files the migration could not import and the states a
+/// re-link kept aside, from the layout report.
+fn print_kept_files(report: &nib::state_migration::relink::LayoutReport) {
+    const MAX_NOT_IMPORTED_LINES: usize = 5;
+    for path in report.not_imported.iter().take(MAX_NOT_IMPORTED_LINES) {
+        println!(
+            "  Not imported: {} is not in the session database; it is kept only in this legacy copy",
+            path.display()
+        );
+    }
+    if report.not_imported.len() > MAX_NOT_IMPORTED_LINES {
+        println!(
+            "  ... and {} more session files that were not imported",
+            report.not_imported.len() - MAX_NOT_IMPORTED_LINES
+        );
+    }
+    for aside in &report.asides {
+        let key = aside
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        println!(
+            "  Kept aside: {} holds the state this folder had before a re-link replaced it. To bring it back, run `nib doctor --fix --relink {key}`.",
+            aside.display()
         );
     }
 }

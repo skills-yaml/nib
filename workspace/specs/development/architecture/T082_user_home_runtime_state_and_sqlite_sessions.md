@@ -228,7 +228,13 @@ Each phase is independently reviewable and keeps `task verify` green.
   `a_session_the_database_holds_differently_stops_the_first_migration`,
   `a_session_run_in_progress_defers_the_session_import`,
   `pre_profile_sessions_reach_the_session_database`,
-  `a_recorded_legacy_session_directory_reaches_the_imported_sessions`;
+  `a_recorded_legacy_session_directory_reaches_the_imported_sessions`,
+  `a_run_stopped_after_the_last_rename_is_finished_by_the_next_one` (a run
+  stopped after the session folder's rename: the record already names the
+  import, the next load finishes it, and the recorded legacy path reaches
+  the database without a store in the project),
+  `a_session_saved_between_its_import_and_the_rename_is_reported`,
+  `a_session_directory_over_the_entry_limit_stops_the_migration`;
   credentials and safety values move with the configuration migration
   (phase 2, AC-2). Runtime state moves by rename, so no second copy of a
   moved entry exists; identical leftovers and all session originals are
@@ -285,8 +291,16 @@ because this touches data integrity, credentials and a public layout.
   migration writes a marker that older binaries treat as "state moved" to
   avoid split-brain, and this must be tested.
 - **Native build impact of bundled SQLite.**
-- **Rollback.** Revert the binary and restore from the legacy directory.
-  `nib.db` is kept. Published versions are never reused.
+- **Rollback.** Runtime state moves by rename, so the legacy directory
+  holds only the original sessions and identical leftovers. Going back to
+  an older binary therefore means: stop nib, delete the version-2 "state
+  moved" markers (`.nib/profiles/<id>/.legacy-state-migration-v1.json`),
+  move the entries `state.toml` lists under `moved` from
+  `~/.nib/projects/<key>/` back into `.nib/`, and move
+  `legacy-<time>/sessions/profiles/<id>/sessions/` (with its lock anchors)
+  and `legacy-<time>/sessions/sessions/` back. Sessions created or changed
+  after the migration exist only in `nib.db`, which is kept. The user guide
+  lists these steps. Published versions are never reused.
 
 ## Implementation Notes
 
@@ -571,6 +585,56 @@ because this touches data integrity, credentials and a public layout.
   (read-only) are new public helpers; `delete_if` and
   `load_result_with_metadata` pass a `SessionRecordMetadata` (modification
   time and size of the file or row) instead of `fs::Metadata`.
+
+### Review fixes (2026-10-24)
+
+An independent review of `fefb5ed` requested changes. Every finding was
+fixed; one part of a minor finding is recorded as a deviation.
+
+- Major, interrupted migrations: `state.toml` is now written before every
+  entry move, session folder rename and pre-profile retirement (an import
+  is recorded before its rename; `moved_sessions_dir` only redirects once
+  the folder is gone), and a run that finds nothing left finishes a record
+  still `moving` (markers, `done`, `completed_at`). Test:
+  `a_run_stopped_after_the_last_rename_is_finished_by_the_next_one`.
+- Directory modes: `open_session_directory` creates directories through
+  `state_migration::ensure_state_directory`, so a store opened on a
+  user-home path that does not exist yet creates every directory `0700`
+  (`session::database::tests::a_session_directory_in_the_user_home_is_created_private`,
+  which fails without the fix). The fresh-project test checks only the
+  directory it creates, so it no longer depends on test order;
+  `cargo test --lib -- session::database state_migration` passes.
+- Writers between import and rename: the cheaper fix. After the rename the
+  kept folder is hashed again; session files that changed or appeared since
+  the plan are recorded in `state.toml` (`not_imported`, with the
+  unreadable files), logged, and listed by `nib doctor` ("Not imported",
+  a warning). Their content is not merged into the database, whose row may
+  already have newer writes. Test:
+  `a_session_saved_between_its_import_and_the_rename_is_reported`.
+- Deviation from Rule 6 ("recorded in `nib.db` and confirmed in the TUI"):
+  the migration is recorded in `state.toml` and in the database's import
+  ledger, and its outcome is reported in the log; there is no TUI
+  confirmation. A migration only renames and imports (nothing is deleted),
+  and `nib doctor` lists what is left, the legacy copies and every file not
+  imported. A TUI notice is left for a follow-up.
+- Rollback: the guide and Risks and Rollback now list the actual steps
+  (markers, moved entries, session folders; sessions after the migration
+  are only in `nib.db`).
+- Pre-profile `.nib/sessions`: once a profile migration marker shows it
+  was imported, the folder and its lock anchors are moved into
+  `legacy-<time>/sessions/sessions/` (a held run lease in it postpones
+  this), so the project stops reporting legacy state
+  (`pre_profile_sessions_reach_the_session_database`).
+- Info: `nib doctor` lists states kept aside by a re-link
+  (`projects/.relinked-<key>-<time>`) with the `--relink <aside key>`
+  command that brings one back (asserted in
+  `a_moved_project_is_found_and_relinked_with_its_sessions_and_memory`);
+  `relinked-<time>/` is created through `ensure_state_directory`.
+- Info: a legacy session folder with more than `MAX_SESSION_DIR_ENTRIES`
+  (100,000) entries stops the migration with a diagnostic before anything
+  changes instead of being renamed with unplanned files
+  (`a_session_directory_over_the_entry_limit_stops_the_migration`, with a
+  limit of 64 under test).
 
 ### Phase 5: doctor, re-linking and documentation (2026-10-24)
 

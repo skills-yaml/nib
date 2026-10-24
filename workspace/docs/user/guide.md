@@ -133,8 +133,8 @@ When this version loads a project that still has them, nib moves the state to
   the next start after they finish moves it;
 - if your user home is on another file system than the project, the state stays in
   the project and nib says so;
-- the move is recorded in `~/.nib/projects/<project-key>/state.toml`, and an
-  interrupted move finishes on the next start;
+- the move is recorded in `~/.nib/projects/<project-key>/state.toml` before each
+  step, and an interrupted move finishes on the next start;
 - each session file (`.nib/profiles/<id>/sessions/<session-id>.json`) is imported
   with its full content; nib checks every file before it changes anything, and a
   session the database already holds differently stops the migration with a message
@@ -143,9 +143,13 @@ When this version loads a project that still has them, nib moves the state to
   as a session, which it names in a warning) is kept byte for byte in
   `<project>/.nib/legacy-<time>/sessions/`. The import is recorded per session, so
   an interrupted import resumes without duplicates, and running it again changes
-  nothing. A session that is running (its run lease is held) postpones the move;
+  nothing. A session that is running (its run lease is held) postpones the move.
+  If a nib that was already running saves a session after its import, nib keeps
+  that save in the legacy copy and reports the file. A session folder with more
+  than 100,000 entries is not imported; nib stops with a message instead;
 - sessions from before profiles (`.nib/sessions/`) are imported into the default
-  profile the same way; that folder itself is left in place;
+  profile the same way, and the folder is then kept in
+  `<project>/.nib/legacy-<time>/sessions/sessions/`;
 - worktrees older versions created under `.nib/worktrees/` stay where they are and
   remain manageable (`/land`, subagent cleanup, `nib doctor`); new ones go to the
   user home;
@@ -154,10 +158,29 @@ When this version loads a project that still has them, nib moves the state to
   older version writes there anyway is left in place and reported, never merged
   over the moved state.
 
-`nib doctor` lists what is left of older versions in `.nib`: runtime state that
-could not move yet, the `legacy-<time>` folders with the originals, and the older
-worktrees. Remove a `legacy-<time>` folder once you no longer need it. To go back
-to an older nib, restore the files from it; `~/.nib/nib.db` is kept.
+nib reports what it moved in its log only; the TUI shows no notice. `nib doctor`
+lists what is left of older versions in `.nib`: runtime state that could not move
+yet, the `legacy-<time>` folders with the originals, the older worktrees, and each
+session file that is in a legacy copy but not in `~/.nib/nib.db` ("Not
+imported": a file nib could not read, or one saved after its import). Remove a
+`legacy-<time>` folder once you no longer need it.
+
+To go back to an older nib, stop every nib process of the project, then:
+
+1. Delete the "state moved" markers `.nib/profiles/<id>/.legacy-state-migration-v1.json`
+   (they hold `"version": 2`); older versions refuse to load a profile while
+   they are there.
+2. Move each entry listed under `moved` in
+   `~/.nib/projects/<project-key>/state.toml` from that folder back to the same
+   path below `<project>/.nib/`. The state was moved, not copied, so the legacy
+   copies do not hold it.
+3. Move `<project>/.nib/legacy-<time>/sessions/profiles/<id>/sessions/` back to
+   `.nib/profiles/<id>/sessions/`, the `.nib-lock-*.anchor` files next to it back to
+   `.nib/profiles/<id>/`, and `legacy-<time>/sessions/sessions/` (if present) back
+   to `.nib/sessions/`.
+
+Sessions created or changed after the migration exist only in `~/.nib/nib.db`,
+which is kept; an older nib does not see them.
 
 #### Moving or copying a project
 
