@@ -488,6 +488,42 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(!script.contains("curl "));
     assert!(!script.contains("wget "));
 
+    // The editor cases wait on observable signals under one deadline inside the
+    // 40-second PTY bound, and quit the TUI when a signal is missed (T087).
+    let editor_cases = script
+        .split_once("tui_editor_success_input() {")
+        .and_then(|(_, rest)| rest.split_once("printf -v editor_success_environment"))
+        .expect("editor smoke cases")
+        .0;
+    assert!(script.contains("editor_case_seconds=25\n"));
+    assert!(script.contains("run_bounded_command 40 \"$output\" script -q -e -c"));
+    assert!(
+        !editor_cases.contains("sleep 0."),
+        "editor cases use fixed delays"
+    );
+    assert_eq!(
+        editor_cases
+            .matches("local deadline=$((SECONDS + editor_case_seconds))")
+            .count(),
+        2
+    );
+    assert_eq!(
+        editor_cases
+            .matches("pty_output_occurs \"$output\" \"$bracketed_paste_enable\" 2")
+            .count(),
+        2,
+        "both editor cases wait for the TUI to resume after the editor"
+    );
+    assert_eq!(
+        editor_cases
+            .matches("wait_until_deadline \"$deadline\"")
+            .count(),
+        editor_cases
+            .matches("|| abandon_tui_input || return 1")
+            .count(),
+        "every bounded editor wait quits the TUI when its signal is missed"
+    );
+
     for contract in [
         "Invoke-WindowsPseudoTerminal",
         "Invoke-NibRedirectedPlain",
