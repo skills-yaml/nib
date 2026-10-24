@@ -1,6 +1,15 @@
 use super::*;
 use crate::paths::TestNibHome;
 use sha2::Digest;
+use std::cell::Cell;
+
+thread_local! {
+    /// Runs once after a session directory's import, before its rename.
+    pub(super) static AFTER_IMPORT: Cell<Option<fn(&Path)>> = const { Cell::new(None) };
+    /// Stops the run once after a session directory's rename, as an
+    /// interruption would.
+    pub(super) static STOP_AFTER_IMPORT_RENAME: Cell<bool> = const { Cell::new(false) };
+}
 
 /// A project laid out the way versions before T082 left it: runtime state,
 /// a profile with sessions and state, a legacy worktree and preferences.
@@ -522,10 +531,10 @@ fn a_fresh_project_records_its_state_in_the_user_home() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for directory in [state.parent().unwrap().to_path_buf(), state.clone()] {
-            let mode = fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o700, "{}", directory.display());
-        }
+        // Only the directory this test creates: other tests share the
+        // process home and its `projects` directory.
+        let mode = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", state.display());
         let mode = fs::metadata(state.join(STATE_RECORD_FILE))
             .unwrap()
             .permissions()
@@ -778,8 +787,26 @@ fn pre_profile_sessions_reach_the_session_database() {
     let sessions = database_sessions(&state);
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].messages[0].content, "before profiles");
-    // The profile migration never removes its sources.
-    assert!(legacy.join("sessions/old-1.json").is_file());
+    // Once imported, the original files are kept in the legacy copy, and
+    // the project holds no legacy state any more.
+    let copies = legacy_copies(&legacy);
+    assert_eq!(copies.len(), 1);
+    assert!(copies[0].join("sessions/sessions/old-1.json").is_file());
+    assert!(!legacy.join("sessions").exists());
+    assert!(!NibPaths::has_legacy_state(&root));
+    let report = relink::layout_report(&root).expect("layout");
+    assert!(
+        report
+            .legacy
+            .iter()
+            .all(|line| !line.contains("runtime state")),
+        "{:?}",
+        report.legacy
+    );
+    assert_eq!(
+        migrate_project_state(&root, &[], &["default".to_string()]),
+        Ok(StateMigration::Current)
+    );
 }
 
 #[test]
@@ -810,4 +837,112 @@ fn a_recorded_legacy_session_directory_reaches_the_imported_sessions() {
         moved_sessions_dir(&project.legacy().join("profiles/other/sessions")),
         None
     );
+}
+
+#[test]
+fn a_run_stopped_after_the_last_rename_is_finished_by_the_next_one() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    let legacy_sessions = project.legacy().join("profiles/default/sessions");
+    let state = project.state();
+    STOP_AFTER_IMPORT_RENAME.set(true);
+
+    project.migrate().expect_err("interrupted");
+
+    assert!(!legacy_sessions.exists());
+    let record = read_record(&state.join(STATE_RECORD_FILE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, "moving");
+    // Every step was recorded before it ran.
+    assert!(record.moved.contains(&"memory.json".to_string()));
+    assert!(record
+        .imported
+        .iter()
+        .any(|entry| entry.starts_with("profiles/default/sessions:")));
+
+    assert_eq!(project.migrate(), Ok(StateMigration::Current));
+
+    let record = read_record(&state.join(STATE_RECORD_FILE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, "done");
+    assert!(record.completed_at.is_some());
+    assert!(is_moved_marker(
+        &project
+            .legacy()
+            .join("profiles/default")
+            .join(LEGACY_PROFILE_STATE_ENTRIES[0])
+    ));
+    let store = crate::session::SessionStore::at_dir(legacy_sessions.clone());
+    assert!(store.database_path().is_some());
+    assert_eq!(
+        store.load("s-2").expect("s-2").messages[0].content,
+        "second"
+    );
+    assert!(
+        !legacy_sessions.exists(),
+        "no second session store starts in the project"
+    );
+    let report = relink::layout_report(&project.root).expect("layout");
+    assert_eq!(report.state_status.as_deref(), Some("done"));
+}
+
+#[test]
+fn a_session_saved_between_its_import_and_the_rename_is_reported() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    AFTER_IMPORT.set(Some(|source: &Path| {
+        fs::write(source.join("s-2.json"), legacy_session("s-2", "saved late")).unwrap();
+        fs::write(
+            source.join("s-3.json"),
+            legacy_session("s-3", "created late"),
+        )
+        .unwrap();
+    }));
+
+    let outcome = project.migrate().expect("migration");
+
+    assert!(matches!(outcome, StateMigration::Moved(_)), "{outcome:?}");
+    let kept = legacy_copies(&project.legacy())[0].join("sessions/profiles/default/sessions");
+    let record = read_record(&project.state().join(STATE_RECORD_FILE))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.not_imported,
+        [
+            kept.join("broken.json"),
+            kept.join("s-2.json"),
+            kept.join("s-3.json")
+        ]
+    );
+    // The database keeps what was imported; the late saves stay on disk.
+    let sessions = database_sessions(&project.state());
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[1].messages[0].content, "second");
+    assert!(fs::read_to_string(kept.join("s-2.json"))
+        .unwrap()
+        .contains("saved late"));
+    assert_eq!(
+        relink::layout_report(&project.root)
+            .expect("layout")
+            .not_imported,
+        record.not_imported
+    );
+}
+
+#[test]
+fn a_session_directory_over_the_entry_limit_stops_the_migration() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    for index in 0..sessions::MAX_SESSION_DIR_ENTRIES {
+        project.write(&format!("profiles/default/sessions/extra-{index}.txt"), "");
+    }
+    let legacy = files_below(&project.legacy());
+
+    let error = project.migrate().expect_err("too many entries");
+
+    assert!(error.contains("more than"), "{error}");
+    assert_eq!(files_below(&project.legacy()), legacy);
+    assert!(!project.state().join(STATE_RECORD_FILE).exists());
 }

@@ -28,8 +28,9 @@ const RUN_LEASE_PREFIX: &str = ".session-run-";
 /// Largest session file read.
 const MAX_SESSION_FILE_BYTES: u64 = crate::session::MAX_SESSION_JSON_BYTES;
 
-/// Most entries read from one legacy session directory.
-const MAX_SESSION_DIR_ENTRIES: usize = 100_000;
+/// Most entries of one legacy session directory; a larger one stops the
+/// migration.
+pub(super) const MAX_SESSION_DIR_ENTRIES: usize = if cfg!(test) { 64 } else { 100_000 };
 
 /// One legacy session directory and where its sessions go.
 pub(super) struct SessionDirImport {
@@ -108,7 +109,15 @@ fn plan_directory(
     let mut paths = Vec::new();
     let entries = fs::read_dir(&source)
         .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    for entry in entries.take(MAX_SESSION_DIR_ENTRIES) {
+    for (count, entry) in entries.enumerate() {
+        // The whole directory moves into the legacy copy, so a file left
+        // unplanned would leave nib without a word.
+        if count == MAX_SESSION_DIR_ENTRIES {
+            return Err(format!(
+                "nib cannot import the sessions of {}: it holds more than {MAX_SESSION_DIR_ENTRIES} entries, so its sessions stay where they are. Move the sessions you no longer need out of it.",
+                source.display()
+            ));
+        }
         let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) == Some("json")
@@ -264,6 +273,45 @@ pub(super) fn import_sessions(
         }
     }
     Ok(imported)
+}
+
+/// The session files in `kept` (the legacy copy of `import`'s directory,
+/// after its rename) that are not the files the import read: a writer that
+/// opened the directory before the migration changed or added them. Files
+/// the plan already found unreadable are not repeated.
+pub(super) fn changed_after_import(import: &SessionDirImport, kept: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(kept) else {
+        return Vec::new();
+    };
+    let mut changed = Vec::new();
+    for entry in entries.filter_map(Result::ok).take(MAX_SESSION_DIR_ENTRIES) {
+        let name = entry.file_name();
+        if Path::new(&name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("json")
+            || name.to_string_lossy().starts_with('.')
+            || import
+                .unreadable
+                .iter()
+                .any(|(path, _)| path.file_name() == Some(name.as_os_str()))
+        {
+            continue;
+        }
+        let planned = import
+            .files
+            .iter()
+            .find(|file| file.path.file_name() == Some(name.as_os_str()));
+        let path = entry.path();
+        let unchanged = planned.is_some_and(|file| {
+            read_session(&path).is_ok_and(|(_, sha256, _)| sha256 == file.sha256)
+        });
+        if !unchanged {
+            changed.push(path);
+        }
+    }
+    changed.sort();
+    changed
 }
 
 /// The lock anchors older versions kept beside a profile's session

@@ -575,6 +575,7 @@ fn print_layout(project: &Path) {
     let interrupted = report.state_status.as_deref() == Some("moving");
     let attention = pending
         || interrupted
+        || !report.not_imported.is_empty()
         || report.candidates.iter().any(|candidate| {
             matches!(
                 candidate.kind,
@@ -607,6 +608,29 @@ fn print_layout(project: &Path) {
     );
     for line in &report.legacy {
         println!("  Legacy: {line}");
+    }
+    const MAX_NOT_IMPORTED_LINES: usize = 5;
+    for path in report.not_imported.iter().take(MAX_NOT_IMPORTED_LINES) {
+        println!(
+            "  Not imported: {} is not in the session database; it is kept only in this legacy copy",
+            path.display()
+        );
+    }
+    if report.not_imported.len() > MAX_NOT_IMPORTED_LINES {
+        println!(
+            "  ... and {} more session files that were not imported",
+            report.not_imported.len() - MAX_NOT_IMPORTED_LINES
+        );
+    }
+    for aside in &report.asides {
+        let key = aside
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        println!(
+            "  Kept aside: {} holds the state this folder had before a re-link replaced it. To bring it back, run `nib doctor --fix --relink {key}`.",
+            aside.display()
+        );
     }
     // States of deleted folders accumulate; name a few of them.
     const MAX_ORPHANED_LINES: usize = 3;

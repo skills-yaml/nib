@@ -39,6 +39,37 @@ fn scope_of(store: &SessionStore) -> String {
         .clone()
 }
 
+#[cfg(unix)]
+#[test]
+fn a_session_directory_in_the_user_home_is_created_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let sessions_dir = database_sessions_dir();
+    let state = sessions_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("state")
+        .to_path_buf();
+    assert!(!state.exists());
+
+    let store = SessionStore::at_dir(sessions_dir.clone());
+
+    assert!(store.database.is_some());
+    let mut created = vec![sessions_dir.clone()];
+    created.extend(
+        sessions_dir
+            .ancestors()
+            .skip(1)
+            .take_while(|directory| directory.starts_with(&state))
+            .map(Path::to_path_buf),
+    );
+    assert_eq!(created.len(), 4);
+    for directory in created {
+        let mode = fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", directory.display());
+    }
+}
+
 #[test]
 fn default_user_home_sessions_live_in_the_database_and_others_in_files() {
     let store = database_store();

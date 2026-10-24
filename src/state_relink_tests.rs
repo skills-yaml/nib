@@ -127,6 +127,11 @@ fn a_moved_project_is_found_and_relinked_with_its_sessions_and_memory() {
     assert!(session_counts()
         .iter()
         .any(|(key, _, count)| key == &aside_key && *count == 1));
+    // `nib doctor` names it, so it can be brought back.
+    assert_eq!(
+        layout_report(&moved.root).expect("layout").asides,
+        outcome.replaced
+    );
     assert_eq!(
         recorded_root_of(&outcome.state_dir).as_deref(),
         Some(moved.root.as_path())

@@ -119,6 +119,12 @@ pub struct LayoutReport {
     pub sessions: Option<u64>,
     /// Older nib files still in the project's `.nib`, one line each.
     pub legacy: Vec<String>,
+    /// Session files the migration kept in the project's legacy copy but
+    /// could not import into the session database.
+    pub not_imported: Vec<PathBuf>,
+    /// States this folder had before a re-link replaced them, kept aside as
+    /// `projects/.relinked-<key>-<time>`.
+    pub asides: Vec<PathBuf>,
     pub candidates: Vec<StateLinkCandidate>,
 }
 
@@ -128,8 +134,17 @@ pub fn layout_report(project_root: &Path) -> Result<LayoutReport, String> {
     let state_dir = NibPaths::project_state(&root);
     let user_home = NibPaths::user_home();
     let state_in_user_home = super::user_home_containing(&state_dir).is_some();
-    let state_status = read_table(&state_dir.join(STATE_RECORD_FILE))
+    let state_record = read_table(&state_dir.join(STATE_RECORD_FILE));
+    let state_status = state_record
+        .as_ref()
         .and_then(|table| table.get("status")?.as_str().map(str::to_string));
+    let not_imported = state_record
+        .as_ref()
+        .and_then(|table| table.get("not_imported")?.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| path.as_str().map(PathBuf::from))
+        .collect();
     let counts = session_counts();
     let key = NibPaths::state_key(&root);
     let sessions = key.as_ref().map(|key| {
@@ -147,8 +162,26 @@ pub fn layout_report(project_root: &Path) -> Result<LayoutReport, String> {
         state_status,
         sessions,
         legacy: legacy_findings(&root),
+        not_imported,
+        asides: key.as_deref().map(aside_states).unwrap_or_default(),
         candidates: find_candidates_with(&root, &counts)?,
     })
+}
+
+/// The states of the folder keyed `key` that re-links kept aside, sorted.
+fn aside_states(key: &str) -> Vec<PathBuf> {
+    let prefix = format!(".relinked-{key}-");
+    let mut asides: Vec<PathBuf> = NibPaths::user_project_dirs()
+        .into_iter()
+        .filter(|state_dir| {
+            state_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+    asides.sort();
+    asides
 }
 
 /// The state directories the folder at `project_root` may belong to.
@@ -430,7 +463,8 @@ fn keep_stale_receipts(state: &Path, root: &Path) -> Result<Option<PathBuf>, Str
         "relinked-{}",
         chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ")
     ));
-    fs::create_dir(&kept).map_err(|error| format!("cannot create {}: {error}", kept.display()))?;
+    super::ensure_state_directory(&kept)
+        .map_err(|error| format!("cannot create {}: {error}", kept.display()))?;
     let destination = kept.join("worktree-ownership");
     rename_no_replace(&receipts, &destination)
         .map_err(|error| move_error(&receipts, &destination, &error))?;

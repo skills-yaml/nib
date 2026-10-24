@@ -1787,7 +1787,9 @@ pub(crate) fn open_session_directory(
     ),
     String,
 > {
-    let sessions_dir = crate::fs_security::ensure_directory_without_symlinks(requested)
+    // Inside the user home every directory is created private, as the state
+    // directories are; elsewhere it is created as before.
+    let sessions_dir = crate::state_migration::ensure_state_directory(requested)
         .map_err(|error| error.to_string())?;
     let parent_path = sessions_dir.parent().ok_or_else(|| {
         format!(
