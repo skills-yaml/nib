@@ -635,6 +635,11 @@ fixed; one part of a minor finding is recorded as a deviation.
   changes instead of being renamed with unplanned files
   (`a_session_directory_over_the_entry_limit_stops_the_migration`, with a
   limit of 64 under test).
+- Validation (2026-10-24): `cargo fmt`; `task check` passed; `cargo test
+  --lib -- --test-threads=2` passed 1627 of 1627; `cargo test --lib --
+  session::database state_migration` passed 35 three times in a row;
+  `doctor_cli` (7), `session_roundtrip` (17) and `durable_tasks` (4)
+  passed.
 
 ### Phase 5: doctor, re-linking and documentation (2026-10-24)
 
