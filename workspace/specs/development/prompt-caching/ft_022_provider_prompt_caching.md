@@ -209,7 +209,7 @@ capability mappings, opt-in controls, reviewed retention, and representative
 measurements. Keep cache metadata bounded/redacted; do not persist raw prompt
 hashes or provider continuation objects as new audit fields.
 
-## Compatibility, Rollout, and Version Impact
+## Compatibility, Rollout Plan, and Version Impact
 
 1. Establish deterministic request fixtures and baseline measurements; extend
    usage without enabling new controls.

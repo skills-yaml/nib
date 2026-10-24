@@ -19,7 +19,7 @@ found these problems:
   `llm.providers.*.api_key` into `<project>/.nib/config.toml`
   (`src/auth.rs:4,125`). This file sits next to the code, is copied with the
   repository, is readable by supervised sandboxed commands (see
-  [T080](../../development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md)), and has
+  [T080](../../test/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md)), and has
   no `.gitignore` protection.
 - **No user-global layer.** Config is project-only
   (`load_nib_config_full`, `src/config/split_00.rs:1553`), and every project
@@ -89,7 +89,7 @@ longer the only identity.
 4. **Sessions are scoped by project.** Each row carries `project_key` and
    `profile_id`, and `/sessions` lists the current project unless asked for all
    projects.
-5. **Worktrees outside the project.** Under [T080](../../development/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md),
+5. **Worktrees outside the project.** Under [T080](../../test/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md),
    sessions work in place by default and worktrees are opt-in. Session
    checkpoints and write leases also live in user-home state. Opt-in session
    worktrees and subagent worktrees are
