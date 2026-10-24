@@ -246,7 +246,7 @@ fn subagent_listing_rejects_symlinked_records() {
 
 #[cfg(unix)]
 #[test]
-fn subagent_record_creation_rejects_symlinked_project_state() {
+fn subagent_record_creation_never_follows_a_symlinked_project_directory() {
     use std::os::unix::fs::symlink;
 
     let root = tempdir().expect("root");
@@ -270,13 +270,14 @@ fn subagent_record_creation_rejects_symlinked_project_state() {
         updated_at: Utc::now(),
     };
 
-    let error = write_subagent_record(root.path(), &record)
-        .expect_err("symlinked project state must fail closed");
-    assert!(
-        error.contains("local directory") && error.contains("not a symlink"),
-        "{error}"
-    );
+    // A symbolic-link `.nib` is never taken for the project's state (T082):
+    // the record goes to the project's state in nib's user home.
+    write_subagent_record(root.path(), &record).expect("record in the user home");
+    let state = nib::paths::NibPaths::project_state(root.path());
+    assert!(!state.starts_with(root.path()));
+    assert!(state.join("subagents/escaped.json").is_file());
     assert!(!outside.path().join("subagents").exists());
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
 }
 
 fn merge_execution() -> ExecutionConfig {

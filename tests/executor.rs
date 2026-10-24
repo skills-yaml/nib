@@ -1005,12 +1005,12 @@ async fn background_terminal_success_returns_to_trusted_session_context() {
         observation["result"]["stdout"],
         "first line\nsecond\tline\n"
     );
+    // The profile's daemons live in nib's user home, apart from its sessions.
     let audit = nib::daemons::task::DaemonAuditLog::at_path(
-        store
-            .sessions_dir()
-            .parent()
-            .unwrap()
-            .join("daemons/audit.jsonl"),
+        nib::daemons::workload::DurableTaskStore::from_sessions_dir(store.sessions_dir())
+            .expect("profile daemons")
+            .daemon_dir()
+            .join("audit.jsonl"),
     )
     .read_all()
     .expect("daemon audit");
@@ -1105,12 +1105,12 @@ async fn background_terminal_failure_returns_to_trusted_session_context() {
         .as_str()
         .unwrap()
         .contains("command exited with 9"));
+    // The profile's daemons live in nib's user home, apart from its sessions.
     let audit = nib::daemons::task::DaemonAuditLog::at_path(
-        store
-            .sessions_dir()
-            .parent()
-            .unwrap()
-            .join("daemons/audit.jsonl"),
+        nib::daemons::workload::DurableTaskStore::from_sessions_dir(store.sessions_dir())
+            .expect("profile daemons")
+            .daemon_dir()
+            .join("audit.jsonl"),
     )
     .read_all()
     .expect("daemon audit");

@@ -2327,7 +2327,8 @@ async fn nib_run_precommit_cancellation_kills_git_and_leaves_no_spawn_state() {
         .expect("list worktrees");
     assert!(worktrees.status.success());
     assert!(
-        !String::from_utf8_lossy(&worktrees.stdout).contains(".nib/worktrees/subagents"),
+        !String::from_utf8_lossy(&worktrees.stdout)
+            .contains(worktree_root.to_str().expect("UTF-8 worktree root")),
         "precommit worktree remained registered"
     );
     wait_for_nib_run_cancellation_audit(project.path()).await;
@@ -2485,7 +2486,8 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
         .expect("list worktrees");
     assert!(worktrees.status.success());
     assert!(
-        String::from_utf8_lossy(&worktrees.stdout).contains(".nib/worktrees/subagents"),
+        String::from_utf8_lossy(&worktrees.stdout)
+            .contains(worktree_root.to_str().expect("UTF-8 worktree root")),
         "unproven post-error registration was deleted"
     );
     let store = observed_session_store(project.path());

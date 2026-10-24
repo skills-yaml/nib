@@ -31,6 +31,9 @@ pub(crate) const MANAGED_PROCESS_SCOPE_ENV: &str = "NIB_MANAGED_PROCESS_SCOPE";
 const INHERITED_ENVIRONMENT_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
+    // nib's user home (T082): a nib started by a tool or as an MCP server
+    // must use the same configuration and project state.
+    "NIB_HOME",
     "USER",
     "LOGNAME",
     "SHELL",
@@ -1734,6 +1737,23 @@ mod tests {
             String::from_utf8(output.stdout).unwrap(),
             "\nexplicit\n\nscope-fixture"
         );
+    }
+
+    /// T082: a nib started from a tool or as an MCP server uses the same
+    /// user home as its parent.
+    #[test]
+    #[serial]
+    fn child_environment_keeps_nib_home() {
+        let _nib_home = EnvironmentVariableGuard::set("NIB_HOME", OsStr::new("/srv/nib-home"));
+        let mut command = std::process::Command::new("git");
+
+        apply_std_child_environment(&mut command, &HashMap::new());
+
+        let nib_home = command
+            .get_envs()
+            .find_map(|(key, value)| (key == OsStr::new("NIB_HOME")).then_some(value))
+            .flatten();
+        assert_eq!(nib_home, Some(OsStr::new("/srv/nib-home")));
     }
 
     #[test]
